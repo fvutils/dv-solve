@@ -83,9 +83,9 @@ def test_reset_reuse(tmp_path):
                    cwd=build_dir, check=True, capture_output=True)
     subprocess.run(["cmake", "--build", str(build_dir), "--parallel"],
                    check=True, capture_output=True)
-    hits = sorted(build_dir.glob("libzsp_solver.so*"), key=lambda p: len(p.name))
+    hits = sorted(build_dir.glob("libdv_solve.so*"), key=lambda p: len(p.name))
     if not hits:
-        pytest.skip("libzsp_solver.so not found")
+        pytest.skip("libdv_solve.so not found")
     lib = ctypes.CDLL(str(hits[0]))
     _setup(lib)
 

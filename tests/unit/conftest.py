@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the native-solver C unit tests.
 
-The ``libzsp`` fixture builds ``libzsp_solver.so`` via CMake (into a
+The ``libzsp`` fixture builds ``libdv_solve.so`` via CMake (into a
 temporary directory) and loads it with ``ctypes.CDLL``.  Tests that need
 the library receive it as a parameter; the fixture emits a pytest.skip()
 if the build fails so the suite degrades gracefully on hosts without a C
@@ -41,10 +41,10 @@ def _build_library(build_dir: Path) -> Path:
     )
 
     # Locate the produced .so
-    candidates = list(build_dir.glob("libzsp_solver.so*"))
+    candidates = list(build_dir.glob("libdv_solve.so*"))
     if not candidates:
         raise FileNotFoundError(
-            f"libzsp_solver.so not found in {build_dir} after build"
+            f"libdv_solve.so not found in {build_dir} after build"
         )
     # Prefer the unversioned symlink / exact name
     candidates.sort(key=lambda p: len(p.name))
@@ -56,7 +56,7 @@ _lib_cache: dict = {}
 
 
 def _build_debug_library(build_dir: Path) -> Path:
-    """Build libzsp_solver_debug.so with contradiction analysis enabled."""
+    """Build libdv_solve_debug.so with contradiction analysis enabled."""
     build_dir.mkdir(parents=True, exist_ok=True)
 
     subprocess.run(
@@ -68,16 +68,16 @@ def _build_debug_library(build_dir: Path) -> Path:
     )
 
     subprocess.run(
-        ["cmake", "--build", str(build_dir), "--target", "zsp_solver_debug",
+        ["cmake", "--build", str(build_dir), "--target", "dv_solve_debug",
          "--parallel"],
         check=True,
         capture_output=True,
     )
 
-    candidates = list(build_dir.glob("libzsp_solver_debug.so*"))
+    candidates = list(build_dir.glob("libdv_solve_debug.so*"))
     if not candidates:
         raise FileNotFoundError(
-            f"libzsp_solver_debug.so not found in {build_dir} after build"
+            f"libdv_solve_debug.so not found in {build_dir} after build"
         )
     candidates.sort(key=lambda p: len(p.name))
     return candidates[0]
@@ -85,7 +85,7 @@ def _build_debug_library(build_dir: Path) -> Path:
 
 @pytest.fixture(scope="session")
 def libzsp(tmp_path_factory):
-    """Session-scoped fixture that builds and loads libzsp_solver.so.
+    """Session-scoped fixture that builds and loads libdv_solve.so.
 
     Yields the ctypes.CDLL handle.  Skips if cmake/gcc is not available
     or the build fails.
@@ -99,7 +99,7 @@ def libzsp(tmp_path_factory):
     try:
         lib_path = _build_library(build_dir)
     except Exception as exc:
-        pytest.skip(f"libzsp_solver build failed: {exc}")
+        pytest.skip(f"libdv_solve build failed: {exc}")
 
     lib = ctypes.CDLL(str(lib_path))
     yield lib
@@ -107,7 +107,7 @@ def libzsp(tmp_path_factory):
 
 @pytest.fixture(scope="session")
 def libzsp_debug(tmp_path_factory):
-    """Session-scoped fixture that builds and loads libzsp_solver_debug.so.
+    """Session-scoped fixture that builds and loads libdv_solve_debug.so.
 
     This library always has ZSP_CONTRADICTION_ANALYSIS=ON.
     """
@@ -120,7 +120,7 @@ def libzsp_debug(tmp_path_factory):
     try:
         lib_path = _build_debug_library(build_dir)
     except Exception as exc:
-        pytest.skip(f"libzsp_solver_debug build failed: {exc}")
+        pytest.skip(f"libdv_solve_debug build failed: {exc}")
 
     lib = ctypes.CDLL(str(lib_path))
     yield lib

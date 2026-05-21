@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "socmemmap",
+  "result": "sat",
+  "solve_time_ms": 70.5134654417634,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((boot_base (_ bv9797 16))\n (boot_size (_ bv21648 15))\n (boot_end_addr (_ bv31445 16))\n (sram_base (_ bv31798 16))\n (sram_size (_ bv5028 15))\n (sram_end_addr (_ bv36826 16))\n (periph_base (_ bv36838 16))\n (periph_size (_ bv4121 15))\n (periph_end_addr (_ bv40959 16))\n (dma_base (_ bv40959 16))\n (dma_size (_ bv15922 15))\n (dma_end_addr (_ bv56881 16)))\n",
+  "stderr": ""
+}

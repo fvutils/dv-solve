@@ -2,7 +2,7 @@
  *
  * Compares solver performance with and without LCG enabled.
  *
- * Build: gcc -O2 -Isrc/c tests/bench/placement/test_lcg.c -Lbuild -lzsp_solver -Wl,-rpath,build -o build/test_lcg
+ * Build: gcc -O2 -Isrc/c tests/bench/placement/test_lcg.c -Lbuild -ldv_solve -Wl,-rpath,build -o build/test_lcg
  */
 #include <stdio.h>
 #include <stdlib.h>

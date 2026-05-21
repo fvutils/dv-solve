@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "ddr5cmdbasic",
+  "result": "sat",
+  "solve_time_ms": 1.7035873606801033,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((cmd (_ bv4 3))\n (ba (_ bv1 2))\n (bg (_ bv4 3))\n (cid (_ bv8 4))\n (row_hi (_ bv145 8))\n (row_lo (_ bv654 10))\n (col (_ bv0 9))\n (ap (_ bv0 1)))\n",
+  "stderr": ""
+}

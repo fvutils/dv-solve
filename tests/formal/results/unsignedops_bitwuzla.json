@@ -1,0 +1,10 @@
+{
+  "solver": "bitwuzla",
+  "benchmark": "unsignedops",
+  "result": "sat",
+  "solve_time_ms": 8.452215231955051,
+  "peak_memory_kb": 41068,
+  "returncode": 0,
+  "stdout": "sat\n(\n  (addr #b11111111111111111111111111110000)\n  (offset #b1111)\n  (result #b11111111111111111111111111111111)\n)\n",
+  "stderr": ""
+}

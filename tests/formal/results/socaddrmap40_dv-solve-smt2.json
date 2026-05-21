@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "socaddrmap40",
+  "result": "sat",
+  "solve_time_ms": 2.1572038531303406,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((r0_base (_ bv50414748540 40))\n (r0_size (_ bv1080086810 34))\n (r0_end (_ bv51494835350 40))\n (r1_base (_ bv119359654845 40))\n (r1_size (_ bv7964347621 34))\n (r1_end (_ bv127324002466 40))\n (r2_base (_ bv795863877679 40))\n (r2_size (_ bv6395672329 34))\n (r2_end (_ bv802259550008 40))\n (r3_base (_ bv1047558176209 40))\n (r3_size (_ bv7902758811 34))\n (r3_end (_ bv1055460935020 40))\n (r4_base (_ bv1059283835693 40))\n (r4_size (_ bv7297547827 34))\n (r4_end (_ bv1066581383520 40))\n (r5_base (_ bv1066795003570 40))\n (r5_size (_ bv4305081537 34))\n (r5_end (_ bv1071100085107 40))\n (r6_base (_ bv1078192506139 40))\n (r6_size (_ bv5516597771 34))\n (r6_end (_ bv1083709103910 40))\n (r7_base (_ bv1089317574727 40))\n (r7_size (_ bv6903873862 34))\n (r7_end (_ bv1096221448589 40)))\n",
+  "stderr": ""
+}

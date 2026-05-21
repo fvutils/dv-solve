@@ -131,6 +131,22 @@ void solver_set_seed(SolveCtx *ctx, uint64_t seed);
 void solver_get_values(const SolveCtx *ctx, uint32_t n,
                        const uint32_t *var_ids, int64_t *out);
 
+/**
+ * Batch solve: reset + solve + read values, repeated n_solves times.
+ *
+ * Keeps the entire loop in C to avoid per-solve FFI overhead.
+ * Seeds are base_seed, base_seed+1, ..., base_seed+n_solves-1.
+ *
+ * @param out  Output matrix: n_solves * n_vars int64 values (row-major).
+ *             Only the first n_ok rows are filled.
+ * @return Number of successful solves (n_ok).
+ */
+int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
+                   uint32_t n_vars, const uint32_t *var_ids,
+                   int64_t *out,
+                   uint64_t base_seed,
+                   uint32_t max_shave_iters);
+
 
 /**
  * Query whether a soft constraint's assumption is still active after solve.

@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "shiftaligned",
+  "result": "sat",
+  "solve_time_ms": 2.32009869068861,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((base_addr (_ bv4 10))\n (aligned (_ bv4 10)))\n",
+  "stderr": ""
+}

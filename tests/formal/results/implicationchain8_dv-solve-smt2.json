@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "implicationchain8",
+  "result": "sat",
+  "solve_time_ms": 2.1175500005483627,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((a (_ bv39 7))\n (b (_ bv82 7))\n (c (_ bv16 7))\n (d (_ bv66 7))\n (e (_ bv100 7))\n (f (_ bv16 7))\n (g (_ bv95 7))\n (h (_ bv2 7)))\n",
+  "stderr": ""
+}

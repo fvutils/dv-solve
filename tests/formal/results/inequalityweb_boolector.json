@@ -1,0 +1,10 @@
+{
+  "solver": "boolector",
+  "benchmark": "inequalityweb",
+  "result": "sat",
+  "solve_time_ms": 71.53947930783033,
+  "peak_memory_kb": 40804,
+  "returncode": 10,
+  "stdout": "sat\n(\n (a #b000011)\n (b #b000111)\n (c #b001111)\n (d #b010000)\n (e #b010011)\n (f #b101000)\n (g #b110000)\n (h #b110010)\n)\n",
+  "stderr": ""
+}

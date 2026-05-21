@@ -1,0 +1,10 @@
+{
+  "solver": "z3",
+  "benchmark": "fifo_ptr_valid_kind_k4",
+  "result": "unsat",
+  "solve_time_ms": 88.29579409211874,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "unsat\n",
+  "stderr": ""
+}

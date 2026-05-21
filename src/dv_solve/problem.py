@@ -75,7 +75,7 @@ class SolveProblem:
     def __init__(self, buf_size: int = _SP_BUF_SIZE) -> None:
         lib = _load_lib()
         if lib is None:
-            raise RuntimeError("libzsp_solver.so not found — native solver unavailable")
+            raise RuntimeError("libdv_solve.so not found — native solver unavailable")
         self._lib = lib
         self._buf = (ctypes.c_uint8 * buf_size)()
         sp = lib.solve_problem_init(self._buf, buf_size)

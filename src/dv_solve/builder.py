@@ -34,7 +34,7 @@ class SolveProblemBuilder:
             lib = _load_lib()
         if lib is None:
             raise RuntimeError(
-                "libzsp_solver.so not found -- native solver unavailable"
+                "libdv_solve.so not found -- native solver unavailable"
             )
         self._lib = lib
         self._b = lib.builder_create(block_size, None)

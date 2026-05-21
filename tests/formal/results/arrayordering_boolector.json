@@ -1,0 +1,10 @@
+{
+  "solver": "boolector",
+  "benchmark": "arrayordering",
+  "result": "unsat",
+  "solve_time_ms": 4.663428291678429,
+  "peak_memory_kb": 40536,
+  "returncode": 1,
+  "stdout": "unsat\n",
+  "stderr": "boolector: /proj/nbio_ce_01/users/mballanc/projects/2026/pss/dv-solve/tests/formal/smt2/tier1/arrayordering.smt2:87:13: expected '(' at 'v0'\n"
+}

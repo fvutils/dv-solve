@@ -1639,12 +1639,32 @@ static PropResult _fire_disj_clause(Propagator *self, SolveCtx *ctx) {
     uint32_t n_false = 0;
     uint32_t survivor = 0;  /* index of the last non-false clause */
     for (uint32_t i = 0; i < n; i++) {
-        Variable *v = &ctx->vars[dc->clauses[i].var_id];
-        if (_clause_definitely_false(v, ctx, dc->clauses[i].op,
-                                     dc->clauses[i].constant)) {
-            n_false++;
+        if (dc->clauses[i].rhs_var_id == UINT32_MAX) {
+            Variable *v = &ctx->vars[dc->clauses[i].var_id];
+            if (_clause_definitely_false(v, ctx, dc->clauses[i].op,
+                                         dc->clauses[i].constant)) {
+                n_false++;
+            } else {
+                survivor = i;
+            }
         } else {
-            survivor = i;
+            /* var-var clause: check if definitely false */
+            Variable *lv = &ctx->vars[dc->clauses[i].var_id];
+            Variable *rv = &ctx->vars[dc->clauses[i].rhs_var_id];
+            int64_t l_lo = var_lo64(ctx, lv), l_hi = var_hi64(ctx, lv);
+            int64_t r_lo = var_lo64(ctx, rv), r_hi = var_hi64(ctx, rv);
+            int def_false = 0;
+            switch (dc->clauses[i].op) {
+            case BIN_LT:  def_false = (l_lo >= r_hi); break;
+            case BIN_LTE: def_false = (l_lo > r_hi);  break;
+            case BIN_GT:  def_false = (l_hi <= r_lo); break;
+            case BIN_GTE: def_false = (l_hi < r_lo);  break;
+            case BIN_EQ:  def_false = (l_lo > r_hi || l_hi < r_lo); break;
+            case BIN_NEQ: def_false = (l_lo == l_hi && r_lo == r_hi && l_lo == r_lo); break;
+            default: break;
+            }
+            if (def_false) n_false++;
+            else survivor = i;
         }
     }
 
@@ -1652,9 +1672,45 @@ static PropResult _fire_disj_clause(Propagator *self, SolveCtx *ctx) {
     if (n_false < n - 1) return PROP_OK;     /* 2+ undecided */
 
     /* Exactly one survivor — enforce it */
-    return _enforce_clause(ctx, dc->clauses[survivor].var_id,
-                           dc->clauses[survivor].op,
-                           dc->clauses[survivor].constant);
+    if (dc->clauses[survivor].rhs_var_id == UINT32_MAX) {
+        return _enforce_clause(ctx, dc->clauses[survivor].var_id,
+                               dc->clauses[survivor].op,
+                               dc->clauses[survivor].constant);
+    } else {
+        /* var-var survivor: tighten both sides */
+        uint32_t lv = dc->clauses[survivor].var_id;
+        uint32_t rv = dc->clauses[survivor].rhs_var_id;
+        int64_t l_lo = var_lo64(ctx, &ctx->vars[lv]);
+        int64_t r_hi = var_hi64(ctx, &ctx->vars[rv]);
+        int64_t r_lo = var_lo64(ctx, &ctx->vars[rv]);
+        int64_t l_hi = var_hi64(ctx, &ctx->vars[lv]);
+        switch (dc->clauses[survivor].op) {
+        case BIN_GTE:
+            if (ctx_tighten_lb64(ctx, lv, r_lo) == PROP_CONFLICT) return PROP_CONFLICT;
+            if (ctx_tighten_ub64(ctx, rv, l_hi) == PROP_CONFLICT) return PROP_CONFLICT;
+            return PROP_OK;
+        case BIN_LTE:
+            if (ctx_tighten_ub64(ctx, lv, r_hi) == PROP_CONFLICT) return PROP_CONFLICT;
+            if (ctx_tighten_lb64(ctx, rv, l_lo) == PROP_CONFLICT) return PROP_CONFLICT;
+            return PROP_OK;
+        case BIN_GT:
+            if (ctx_tighten_lb64(ctx, lv, r_lo + 1) == PROP_CONFLICT) return PROP_CONFLICT;
+            if (ctx_tighten_ub64(ctx, rv, l_hi - 1) == PROP_CONFLICT) return PROP_CONFLICT;
+            return PROP_OK;
+        case BIN_LT:
+            if (ctx_tighten_ub64(ctx, lv, r_hi - 1) == PROP_CONFLICT) return PROP_CONFLICT;
+            if (ctx_tighten_lb64(ctx, rv, l_lo + 1) == PROP_CONFLICT) return PROP_CONFLICT;
+            return PROP_OK;
+        case BIN_EQ:
+            if (ctx_tighten_lb64(ctx, lv, r_lo) == PROP_CONFLICT) return PROP_CONFLICT;
+            if (ctx_tighten_ub64(ctx, lv, r_hi) == PROP_CONFLICT) return PROP_CONFLICT;
+            if (ctx_tighten_lb64(ctx, rv, l_lo) == PROP_CONFLICT) return PROP_CONFLICT;
+            if (ctx_tighten_ub64(ctx, rv, l_hi) == PROP_CONFLICT) return PROP_CONFLICT;
+            return PROP_OK;
+        default:
+            return PROP_OK;
+        }
+    }
 }
 
 uint32_t prop_add_disj_clause(SolveCtx *ctx,
@@ -1662,11 +1718,21 @@ uint32_t prop_add_disj_clause(SolveCtx *ctx,
                                const uint32_t *var_ids,
                                const uint32_t *ops,
                                const int64_t *constants,
-                               uint8_t priority) {
+                               uint8_t priority,
+                               const uint32_t *rhs_var_ids) {
     if (n_clauses == 0 || n_clauses > MAX_DISJ_CLAUSES) return EXPR_NULL;
 
+    /* Collect all watched var IDs (lhs + rhs vars) */
+    uint32_t all_vids[MAX_DISJ_CLAUSES * 2];
+    uint32_t n_watch = 0;
+    for (uint32_t i = 0; i < n_clauses; i++) {
+        all_vids[n_watch++] = var_ids[i];
+        if (rhs_var_ids && rhs_var_ids[i] != UINT32_MAX) {
+            all_vids[n_watch++] = rhs_var_ids[i];
+        }
+    }
     uint32_t ref = _alloc_prop(ctx, _fire_disj_clause, priority,
-                                n_clauses, var_ids, sizeof(DisjClause_t));
+                                n_watch, all_vids, sizeof(DisjClause_t));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     DisjClause_t *dc = (DisjClause_t *)zsp_pool_ptr(&ctx->pool, ref);
@@ -1675,6 +1741,7 @@ uint32_t prop_add_disj_clause(SolveCtx *ctx,
         dc->clauses[i].var_id   = var_ids[i];
         dc->clauses[i].op       = ops[i];
         dc->clauses[i].constant = constants[i];
+        dc->clauses[i].rhs_var_id = (rhs_var_ids ? rhs_var_ids[i] : UINT32_MAX);
     }
     return ref;
 }

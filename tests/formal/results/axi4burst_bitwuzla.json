@@ -1,0 +1,10 @@
+{
+  "solver": "bitwuzla",
+  "benchmark": "axi4burst",
+  "result": "sat",
+  "solve_time_ms": 7.499929517507553,
+  "peak_memory_kb": 41068,
+  "returncode": 0,
+  "stdout": "sat\n(\n  (addr_word #b1111111110)\n  (addr_page #b0000)\n  (len_m1 #b00000001)\n  (burst #b10)\n  (end_word #b10000000000)\n)\n",
+  "stderr": ""
+}

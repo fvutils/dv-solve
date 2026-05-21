@@ -563,6 +563,40 @@ void solver_get_values(const SolveCtx *ctx, uint32_t n,
 }
 
 /* ------------------------------------------------------------------ */
+/* solver_solve_n — batch solve loop (reset+solve+read × N)           */
+/* ------------------------------------------------------------------ */
+
+int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
+                   uint32_t n_vars, const uint32_t *var_ids,
+                   int64_t *out,
+                   uint64_t base_seed,
+                   uint32_t max_shave_iters) {
+    if (!ctx || !var_ids || !out) return 0;
+
+    SolveOpts opts;
+    opts.max_conflicts  = 100;
+    opts.max_restarts   = 10000;
+    opts.use_phase_save = 0;
+    opts._pad[0] = opts._pad[1] = opts._pad[2] = 0;
+    opts.max_shave_iters = max_shave_iters;
+
+    int n_ok = 0;
+    for (uint32_t i = 0; i < n_solves; i++) {
+        solver_reset(ctx);
+        opts.seed = base_seed + i;
+        SolveResult r = _solver_solve_core(ctx, &opts);
+        if (r == SOLVE_OK) {
+            int64_t *row = out + (uint64_t)n_ok * n_vars;
+            for (uint32_t j = 0; j < n_vars; j++) {
+                row[j] = solver_get_value(ctx, var_ids[j]);
+            }
+            n_ok++;
+        }
+    }
+    return n_ok;
+}
+
+/* ------------------------------------------------------------------ */
 /* solver_soft_active                                                  */
 /* ------------------------------------------------------------------ */
 

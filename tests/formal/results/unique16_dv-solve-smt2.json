@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "unique16",
+  "result": "sat",
+  "solve_time_ms": 1.972670666873455,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((v0 (_ bv20 5))\n (v1 (_ bv21 5))\n (v2 (_ bv4 5))\n (v3 (_ bv8 5))\n (v4 (_ bv17 5))\n (v5 (_ bv14 5))\n (v6 (_ bv19 5))\n (v7 (_ bv26 5))\n (v8 (_ bv7 5))\n (v9 (_ bv15 5))\n (v10 (_ bv6 5))\n (v11 (_ bv0 5))\n (v12 (_ bv31 5))\n (v13 (_ bv9 5))\n (v14 (_ bv2 5))\n (v15 (_ bv10 5)))\n",
+  "stderr": ""
+}

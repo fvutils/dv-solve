@@ -1,7 +1,7 @@
 /* Test LCG integration: compare OFF vs PRE-ENABLED on tight problems.
  *
  * Build: gcc -O2 -Isrc/c tests/bench/placement/test_lcg_integration.c \
- *        -Lbuild -lzsp_solver -Wl,-rpath,build -o build/test_lcg_integration
+ *        -Lbuild -ldv_solve -Wl,-rpath,build -o build/test_lcg_integration
  */
 #include <stdio.h>
 #include <stdlib.h>

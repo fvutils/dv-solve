@@ -1,0 +1,38 @@
+(set-option :seed 0)
+(set-option :produce-models true)
+(set-logic QF_BV)
+
+(declare-const a0 (_ BitVec 8))
+(declare-const a1 (_ BitVec 8))
+(declare-const a2 (_ BitVec 8))
+(declare-const a3 (_ BitVec 8))
+(declare-const a4 (_ BitVec 8))
+(declare-const a5 (_ BitVec 8))
+(declare-const a6 (_ BitVec 8))
+(declare-const a7 (_ BitVec 8))
+(declare-const s (_ BitVec 11))
+
+(assert (bvuge a0 (_ bv0 8)))
+(assert (bvule a0 (_ bv255 8)))
+(assert (bvuge a1 (_ bv0 8)))
+(assert (bvule a1 (_ bv255 8)))
+(assert (bvuge a2 (_ bv0 8)))
+(assert (bvule a2 (_ bv255 8)))
+(assert (bvuge a3 (_ bv0 8)))
+(assert (bvule a3 (_ bv255 8)))
+(assert (bvuge a4 (_ bv0 8)))
+(assert (bvule a4 (_ bv255 8)))
+(assert (bvuge a5 (_ bv0 8)))
+(assert (bvule a5 (_ bv255 8)))
+(assert (bvuge a6 (_ bv0 8)))
+(assert (bvule a6 (_ bv255 8)))
+(assert (bvuge a7 (_ bv0 8)))
+(assert (bvule a7 (_ bv255 8)))
+(assert (bvuge s (_ bv0 11)))
+(assert (bvule s (_ bv2040 11)))
+
+(assert (= ((_ zero_extend 4) s) (bvadd ((_ zero_extend 1) (bvadd ((_ zero_extend 1) (bvadd ((_ zero_extend 1) (bvadd ((_ zero_extend 1) (bvadd ((_ zero_extend 1) (bvadd ((_ zero_extend 1) (bvadd ((_ zero_extend 1) a0) ((_ zero_extend 1) a1))) ((_ zero_extend 2) a2))) ((_ zero_extend 3) a3))) ((_ zero_extend 4) a4))) ((_ zero_extend 5) a5))) ((_ zero_extend 6) a6))) ((_ zero_extend 7) a7))))  ; c_sum
+(assert (= s (_ bv1000 11)))  ; c_target
+
+(check-sat)
+(get-value (a0 a1 a2 a3 a4 a5 a6 a7 s))

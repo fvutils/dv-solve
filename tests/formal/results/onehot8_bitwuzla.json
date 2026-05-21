@@ -1,0 +1,10 @@
+{
+  "solver": "bitwuzla",
+  "benchmark": "onehot8",
+  "result": "sat",
+  "solve_time_ms": 5.961449816823006,
+  "peak_memory_kb": 41068,
+  "returncode": 0,
+  "stdout": "sat\n(\n  (value #b11111111)\n  (count #b1)\n)\n",
+  "stderr": ""
+}

@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "timer_watchdog_bmc_d2",
+  "result": "error",
+  "solve_time_ms": 2.292787656188011,
+  "peak_memory_kb": 41088,
+  "returncode": 2,
+  "stdout": "",
+  "stderr": "error: only QF_BV logic is supported\n"
+}

@@ -35,7 +35,7 @@ print("x =", ctx.get_value(x))
 
 | Module | Purpose |
 |---|---|
-| `dv_solve.lib` | ctypes loader for `libzsp_solver.so` |
+| `dv_solve.lib` | ctypes loader for `libdv_solve.so` |
 | `dv_solve.problem` | `SolveProblem` buffer wrapper and expression constants |
 | `dv_solve.builder` | `SolveProblemBuilder` — build constraint problems |
 | `dv_solve.ctx` | `SolveCtx` — compile and solve problems |
@@ -60,5 +60,5 @@ cmake -S . -B build
 cmake --build build
 ```
 
-The shared library (`libzsp_solver.so`) is installed alongside the Python package.
+The shared library (`libdv_solve.so`) is installed alongside the Python package.
 The C source prefix (`zsp_`) will be renamed to `dvs_` in a future release.

@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "inequalityweb",
+  "result": "sat",
+  "solve_time_ms": 70.62404230237007,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((a (_ bv35 6))\n (b (_ bv44 6))\n (c (_ bv45 6))\n (d (_ bv46 6))\n (e (_ bv47 6))\n (f (_ bv48 6))\n (g (_ bv49 6))\n (h (_ bv50 6)))\n",
+  "stderr": ""
+}

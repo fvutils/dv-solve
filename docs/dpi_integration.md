@@ -11,7 +11,7 @@ open arrays.  This works on all simulators including Verilator.
 
 ## Prerequisites
 
-- `libzsp_solver_dpi.so` (built from `packages/zuspec-solver` via CMake)
+- `libdv_solve_dpi.so` (built from `packages/zuspec-solver` via CMake)
 - A SystemVerilog simulator with DPI support (Verilator, Questa, VCS, etc.)
 
 ## Quick Start
@@ -54,7 +54,7 @@ verilator --cc --exe --main -o simv -Wno-fatal --timing \
     src/sv/zsp_dpi_pkg.sv src/sv/zsp_randomizer_pkg.sv harness.sv \
     --top-module MemTransaction_harness
 make -C obj_dir -f VMemTransaction_harness.mk \
-    VM_USER_LDLIBS="-Lbuild -Wl,-rpath,build -lzsp_solver_dpi"
+    VM_USER_LDLIBS="-Lbuild -Wl,-rpath,build -ldv_solve_dpi"
 obj_dir/simv +n_solutions=100
 ```
 
@@ -118,7 +118,7 @@ at construction time.  Per-solve cost is one `solve_h` call plus N
 
 **Verilator C++ compilation errors for solver sources**
 The solver C code uses C11 features not compatible with C++.  Link
-against the pre-built `libzsp_solver_dpi.so` instead of compiling
+against the pre-built `libdv_solve_dpi.so` instead of compiling
 sources directly.
 
 **`compile failed` at simulation start**

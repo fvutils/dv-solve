@@ -1,4 +1,4 @@
-"""ctypes handle for libzsp_solver.so.
+"""ctypes handle for libdv_solve.so.
 
 Call ``_load_lib()`` to obtain the cached CDLL handle (or None when the
 library is not available).  The first successful call also wires all
@@ -20,7 +20,7 @@ _LOAD_ATTEMPTED = False
 
 
 def _candidate_paths() -> list[Path]:
-    """Return ordered list of directories to search for libzsp_solver.so."""
+    """Return ordered list of directories to search for libdv_solve.so."""
     candidates: list[Path] = []
 
     # 1. Explicit override
@@ -54,7 +54,7 @@ def _find_library() -> Optional[Path]:
     for d in _candidate_paths():
         if not d.is_dir():
             continue
-        hits = sorted(d.glob("libzsp_solver.so*"), key=lambda p: len(p.name))
+        hits = sorted(d.glob("libdv_solve.so*"), key=lambda p: len(p.name))
         if hits:
             return hits[0]
     return None
@@ -151,6 +151,24 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
 
     lib.solver_propagate_only.restype  = c.c_int
     lib.solver_propagate_only.argtypes = [c.c_void_p]
+
+    # Reset / re-solve helpers
+    lib.solver_reset.restype  = None
+    lib.solver_reset.argtypes = [c.c_void_p]
+
+    lib.solver_set_seed.restype  = None
+    lib.solver_set_seed.argtypes = [c.c_void_p, c.c_uint64]
+
+    lib.solver_get_values.restype  = None
+    lib.solver_get_values.argtypes = [c.c_void_p, c.c_uint32,
+                                      c.POINTER(c.c_uint32),
+                                      c.POINTER(c.c_int64)]
+
+    lib.solver_solve_n.restype  = c.c_int
+    lib.solver_solve_n.argtypes = [c.c_void_p, c.c_uint32,
+                                   c.c_uint32, c.POINTER(c.c_uint32),
+                                   c.POINTER(c.c_int64),
+                                   c.c_uint64, c.c_uint32]
 
     # Variable query helpers
     lib.zsp_var_lo32.restype  = c.c_int32

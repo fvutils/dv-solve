@@ -33,7 +33,7 @@ overhead on embedded targets.
 
 ### Debug library
 
-The build always produces `libzsp_solver_debug.so` with the module
+The build always produces `libdv_solve_debug.so` with the module
 enabled, suitable for development and testing.
 
 ## 3. API Reference

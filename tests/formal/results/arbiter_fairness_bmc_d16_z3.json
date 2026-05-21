@@ -1,0 +1,10 @@
+{
+  "solver": "z3",
+  "benchmark": "arbiter_fairness_bmc_d16",
+  "result": "unsat",
+  "solve_time_ms": 102.80376579612494,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "unsat\n",
+  "stderr": ""
+}

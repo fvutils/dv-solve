@@ -170,12 +170,13 @@ static int _compile_var_const_cmp(SolveCtx *ctx, BinOp op,
 /* _flatten_or — collect var-const comparison clauses from an OR tree */
 /* ------------------------------------------------------------------ */
 
-#define MAX_OR_CLAUSES 4
+#define MAX_OR_CLAUSES 16
 
 typedef struct {
     uint32_t var_id;
     uint32_t op;
     int64_t  constant;
+    uint32_t rhs_var_id;  /* UINT32_MAX = use constant; else = var-var comparison */
 } OrClause;
 
 /**
@@ -207,6 +208,7 @@ static int _flatten_or(SolveProblem *sp, ExprRef ref,
         out[0].var_id = vid;
         out[0].op = e->op;
         out[0].constant = cv;
+        out[0].rhs_var_id = UINT32_MAX;
         return 1;
     }
     if (_is_const(sp, e->lhs, &cv) && _is_var(sp, e->rhs, &vid)) {
@@ -221,10 +223,22 @@ static int _flatten_or(SolveProblem *sp, ExprRef ref,
         default:      out[0].op = e->op;   break;
         }
         out[0].constant = cv;
+        out[0].rhs_var_id = UINT32_MAX;
         return 1;
     }
 
-    return -1;  /* not a var-const comparison */
+    /* var-var comparison */
+    uint32_t vid2;
+    if (_is_var(sp, e->lhs, &vid) && _is_var(sp, e->rhs, &vid2)) {
+        if (max_clauses < 1) return -1;
+        out[0].var_id = vid;
+        out[0].op = e->op;
+        out[0].constant = 0;
+        out[0].rhs_var_id = vid2;
+        return 1;
+    }
+
+    return -1;  /* unsupported leaf */
 }
 
 /* Forward declaration */
@@ -414,13 +428,16 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                 uint32_t vids[MAX_OR_CLAUSES];
                 uint32_t ops[MAX_OR_CLAUSES];
                 int64_t  cvs[MAX_OR_CLAUSES];
+                uint32_t rvids[MAX_OR_CLAUSES];
                 for (int i = 0; i < n; i++) {
                     vids[i] = clauses[i].var_id;
                     ops[i]  = clauses[i].op;
                     cvs[i]  = clauses[i].constant;
+                    rvids[i] = clauses[i].rhs_var_id;
                 }
                 uint32_t ref = prop_add_disj_clause(ctx, (uint32_t)n,
-                                                     vids, ops, cvs, 0);
+                                                     vids, ops, cvs, 0,
+                                                     rvids);
                 return (ref != EXPR_NULL) ? 1 : 0;
             }
             return 0;  /* couldn't flatten — fall through */

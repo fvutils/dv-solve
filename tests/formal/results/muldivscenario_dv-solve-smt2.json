@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "muldivscenario",
+  "result": "sat",
+  "solve_time_ms": 1.8564220517873764,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((unit_price (_ bv203 14))\n (quantity (_ bv93 7))\n (total (_ bv669527 20)))\n",
+  "stderr": ""
+}

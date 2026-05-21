@@ -43,7 +43,7 @@ def pytest_configure(config):
 
 
 def _build_native_lib(build_dir: Path) -> Path:
-    """Build libzsp_solver.so into build_dir via CMake."""
+    """Build libdv_solve.so into build_dir via CMake."""
     build_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["cmake", str(_PKG_DIR), "-DCMAKE_BUILD_TYPE=Release"],
@@ -53,9 +53,9 @@ def _build_native_lib(build_dir: Path) -> Path:
         ["cmake", "--build", str(build_dir), "--parallel"],
         check=True, capture_output=True,
     )
-    hits = sorted(build_dir.glob("libzsp_solver.so*"), key=lambda p: len(p.name))
+    hits = sorted(build_dir.glob("libdv_solve.so*"), key=lambda p: len(p.name))
     if not hits:
-        raise FileNotFoundError("libzsp_solver.so not found after build")
+        raise FileNotFoundError("libdv_solve.so not found after build")
     return hits[0]
 
 

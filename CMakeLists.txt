@@ -48,27 +48,27 @@ set(ZSP_SOURCES
 # Shared library target                                                #
 # ------------------------------------------------------------------ #
 
-add_library(zsp_solver SHARED ${ZSP_SOURCES})
+add_library(dv_solve SHARED ${ZSP_SOURCES})
 
 if(ZSP_CONTRADICTION_ANALYSIS)
-    target_sources(zsp_solver PRIVATE ${ZSP_CONTRA_SOURCES})
-    target_compile_definitions(zsp_solver PRIVATE ZSP_CONTRADICTION_ANALYSIS=1)
+    target_sources(dv_solve PRIVATE ${ZSP_CONTRA_SOURCES})
+    target_compile_definitions(dv_solve PRIVATE ZSP_CONTRADICTION_ANALYSIS=1)
 endif()
 
-target_include_directories(zsp_solver PUBLIC
+target_include_directories(dv_solve PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
 )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(zsp_solver PRIVATE -fsanitize=address -g -O0)
-    target_link_options(zsp_solver PRIVATE -fsanitize=address)
+    target_compile_options(dv_solve PRIVATE -fsanitize=address -g -O0)
+    target_link_options(dv_solve PRIVATE -fsanitize=address)
 endif()
 
 # ------------------------------------------------------------------ #
 # Installation                                                         #
 # ------------------------------------------------------------------ #
 
-install(TARGETS zsp_solver
+install(TARGETS dv_solve
     LIBRARY DESTINATION lib
 )
 
@@ -76,20 +76,20 @@ install(TARGETS zsp_solver
 # Debug library (always includes contradiction analysis)              #
 # ------------------------------------------------------------------ #
 
-add_library(zsp_solver_debug SHARED ${ZSP_SOURCES} ${ZSP_CONTRA_SOURCES})
+add_library(dv_solve_debug SHARED ${ZSP_SOURCES} ${ZSP_CONTRA_SOURCES})
 
-target_compile_definitions(zsp_solver_debug PRIVATE ZSP_CONTRADICTION_ANALYSIS=1)
+target_compile_definitions(dv_solve_debug PRIVATE ZSP_CONTRADICTION_ANALYSIS=1)
 
-target_include_directories(zsp_solver_debug PUBLIC
+target_include_directories(dv_solve_debug PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
 )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(zsp_solver_debug PRIVATE -fsanitize=address -g -O0)
-    target_link_options(zsp_solver_debug PRIVATE -fsanitize=address)
+    target_compile_options(dv_solve_debug PRIVATE -fsanitize=address -g -O0)
+    target_link_options(dv_solve_debug PRIVATE -fsanitize=address)
 endif()
 
-install(TARGETS zsp_solver_debug
+install(TARGETS dv_solve_debug
     LIBRARY DESTINATION lib
 )
 
@@ -97,17 +97,64 @@ install(TARGETS zsp_solver_debug
 # DPI shared library target                                            #
 # ------------------------------------------------------------------ #
 
-add_library(zsp_solver_dpi SHARED
+add_library(dv_solve_dpi SHARED
     src/c/zsp_dpi.c
     ${ZSP_SOURCES}
 )
 
-target_include_directories(zsp_solver_dpi PUBLIC
+target_include_directories(dv_solve_dpi PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
 )
 
-target_compile_definitions(zsp_solver_dpi PRIVATE)
+target_compile_definitions(dv_solve_dpi PRIVATE)
 
-install(TARGETS zsp_solver_dpi
+install(TARGETS dv_solve_dpi
     LIBRARY DESTINATION lib
 )
+
+# ------------------------------------------------------------------ #
+# SMT-LIB2 lexer test                                                 #
+# ------------------------------------------------------------------ #
+
+enable_testing()
+
+add_executable(test_smt2_lexer
+    tests/c/test_smt2_lexer.c
+    src/c/smt2/smt2_lexer.c
+)
+target_include_directories(test_smt2_lexer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/c
+)
+add_test(NAME test_smt2_lexer COMMAND test_smt2_lexer)
+
+# ------------------------------------------------------------------ #
+# SMT-LIB2 parser test                                                 #
+# ------------------------------------------------------------------ #
+
+add_executable(test_smt2_parser
+    tests/c/test_smt2_parser.c
+    src/c/smt2/smt2_lexer.c
+    src/c/smt2/smt2_parser.c
+)
+target_include_directories(test_smt2_parser PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/c
+)
+add_test(NAME test_smt2_parser COMMAND test_smt2_parser)
+
+# ------------------------------------------------------------------ #
+# dv-solve-smt2 executable                                            #
+# ------------------------------------------------------------------ #
+
+set(SMT2_SOURCES
+    src/c/smt2/smt2_lexer.c
+    src/c/smt2/smt2_parser.c
+    src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_main.c
+)
+
+add_executable(dv-solve-smt2 ${SMT2_SOURCES})
+target_link_libraries(dv-solve-smt2 PRIVATE dv_solve)
+target_include_directories(dv-solve-smt2 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/c
+)
+install(TARGETS dv-solve-smt2 RUNTIME DESTINATION bin)

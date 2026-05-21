@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "unsignedops",
+  "result": "sat",
+  "solve_time_ms": 67.51958094537258,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((addr (_ bv3380991064 32))\n (offset (_ bv4 4))\n (result (_ bv3380991068 32)))\n",
+  "stderr": ""
+}

@@ -1,7 +1,7 @@
 """Native C executable back-end for benchmarks.
 
 Generates a self-contained C harness via CSolvePerfHarnessGenerator,
-compiles it with gcc against libzsp_solver.so, and runs the resulting
+compiles it with gcc against libdv_solve.so, and runs the resulting
 executable.  This measures the raw C solver throughput without any
 Python/ctypes overhead.
 """
@@ -18,7 +18,7 @@ import zuspec.dataclasses as zdc
 
 from .base import BenchResult, RESULTS_DIR, get_bench_config
 
-# Locate libzsp_solver.so
+# Locate libdv_solve.so
 _SOLVER_PKG = Path(__file__).parent.parent.parent.parent  # packages/zuspec-solver
 _BUILD_DIR = _SOLVER_PKG / "build"
 _SRC_DIR = _SOLVER_PKG / "src" / "c"
@@ -37,9 +37,9 @@ class CExeSolver:
         min_bench_ns: int = 1_000_000_000,
     ) -> None:
         # Check prerequisites
-        lib_path = _BUILD_DIR / "libzsp_solver.so"
+        lib_path = _BUILD_DIR / "libdv_solve.so"
         if not lib_path.exists():
-            pytest.skip("libzsp_solver.so not built (run cmake --build)")
+            pytest.skip("libdv_solve.so not built (run cmake --build)")
         if not shutil.which("gcc"):
             pytest.skip("gcc not found on PATH")
 
@@ -69,7 +69,7 @@ class CExeSolver:
              str(c_file),
              "-L", str(_BUILD_DIR),
              f"-Wl,-rpath,{_BUILD_DIR}",
-             "-lzsp_solver", "-lrt"],
+             "-ldv_solve", "-lrt"],
             capture_output=True, text=True,
         )
         if rc.returncode != 0:

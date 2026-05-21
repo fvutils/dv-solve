@@ -33,7 +33,7 @@ _PKG_DIR = Path(__file__).parent.parent.parent  # packages/zuspec-solver
 
 
 def _build_lib(build_dir: Path) -> Path:
-    """Build libzsp_solver.so into build_dir via CMake."""
+    """Build libdv_solve.so into build_dir via CMake."""
     build_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["cmake", str(_PKG_DIR), "-DCMAKE_BUILD_TYPE=Release"],
@@ -43,15 +43,15 @@ def _build_lib(build_dir: Path) -> Path:
         ["cmake", "--build", str(build_dir), "--parallel"],
         check=True, capture_output=True,
     )
-    hits = sorted(build_dir.glob("libzsp_solver.so*"), key=lambda p: len(p.name))
+    hits = sorted(build_dir.glob("libdv_solve.so*"), key=lambda p: len(p.name))
     if not hits:
-        raise FileNotFoundError("libzsp_solver.so not found after build")
+        raise FileNotFoundError("libdv_solve.so not found after build")
     return hits[0]
 
 
 @pytest.fixture(scope="module")
 def e2e_lib_path(tmp_path_factory):
-    """Build libzsp_solver.so once for all e2e tests (module scope)."""
+    """Build libdv_solve.so once for all e2e tests (module scope)."""
     if not shutil.which("cmake"):
         return None
     build_dir = tmp_path_factory.mktemp("zsp_e2e_build")

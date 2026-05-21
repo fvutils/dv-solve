@@ -90,7 +90,7 @@ def _build_2var_b64(lib):
 # Load the DPI library
 @pytest.fixture(scope="session")
 def libdpi(tmp_path_factory):
-    """Build and load libzsp_solver_dpi.so."""
+    """Build and load libdv_solve_dpi.so."""
     import shutil
     import subprocess
     from pathlib import Path
@@ -110,9 +110,9 @@ def libdpi(tmp_path_factory):
         check=True, capture_output=True,
     )
 
-    candidates = list(build_dir.glob("libzsp_solver_dpi.so*"))
+    candidates = list(build_dir.glob("libdv_solve_dpi.so*"))
     if not candidates:
-        pytest.skip("libzsp_solver_dpi.so not built")
+        pytest.skip("libdv_solve_dpi.so not built")
     candidates.sort(key=lambda p: len(p.name))
     return ctypes.CDLL(str(candidates[0]))
 

@@ -1,0 +1,10 @@
+{
+  "solver": "boolector",
+  "benchmark": "ddr5timing",
+  "result": "sat",
+  "solve_time_ms": 3.944496624171734,
+  "peak_memory_kb": 40804,
+  "returncode": 10,
+  "stdout": "sat\n(\n (cmd_prev #b001)\n (cmd #b011)\n (ap_prev false)\n (cancel_prev false)\n (max_tccd #b0100)\n (tccd #b100010)\n (tccd_base #b011110)\n)\n",
+  "stderr": ""
+}

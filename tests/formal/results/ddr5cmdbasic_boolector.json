@@ -1,0 +1,10 @@
+{
+  "solver": "boolector",
+  "benchmark": "ddr5cmdbasic",
+  "result": "sat",
+  "solve_time_ms": 2.717568539083004,
+  "peak_memory_kb": 40804,
+  "returncode": 10,
+  "stdout": "sat\n(\n (cmd #b001)\n (ba #b00)\n (bg #b000)\n (cid #b0000)\n (row_hi #b01011111)\n (row_lo #b1001011111)\n (col #b000000000)\n (ap false)\n)\n",
+  "stderr": ""
+}

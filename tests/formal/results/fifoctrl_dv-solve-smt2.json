@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "fifoctrl",
+  "result": "sat",
+  "solve_time_ms": 1.785600557923317,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((wr_ptr (_ bv116 8))\n (rd_ptr (_ bv100 8))\n (watermark_lo (_ bv20 6))\n (watermark_hi (_ bv213 8)))\n",
+  "stderr": ""
+}

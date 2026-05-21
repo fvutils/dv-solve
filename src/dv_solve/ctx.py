@@ -70,7 +70,7 @@ class SolveCtx:
     def __init__(self, problem: "SolveProblem", ctx_buf_size: int = _CTX_BUF_SIZE) -> None:  # noqa: F821
         lib = _load_lib()
         if lib is None:
-            raise RuntimeError("libzsp_solver.so not found — native solver unavailable")
+            raise RuntimeError("libdv_solve.so not found — native solver unavailable")
         self._lib = lib
 
         # Block allocator owns all dynamic memory used by the context.
@@ -143,6 +143,37 @@ class SolveCtx:
         )
         return self._lib.solver_solve(self._ctx, ctypes.byref(opts))
 
+    def reset(self) -> None:
+        """Reset solver to post-compile state for a fresh solve."""
+        self._lib.solver_reset(self._ctx)
+
+    def solve_n(
+        self,
+        n: int,
+        var_ids: "ctypes.Array[ctypes.c_uint32]",
+        n_vars: int,
+        base_seed: int = 1,
+        max_shave_iters: int = 0,
+    ) -> "tuple[int, list[list[int]]]":
+        """Run *n* independent solves, resetting between each.
+
+        Returns ``(n_ok, solutions)`` where *solutions* is a list of
+        ``n_ok`` value-lists (one per successful solve, each containing
+        the values of *var_ids* in order).
+
+        This keeps the entire loop in Python/ctypes but avoids rebuilding
+        the SolveProblem and SolveCtx on each iteration.
+        """
+        out = (ctypes.c_int64 * (n * n_vars))()
+        n_ok = self._lib.solver_solve_n(
+            self._ctx, n, n_vars, var_ids, out,
+            base_seed, max_shave_iters,
+        )
+        solutions: list[list[int]] = []
+        for i in range(n_ok):
+            row = out[i * n_vars : (i + 1) * n_vars]
+            solutions.append(list(row))
+        return n_ok, solutions
 
     def add_constraint(self, aux_problem) -> int:
         """Add constraints from an auxiliary SolveProblem to this context.

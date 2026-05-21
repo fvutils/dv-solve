@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "memtransaction",
+  "result": "sat",
+  "solve_time_ms": 1.6882997006177902,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((addr (_ bv17 8))\n (length (_ bv5 5))\n (end_addr (_ bv22 9)))\n",
+  "stderr": ""
+}

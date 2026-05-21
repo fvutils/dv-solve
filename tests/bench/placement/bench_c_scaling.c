@@ -1,6 +1,6 @@
 /* C benchmark: measure scaling of NoOverlap2D solver across problem sizes.
  *
- * Compile: gcc -O2 -I src/c bench_c_scaling.c -L build -lzsp_solver -Wl,-rpath,build -o bench_c_scaling
+ * Compile: gcc -O2 -I src/c bench_c_scaling.c -L build -ldv_solve -Wl,-rpath,build -o bench_c_scaling
  * Run: ./bench_c_scaling
  */
 #include <stdio.h>

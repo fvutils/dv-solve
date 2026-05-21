@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "verilatorops",
+  "result": "sat",
+  "solve_time_ms": 1.9729100167751312,
+  "peak_memory_kb": 42188,
+  "returncode": 0,
+  "stdout": "sat\n((a (_ bv66 8))\n (b (_ bv113 8))\n (sum_ab (_ bv179 9))\n (masked (_ bv2 4)))\n",
+  "stderr": ""
+}

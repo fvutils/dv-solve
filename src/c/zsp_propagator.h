@@ -387,7 +387,7 @@ uint32_t prop_add_all_different(SolveCtx *ctx, uint32_t n_vars,
 /* falsified by the current bounds, the surviving clause is enforced. */
 /* Uses uint32_t for op to avoid including zsp_problem.h.             */
 /* ------------------------------------------------------------------ */
-#define MAX_DISJ_CLAUSES 4u
+#define MAX_DISJ_CLAUSES 16u
 
 typedef struct {
     Propagator    hdr;
@@ -397,6 +397,7 @@ typedef struct {
         uint32_t var_id;
         uint32_t op;       /* BIN_EQ / BIN_NEQ / BIN_LT / BIN_LTE / BIN_GT / BIN_GTE */
         int64_t  constant;
+        uint32_t rhs_var_id;  /* UINT32_MAX = use constant; else = var-var */
     } clauses[MAX_DISJ_CLAUSES];
 } DisjClause_t;
 
@@ -405,7 +406,8 @@ uint32_t prop_add_disj_clause(SolveCtx *ctx,
                                const uint32_t *var_ids,
                                const uint32_t *ops,
                                const int64_t *constants,
-                               uint8_t priority);
+                               uint8_t priority,
+                               const uint32_t *rhs_var_ids);
 
 /* ------------------------------------------------------------------ */
 /* SumEq: result == var_ids[0] + var_ids[1] + ... + var_ids[n-1]      */

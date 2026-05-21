@@ -6,4 +6,17 @@ package:
     deps: 
     - name: zuspec-dataclasses
       url: https://github.com/zuspec/zuspec-dataclasses.git
+    - name: zuspec-be-fv
+      url: https://github.com/zuspec/zuspec-be-fv.git
+    - name: zuspec-be-sv
+      url: https://github.com/zuspec/zuspec-be-sv.git
+    - name: zuspec-synth
+      url: https://github.com/zuspec/zuspec-synth.git
+    - name: pytest-dfm
+      url: https://github.com/dv-flow/pytest-dfm.git
+    - name: dv-flow-libhdlsim
+      url: https://github.com/dv-flow/dv-flow-libhdlsim.git
+    - name: yosys-bin
+      url: https://github.com/edapack/yosys-bin
+      src: gh-rls
 

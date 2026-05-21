@@ -4,7 +4,7 @@
  * with nets, measuring both solve time and HPWL quality.
  *
  * Build: gcc -O2 -Isrc/c tests/bench/placement/test_costguided.c \
- *        -Lbuild -lzsp_solver -Wl,-rpath,build -o build/test_costguided
+ *        -Lbuild -ldv_solve -Wl,-rpath,build -o build/test_costguided
  */
 #include <stdio.h>
 #include <stdlib.h>
