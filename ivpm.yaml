@@ -1,0 +1,9 @@
+package:
+  name: dv-solve
+
+  dep-sets:
+  - name: default-dev
+    deps: 
+    - name: zuspec-dataclasses
+      url: https://github.com/zuspec/zuspec-dataclasses.git
+
