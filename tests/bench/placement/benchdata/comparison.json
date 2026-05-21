@@ -1,0 +1,17 @@
+[
+  {"name": "A1", "n": 20, "nets": 30,
+   "systematic": {"hpwl": 10957, "time_sec": 0.001},
+   "lns": {"hpwl": 5881, "time_sec": 0.3, "improvement_pct": 46.3}},
+  {"name": "A2", "n": 50, "nets": 80,
+   "systematic": {"hpwl": 50441, "time_sec": 1.1},
+   "lns": {"hpwl": 38568, "time_sec": 4.7, "improvement_pct": 23.5}},
+  {"name": "B1", "n": 20, "nets": 80,
+   "systematic": {"hpwl": 49118, "time_sec": 0.001},
+   "lns": {"hpwl": 37335, "time_sec": 0.2, "improvement_pct": 24.0}},
+  {"name": "B2", "n": 50, "nets": 200,
+   "systematic": {"hpwl": 152225, "time_sec": 0.4},
+   "lns": {"hpwl": 130050, "time_sec": 3.2, "improvement_pct": 14.6}},
+  {"name": "C1", "n": 100, "nets": 200,
+   "systematic": {"hpwl": 158238, "time_sec": 1.9},
+   "lns": {"note": "greedy works, LNS limited by spacing rules"}}
+]

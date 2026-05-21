@@ -1,0 +1,921 @@
+{
+  "macros": [
+    {
+      "id": 0,
+      "width": 22,
+      "height": 12,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 1,
+      "width": 47,
+      "height": 25,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 2,
+      "width": 26,
+      "height": 16,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 3,
+      "width": 77,
+      "height": 43,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 4,
+      "width": 81,
+      "height": 47,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 5,
+      "width": 105,
+      "height": 63,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 6,
+      "width": 81,
+      "height": 45,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 7,
+      "width": 44,
+      "height": 27,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 8,
+      "width": 16,
+      "height": 15,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 9,
+      "width": 132,
+      "height": 75,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 10,
+      "width": 95,
+      "height": 55,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 11,
+      "width": 118,
+      "height": 73,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 12,
+      "width": 46,
+      "height": 24,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 13,
+      "width": 122,
+      "height": 63,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 14,
+      "width": 15,
+      "height": 9,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 15,
+      "width": 28,
+      "height": 17,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 16,
+      "width": 80,
+      "height": 47,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 17,
+      "width": 30,
+      "height": 16,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 18,
+      "width": 50,
+      "height": 35,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    },
+    {
+      "id": 19,
+      "width": 23,
+      "height": 15,
+      "group_id": -1,
+      "preplaced": false,
+      "x": null,
+      "y": null
+    }
+  ],
+  "nets": [
+    {
+      "id": 0,
+      "pins": [
+        {
+          "macro_id": 2,
+          "pin_x": 5,
+          "pin_y": 12
+        },
+        {
+          "macro_id": 9,
+          "pin_x": 9,
+          "pin_y": 19
+        },
+        {
+          "macro_id": 11,
+          "pin_x": 111,
+          "pin_y": 12
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "pins": [
+        {
+          "macro_id": 6,
+          "pin_x": 25,
+          "pin_y": 8
+        },
+        {
+          "macro_id": 0,
+          "pin_x": 17,
+          "pin_y": 7
+        },
+        {
+          "macro_id": 13,
+          "pin_x": 112,
+          "pin_y": 27
+        },
+        {
+          "macro_id": 10,
+          "pin_x": 73,
+          "pin_y": 2
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "pins": [
+        {
+          "macro_id": 11,
+          "pin_x": 23,
+          "pin_y": 14
+        },
+        {
+          "macro_id": 13,
+          "pin_x": 88,
+          "pin_y": 45
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "pins": [
+        {
+          "macro_id": 6,
+          "pin_x": 66,
+          "pin_y": 37
+        },
+        {
+          "macro_id": 1,
+          "pin_x": 23,
+          "pin_y": 15
+        },
+        {
+          "macro_id": 2,
+          "pin_x": 0,
+          "pin_y": 14
+        },
+        {
+          "macro_id": 7,
+          "pin_x": 3,
+          "pin_y": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "pins": [
+        {
+          "macro_id": 4,
+          "pin_x": 60,
+          "pin_y": 41
+        },
+        {
+          "macro_id": 3,
+          "pin_x": 33,
+          "pin_y": 16
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "pins": [
+        {
+          "macro_id": 0,
+          "pin_x": 3,
+          "pin_y": 7
+        },
+        {
+          "macro_id": 7,
+          "pin_x": 12,
+          "pin_y": 26
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "pins": [
+        {
+          "macro_id": 16,
+          "pin_x": 78,
+          "pin_y": 21
+        },
+        {
+          "macro_id": 11,
+          "pin_x": 67,
+          "pin_y": 40
+        },
+        {
+          "macro_id": 3,
+          "pin_x": 60,
+          "pin_y": 1
+        },
+        {
+          "macro_id": 2,
+          "pin_x": 25,
+          "pin_y": 14
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "pins": [
+        {
+          "macro_id": 10,
+          "pin_x": 38,
+          "pin_y": 32
+        },
+        {
+          "macro_id": 15,
+          "pin_x": 27,
+          "pin_y": 17
+        },
+        {
+          "macro_id": 12,
+          "pin_x": 21,
+          "pin_y": 22
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "pins": [
+        {
+          "macro_id": 3,
+          "pin_x": 16,
+          "pin_y": 32
+        },
+        {
+          "macro_id": 9,
+          "pin_x": 47,
+          "pin_y": 9
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "pins": [
+        {
+          "macro_id": 8,
+          "pin_x": 9,
+          "pin_y": 2
+        },
+        {
+          "macro_id": 17,
+          "pin_x": 3,
+          "pin_y": 3
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "pins": [
+        {
+          "macro_id": 2,
+          "pin_x": 21,
+          "pin_y": 2
+        },
+        {
+          "macro_id": 7,
+          "pin_x": 12,
+          "pin_y": 16
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "pins": [
+        {
+          "macro_id": 12,
+          "pin_x": 29,
+          "pin_y": 1
+        },
+        {
+          "macro_id": 16,
+          "pin_x": 26,
+          "pin_y": 21
+        },
+        {
+          "macro_id": 3,
+          "pin_x": 67,
+          "pin_y": 32
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "pins": [
+        {
+          "macro_id": 2,
+          "pin_x": 14,
+          "pin_y": 7
+        },
+        {
+          "macro_id": 19,
+          "pin_x": 6,
+          "pin_y": 14
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "pins": [
+        {
+          "macro_id": 4,
+          "pin_x": 42,
+          "pin_y": 17
+        },
+        {
+          "macro_id": 2,
+          "pin_x": 23,
+          "pin_y": 9
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "pins": [
+        {
+          "macro_id": 2,
+          "pin_x": 8,
+          "pin_y": 9
+        },
+        {
+          "macro_id": 15,
+          "pin_x": 28,
+          "pin_y": 13
+        },
+        {
+          "macro_id": 3,
+          "pin_x": 59,
+          "pin_y": 1
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "pins": [
+        {
+          "macro_id": 13,
+          "pin_x": 60,
+          "pin_y": 34
+        },
+        {
+          "macro_id": 4,
+          "pin_x": 27,
+          "pin_y": 6
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "pins": [
+        {
+          "macro_id": 16,
+          "pin_x": 61,
+          "pin_y": 30
+        },
+        {
+          "macro_id": 11,
+          "pin_x": 21,
+          "pin_y": 65
+        },
+        {
+          "macro_id": 17,
+          "pin_x": 5,
+          "pin_y": 6
+        },
+        {
+          "macro_id": 19,
+          "pin_x": 17,
+          "pin_y": 4
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "pins": [
+        {
+          "macro_id": 0,
+          "pin_x": 22,
+          "pin_y": 0
+        },
+        {
+          "macro_id": 8,
+          "pin_x": 3,
+          "pin_y": 14
+        },
+        {
+          "macro_id": 12,
+          "pin_x": 19,
+          "pin_y": 19
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "pins": [
+        {
+          "macro_id": 11,
+          "pin_x": 0,
+          "pin_y": 39
+        },
+        {
+          "macro_id": 2,
+          "pin_x": 16,
+          "pin_y": 14
+        },
+        {
+          "macro_id": 17,
+          "pin_x": 5,
+          "pin_y": 12
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "pins": [
+        {
+          "macro_id": 19,
+          "pin_x": 0,
+          "pin_y": 8
+        },
+        {
+          "macro_id": 5,
+          "pin_x": 92,
+          "pin_y": 50
+        },
+        {
+          "macro_id": 7,
+          "pin_x": 22,
+          "pin_y": 14
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "pins": [
+        {
+          "macro_id": 19,
+          "pin_x": 19,
+          "pin_y": 13
+        },
+        {
+          "macro_id": 1,
+          "pin_x": 12,
+          "pin_y": 13
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "pins": [
+        {
+          "macro_id": 11,
+          "pin_x": 15,
+          "pin_y": 31
+        },
+        {
+          "macro_id": 14,
+          "pin_x": 12,
+          "pin_y": 8
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "pins": [
+        {
+          "macro_id": 18,
+          "pin_x": 28,
+          "pin_y": 6
+        },
+        {
+          "macro_id": 14,
+          "pin_x": 15,
+          "pin_y": 1
+        },
+        {
+          "macro_id": 2,
+          "pin_x": 19,
+          "pin_y": 5
+        },
+        {
+          "macro_id": 0,
+          "pin_x": 1,
+          "pin_y": 1
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "pins": [
+        {
+          "macro_id": 1,
+          "pin_x": 22,
+          "pin_y": 6
+        },
+        {
+          "macro_id": 16,
+          "pin_x": 79,
+          "pin_y": 4
+        },
+        {
+          "macro_id": 5,
+          "pin_x": 71,
+          "pin_y": 38
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "pins": [
+        {
+          "macro_id": 2,
+          "pin_x": 26,
+          "pin_y": 2
+        },
+        {
+          "macro_id": 1,
+          "pin_x": 31,
+          "pin_y": 23
+        },
+        {
+          "macro_id": 4,
+          "pin_x": 44,
+          "pin_y": 10
+        },
+        {
+          "macro_id": 5,
+          "pin_x": 93,
+          "pin_y": 41
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "pins": [
+        {
+          "macro_id": 19,
+          "pin_x": 21,
+          "pin_y": 9
+        },
+        {
+          "macro_id": 3,
+          "pin_x": 72,
+          "pin_y": 25
+        },
+        {
+          "macro_id": 15,
+          "pin_x": 12,
+          "pin_y": 8
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "pins": [
+        {
+          "macro_id": 6,
+          "pin_x": 17,
+          "pin_y": 32
+        },
+        {
+          "macro_id": 0,
+          "pin_x": 3,
+          "pin_y": 1
+        },
+        {
+          "macro_id": 5,
+          "pin_x": 97,
+          "pin_y": 40
+        },
+        {
+          "macro_id": 15,
+          "pin_x": 17,
+          "pin_y": 15
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "pins": [
+        {
+          "macro_id": 0,
+          "pin_x": 10,
+          "pin_y": 12
+        },
+        {
+          "macro_id": 7,
+          "pin_x": 5,
+          "pin_y": 6
+        },
+        {
+          "macro_id": 2,
+          "pin_x": 26,
+          "pin_y": 14
+        },
+        {
+          "macro_id": 17,
+          "pin_x": 19,
+          "pin_y": 0
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "pins": [
+        {
+          "macro_id": 19,
+          "pin_x": 0,
+          "pin_y": 6
+        },
+        {
+          "macro_id": 10,
+          "pin_x": 70,
+          "pin_y": 32
+        },
+        {
+          "macro_id": 13,
+          "pin_x": 83,
+          "pin_y": 24
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "pins": [
+        {
+          "macro_id": 18,
+          "pin_x": 6,
+          "pin_y": 35
+        },
+        {
+          "macro_id": 14,
+          "pin_x": 8,
+          "pin_y": 7
+        }
+      ]
+    }
+  ],
+  "canvas": {
+    "width": 424,
+    "height": 424
+  },
+  "halos": [
+    {
+      "macro_id": 0,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 1,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 2,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 3,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 4,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 5,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 6,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 7,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 8,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 9,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 10,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 11,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 12,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 13,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 14,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 15,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 16,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 17,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 18,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    },
+    {
+      "macro_id": 19,
+      "left": 0,
+      "right": 0,
+      "top": 0,
+      "bottom": 0
+    }
+  ],
+  "spacing_rules": [],
+  "forbidden_regions": [],
+  "parameters": {
+    "n_macros": 20,
+    "canvas_ratio": 3.0,
+    "size_distribution": "uniform",
+    "seed": 1001
+  },
+  "name": "A1"
+}

@@ -1,0 +1,134 @@
+[
+  {
+    "test": "NoOverlap2D-10rects-canvas300",
+    "n_rects": 10,
+    "canvas": 300,
+    "halos": 0,
+    "result": "FEASIBLE",
+    "conflicts": 0,
+    "notes": "Generous canvas, no halos"
+  },
+  {
+    "test": "NoOverlap2D-10rects-canvas200",
+    "n_rects": 10,
+    "canvas": 200,
+    "halos": 0,
+    "result": "FEASIBLE",
+    "conflicts": 7,
+    "notes": "Medium canvas"
+  },
+  {
+    "test": "NoOverlap2D-10rects-canvas150",
+    "n_rects": 10,
+    "canvas": 150,
+    "halos": 0,
+    "result": "FEASIBLE",
+    "conflicts": 5,
+    "notes": "Tight canvas"
+  },
+  {
+    "test": "NoOverlap2D-10rects-canvas120",
+    "n_rects": 10,
+    "canvas": 120,
+    "halos": 0,
+    "result": "FEASIBLE",
+    "conflicts": 13,
+    "notes": "Very tight canvas"
+  },
+  {
+    "test": "NoOverlap2D-20rects-canvas300",
+    "n_rects": 20,
+    "canvas": 300,
+    "halos": 1,
+    "result": "FEASIBLE",
+    "conflicts": 9,
+    "notes": "20 rects with 1-unit halos"
+  },
+  {
+    "test": "Optimize-sum-min",
+    "description": "Minimize a+b where a,b in [1,10]",
+    "result": "OPTIMAL",
+    "best_objective": 2,
+    "notes": "Branch-and-bound correctly finds minimum"
+  },
+  {
+    "test": "MinOfN-3vars",
+    "description": "r=min(a,b,c)",
+    "result": "CORRECT",
+    "notes": "Propagator correctly computes min"
+  },
+  {
+    "test": "MaxOfN-3vars",
+    "description": "r=max(a,b,c)",
+    "result": "CORRECT",
+    "notes": "Propagator correctly computes max"
+  },
+  {
+    "test": "HPWL-2macros-1net",
+    "description": "HPWL = |x0-x1| + |y0-y1| modeled via MinOf/MaxOf/SumEq",
+    "result": "CORRECT",
+    "notes": "End-to-end HPWL modeling verified"
+  },
+  {
+    "test": "Synthetic-A1-20macros",
+    "n_macros": 20,
+    "canvas": "424x424",
+    "halos": 1,
+    "result": "TIMEOUT",
+    "notes": "With 1-unit halos from generator bug (now fixed). Without LCG, solver struggles on random search with interacting constraints."
+  }
+]
+[
+  {
+    "category": "scaling-generous-canvas",
+    "results": [
+      {"n": 2,  "canvas": 90,   "halo": 0, "result": "FEASIBLE", "conflicts": 0,  "time_ms": 0.017},
+      {"n": 5,  "canvas": 150,  "halo": 0, "result": "FEASIBLE", "conflicts": 1,  "time_ms": 0.014},
+      {"n": 10, "canvas": 250,  "halo": 0, "result": "FEASIBLE", "conflicts": 3,  "time_ms": 0.049},
+      {"n": 15, "canvas": 350,  "halo": 0, "result": "FEASIBLE", "conflicts": 2,  "time_ms": 0.094},
+      {"n": 20, "canvas": 450,  "halo": 0, "result": "FEASIBLE", "conflicts": 2,  "time_ms": 0.208},
+      {"n": 30, "canvas": 650,  "halo": 0, "result": "FEASIBLE", "conflicts": 2,  "time_ms": 0.559},
+      {"n": 40, "canvas": 850,  "halo": 0, "result": "FEASIBLE", "conflicts": 3,  "time_ms": 0.778},
+      {"n": 50, "canvas": 1050, "halo": 0, "result": "FEASIBLE", "conflicts": 4,  "time_ms": 1.467},
+      {"n": 64, "canvas": 1330, "halo": 0, "result": "FEASIBLE", "conflicts": 2,  "time_ms": 2.840}
+    ]
+  },
+  {
+    "category": "scaling-with-halos",
+    "results": [
+      {"n": 5,  "canvas": 175,  "halo": 2, "result": "FEASIBLE", "conflicts": 1,  "time_ms": 0.017},
+      {"n": 10, "canvas": 300,  "halo": 2, "result": "FEASIBLE", "conflicts": 2,  "time_ms": 0.045},
+      {"n": 15, "canvas": 425,  "halo": 2, "result": "FEASIBLE", "conflicts": 3,  "time_ms": 0.112},
+      {"n": 20, "canvas": 550,  "halo": 2, "result": "FEASIBLE", "conflicts": 4,  "time_ms": 0.202},
+      {"n": 30, "canvas": 800,  "halo": 2, "result": "FEASIBLE", "conflicts": 5,  "time_ms": 0.613}
+    ]
+  },
+  {
+    "category": "constraint-density-stress",
+    "results": [
+      {"n": 10, "canvas": 100, "halo": 0, "result": "FEASIBLE", "conflicts": 5,       "time_ms": 0.093},
+      {"n": 10, "canvas": 80,  "halo": 0, "result": "FEASIBLE", "conflicts": 72,      "time_ms": 0.273},
+      {"n": 10, "canvas": 70,  "halo": 0, "result": "FEASIBLE", "conflicts": 590469,  "time_ms": 1466.132},
+      {"n": 15, "canvas": 120, "halo": 0, "result": "FEASIBLE", "conflicts": 252,     "time_ms": 2.101},
+      {"n": 15, "canvas": 100, "halo": 0, "result": "FEASIBLE", "conflicts": 4202,    "time_ms": 26.139},
+      {"n": 20, "canvas": 150, "halo": 0, "result": "FEASIBLE", "conflicts": 18,      "time_ms": 0.477},
+      {"n": 20, "canvas": 130, "halo": 0, "result": "FEASIBLE", "conflicts": 313,     "time_ms": 3.453},
+      {"n": 10, "canvas": 100, "halo": 2, "result": "FEASIBLE", "conflicts": 43,      "time_ms": 0.191},
+      {"n": 10, "canvas": 80,  "halo": 2, "result": "TIMEOUT",  "conflicts": 1981040, "time_ms": 4302.266},
+      {"n": 15, "canvas": 120, "halo": 2, "result": "FEASIBLE", "conflicts": 6476,    "time_ms": 36.882},
+      {"n": 20, "canvas": 150, "halo": 2, "result": "FEASIBLE", "conflicts": 184,     "time_ms": 2.277}
+    ],
+    "notes": "Demonstrates exponential conflict growth as canvas tightens. 10 rects on 80x80 with halo=2 times out at 2M conflicts. This is the predicted behavior without LCG (clause learning)."
+  },
+  {
+    "category": "unit-tests",
+    "results": [
+      {"test": "MinOfN-3vars", "result": "PASS"},
+      {"test": "MaxOfN-3vars", "result": "PASS"},
+      {"test": "NoOverlap2D-2rects", "result": "PASS"},
+      {"test": "NoOverlap2D-3rects-halo", "result": "PASS"},
+      {"test": "Optimize-sum-min", "result": "PASS"},
+      {"test": "HPWL-2macros-1net", "result": "PASS"}
+    ]
+  }
+]
