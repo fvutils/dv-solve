@@ -1,10 +1,10 @@
 {
   "solver": "dv-solve-smt2",
   "benchmark": "alu_pipeline_bmc_d1",
-  "result": "error",
-  "solve_time_ms": 6.169336847960949,
-  "peak_memory_kb": 40560,
-  "returncode": 2,
-  "stdout": "",
-  "stderr": "error: only QF_BV logic is supported\n"
+  "result": "sat",
+  "solve_time_ms": 231.4997100038454,
+  "peak_memory_kb": 35840,
+  "returncode": 0,
+  "stdout": "sat\n",
+  "stderr": ""
 }

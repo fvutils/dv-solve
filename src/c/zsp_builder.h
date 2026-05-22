@@ -123,6 +123,13 @@ ExprRef builder_alloc(SolveProblemBuilder *b, uint32_t bytes, uint32_t align);
  */
 uint32_t builder_virtual_used(const SolveProblemBuilder *b);
 
+/**
+ * Return a pointer to the data at the given ExprRef within the builder's
+ * virtual address space.  Used to read back nodes (e.g. ExprVar.var_id)
+ * that were allocated earlier.  Returns NULL if ref is EXPR_NULL.
+ */
+void *builder_ref_ptr(const SolveProblemBuilder *b, ExprRef ref);
+
 /* ------------------------------------------------------------------ */
 /* Expression builders (mirror zsp_problem.h API)                      */
 /* ------------------------------------------------------------------ */

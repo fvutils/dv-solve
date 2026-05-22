@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "socmemmap",
   "result": "sat",
-  "solve_time_ms": 98.48892595618963,
-  "peak_memory_kb": 40804,
+  "solve_time_ms": 11.56427399837412,
+  "peak_memory_kb": 36096,
   "returncode": 10,
   "stdout": "sat\n(\n (boot_base #b0000000000010000)\n (boot_size #b001000000000000)\n (boot_end_addr #b0001000000010000)\n (sram_base #b0001001110100000)\n (sram_size #b001001100001101)\n (sram_end_addr #b0010011010101101)\n (periph_base #b0011001001001001)\n (periph_size #b010101010100111)\n (periph_end_addr #b0101110011110000)\n (dma_base #b0111111001111111)\n (dma_size #b001000110010000)\n (dma_end_addr #b1001000000001111)\n)\n",
   "stderr": ""

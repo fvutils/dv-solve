@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "bustransaction",
   "result": "sat",
-  "solve_time_ms": 1.889052800834179,
-  "peak_memory_kb": 42188,
+  "solve_time_ms": 2.623071995913051,
+  "peak_memory_kb": 42240,
   "returncode": 0,
   "stdout": "sat\n((word_addr (_ bv60000 16))\n (burst_len (_ bv149 8))\n (beat_size (_ bv0 2))\n (end_addr (_ bv60149 17)))\n",
   "stderr": ""

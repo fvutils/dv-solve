@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdio.h>
 #include "zsp_ctx.h"
 #include "zsp_propagator.h"
 #include "zsp_problem.h"
@@ -410,15 +411,139 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
     return 0;
 }
 
+/* Recursively materialise an expression as a solver variable.
+ * Handles EXPR_VAR, EXPR_CONST, and EXPR_ITE whose condition is
+ * a BIN_EQ(var, const) comparison (including deeply nested ITE chains).
+ * Returns the var_id on success, EXPR_NULL on failure.
+ * `width` hints the bit-width for new const/result vars (0 → 32). */
+static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
+                               ExprRef ref, uint8_t width) {
+    if (ref == EXPR_NULL) return EXPR_NULL;
+    ExprKind k = *(ExprKind *)zsp_pool_ptr(&sp->pool, ref);
+
+    if (k == EXPR_VAR) {
+        ExprVar *ev = (ExprVar *)zsp_pool_ptr(&sp->pool, ref);
+        return _resolve(ctx, ev->var_id);
+    }
+    if (k == EXPR_CONST) {
+        ExprConst *ec = (ExprConst *)zsp_pool_ptr(&sp->pool, ref);
+        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        uint32_t cv_id = ctx->n_vars;
+        uint8_t w = width ? width : 32;
+        _init_tier0(&ctx->vars[cv_id], w, VAR_AUX, ec->value, ec->value);
+        ctx->n_vars = cv_id + 1;
+        if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
+        return cv_id;
+    }
+    if (k == EXPR_ITE) {
+        ExprITE *ite = (ExprITE *)zsp_pool_ptr(&sp->pool, ref);
+
+        /* Resolve condition to a boolean var ID. */
+        uint32_t cond_id = EXPR_NULL;
+        uint32_t cmp_vid; int64_t cmp_cv;
+        int cond_ok = 0;
+
+        if (_is_var(sp, ite->cond, &cond_id)) {
+            cond_id = _resolve(ctx, cond_id);
+            cond_ok = 1;
+        } else {
+            ExprKind ck = *(ExprKind *)zsp_pool_ptr(&sp->pool, ite->cond);
+            if (ck == EXPR_BINARY && ctx->n_vars + 2 <= ctx->n_vars_capacity) {
+                ExprBinary *cmp = (ExprBinary *)zsp_pool_ptr(&sp->pool, ite->cond);
+                if (cmp->op == BIN_EQ) {
+                    int is_vc = _is_var(sp, cmp->lhs, &cmp_vid) &&
+                                _is_const(sp, cmp->rhs, &cmp_cv);
+                    int is_cv = !is_vc && _is_const(sp, cmp->lhs, &cmp_cv) &&
+                                _is_var(sp, cmp->rhs, &cmp_vid);
+                    if (is_vc || is_cv) {
+                        cmp_vid = _resolve(ctx, cmp_vid);
+                        uint8_t cv_w = ctx->vars[cmp_vid].width;
+                        /* Guard boolean [0,1] — VAR_AUX: determined by propagation */
+                        uint32_t gid = ctx->n_vars;
+                        _init_tier0(&ctx->vars[gid], 1, VAR_AUX, 0, 1);
+                        ctx->n_vars = gid + 1;
+                        if (ctx->watcher_heads) ctx->watcher_heads[gid] = EXPR_NULL;
+                        /* Const-var for comparison value — VAR_AUX singleton */
+                        uint32_t cvc_id = ctx->n_vars;
+                        _init_tier0(&ctx->vars[cvc_id], cv_w, VAR_AUX, cmp_cv, cmp_cv);
+                        ctx->n_vars = cvc_id + 1;
+                        if (ctx->watcher_heads) ctx->watcher_heads[cvc_id] = EXPR_NULL;
+                        /* guard ↔ (cmp_vid == cmp_cv) */
+                        prop_add_reification_eq_32(ctx, gid, cmp_vid, cvc_id, 0);
+                        cond_id = gid;
+                        cond_ok = 1;
+                    }
+                }
+            }
+        }
+        if (!cond_ok) return EXPR_NULL;
+
+        uint32_t then_id = _value_to_var(ctx, sp, ite->then_e, width);
+        if (then_id == EXPR_NULL) return EXPR_NULL;
+        uint32_t else_id = _value_to_var(ctx, sp, ite->else_e, width);
+        if (else_id == EXPR_NULL) return EXPR_NULL;
+
+        /* Create result var for this ITE — VAR_AUX: determined by propagation */
+        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        uint32_t r_id = ctx->n_vars;
+        uint8_t w = width ? width : 32;
+        int64_t max_val = (w >= 64) ? (int64_t)UINT64_MAX
+                        : (int64_t)((1ULL << w) - 1);
+        _init_tier0(&ctx->vars[r_id], w, VAR_AUX, 0, max_val);
+        ctx->n_vars = r_id + 1;
+        if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
+        prop_add_ite_value_64(ctx, r_id, cond_id, then_id, else_id, 0);
+        return r_id;
+    }
+    return EXPR_NULL;
+}
+
 /* Returns 1 if the constraint was compiled, 0 if it could not be handled. */
 static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
     if (root == EXPR_NULL) return 1; /* vacuously handled */
 
     ExprKind k = *(ExprKind *)zsp_pool_ptr(&sp->pool, root);
 
+    /* Boolean/BV assertion: (assert var) means var must be non-zero (true). */
+    if (k == EXPR_VAR) {
+        ExprVar *ev = (ExprVar *)zsp_pool_ptr(&sp->pool, root);
+        uint32_t v_id = _resolve(ctx, ev->var_id);
+        if (ctx_tighten_lb64(ctx, v_id, 1) == PROP_CONFLICT) return -1;
+        return 1;
+    }
+
     if (k == EXPR_BINARY) {
         ExprBinary *e = (ExprBinary *)zsp_pool_ptr(&sp->pool, root);
         uint32_t lid, rid2;
+
+        /* Constant folding: CONST op CONST → evaluate at compile time */
+        {
+            int64_t lc, rc;
+            if (_is_const(sp, e->lhs, &lc) && _is_const(sp, e->rhs, &rc)) {
+                int truth;
+                switch (e->op) {
+                case BIN_EQ:  truth = (lc == rc); break;
+                case BIN_NEQ: truth = (lc != rc); break;
+                case BIN_LT:  truth = (lc <  rc); break;
+                case BIN_LTE: truth = (lc <= rc); break;
+                case BIN_GT:  truth = (lc >  rc); break;
+                case BIN_GTE: truth = (lc >= rc); break;
+                case BIN_AND: truth = (lc != 0 && rc != 0); break;
+                case BIN_OR:  truth = (lc != 0 || rc != 0); break;
+                default: truth = 1; break;
+                }
+                return truth ? 1 : -1;
+            }
+        }
+
+        /* AND constraint: both sides must hold — compile each separately */
+        if (e->op == BIN_AND) {
+            int r1 = _compile_constraint(ctx, sp, e->lhs);
+            if (r1 < 0) return r1;
+            int r2 = _compile_constraint(ctx, sp, e->rhs);
+            if (r2 < 0) return r2;
+            return (r1 == 0 || r2 == 0) ? 0 : 1;
+        }
 
         /* OR tree of var-const comparisons → DisjClause propagator */
         if (e->op == BIN_OR) {
@@ -448,8 +573,9 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
             /* Resolve through alias table */
             lid = _resolve(ctx, lid);
             rid2 = _resolve(ctx, rid2);
-            /* If aliased to same root, this EQ is already satisfied */
-            if (lid == rid2 && e->op == BIN_EQ) return 1;
+            /* If aliased to same root: EQ is trivially true, NEQ is UNSAT */
+            if (lid == rid2 && e->op == BIN_EQ)  return 1;
+            if (lid == rid2 && e->op == BIN_NEQ) return -1;
             /* Use 64-bit propagators if either variable is promoted to tier-1+ */
             int wide = _var_needs_wide(ctx, lid) || _var_needs_wide(ctx, rid2);
             uint16_t w = wide ? 64 : (ctx->vars[lid].width > ctx->vars[rid2].width
@@ -1061,15 +1187,54 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
             }
             if (var_side != EXPR_NULL && ite_side != EXPR_NULL) {
                 ExprVar *ev = (ExprVar *)zsp_pool_ptr(&sp->pool, var_side);
-                uint32_t r_id = ev->var_id;
+                uint32_t r_id = _resolve(ctx, ev->var_id);
                 ExprITE *ite = (ExprITE *)zsp_pool_ptr(&sp->pool, ite_side);
 
                 uint32_t cond_id, a_id, b_id;
-                if (_is_var(sp, ite->cond, &cond_id) &&
-                    _is_var(sp, ite->then_e, &a_id) &&
-                    _is_var(sp, ite->else_e, &b_id)) {
+                int64_t then_cv, else_cv;
+                int cond_ok = _is_var(sp, ite->cond, &cond_id);
+                int then_ok = _is_var(sp, ite->then_e, &a_id);
+                int else_ok = _is_var(sp, ite->else_e, &b_id);
+                if (cond_ok) cond_id = _resolve(ctx, cond_id);
+                if (then_ok) a_id    = _resolve(ctx, a_id);
+                if (else_ok) b_id    = _resolve(ctx, b_id);
+
+                /* Promote const then/else branches to const-vars */
+                if (cond_ok && !then_ok && _is_const(sp, ite->then_e, &then_cv) &&
+                    ctx->n_vars < ctx->n_vars_capacity) {
+                    a_id = ctx->n_vars;
+                    _init_tier0(&ctx->vars[a_id], 32, 0, then_cv, then_cv);
+                    ctx->n_vars = a_id + 1;
+                    if (ctx->watcher_heads) ctx->watcher_heads[a_id] = EXPR_NULL;
+                    then_ok = 1;
+                }
+                if (cond_ok && !else_ok && _is_const(sp, ite->else_e, &else_cv) &&
+                    ctx->n_vars < ctx->n_vars_capacity) {
+                    b_id = ctx->n_vars;
+                    _init_tier0(&ctx->vars[b_id], 32, 0, else_cv, else_cv);
+                    ctx->n_vars = b_id + 1;
+                    if (ctx->watcher_heads) ctx->watcher_heads[b_id] = EXPR_NULL;
+                    else_ok = 1;
+                }
+
+                if (cond_ok && then_ok && else_ok) {
                     prop_add_ite_value_64(ctx, r_id, cond_id, a_id, b_id, 0);
                     return 1;
+                }
+
+                /* Fallback: handle ITE with comparison cond or nested ITE
+                 * branches by recursively materialising the ITE chain. */
+                {
+                    uint8_t val_w = (uint8_t)(r_id < ctx->n_vars_capacity
+                                              ? ctx->vars[r_id].width : 32);
+                    uint32_t ite_var = _value_to_var(ctx, sp, ite_side, val_w);
+                    if (ite_var != EXPR_NULL) {
+                        int wide = _var_needs_wide(ctx, r_id) ||
+                                   _var_needs_wide(ctx, ite_var);
+                        if (wide) prop_add_bounds_eq_64(ctx, r_id, ite_var, 0);
+                        else      prop_add_bounds_eq_32(ctx, r_id, ite_var, 0);
+                        return 1;
+                    }
                 }
             }
         }
@@ -1081,6 +1246,8 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
         uint32_t r_id, idx_id;
         if (!_is_var(sp, as->result, &r_id)) return 0;
         if (!_is_var(sp, as->index, &idx_id)) return 0;
+        r_id   = _resolve(ctx, r_id);
+        idx_id = _resolve(ctx, idx_id);
         uint32_t base = as->base_var_id;
         uint32_t n = as->n_elems;
 
@@ -1136,6 +1303,7 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
         ExprSum *es = (ExprSum *)zsp_pool_ptr(&sp->pool, root);
         uint32_t r_id;
         if (!_is_var(sp, es->result, &r_id)) return 0;
+        r_id = _resolve(ctx, r_id);
 
         ExprRef *sum_refs = (ExprRef *)(es + 1);
         uint32_t summand_ids[MAX_SUM_VARS];
@@ -1144,6 +1312,7 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
 
         for (uint32_t i = 0; i < ns; i++) {
             if (!_is_var(sp, sum_refs[i], &summand_ids[i])) return 0;
+            summand_ids[i] = _resolve(ctx, summand_ids[i]);
         }
 
         uint32_t ref = prop_add_sum_eq_32(ctx, r_id, ns, summand_ids, 0);
@@ -1156,6 +1325,8 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
         uint32_t r_id, x_id;
         if (!_is_var(sp, ec->result, &r_id)) return 0;
         if (!_is_var(sp, ec->operand, &x_id)) return 0;
+        r_id = _resolve(ctx, r_id);
+        x_id = _resolve(ctx, x_id);
         uint32_t ref = prop_add_countones_32(ctx, r_id, x_id, 0);
         return (ref != EXPR_NULL) ? 1 : 0;
     }
@@ -1166,6 +1337,8 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
         uint32_t r_id, x_id;
         if (!_is_var(sp, ec->result, &r_id)) return 0;
         if (!_is_var(sp, ec->operand, &x_id)) return 0;
+        r_id = _resolve(ctx, r_id);
+        x_id = _resolve(ctx, x_id);
         uint32_t ref = prop_add_clog2_32(ctx, r_id, x_id, 0);
         return (ref != EXPR_NULL) ? 1 : 0;
     }
@@ -1237,38 +1410,89 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                      * We can reuse the lhs/rhs from inner since they
                      * point into the sp pool which is read-only here.
                      * Create a temporary ExprBinary on the stack. */
-                    ExprBinary synth;
-                    synth.kind = EXPR_BINARY;
-                    synth.op   = negated;
-                    synth.lhs  = inner->lhs;
-                    synth.rhs  = inner->rhs;
                     /* We can't call _compile_constraint with a stack-local
-                     * ExprRef, so handle var-const and var-var directly. */
+                     * ExprRef, so handle var-const, var-var, and const-const
+                     * directly with the negated operator. */
                     uint32_t lid, rid2;
-                    int64_t cv;
-                    if (_is_var(sp, synth.lhs, &lid) && _is_var(sp, synth.rhs, &rid2)) {
+                    int64_t cv, lc2, rc2;
+
+                    /* Constant folding: CONST negated_op CONST */
+                    if (_is_const(sp, inner->lhs, &lc2) && _is_const(sp, inner->rhs, &rc2)) {
+                        int truth;
+                        switch (negated) {
+                        case BIN_EQ:  truth = (lc2 == rc2); break;
+                        case BIN_NEQ: truth = (lc2 != rc2); break;
+                        case BIN_LT:  truth = (lc2 <  rc2); break;
+                        case BIN_LTE: truth = (lc2 <= rc2); break;
+                        case BIN_GT:  truth = (lc2 >  rc2); break;
+                        case BIN_GTE: truth = (lc2 >= rc2); break;
+                        default:      truth = 1;             break;
+                        }
+                        return truth ? 1 : -1;
+                    }
+                    if (_is_var(sp, inner->lhs, &lid) && _is_var(sp, inner->rhs, &rid2)) {
                         lid = _resolve(ctx, lid);
                         rid2 = _resolve(ctx, rid2);
+                        /* Same-var special cases */
+                        if (lid == rid2) {
+                            if (negated == BIN_EQ)  return 1;   /* v == v: tautology */
+                            if (negated == BIN_NEQ) return -1;  /* v != v: UNSAT */
+                        }
                         switch (negated) {
                         case BIN_LTE: prop_add_bounds_le_32(ctx, lid, rid2, 0); return 1;
                         case BIN_LT:  prop_add_bounds_lt_32(ctx, lid, rid2, 0); return 1;
-                        case BIN_EQ:  if (lid == rid2) return 1;
-                                      prop_add_bounds_eq_32(ctx, lid, rid2, 0); return 1;
+                        case BIN_EQ:  prop_add_bounds_eq_32(ctx, lid, rid2, 0); return 1;
                         case BIN_NEQ: prop_add_bounds_ne_32(ctx, lid, rid2, 0); return 1;
                         case BIN_GT:  prop_add_bounds_lt_32(ctx, rid2, lid, 0); return 1;
                         case BIN_GTE: prop_add_bounds_le_32(ctx, rid2, lid, 0); return 1;
                         default: break;
                         }
                     }
-                    if (_is_var(sp, synth.lhs, &lid) && _is_const(sp, synth.rhs, &cv)) {
+                    /* var NEQ const: create const-var + NE propagator */
+                    if (negated == BIN_NEQ) {
+                        int is_vc = _is_var(sp, inner->lhs, &lid) && _is_const(sp, inner->rhs, &cv);
+                        int is_cv = !is_vc && _is_const(sp, inner->lhs, &cv) && _is_var(sp, inner->rhs, &lid);
+                        if ((is_vc || is_cv) && ctx->n_vars < ctx->n_vars_capacity) {
+                            lid = _resolve(ctx, lid);
+                            uint32_t cv_id = ctx->n_vars;
+                            _init_tier0(&ctx->vars[cv_id], 32, 0, cv, cv);
+                            ctx->n_vars = cv_id + 1;
+                            if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
+                            prop_add_bounds_ne_32(ctx, lid, cv_id, 0);
+                            return 1;
+                        }
+                    }
+                    /* var EQ/cmp const: delegate to _compile_var_const_cmp */
+                    if (_is_var(sp, inner->lhs, &lid) && _is_const(sp, inner->rhs, &cv)) {
                         lid = _resolve(ctx, lid);
                         int r = _compile_var_const_cmp(ctx, negated, lid, cv, 0);
                         if (r != 0) return r;
                     }
-                    if (_is_const(sp, synth.lhs, &cv) && _is_var(sp, synth.rhs, &lid)) {
+                    if (_is_const(sp, inner->lhs, &cv) && _is_var(sp, inner->rhs, &lid)) {
                         lid = _resolve(ctx, lid);
                         int r = _compile_var_const_cmp(ctx, negated, lid, cv, 1);
                         if (r != 0) return r;
+                    }
+                    /* NOT(EQ(ITE_chain, var)) or NOT(EQ(var, ITE_chain)):
+                     * materialize the ITE into an aux var and add a NE constraint. */
+                    if (negated == BIN_NEQ) {
+                        ExprKind lk3 = *(ExprKind *)zsp_pool_ptr(&sp->pool, inner->lhs);
+                        ExprKind rk3 = *(ExprKind *)zsp_pool_ptr(&sp->pool, inner->rhs);
+                        ExprRef ite_s = EXPR_NULL; uint32_t v_id;
+                        if (lk3 == EXPR_ITE && _is_var(sp, inner->rhs, &v_id))
+                            ite_s = inner->lhs;
+                        else if (rk3 == EXPR_ITE && _is_var(sp, inner->lhs, &v_id))
+                            ite_s = inner->rhs;
+                        if (ite_s != EXPR_NULL) {
+                            v_id = _resolve(ctx, v_id);
+                            uint8_t val_w = (uint8_t)(v_id < ctx->n_vars_capacity
+                                                      ? ctx->vars[v_id].width : 32);
+                            uint32_t ite_var = _value_to_var(ctx, sp, ite_s, val_w);
+                            if (ite_var != EXPR_NULL) {
+                                prop_add_bounds_ne_32(ctx, v_id, ite_var, 0);
+                                return 1;
+                            }
+                        }
                     }
                 }
             }
@@ -1277,6 +1501,25 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
 
     /* Unhandled expression type */
     return 0;
+}
+
+/* Recursively collect BIN_EQ(var,var) pairs from a constraint tree
+ * (including those nested inside BIN_AND) into the alias table.
+ * This lets the compile-time UNSAT check detect contradictions like
+ * eq(x,y) + ne(x,y) via alias resolution before search. */
+static void _collect_eq_aliases(uint32_t *alias, SolveProblem *sp, ExprRef ref) {
+    if (ref == EXPR_NULL) return;
+    ExprKind k = *(ExprKind *)zsp_pool_ptr(&sp->pool, ref);
+    if (k != EXPR_BINARY) return;
+    ExprBinary *e = (ExprBinary *)zsp_pool_ptr(&sp->pool, ref);
+    if (e->op == BIN_AND) {
+        _collect_eq_aliases(alias, sp, e->lhs);
+        _collect_eq_aliases(alias, sp, e->rhs);
+    } else if (e->op == BIN_EQ) {
+        uint32_t lid, rid;
+        if (_is_var(sp, e->lhs, &lid) && _is_var(sp, e->rhs, &rid))
+            _alias_union(alias, lid, rid);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1403,22 +1646,12 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
             ctx->var_alias = (uint32_t *)zsp_pool_ptr(&ctx->pool, al_ref);
             for (uint32_t i = 0; i < capacity; i++) ctx->var_alias[i] = i;
 
-            /* Pre-scan: collect unconditional BIN_EQ(var, var) constraints */
+            /* Pre-scan: collect unconditional BIN_EQ(var, var) constraints,
+             * including those nested inside BIN_AND trees. */
             ExprRef scan = sp->constraints_head;
             while (scan != EXPR_NULL) {
                 ConstraintSpec *cs = (ConstraintSpec *)zsp_pool_ptr(&sp->pool, scan);
-                if (cs->root != EXPR_NULL) {
-                    ExprKind sk = *(ExprKind *)zsp_pool_ptr(&sp->pool, cs->root);
-                    if (sk == EXPR_BINARY) {
-                        ExprBinary *se = (ExprBinary *)zsp_pool_ptr(&sp->pool, cs->root);
-                        if (se->op == BIN_EQ) {
-                            uint32_t lid, rid;
-                            if (_is_var(sp, se->lhs, &lid) && _is_var(sp, se->rhs, &rid)) {
-                                _alias_union(ctx->var_alias, lid, rid);
-                            }
-                        }
-                    }
-                }
+                _collect_eq_aliases(ctx->var_alias, sp, cs->root);
                 scan = cs->next;
             }
 

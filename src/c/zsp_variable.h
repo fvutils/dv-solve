@@ -16,6 +16,7 @@ extern "C" {
 #define VAR_STATE   0x04u   /* non-rand state variable                */
 #define VAR_TIER1   0x08u   /* bounds stored in WideBounds64 (33-64b) */
 #define VAR_TIER2   0x10u   /* bounds stored in WideBoundsN  (>64b)   */
+#define VAR_AUX     0x20u   /* auxiliary (guard/ITE result): never a search decision */
 
 /* Convenience: tier-0 when neither TIER1 nor TIER2 is set (width ≤ 32) */
 #define VAR_IS_TIER0(f)  (((f) & (VAR_TIER1|VAR_TIER2)) == 0)

@@ -22,9 +22,16 @@ from tests.formal.harness.results_collector import ResultsCollector
 SMT2_DIR = Path(__file__).resolve().parents[1] / "smt2" / "tier2"
 
 # Boolector doesn't support declare-sort (QF_UFBV); skip it for Tier 2
-_TIER2_SOLVERS = [s for s in AVAILABLE_SOLVERS if s.name not in ("boolector", "dv-solve-smt2")]
+_TIER2_SOLVERS = [s for s in AVAILABLE_SOLVERS if s.name not in ("boolector",)]
 
-# Benchmarks where we expect assertion violations (known model limitations)
+# Benchmarks where dv-solve-smt2 returns 'unknown' (search budget exhausted
+# under the current restart limits).  Tracked as known solver-search gaps;
+# bitwuzla/z3 baselines confirm unsat.
+_KNOWN_ISSUES_DV_SOLVE: set[str] = {
+    "counter_overflow_bmc_d1",
+    "regfile_rdwr_bmc_d1",
+    "timer_watchdog_bmc_d1",
+}
 _KNOWN_ISSUES: set[str] = set()
 
 
@@ -77,6 +84,10 @@ def test_tier2_bmc(smt2_file, solver, tier2_collector):
     if bench_key in _KNOWN_ISSUES:
         if result.result != "unsat":
             pytest.xfail(f"Known issue: {bench_key} returned {result.result}")
+        return
+    if solver.name == "dv-solve-smt2" and bench_key in _KNOWN_ISSUES_DV_SOLVE:
+        if result.result != "unsat":
+            pytest.xfail(f"dv-solve-smt2 search budget gap on {bench_key}: {result.result}")
         return
 
     assert result.result == "unsat", (

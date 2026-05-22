@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "muldivscenario",
   "result": "sat",
-  "solve_time_ms": 95.92559468001127,
-  "peak_memory_kb": 40804,
+  "solve_time_ms": 11.505141999805346,
+  "peak_memory_kb": 36096,
   "returncode": 10,
   "stdout": "sat\n(\n (unit_price #b01111111111111)\n (quantity #b1011111)\n (total #b00000101111110100001)\n)\n",
   "stderr": ""

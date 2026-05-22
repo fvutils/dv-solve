@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "unique32",
   "result": "sat",
-  "solve_time_ms": 1.7372407019138336,
-  "peak_memory_kb": 42188,
+  "solve_time_ms": 3.0749440047657117,
+  "peak_memory_kb": 42240,
   "returncode": 0,
   "stdout": "sat\n((v0 (_ bv20 6))\n (v1 (_ bv21 6))\n (v2 (_ bv52 6))\n (v3 (_ bv36 6))\n (v4 (_ bv40 6))\n (v5 (_ bv17 6))\n (v6 (_ bv14 6))\n (v7 (_ bv19 6))\n (v8 (_ bv58 6))\n (v9 (_ bv39 6))\n (v10 (_ bv51 6))\n (v11 (_ bv47 6))\n (v12 (_ bv39 6))\n (v13 (_ bv14 6))\n (v14 (_ bv32 6))\n (v15 (_ bv55 6))\n (v16 (_ bv6 6))\n (v17 (_ bv3 6))\n (v18 (_ bv49 6))\n (v19 (_ bv38 6))\n (v20 (_ bv10 6))\n (v21 (_ bv8 6))\n (v22 (_ bv46 6))\n (v23 (_ bv39 6))\n (v24 (_ bv54 6))\n (v25 (_ bv53 6))\n (v26 (_ bv28 6))\n (v27 (_ bv44 6))\n (v28 (_ bv8 6))\n (v29 (_ bv50 6))\n (v30 (_ bv11 6))\n (v31 (_ bv37 6)))\n",
   "stderr": ""

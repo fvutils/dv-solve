@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "arbiter_fairness_kind_k2",
   "result": "unsat",
-  "solve_time_ms": 11.119360104203224,
-  "peak_memory_kb": 42188,
+  "solve_time_ms": 4.358822989161126,
+  "peak_memory_kb": 42240,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "alu_pipeline_bmc_d4",
   "result": "unsat",
-  "solve_time_ms": 9.609393775463104,
-  "peak_memory_kb": 42188,
+  "solve_time_ms": 6.052427997929044,
+  "peak_memory_kb": 35840,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

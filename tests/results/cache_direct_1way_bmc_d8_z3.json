@@ -1,0 +1,10 @@
+{
+  "solver": "z3",
+  "benchmark": "cache_direct_1way_bmc_d8",
+  "result": "unsat",
+  "solve_time_ms": 7.661028997972608,
+  "peak_memory_kb": 256,
+  "returncode": 0,
+  "stdout": "unsat\n",
+  "stderr": ""
+}

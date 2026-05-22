@@ -157,4 +157,28 @@ target_link_libraries(dv-solve-smt2 PRIVATE dv_solve)
 target_include_directories(dv-solve-smt2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/c
 )
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(dv-solve-smt2 PRIVATE -fsanitize=address -g -O0)
+    target_link_options(dv-solve-smt2 PRIVATE -fsanitize=address)
+endif()
 install(TARGETS dv-solve-smt2 RUNTIME DESTINATION bin)
+
+# ------------------------------------------------------------------ #
+# SMT-LIB2 frontend unit tests                                        #
+# ------------------------------------------------------------------ #
+
+add_executable(test_smt2_frontend
+    tests/c/test_smt2_frontend.c
+    src/c/smt2/smt2_lexer.c
+    src/c/smt2/smt2_parser.c
+    src/c/smt2/smt2_frontend.c
+)
+target_link_libraries(test_smt2_frontend PRIVATE dv_solve)
+target_include_directories(test_smt2_frontend PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/c
+)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(test_smt2_frontend PRIVATE -fsanitize=address -g -O0)
+    target_link_options(test_smt2_frontend PRIVATE -fsanitize=address)
+endif()
+add_test(NAME test_smt2_frontend COMMAND test_smt2_frontend)

@@ -1,0 +1,10 @@
+{
+  "solver": "z3",
+  "benchmark": "dma_engine_small_bmc_d8",
+  "result": "unsat",
+  "solve_time_ms": 6.330594012979418,
+  "peak_memory_kb": 36096,
+  "returncode": 0,
+  "stdout": "unsat\n",
+  "stderr": ""
+}

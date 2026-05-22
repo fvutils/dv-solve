@@ -1,0 +1,10 @@
+{
+  "solver": "dv-solve-smt2",
+  "benchmark": "counter_overflow_kind_k1",
+  "result": "unknown",
+  "solve_time_ms": 2.9630810022354126,
+  "peak_memory_kb": 42240,
+  "returncode": 2,
+  "stdout": "unknown\n",
+  "stderr": ""
+}

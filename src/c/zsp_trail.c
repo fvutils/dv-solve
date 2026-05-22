@@ -176,10 +176,11 @@ void trail_backtrack(SolveCtx *ctx, uint32_t target_level) {
     ctx->trail_count    = mark->trail_count;
     ctx->decision_level = target_level;
 
-    /* Rebuild unassigned_mask from restored domains */
+    /* Rebuild unassigned_mask from restored domains (skip VAR_AUX) */
     if (ctx->n_vars <= 64) {
         uint64_t mask = 0;
         for (uint32_t i = 0; i < ctx->n_vars; i++) {
+            if (ctx->vars[i].flags & VAR_AUX) continue;
             if (var_lo64(ctx, &ctx->vars[i]) != var_hi64(ctx, &ctx->vars[i]))
                 mask |= (1ULL << i);
         }

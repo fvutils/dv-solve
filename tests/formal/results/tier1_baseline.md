@@ -1,38 +1,38 @@
 # Tier 1 Baseline Results
 
-| Benchmark | bitwuzla (ms) | bitwuzla result | bitwuzla mem (KB) | boolector (ms) | boolector result | boolector mem (KB) | dv-solve-smt2 (ms) | dv-solve-smt2 result | dv-solve-smt2 mem (KB) | z3 (ms) | z3 result | z3 mem (KB) |
-|-----------|----------:|:----------:|------------:|----------:|:----------:|------------:|----------:|:----------:|------------:|----------:|:----------:|------------:|
-| alignedaddr | 7.5 | sat | 40804 | 2.0 | sat | 40536 | 2.1 | sat | 42188 | 14.2 | sat | 41068 |
-| arrayordering | 77.9 | unsat | 40804 | 4.7 | unsat | 40536 | 2.3 | sat | 42188 | 81.1 | unsat | 41068 |
-| arraysum8 | 7.6 | sat | 264 | 11.3 | sat | 268 | 2.0 | sat | 42188 | 85.5 | sat | 41068 |
-| axi4burst | 7.5 | sat | 41068 | 75.7 | sat | 40804 | 2.2 | sat | 42188 | 12.9 | sat | 41068 |
-| bustransaction | 7.6 | sat | 41068 | 7.3 | sat | 40804 | 1.9 | sat | 42188 | 83.3 | sat | 41068 |
-| condinside | 8.5 | sat | 41068 | 6.7 | sat | 40804 | 1.7 | sat | 42188 | 11.0 | sat | 41068 |
-| ddr5cmdbasic | 72.5 | sat | 41068 | 2.7 | sat | 40804 | 1.7 | sat | 42188 | 76.6 | sat | 41068 |
-| ddr5moderegister | 6.8 | sat | 41068 | 2.1 | sat | 40804 | 68.0 | sat | 42188 | 11.0 | sat | 41068 |
-| ddr5timing | 7.5 | sat | 41068 | 3.9 | sat | 40804 | 2.5 | sat | 42188 | 11.8 | sat | 41068 |
-| distweighted | 74.6 | sat | 41068 | 71.0 | sat | 40804 | 2.0 | sat | 42188 | 8.0 | sat | 41068 |
-| enumcond | 7.5 | sat | 41068 | 14.4 | sat | 40804 | 2.2 | sat | 42188 | 13.0 | sat | 41068 |
-| fifoctrl | 6.4 | sat | 41068 | 2.0 | sat | 40804 | 1.8 | sat | 42188 | 9.4 | sat | 41068 |
-| implicationchain8 | 76.9 | sat | 41068 | 3.0 | sat | 40804 | 2.1 | sat | 42188 | 11.7 | sat | 41068 |
-| inequalityweb | 7.5 | sat | 41068 | 71.5 | sat | 40804 | 70.6 | sat | 42188 | 87.0 | sat | 41068 |
-| memmaptight32 | 99.9 | sat | 41068 | 807.8 | sat | 40804 | 3.9 | sat | 42188 | 301.3 | sat | 1120 |
-| mempartitionknapsack | 78.4 | sat | 41068 | 84.5 | sat | 40804 | 3.2 | sat | 42188 | 92.6 | sat | 42188 |
-| memtransaction | 6.3 | sat | 41068 | 3.0 | sat | 40804 | 1.7 | sat | 42188 | 11.8 | sat | 42188 |
-| muldivscenario | 87.2 | sat | 41068 | 95.9 | sat | 40804 | 1.9 | sat | 42188 | 80.8 | sat | 42188 |
-| nqueens8 | 16.1 | sat | 41068 | 24.3 | sat | 40804 | 2.0 | sat | 42188 | 15.0 | sat | 42188 |
-| onehot8 | 6.0 | sat | 41068 | 64.2 | sat | 40804 | 69.4 | sat | 42188 | 75.9 | sat | 42188 |
-| packethdr | 74.9 | sat | 41068 | 3.1 | sat | 40804 | 2.0 | sat | 42188 | 11.7 | sat | 42188 |
-| pcietlp | 6.8 | sat | 41068 | 2.5 | sat | 40804 | 2.9 | sat | 42188 | 76.0 | sat | 42188 |
-| shiftaligned | 5.9 | sat | 41068 | 1.8 | sat | 40804 | 2.3 | sat | 42188 | 9.3 | sat | 42188 |
-| socaddrmap32 | 83.0 | sat | 41068 | 311.3 | sat | 40804 | 2.0 | sat | 42188 | 95.8 | sat | 42188 |
-| socaddrmap40 | 15.7 | sat | 41068 | 408.2 | sat | 40804 | 2.2 | sat | 42188 | 95.8 | sat | 42188 |
-| socmemmap | 75.2 | sat | 41068 | 98.5 | sat | 40804 | 70.5 | sat | 42188 | 15.2 | sat | 42188 |
-| softrelaxbaseline | 5.5 | sat | 41068 | 1.9 | sat | 40804 | 2.2 | sat | 42188 | 11.9 | sat | 42188 |
-| softrelaxwithconflict | 6.8 | sat | 41068 | 2.0 | sat | 40804 | 1.9 | sat | 42188 | 12.6 | sat | 42188 |
-| sumpartition | 76.6 | sat | 41068 | 88.8 | sat | 40804 | 2.2 | sat | 42188 | 15.6 | sat | 42188 |
-| threeunique | 6.5 | sat | 41068 | 4.0 | sat | 40804 | 1.9 | sat | 42188 | 11.4 | sat | 42188 |
-| unique16 | 13.4 | sat | 41068 | 182.3 | sat | 40804 | 2.0 | sat | 42188 | 17.2 | sat | 42188 |
-| unique32 | 6.5 | sat | 41068 | 2.1 | sat | 40804 | 1.7 | sat | 42188 | 79.5 | sat | 42188 |
-| unsignedops | 8.5 | sat | 41068 | 2.9 | sat | 40804 | 67.5 | sat | 42188 | 12.0 | sat | 42188 |
-| verilatorops | 7.1 | sat | 41068 | 8.4 | sat | 40804 | 2.0 | sat | 42188 | 12.1 | sat | 42188 |
+| Benchmark | boolector (ms) | boolector result | boolector mem (KB) | dv-solve-smt2 (ms) | dv-solve-smt2 result | dv-solve-smt2 mem (KB) | z3 (ms) | z3 result | z3 mem (KB) |
+|-----------|----------:|:----------:|------------:|----------:|:----------:|------------:|----------:|:----------:|------------:|
+| alignedaddr | 1.0 | sat | 36096 | 3.4 | sat | 42240 | 5.0 | sat | 36096 |
+| arrayordering | 2.2 | unsat | 36096 | 4.3 | sat | 42240 | 8.2 | unsat | 2048 |
+| arraysum8 | 4.7 | sat | 36096 | 3.4 | sat | 42240 | 7.5 | sat | 38144 |
+| axi4burst | 1.9 | sat | 36096 | 3.9 | sat | 42240 | 6.9 | sat | 38144 |
+| bustransaction | 1.3 | sat | 36096 | 2.6 | sat | 42240 | 6.3 | sat | 38144 |
+| condinside | 0.8 | sat | 36096 | 2.8 | sat | 42240 | 6.0 | sat | 38144 |
+| ddr5cmdbasic | 1.0 | sat | 36096 | 3.1 | sat | 42240 | 6.5 | sat | 38144 |
+| ddr5moderegister | 0.7 | sat | 36096 | 3.2 | sat | 42240 | 6.4 | sat | 38144 |
+| ddr5timing | 1.6 | sat | 36096 | 3.0 | sat | 42240 | 5.9 | sat | 38144 |
+| distweighted | 0.8 | sat | 36096 | 2.9 | sat | 42240 | 4.5 | sat | 38144 |
+| enumcond | 6.2 | sat | 36096 | 3.9 | sat | 42240 | 7.1 | sat | 38144 |
+| fifoctrl | 0.7 | sat | 36096 | 2.7 | sat | 42240 | 5.1 | sat | 38144 |
+| implicationchain8 | 1.1 | sat | 36096 | 3.5 | sat | 42240 | 5.6 | sat | 38144 |
+| inequalityweb | 3.0 | sat | 36096 | 2.9 | sat | 42240 | 6.2 | sat | 38144 |
+| memmaptight32 | 116.8 | sat | 36096 | 6.8 | sat | 42240 | 39.6 | sat | 4096 |
+| mempartitionknapsack | 9.0 | sat | 36096 | 3.9 | sat | 42240 | 9.3 | sat | 42240 |
+| memtransaction | 1.2 | sat | 36096 | 3.7 | sat | 42240 | 7.5 | sat | 42240 |
+| muldivscenario | 11.5 | sat | 36096 | 3.3 | sat | 42240 | 7.9 | sat | 42240 |
+| nqueens8 | 10.3 | sat | 36096 | 3.9 | sat | 42240 | 8.6 | sat | 42240 |
+| onehot8 | 0.6 | sat | 36096 | 2.8 | sat | 42240 | 5.2 | sat | 42240 |
+| packethdr | 1.2 | sat | 36096 | 2.8 | sat | 42240 | 7.3 | sat | 42240 |
+| pcietlp | 0.9 | sat | 36096 | 2.8 | sat | 42240 | 6.4 | sat | 42240 |
+| shiftaligned | 0.6 | sat | 36096 | 2.7 | sat | 42240 | 4.6 | sat | 42240 |
+| socaddrmap32 | 50.6 | sat | 36096 | 3.4 | sat | 42240 | 12.5 | sat | 42240 |
+| socaddrmap40 | 56.8 | sat | 36096 | 3.2 | sat | 42240 | 14.2 | sat | 42240 |
+| socmemmap | 11.6 | sat | 36096 | 3.0 | sat | 42240 | 7.7 | sat | 42240 |
+| softrelaxbaseline | 0.7 | sat | 36096 | 2.6 | sat | 42240 | 7.1 | sat | 42240 |
+| softrelaxwithconflict | 0.6 | sat | 36096 | 2.5 | sat | 42240 | 6.6 | sat | 42240 |
+| sumpartition | 8.8 | sat | 36096 | 3.9 | sat | 42240 | 8.7 | sat | 42240 |
+| threeunique | 1.5 | sat | 36096 | 2.6 | sat | 42240 | 5.9 | sat | 42240 |
+| unique16 | 21.0 | sat | 36096 | 3.7 | sat | 42240 | 8.8 | sat | 42240 |
+| unique32 | 1.0 | sat | 36096 | 3.1 | sat | 42240 | 4.8 | sat | 42240 |
+| unsignedops | 1.0 | sat | 36096 | 3.6 | sat | 42240 | 7.2 | sat | 42240 |
+| verilatorops | 2.5 | sat | 36096 | 2.6 | sat | 42240 | 6.6 | sat | 42240 |

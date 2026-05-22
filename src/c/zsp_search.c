@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <string.h>
+#include <assert.h>
 #include "zsp_search.h"
 #include "zsp_ctx.h"
 #include "zsp_propagator.h"
@@ -64,6 +65,7 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
             uint32_t i = (uint32_t)__builtin_ctzll(m);
             m &= m - 1;  /* clear lowest set bit */
             Variable *v = &ctx->vars[i];
+            if (v->flags & VAR_AUX) continue;  /* aux: determined by propagation */
             int64_t lo = var_lo64(ctx, v);
             int64_t hi = var_hi64(ctx, v);
             if (lo == hi) continue;  /* singleton -- already assigned */
@@ -77,6 +79,7 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
     } else {
         for (uint32_t i = 0; i < ctx->n_vars; i++) {
             Variable *v = &ctx->vars[i];
+            if (v->flags & VAR_AUX) continue;  /* aux: determined by propagation */
             int64_t lo = var_lo64(ctx, v);
             int64_t hi = var_hi64(ctx, v);
             if (lo == hi) continue;
@@ -259,6 +262,16 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
             return SOLVE_UNSAT;
     }
 
+    /* Seal compile-time + initial-propagation state as the level-0 baseline.
+     * level_marks[0] starts zeroed (trail_top=NULL), so trail_backtrack(ctx,0)
+     * would undo every trail entry including compile-time domain narrowings
+     * (e.g. (assert cond) → cond forced to [1,1]).  By resetting the mark
+     * here we ensure restarts and bounds_shave probes only undo search-time
+     * changes, not the compile-time ones. */
+    ctx->level_marks[0].trail_top   = ctx->trail_top;
+    ctx->level_marks[0].trail_count = ctx->trail_count;
+    ctx->level_marks[0].stack_mark  = zsp_stack_push(ctx->dynamic);
+
     /* Pre-search bounds shaving (L2): tighten domains beyond what
      * individual propagator fixed-point can achieve. */
     uint32_t max_si = opts ? opts->max_shave_iters : 1000;
@@ -270,7 +283,19 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     for (;;) {
         /* ── Variable selection ── */
         uint32_t x_id = _select_unassigned(ctx);
-        if (x_id == EXPR_NULL) return SOLVE_OK;   /* all assigned */
+        if (x_id == EXPR_NULL) {
+#ifndef NDEBUG
+            /* Verify all non-aliased variables are singleton at SAT exit. */
+            for (uint32_t _di = 0; _di < ctx->n_vars; _di++) {
+                if (ctx->var_alias && ctx->var_alias[_di] != _di) continue;
+                int64_t _lo = var_lo64(ctx, &ctx->vars[_di]);
+                int64_t _hi = var_hi64(ctx, &ctx->vars[_di]);
+                (void)_lo; (void)_hi;
+                assert(_lo == _hi && "SOLVE_OK but non-singleton domain");
+            }
+#endif
+            return SOLVE_OK;   /* all assigned */
+        }
         int64_t v = _pick_value(ctx, x_id, opts);
 
         /* ── Record decision ── */
@@ -294,29 +319,14 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
 
             uint32_t cur = ctx->decision_level;
 
+            /* A conflict at decision level 0 means the problem is UNSAT:
+             * every permanent domain tightening at level 0 is justified by
+             * a propagation conflict, so if level-0 propagation itself
+             * conflicts there is no search path that can satisfy it. */
+            if (cur == 0) return SOLVE_UNSAT;
+
             /* Restart check */
             if (max_conflicts > 0 && local_conflicts >= luby_limit) {
-                trail_backtrack(ctx, 0);
-                local_conflicts = 0;
-                restart_count++;
-                luby_idx++;
-                luby_limit = _luby(luby_idx) * max_conflicts;
-
-                if (max_restarts > 0 && restart_count >= max_restarts)
-                    return SOLVE_TIMEOUT;
-
-                pr = solver_propagate(ctx);
-                if (pr == PROP_CONFLICT) return SOLVE_UNSAT;
-                break;  /* restart outer for-loop */
-            }
-
-            /* No further backtrack possible at this level.  Restart
-             * with a different RNG state rather than giving up —
-             * the problem may be satisfiable via a different search
-             * path.  True UNSAT is concluded only if the level-0
-             * propagation itself conflicts (domains genuinely empty)
-             * or the restart budget is exhausted (SOLVE_TIMEOUT). */
-            if (cur == 0) {
                 trail_backtrack(ctx, 0);
                 local_conflicts = 0;
                 restart_count++;

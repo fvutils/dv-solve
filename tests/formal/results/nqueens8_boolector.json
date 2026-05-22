@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "nqueens8",
   "result": "sat",
-  "solve_time_ms": 24.278655648231506,
-  "peak_memory_kb": 40804,
+  "solve_time_ms": 10.317487001884729,
+  "peak_memory_kb": 36096,
   "returncode": 10,
   "stdout": "sat\n(\n (q0 #b101)\n (q1 #b001)\n (q2 #b110)\n (q3 #b000)\n (q4 #b010)\n (q5 #b100)\n (q6 #b111)\n (q7 #b011)\n (dp0 #b0101)\n (dp1 #b0010)\n (dp2 #b1000)\n (dp3 #b0011)\n (dp4 #b0110)\n (dp5 #b1001)\n (dp6 #b1101)\n (dp7 #b1010)\n (dm0 #b1100)\n (dm1 #b0111)\n (dm2 #b1011)\n (dm3 #b0100)\n (dm4 #b0101)\n (dm5 #b0110)\n (dm6 #b1000)\n (dm7 #b0011)\n)\n",
   "stderr": ""

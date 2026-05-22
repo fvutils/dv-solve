@@ -22,7 +22,7 @@ from tests.formal.harness.results_collector import ResultsCollector
 
 SMT2_DIR = Path(__file__).resolve().parents[1] / "smt2" / "tier2"
 
-_TIER2_SOLVERS = [s for s in AVAILABLE_SOLVERS if s.name not in ("boolector", "dv-solve-smt2")]
+_TIER2_SOLVERS = [s for s in AVAILABLE_SOLVERS if s.name not in ("boolector",)]
 
 
 

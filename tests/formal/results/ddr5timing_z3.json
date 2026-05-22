@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "ddr5timing",
   "result": "sat",
-  "solve_time_ms": 11.782476678490639,
-  "peak_memory_kb": 41068,
+  "solve_time_ms": 5.945569006144069,
+  "peak_memory_kb": 38144,
   "returncode": 1,
   "stdout": "(error \"line 1 column 19: unknown parameter 'seed'\nLegal parameters are:\n  auto_config (bool) (default: true)\n  ctrl_c (bool) (default: true)\n  debug_ref_count (bool) (default: false)\n  dot_proof_file (string) (default: proof.dot)\n  dump_models (bool) (default: false)\n  encoding (string) (default: unicode)\n  memory_high_watermark (unsigned int) (default: 0)\n  memory_high_watermark_mb (unsigned int) (default: 0)\n  memory_max_alloc_count (unsigned int) (default: 0)\n  memory_max_size (unsigned int) (default: 0)\n  model (bool) (default: true)\n  model_validate (bool) (default: false)\n  proof (bool) (default: false)\n  rlimit (unsigned int) (default: 0)\n  smtlib2_compliant (bool) (default: false)\n  stats (bool) (default: false)\n  timeout (unsigned int) (default: 4294967295)\n  trace (bool) (default: false)\n  trace_file_name (string) (default: z3.log)\n  type_check (bool) (default: true)\n  unsat_core (bool) (default: false)\n  verbose (unsigned int) (default: 0)\n  warning (bool) (default: true)\n  well_sorted_check (bool) (default: false)\")\nsat\n((cmd_prev #b001)\n (cmd #b100)\n (ap_prev #b0)\n (cancel_prev #b0)\n (max_tccd #x4)\n (tccd #b010011)\n (tccd_base #b001111))\n",
   "stderr": ""

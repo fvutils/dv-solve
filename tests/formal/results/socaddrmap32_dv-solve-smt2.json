@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "socaddrmap32",
   "result": "sat",
-  "solve_time_ms": 2.0133359357714653,
-  "peak_memory_kb": 42188,
+  "solve_time_ms": 3.3937130065169185,
+  "peak_memory_kb": 42240,
   "returncode": 0,
   "stdout": "sat\n((r0_base (_ bv1196138497 31))\n (r0_size (_ bv133083823 28))\n (r0_end (_ bv1329222320 31))\n (r1_base (_ bv1351474891 31))\n (r1_size (_ bv97380159 28))\n (r1_end (_ bv1448855050 31))\n (r2_base (_ bv1450217798 31))\n (r2_size (_ bv128266699 28))\n (r2_end (_ bv1578484497 31))\n (r3_base (_ bv1578871013 31))\n (r3_size (_ bv106575017 28))\n (r3_end (_ bv1685446030 31))\n (r4_base (_ bv1685937628 31))\n (r4_size (_ bv47514440 28))\n (r4_end (_ bv1733452068 31))\n (r5_base (_ bv1733531485 31))\n (r5_size (_ bv79429525 28))\n (r5_end (_ bv1812961010 31))\n (r6_base (_ bv1812973950 31))\n (r6_size (_ bv49262093 28))\n (r6_end (_ bv1862236043 31))\n (r7_base (_ bv1862247296 31))\n (r7_size (_ bv83526400 28))\n (r7_end (_ bv1945773696 31)))\n",
   "stderr": ""

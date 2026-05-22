@@ -1,10 +1,10 @@
 {
   "solver": "dv-solve-smt2",
   "benchmark": "counter_overflow_bmc_d2",
-  "result": "error",
-  "solve_time_ms": 2.066373825073242,
-  "peak_memory_kb": 40824,
-  "returncode": 2,
-  "stdout": "",
-  "stderr": "error: only QF_BV logic is supported\n"
+  "result": "unsat",
+  "solve_time_ms": 3.0897620017640293,
+  "peak_memory_kb": 42240,
+  "returncode": 1,
+  "stdout": "unsat\n",
+  "stderr": ""
 }

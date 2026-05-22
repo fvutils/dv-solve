@@ -186,6 +186,18 @@ uint32_t builder_virtual_used(const SolveProblemBuilder *b) {
     return b->virtual_used;
 }
 
+void *builder_ref_ptr(const SolveProblemBuilder *b, ExprRef ref) {
+    if (ref == EXPR_NULL) return NULL;
+    uint32_t voff = ref - POOL_HEADER_SZ;
+    for (BuilderBlock *blk = b->first; blk; blk = blk->next) {
+        if (voff >= blk->base_offset &&
+            voff < blk->base_offset + blk->used) {
+            return _block_ptr_at(blk, voff - blk->base_offset);
+        }
+    }
+    return NULL;
+}
+
 /* ------------------------------------------------------------------ */
 /* Finalize                                                            */
 /* ------------------------------------------------------------------ */

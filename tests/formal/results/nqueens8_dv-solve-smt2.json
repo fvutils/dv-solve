@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "nqueens8",
   "result": "sat",
-  "solve_time_ms": 1.99905876070261,
-  "peak_memory_kb": 42188,
+  "solve_time_ms": 3.8826950039947405,
+  "peak_memory_kb": 42240,
   "returncode": 0,
   "stdout": "sat\n((q0 (_ bv4 3))\n (q1 (_ bv0 3))\n (q2 (_ bv7 3))\n (q3 (_ bv3 3))\n (q4 (_ bv1 3))\n (q5 (_ bv6 3))\n (q6 (_ bv2 3))\n (q7 (_ bv5 3))\n (dp0 (_ bv4 4))\n (dp1 (_ bv1 4))\n (dp2 (_ bv9 4))\n (dp3 (_ bv6 4))\n (dp4 (_ bv5 4))\n (dp5 (_ bv11 4))\n (dp6 (_ bv8 4))\n (dp7 (_ bv12 4))\n (dm0 (_ bv11 4))\n (dm1 (_ bv6 4))\n (dm2 (_ bv12 4))\n (dm3 (_ bv7 4))\n (dm4 (_ bv4 4))\n (dm5 (_ bv8 4))\n (dm6 (_ bv3 4))\n (dm7 (_ bv5 4)))\n",
   "stderr": ""
