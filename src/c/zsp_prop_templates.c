@@ -543,6 +543,17 @@ static PropResult _fire_reification_32(Propagator *self, SolveCtx *ctx) {
         PropResult r;
         if ((r = ctx_tighten_lb32(ctx, xid, y->hi + 1)) != PROP_OK) return r;
     }
+    /* Backward: if domain proves x ≤ y unconditionally, force guard=1.
+     * If domain proves x > y unconditionally, force guard=0. */
+    if (g->lo != g->hi) {
+        if (x->hi <= y->lo) {
+            PropResult r;
+            if ((r = ctx_tighten_lb32(ctx, gid, 1)) != PROP_OK) return r;
+        } else if (x->lo > y->hi) {
+            PropResult r;
+            if ((r = ctx_tighten_ub32(ctx, gid, 0)) != PROP_OK) return r;
+        }
+    }
     return PROP_OK;
 }
 

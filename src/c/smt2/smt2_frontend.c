@@ -1303,12 +1303,6 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
     Smt2ArraySort array_sort;
     int is_arr = _parse_array_sort(fe, sort_s, &array_sort);
     if (is_arr == 1) {
-        /* Guard against push/pop: array vars at push_depth > 0 not supported */
-        if (fe->push_depth > 0) {
-            fprintf(fe->err,
-                    "(error \"declare-const Array inside push scope not supported\")\n");
-            return 0;
-        }
         /* Reject oversized address space (continue session, don't create var) */
         if (array_sort.addr_width > SMT2_MAX_ARRAY_ADDR_BITS) {
             fprintf(fe->err,
@@ -1696,6 +1690,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         if (fe->push_depth < SMT2_MAX_PUSH) {
             fe->push_stack[fe->push_depth] = (uint32_t)-1;
             fe->push_n_vars[fe->push_depth] = fe->n_vars;
+            fe->push_n_array_vars[fe->push_depth] = fe->n_array_vars;
             fe->push_depth++;
         }
         return 0;
@@ -1720,6 +1715,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         }
         fe->push_stack[fe->push_depth++] = (uint32_t)cp;
         fe->push_n_vars[fe->push_depth - 1] = fe->n_vars;
+        fe->push_n_array_vars[fe->push_depth - 1] = fe->n_array_vars;
     }
     return 0;
 }
@@ -1736,11 +1732,29 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
         }
         fe->push_depth--;
         if (fe->ctx && fe->push_stack[fe->push_depth] != (uint32_t)-1) {
-            if (fe->has_result) solver_reset(fe->ctx);
+            /* solver_restore handles trail backtrack itself; calling
+             * solver_reset first would zero ctx->trail_top while leaving
+             * checkpoint marks pointing at stale TrailEntry addresses,
+             * leading to a NULL-deref inside trail_backtrack. */
             fe->has_result = 0;
             solver_restore(fe->ctx, fe->push_stack[fe->push_depth]);
         }
         fe->n_vars = fe->push_n_vars[fe->push_depth];
+
+        /* Free arrays declared inside the popped scope. The solver-side BV
+         * vars are already unwound by solver_restore via the n_vars rewind;
+         * here we drop the frontend-side tracking and malloc'd element list. */
+        uint32_t target_n_arr = fe->push_n_array_vars[fe->push_depth];
+        for (uint32_t i = target_n_arr; i < fe->n_array_vars; i++) {
+            Smt2ArrayVar *av = &fe->array_vars[i];
+            if (av->value) {
+                free(av->value->elems);
+                free(av->value);
+                av->value = NULL;
+            }
+            av->name[0] = '\0';
+        }
+        fe->n_array_vars = target_n_arr;
     }
     return 0;
 }

@@ -376,6 +376,48 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
 
     if (!has_var_var) return 0;
 
+    /* Reified comparison: r ↔ (a op b) — wire to reification propagators
+     * before falling through to arithmetic patterns. */
+    switch (binop->op) {
+    case BIN_EQ:
+        prop_add_reification_eq_32(ctx, r_id, a_id, b_id, 0);
+        return 1;
+    case BIN_LTE:
+        prop_add_reification_32(ctx, r_id, a_id, b_id, 0);
+        return 1;
+    case BIN_GTE:
+        prop_add_reification_32(ctx, r_id, b_id, a_id, 0);
+        return 1;
+    case BIN_LT: {
+        /* r ↔ (a < b)  ≡  r ↔ (a ≤ b-1).  Need a const-var for b-1 when
+         * b is a constant; otherwise fall back to materialising b-1 by
+         * tying a fresh aux through an add propagator (not done here). */
+        int64_t b_cv;
+        if (_is_const(sp, binop->rhs, &b_cv) && ctx->n_vars < ctx->n_vars_capacity) {
+            uint32_t bm1 = ctx->n_vars;
+            _init_tier0(&ctx->vars[bm1], 32, 0, b_cv - 1, b_cv - 1);
+            ctx->n_vars = bm1 + 1;
+            if (ctx->watcher_heads) ctx->watcher_heads[bm1] = EXPR_NULL;
+            prop_add_reification_32(ctx, r_id, a_id, bm1, 0);
+            return 1;
+        }
+        break;
+    }
+    case BIN_GT: {
+        int64_t a_cv;
+        if (_is_const(sp, binop->lhs, &a_cv) && ctx->n_vars < ctx->n_vars_capacity) {
+            uint32_t am1 = ctx->n_vars;
+            _init_tier0(&ctx->vars[am1], 32, 0, a_cv - 1, a_cv - 1);
+            ctx->n_vars = am1 + 1;
+            if (ctx->watcher_heads) ctx->watcher_heads[am1] = EXPR_NULL;
+            prop_add_reification_32(ctx, r_id, b_id, am1, 0);
+            return 1;
+        }
+        break;
+    }
+    default: break;
+    }
+
     int wide = _var_needs_wide(ctx, r_id) ||
                _var_needs_wide(ctx, a_id) ||
                _var_needs_wide(ctx, b_id);
@@ -723,6 +765,12 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
             if (var_side != EXPR_NULL && expr_side != EXPR_NULL) {
                 ExprVar *ev = (ExprVar *)zsp_pool_ptr(&sp->pool, var_side);
                 uint32_t r_id = _resolve(ctx, ev->var_id);
+                /* Delegate to _compile_binexpr_eq_var first — handles reified
+                 * comparisons (r ↔ a op b) before falling through to arithmetic. */
+                {
+                    int rc_d = _compile_binexpr_eq_var(ctx, sp, expr_side, r_id);
+                    if (rc_d != 0) return rc_d;
+                }
                 ExprBinary *binop = (ExprBinary *)zsp_pool_ptr(&sp->pool, expr_side);
                 uint32_t a_id, b_id;
                 int64_t cv;

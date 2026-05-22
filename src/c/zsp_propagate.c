@@ -196,8 +196,19 @@ PropResult solver_propagate(SolveCtx *ctx) {
             }
         }
 
+        /* Tag the firing propagator so trail_record_* attributes the
+         * resulting bound tightenings to it. Cleared after fire so
+         * non-propagation tightenings (e.g. decision pushes, level-0
+         * compile-time clamps) record reason=EXPR_NULL. */
+        ctx->current_prop_ref = prop_ref;
         PropResult r = p->fire(p, ctx);
-        if (r == PROP_CONFLICT) return PROP_CONFLICT;
+        ctx->current_prop_ref = EXPR_NULL;
+        if (r == PROP_CONFLICT) {
+            /* Stash the conflicting propagator for downstream conflict
+             * analysis (zsp_analyze_conflict). */
+            ctx->conflict_prop_ref = prop_ref;
+            return PROP_CONFLICT;
+        }
         if (r == PROP_ENTAILED) p->flags |= PROP_FLAG_ENTAILED;
     }
     return PROP_OK;

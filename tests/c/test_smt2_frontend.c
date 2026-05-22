@@ -477,6 +477,54 @@ static void test_let_parallel_binding(void) {
     smt2_frontend_destroy(&fe);
 }
 
+/* ------------------------------------------------------------------ */
+/* Task 6.4: declare-const Array under push/pop                       */
+/* ------------------------------------------------------------------ */
+
+static void test_array_push_pop_basic(void) {
+    Smt2Frontend fe;
+    smt2_frontend_init(&fe, stderr, stderr);
+    int rc = _run(&fe,
+        "(set-logic QF_AUFBV)"
+        "(declare-const a (Array (_ BitVec 2) (_ BitVec 8)))"
+        "(push 1)"
+        "(declare-const b (Array (_ BitVec 2) (_ BitVec 8)))");
+    ASSERT_EQ_INT(rc, 0);
+    /* Two arrays declared, one inside push */
+    ASSERT_EQ_INT(fe.n_array_vars, 2);
+    ASSERT_EQ_INT(fe.push_depth, 1);
+    /* Saved count = 1 (only `a` existed before push) */
+    ASSERT_EQ_INT(fe.push_n_array_vars[0], 1);
+
+    /* Pop: `b` should be cleaned up, `a` remains */
+    rc = _run(&fe, "(pop 1)");
+    ASSERT_EQ_INT(rc, 0);
+    ASSERT_EQ_INT(fe.n_array_vars, 1);
+    ASSERT_EQ_INT(fe.push_depth, 0);
+    ASSERT_TRUE(fe.array_vars[0].value != NULL);
+    ASSERT_TRUE(fe.array_vars[1].value == NULL);
+    smt2_frontend_destroy(&fe);
+}
+
+static void test_array_push_pop_repeated(void) {
+    Smt2Frontend fe;
+    smt2_frontend_init(&fe, stderr, stderr);
+    int rc = _run(&fe,
+        "(set-logic QF_AUFBV)"
+        "(declare-const a (Array (_ BitVec 2) (_ BitVec 4)))");
+    ASSERT_EQ_INT(rc, 0);
+    /* 50 push/declare/pop cycles — leaks would be caught by ASan. */
+    for (int i = 0; i < 50; i++) {
+        rc = _run(&fe,
+            "(push 1)"
+            "(declare-const tmp (Array (_ BitVec 2) (_ BitVec 4)))"
+            "(pop 1)");
+        ASSERT_EQ_INT(rc, 0);
+    }
+    ASSERT_EQ_INT(fe.n_array_vars, 1);
+    smt2_frontend_destroy(&fe);
+}
+
 static void test_let_malformed(void) {
     Smt2Frontend fe;
     FILE *err_f = tmpfile();
@@ -526,6 +574,10 @@ int main(void) {
     RUN(test_let_shadowing);
     RUN(test_let_parallel_binding);
     RUN(test_let_malformed);
+
+    /* Task 6.4: declare-const Array under push/pop */
+    RUN(test_array_push_pop_basic);
+    RUN(test_array_push_pop_repeated);
 
     printf("\n%d passed, %d failed\n", _passed, _failed);
     return _failed ? 1 : 0;

@@ -194,6 +194,7 @@ typedef struct {
     /* Push/pop stack: maps to solver_checkpoint indices */
     uint32_t             push_stack[32];
     uint32_t             push_n_vars[32];
+    uint32_t             push_n_array_vars[32];
     uint32_t             push_depth;
 
     /* Incremental state: 1 once the initial problem has been compiled. */

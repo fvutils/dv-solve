@@ -245,6 +245,17 @@ static inline const uint64_t *var_hi_wide(const SolveCtx *ctx,
     return (const uint64_t *)(wn + 1) + wn->n_limbs;
 }
 
+/**
+ * Compute a backjump level using trail reasons.
+ *
+ * Returns the decision level the search should backjump to after the most
+ * recent PROP_CONFLICT. The conflicting propagator is read from
+ * ctx->conflict_prop_ref.  Falls back to (decision_level - 1) when no
+ * useful lower-level dependency is found.  See zsp_conflict.c for the
+ * algorithm.
+ */
+uint32_t analyze_conflict(SolveCtx *ctx);
+
 #ifdef __cplusplus
 }
 #endif
