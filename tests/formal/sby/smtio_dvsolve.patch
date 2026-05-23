@@ -1,0 +1,41 @@
+# Apply to packages/yosys-bin/share/yosys/python3/smtio.py to add the
+# dv-solve backend.
+#
+# Until upstream yosys-smtbmc gains a dv-solve case, apply this patch
+# locally after ivpm pulls the yosys-bin package:
+#
+#   patch -p1 < tests/formal/sby/smtio_dvsolve.patch
+#
+# Then symlink the dv-solve-smt2 binary onto PATH:
+#
+#   ln -sf "$(pwd)/build/dv-solve-smt2" \
+#          packages/yosys-bin/bin/dv-solve-smt2
+#
+# After that, sby can drive dv-solve via:
+#
+#   [engines]
+#   smtbmc dv-solve
+
+--- a/packages/yosys-bin/share/yosys/python3/smtio.py
++++ b/packages/yosys-bin/share/yosys/python3/smtio.py
+@@ -229,6 +229,17 @@ class SmtIo:
+         if self.solver in ["boolector", "bitwuzla"]:
+             if self.noincr:
+                 self.popen_vargs = [self.solver, '--smt2'] + self.solver_opts
+             else:
+                 self.popen_vargs = [self.solver, '--smt2', '-i'] + self.solver_opts
+             self.unroll = True
+             if self.timeout != 0:
+                 print('timeout option is not supported for %s.' % self.solver)
+                 sys.exit(1)
++
++        if self.solver == "dv-solve":
++            # Local build of dv-solve-smt2; accepts the yosys-smtbmc
++            # dialect (QF_UFBV with declare-sort) and interactive
++            # stdin SMT2.
++            self.popen_vargs = ['dv-solve-smt2', '--interactive'] + self.solver_opts
++            # dv-solve doesn't need unrolling (it parses declare-sort
++            # state and uninterpreted functions natively, like z3).
++            if self.timeout != 0:
++                print('timeout option is not supported for dv-solve.')
++                sys.exit(1)

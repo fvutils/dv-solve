@@ -418,6 +418,43 @@ clause management.
   completeness for ITE chains, or lazy reification of branch
   values to reduce conflict set width.
 
+## Phase 9 (NEW) — yosys-sby end-to-end backend
+
+**Status:** wired but blocked on a compile bug. dv-solve is now
+registered in `packages/yosys-bin/share/yosys/python3/smtio.py` as the
+`dv-solve` solver (invokes `dv-solve-smt2 --interactive` on PATH). The
+SBY engine line `smtbmc dv-solve` lights up.
+
+**Two bugs found and fixed via this work:**
+1. `_fire_bounds_bnot_64` was missing a bit-width mask (`~5` on an
+   8-bit value gave `-6` instead of `250`); fix in commit `c2e34a0`.
+   Without it, yosys-sby crashed at 65 GB OOM on a 4-bit counter.
+2. SMT2 frontend's push/pop didn't drop aux SolveProblems pushed
+   between them; same commit. The validator was still re-evaluating
+   popped assertions, downgrading sat→unknown.
+
+**Remaining blocker:** OR-of-extract-equalities (`(or (= ((_ extract
+0 0) v) #b1) ...)`) added incrementally after a check-sat compiles
+to nothing — `_classify_or_leaf` doesn't recognize EXTRACT, the
+`_bool_to_var` fallback also doesn't, so the constraint is silently
+dropped (`_compile_constraint` returns 0 = uncompiled). Search then
+returns wrong unsat. Regression fixture:
+`tests/formal/regression_or_extract_xfail.smt2`.
+
+**Fix shape:** teach `_classify_or_leaf` to accept EXTRACT (treat
+it like EXTEND — call `_value_to_var` on the extracted aux), OR
+teach `_bool_to_var` to handle EXTRACT-equality. The latter is
+likely simpler since EXTRACT is more general than EXTEND.
+
+### Exit criteria
+
+- [ ] OR-of-extract case lands `sat / sat` in dv-solve.
+- [ ] `sby -f counter_assert_dv.sby bmc` returns PASS with
+      `engines: smtbmc dv-solve`.
+- [ ] Benchmark dv-solve vs boolector vs z3 via sby on a realistic
+      design (depth >= 20, several modules) — capture timing and
+      memory.
+
 ## Cross-cutting tracking
 
 After each phase, re-run:
@@ -436,6 +473,7 @@ and update the headline numbers below.
 | after phase 6 | 0 | 105 | 13 | +regfile_simple_d2; wall 112s→102s |
 | after phase 7 | 0 | 105 | 13 | LBD+GC infra in; no fixture moved |
 | after phase 8 | 0 | 105 | 13 | phase_save opt-in; wash on default |
+| after phase 9 | 0 | 105 | 13 | +2 bugs fixed (bvnot, pop aux); sby integration blocked on OR-of-extract |
 | after phase 2 | TBD | TBD | TBD | aim: 0 latent unsoundness |
 | after phase 3 | TBD | TBD | TBD | audit complete |
 | after phase 4 | TBD | TBD | TBD | int64 lifted |
