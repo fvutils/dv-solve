@@ -1706,20 +1706,35 @@ static PropResult _fire_bounds_bnot_64(Propagator *self, SolveCtx *ctx) {
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
 
-    int64_t alo = var_lo64(ctx, &ctx->vars[aid]);
-    int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
+    /* Bit-width mask: bvnot on an n-bit value flips n bits, so the
+     * complement must be re-confined to [0, 2^n - 1]. C's `~` flips
+     * all 64 bits and produces a negative int64 for any small
+     * unsigned value (e.g. ~5 = -6, not 250 for an 8-bit value).
+     * Use min(r.width, a.width) since they should match for bvnot. */
+    Variable *rv = &ctx->vars[rid];
+    Variable *av = &ctx->vars[aid];
+    uint16_t  w  = rv->width ? rv->width : av->width;
+    uint64_t  mask = (w >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
+
+    int64_t alo = var_lo64(ctx, av);
+    int64_t ahi = var_hi64(ctx, av);
 
     PropResult res;
 
-    /* ~a reverses ordering: r_lo = ~a_hi, r_hi = ~a_lo */
-    if ((res = ctx_tighten_lb64(ctx, rid, ~ahi)) != PROP_OK) return res;
-    if ((res = ctx_tighten_ub64(ctx, rid, ~alo)) != PROP_OK) return res;
+    /* ~a within w bits reverses ordering: r_lo = mask & ~a_hi,
+     * r_hi = mask & ~a_lo. */
+    int64_t new_rlo = (int64_t)(mask & (uint64_t)~ahi);
+    int64_t new_rhi = (int64_t)(mask & (uint64_t)~alo);
+    if ((res = ctx_tighten_lb64(ctx, rid, new_rlo)) != PROP_OK) return res;
+    if ((res = ctx_tighten_ub64(ctx, rid, new_rhi)) != PROP_OK) return res;
 
-    /* Backward: a_lo = ~r_hi, a_hi = ~r_lo */
-    int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
-    int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
-    if ((res = ctx_tighten_lb64(ctx, aid, ~rhi)) != PROP_OK) return res;
-    if ((res = ctx_tighten_ub64(ctx, aid, ~rlo)) != PROP_OK) return res;
+    /* Backward: a_lo = mask & ~r_hi, a_hi = mask & ~r_lo. */
+    int64_t rlo = var_lo64(ctx, rv);
+    int64_t rhi = var_hi64(ctx, rv);
+    int64_t new_alo = (int64_t)(mask & (uint64_t)~rhi);
+    int64_t new_ahi = (int64_t)(mask & (uint64_t)~rlo);
+    if ((res = ctx_tighten_lb64(ctx, aid, new_alo)) != PROP_OK) return res;
+    if ((res = ctx_tighten_ub64(ctx, aid, new_ahi)) != PROP_OK) return res;
 
     return PROP_OK;
 }

@@ -1967,6 +1967,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->push_stack[fe->push_depth] = (uint32_t)-1;
             fe->push_n_vars[fe->push_depth] = fe->n_vars;
             fe->push_n_array_vars[fe->push_depth] = fe->n_array_vars;
+            fe->push_n_aux_problems[fe->push_depth] = fe->n_aux_problems;
             fe->push_depth++;
         }
         return 0;
@@ -1992,6 +1993,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->push_stack[fe->push_depth++] = (uint32_t)cp;
         fe->push_n_vars[fe->push_depth - 1] = fe->n_vars;
         fe->push_n_array_vars[fe->push_depth - 1] = fe->n_array_vars;
+        fe->push_n_aux_problems[fe->push_depth - 1] = fe->n_aux_problems;
     }
     return 0;
 }
@@ -2031,6 +2033,20 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             av->name[0] = '\0';
         }
         fe->n_array_vars = target_n_arr;
+
+        /* Drop aux problems added between push and pop. The solver-side
+         * propagators those aux problems compiled were already marked
+         * ENTAILED by solver_restore, but their SolveProblem buffers
+         * remained in fe->aux_problems[], which the model-validation
+         * pass would still re-evaluate -- producing spurious violations
+         * (and downgrading sat -> unknown) for assertions the user
+         * popped off the stack. */
+        uint32_t target_n_aux = fe->push_n_aux_problems[fe->push_depth];
+        for (uint32_t i = target_n_aux; i < fe->n_aux_problems; i++) {
+            free(fe->aux_problems[i]);
+            fe->aux_problems[i] = NULL;
+        }
+        fe->n_aux_problems = target_n_aux;
     }
     return 0;
 }

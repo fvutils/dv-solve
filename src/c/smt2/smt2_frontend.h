@@ -203,6 +203,7 @@ typedef struct {
     uint32_t             push_stack[32];
     uint32_t             push_n_vars[32];
     uint32_t             push_n_array_vars[32];
+    uint32_t             push_n_aux_problems[32];
     uint32_t             push_depth;
 
     /* Incremental state: 1 once the initial problem has been compiled. */
