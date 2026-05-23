@@ -1,8 +1,38 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "zsp_lcg.h"
 #include "zsp_ctx.h"
+#include "zsp_explain.h"
 #include "zsp_propagator.h"
+#include "zsp_trail.h"
+
+/* DV_LCG_TRACE: emit per-conflict trace to stderr. Resolved once per
+ * process. Off (0) by default. */
+static int _trace_check(void) {
+    const char *e = getenv("DV_LCG_TRACE");
+    return (e && *e && *e != '0') ? 1 : 0;
+}
+static inline int _tron(void) {
+    static int cached = -1;
+    if (cached < 0) cached = _trace_check();
+    return cached;
+}
+
+static const char *_pname(SolveCtx *ctx, uint32_t prop_ref) {
+    if (prop_ref == EXPR_NULL) return "<decision>";
+    Propagator *p = (Propagator *)zsp_pool_ptr(&ctx->pool, prop_ref);
+    return prop_fire_name(p->fire);
+}
+
+static void _trace_lit(const char *prefix, Literal lit) {
+    fprintf(stderr, "[lcg-trace] %s v%u %s %d\n",
+            prefix, lit.var_id, lit.is_lb ? ">=" : "<=", lit.bound);
+}
+
+/* Index into lcg->seen[] / seen_lit[]: separate slots for LB and UB
+ * literals on the same variable. Slot layout: [v0_lb, v0_ub, v1_lb, v1_ub, ...]. */
+#define SEEN_IX(v, is_lb_)  ((2u * (v)) + ((is_lb_) ? 0u : 1u))
 
 #define PROP_WS(p) ((PropWatchSect *)((char *)(p) + sizeof(Propagator)))
 
@@ -186,8 +216,12 @@ int lcg_init(LCGCtx *lcg, uint32_t n_vars) {
         return -1;
     }
 
-    lcg->seen = (uint8_t *)calloc(n_vars, sizeof(uint8_t));
-    lcg->seen_lit = (Literal *)calloc(n_vars, sizeof(Literal));
+    /* seen[] and seen_lit[] are indexed by (var_id, is_lb) pair so the
+     * analyzer can track LB and UB literals on the same variable
+     * independently — required for non-monotone propagators (bvand,
+     * etc.) whose antecedents include both bounds on a singleton var. */
+    lcg->seen = (uint8_t *)calloc(2u * n_vars, sizeof(uint8_t));
+    lcg->seen_lit = (Literal *)calloc(2u * n_vars, sizeof(Literal));
     lcg->learnt_cap = MAX_CLAUSE_LITS;
     lcg->learnt_buf = (Literal *)calloc(lcg->learnt_cap, sizeof(Literal));
     if (!lcg->seen || !lcg->learnt_buf) {
@@ -231,8 +265,14 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
         return 0;
     }
 
-    memset(lcg->seen, 0, ctx->n_vars * sizeof(uint8_t));
-    memset(lcg->seen_lit, 0, ctx->n_vars * sizeof(Literal));
+    if (_tron()) {
+        fprintf(stderr,
+            "[lcg-trace] === analyze cur_level=%u conflict_prop=%s ===\n",
+            cur_level, _pname(ctx, ctx->conflict_prop_ref));
+    }
+
+    memset(lcg->seen, 0, 2u * ctx->n_vars * sizeof(uint8_t));
+    memset(lcg->seen_lit, 0, 2u * ctx->n_vars * sizeof(Literal));
 
     uint32_t n_at_cur_level = 0;
     uint32_t learnt_idx = 0;
@@ -265,12 +305,15 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
      * Stores the literal so it can be used for UIP / clause body. */
     #define ADD_EXPL_LIT(lit) do {                                   \
         uint32_t _vid = (lit).var_id;                                \
+        uint32_t _slot = SEEN_IX(_vid, (lit).is_lb);                 \
         /* Antecedent literals should be currently TRUE.  Process    \
          * them to find their decision level and resolve or add to   \
-         * the learnt clause body. Skip if already seen or invalid. */\
-        if (_vid < ctx->n_vars && !lcg->seen[_vid]) {               \
-            lcg->seen[_vid] = 1;                                    \
-            lcg->seen_lit[_vid] = (lit);                             \
+         * the learnt clause body. Skip if already seen or invalid.  \
+         * seen[] is indexed per (var, kind) so an antecedent of     \
+         * "x == c" (both x >= c AND x <= c) records both literals. */\
+        if (_vid < ctx->n_vars && !lcg->seen[_slot]) {              \
+            lcg->seen[_slot] = 1;                                   \
+            lcg->seen_lit[_slot] = (lit);                            \
             vsids_bump(&lcg->vsids, _vid);                          \
             /* Find the decision level where this literal became     \
              * true by matching the trail entry's bound kind. */     \
@@ -355,6 +398,14 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
                                other_lit.is_lb, bv, &expl) != 0) {
                     lcg_dbg_bail[1]++; return -1;
                 }
+                if (_tron()) {
+                    fprintf(stderr,
+                        "[lcg-trace] explain(other) prop=%s v%u %s=%ld -> %u lits\n",
+                        prop_fire_name(p->fire), conflict_var,
+                        other_lit.is_lb ? "lb" : "ub", (long)bv, expl.n_lits);
+                    for (uint32_t i = 0; i < expl.n_lits; i++)
+                        _trace_lit("  ante", expl.lits[i]);
+                }
                 for (uint32_t i = 0; i < expl.n_lits; i++)
                     ADD_EXPL_LIT(expl.lits[i]);
             }
@@ -386,8 +437,8 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
                 : var_hi64(ctx, &ctx->vars[conflict_var]));
             cl._pad[0] = cl._pad[1] = cl._pad[2] = 0;
 
-            lcg->seen[conflict_var] = 1;
-            lcg->seen_lit[conflict_var] = cl;
+            lcg->seen[SEEN_IX(conflict_var, cl.is_lb)] = 1;
+            lcg->seen_lit[SEEN_IX(conflict_var, cl.is_lb)] = cl;
             vsids_bump(&lcg->vsids, conflict_var);
             n_at_cur_level++;
 
@@ -403,6 +454,14 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
                 if (p->explain(p, ctx, conflict_var,
                                cl.is_lb, bv, &expl) != 0) {
                     lcg_dbg_bail[6]++; return -1;
+                }
+                if (_tron()) {
+                    fprintf(stderr,
+                        "[lcg-trace] explain(cur) prop=%s v%u %s=%ld -> %u lits\n",
+                        prop_fire_name(p->fire), conflict_var,
+                        cl.is_lb ? "lb" : "ub", (long)bv, expl.n_lits);
+                    for (uint32_t i = 0; i < expl.n_lits; i++)
+                        _trace_lit("  ante", expl.lits[i]);
                 }
                 for (uint32_t i = 0; i < expl.n_lits; i++)
                     ADD_EXPL_LIT(expl.lits[i]);
@@ -428,6 +487,13 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
                 bt_level = other_entry->decision_level;
         }
     } else if (ctx->conflict_prop_ref != EXPR_NULL) {
+        if (_tron()) {
+            Propagator *cp_ = (Propagator *)zsp_pool_ptr(
+                &ctx->pool, ctx->conflict_prop_ref);
+            fprintf(stderr,
+                "[lcg-trace] prop-conflict seed from %s (watch-vars)\n",
+                prop_fire_name(cp_->fire));
+        }
         /* Propagator-conflict path: a propagator's fire returned
          * PROP_CONFLICT without any var hitting lo > hi (e.g.
          * bounds_eq saw x ∩ y = ∅ before tightening).  Build the
@@ -465,24 +531,26 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
         return -1;
     }
 
-    /* Step 2: Resolution loop (1UIP). Resolve until only one variable
+    /* Step 2: Resolution loop (1UIP). Resolve until only one literal
      * at cur_level remains in the working set. */
     TrailEntry *e = ctx->trail_top;
     while (n_at_cur_level > 1 && e) {
-        if (e->decision_level != cur_level || !lcg->seen[e->var_id]) {
+        uint8_t e_is_lb = (e->kind == TRAIL_LB) ? 1 : 0;
+        uint32_t e_slot = SEEN_IX(e->var_id, e_is_lb);
+        if (e->decision_level != cur_level || !lcg->seen[e_slot]) {
             e = e->prev;
             continue;
         }
 
-        lcg->seen[e->var_id] = 0;
+        lcg->seen[e_slot] = 0;
         n_at_cur_level--;
 
         if (e->prop_ref == EXPR_NULL) {
             /* Decision at current level: this becomes the 1UIP.
              * Stop resolution -- the remaining decisions at this level
              * that can't be resolved ARE the UIP. */
-            n_at_cur_level = 1;  /* force loop exit, this var is the UIP */
-            lcg->seen[e->var_id] = 1;  /* re-mark as seen for UIP search */
+            n_at_cur_level = 1;  /* force loop exit, this literal is UIP */
+            lcg->seen[e_slot] = 1;  /* re-mark as seen for UIP search */
             continue;
         }
 
@@ -497,6 +565,16 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
                              (e->kind == TRAIL_LB) ? 1 : 0,
                              bv, &expl);
         if (rc != 0) { lcg_dbg_bail[8]++; return -1; }
+        if (_tron()) {
+            fprintf(stderr,
+                "[lcg-trace] resolve  prop=%s v%u %s=%ld lvl=%u (old=%ld) -> %u lits\n",
+                prop_fire_name(p->fire), e->var_id,
+                (e->kind == TRAIL_LB) ? "lb" : "ub",
+                (long)bv, e->decision_level, (long)e->old_value,
+                expl.n_lits);
+            for (uint32_t i = 0; i < expl.n_lits; i++)
+                _trace_lit("  ante", expl.lits[i]);
+        }
         for (uint32_t i = 0; i < expl.n_lits; i++)
             ADD_EXPL_LIT(expl.lits[i]);
         e = e->prev;
@@ -505,14 +583,15 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
 
     #undef ADD_EXPL_LIT
 
-    /* Step 3: The single remaining seen variable at cur_level is the 1UIP.
+    /* Step 3: The single remaining seen literal at cur_level is the 1UIP.
      * Add its negation as the asserting literal (first in clause). */
     e = ctx->trail_top;
     while (e) {
-        if (lcg->seen[e->var_id]) {
+        uint32_t e_slot = SEEN_IX(e->var_id, (e->kind == TRAIL_LB) ? 1 : 0);
+        if (lcg->seen[e_slot]) {
             /* Use the explanation literal stored in seen_lit, which
              * carries the geometric threshold from the explanation. */
-            Literal uip = lcg->seen_lit[e->var_id];
+            Literal uip = lcg->seen_lit[e_slot];
             if (learnt_idx < lcg->learnt_cap) {
                 for (uint32_t j = learnt_idx; j > 0; j--)
                     lcg->learnt_buf[j] = lcg->learnt_buf[j - 1];
@@ -529,6 +608,14 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
     *out_bt = bt_level;
     if (out_lits && learnt_idx > 0)
         memcpy(out_lits, lcg->learnt_buf, learnt_idx * sizeof(Literal));
+
+    if (_tron()) {
+        fprintf(stderr,
+            "[lcg-trace] learnt (%u lits) bt=%u:\n", learnt_idx, bt_level);
+        for (uint32_t i = 0; i < learnt_idx; i++)
+            _trace_lit(i == 0 ? "  UIP " : "  body", lcg->learnt_buf[i]);
+        fprintf(stderr, "[lcg-trace] ===\n");
+    }
 
     vsids_decay(&lcg->vsids);
     lcg->n_analyses++;

@@ -2501,6 +2501,53 @@ typedef struct {
     int (*explain)(Propagator *, SolveCtx *, uint32_t, uint8_t, int64_t, Explanation *);
 } ExplainEntry;
 
+/* Reverse-lookup: propagator fire-fn pointer -> short human-readable
+ * name. Kept in lockstep with the explain table below; if you add a
+ * propagator there, add it here too. Used only by DV_LCG_TRACE. */
+const char *prop_fire_name(PropResult (*fire)(Propagator *, SolveCtx *)) {
+    #define FN_NAME(F) if (fire == F) return #F
+    FN_NAME(_fire_bounds_le_32);
+    FN_NAME(_fire_bounds_lt_32);
+    FN_NAME(_fire_bounds_eq_32);
+    FN_NAME(_fire_bounds_ne_32);
+    FN_NAME(_fire_bounds_add_32);
+    FN_NAME(_fire_bounds_mul_32);
+    FN_NAME(_fire_bounds_div_32);
+    FN_NAME(_fire_bounds_mod_32);
+    FN_NAME(_fire_unary_neg_32);
+    FN_NAME(_fire_in_set_32);
+    FN_NAME(_fire_implication_32);
+    FN_NAME(_fire_reification_32);
+    FN_NAME(_fire_reification_eq_32);
+    FN_NAME(_fire_bit_slice_32);
+    FN_NAME(_fire_bounds_le_64);
+    FN_NAME(_fire_bounds_lt_64);
+    FN_NAME(_fire_bounds_eq_64);
+    FN_NAME(_fire_bounds_ne_64);
+    FN_NAME(_fire_bounds_add_64);
+    FN_NAME(_fire_bounds_mul_64);
+    FN_NAME(_fire_bounds_div_64);
+    FN_NAME(_fire_bounds_mod_64);
+    FN_NAME(_fire_unary_neg_64);
+    FN_NAME(_fire_ite_value_64);
+    FN_NAME(_fire_in_set_64);
+    FN_NAME(_fire_bit_slice_64);
+    FN_NAME(_fire_bounds_band_64);
+    FN_NAME(_fire_bounds_bor_64);
+    FN_NAME(_fire_bounds_bxor_64);
+    FN_NAME(_fire_bounds_bnot_64);
+    FN_NAME(_fire_bounds_shl_64);
+    FN_NAME(_fire_bounds_lshr_64);
+    FN_NAME(_fire_bounds_concat_64);
+    FN_NAME(_fire_disj_clause);
+    FN_NAME(_fire_all_different_32);
+    FN_NAME(_fire_sum_eq_32);
+    FN_NAME(_fire_countones_32);
+    FN_NAME(_fire_clog2_32);
+    #undef FN_NAME
+    return "?fire";
+}
+
 void contra_register_explanations(SolveCtx *ctx) {
     static const ExplainEntry table[] = {
         { _fire_bounds_le_32,       explain_bounds_le },

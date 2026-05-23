@@ -12,6 +12,12 @@ typedef struct SolveCtx SolveCtx;
  */
 void contra_register_explanations(SolveCtx *ctx);
 
+/**
+ * Look up a short, human-readable name for a propagator fire-fn pointer.
+ * Returns "?fire" for unknown pointers. Used by DV_LCG_TRACE.
+ */
+const char *prop_fire_name(PropResult (*fire)(Propagator *, SolveCtx *));
+
 /* Explanation functions for standard propagators.
  * Wire these into propagator constructors to enable LCG. */
 
