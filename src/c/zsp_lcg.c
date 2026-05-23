@@ -255,7 +255,7 @@ uint64_t lcg_dbg_bail[16];
 
 int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
                           Literal *out_lits, uint32_t *out_n,
-                          uint32_t *out_bt) {
+                          uint32_t *out_bt, uint32_t *out_lbd) {
     if (!lcg || !lcg->enabled || !ctx) return -1;
 
     uint32_t cur_level = ctx->decision_level;
@@ -660,15 +660,54 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
         }
     }
 
+    /* Compute LBD (Literal Block Distance): the number of distinct
+     * decision levels among the clause's literals. Standard CDCL
+     * quality measure — clauses with LBD ≤ 2 are "glue" and almost
+     * always kept, larger LBD signals lower utility. */
+    uint32_t lbd = 0;
+    {
+        /* Tiny set of seen levels, capped at 32. Beyond that we just
+         * stop counting — clauses with > 32 distinct levels are very
+         * low-quality regardless. */
+        uint16_t seen_levels[32];
+        uint32_t n_seen = 0;
+        for (uint32_t i = 0; i < learnt_idx; i++) {
+            Literal lit = lcg->learnt_buf[i];
+            if (lit.var_id >= ctx->n_vars) continue;
+            uint8_t k = lit.is_lb ? TRAIL_LB : TRAIL_UB;
+            /* For the UIP literal, the slot we want is the negation's
+             * level (the one it'll fire at). For body literals, same
+             * thing — they're negations of antecedents whose level we
+             * captured during ADD_EXPL_LIT. Just look up the most
+             * recent matching entry on the OPPOSITE kind. */
+            uint8_t look = (k == TRAIL_LB) ? TRAIL_UB : TRAIL_LB;
+            uint16_t lvl = 0;
+            for (TrailEntry *t = ctx->trail_top; t; t = t->prev) {
+                if (t->var_id == lit.var_id && t->kind == look) {
+                    lvl = t->decision_level; break;
+                }
+            }
+            if (lvl == 0) continue;
+            int hit = 0;
+            for (uint32_t s = 0; s < n_seen; s++) {
+                if (seen_levels[s] == lvl) { hit = 1; break; }
+            }
+            if (!hit && n_seen < 32) seen_levels[n_seen++] = lvl;
+        }
+        lbd = n_seen;
+    }
+
     /* Output */
     *out_n = learnt_idx;
     *out_bt = bt_level;
+    if (out_lbd) *out_lbd = lbd;
     if (out_lits && learnt_idx > 0)
         memcpy(out_lits, lcg->learnt_buf, learnt_idx * sizeof(Literal));
 
     if (_tron()) {
         fprintf(stderr,
-            "[lcg-trace] learnt (%u lits) bt=%u:\n", learnt_idx, bt_level);
+            "[lcg-trace] learnt (%u lits, lbd=%u) bt=%u:\n",
+            learnt_idx, lbd, bt_level);
         for (uint32_t i = 0; i < learnt_idx; i++)
             _trace_lit(i == 0 ? "  UIP " : "  body", lcg->learnt_buf[i]);
         fprintf(stderr, "[lcg-trace] ===\n");

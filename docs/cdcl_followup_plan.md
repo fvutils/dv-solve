@@ -294,9 +294,12 @@ cheap coalescing step in ADD_EXPL_LIT.
       isn't enough. Clause minimization / better search heuristics
       are the next levers (new Phase 7).
 
-## Phase 7 (NEW) — Clause minimization / search heuristics
+## Phase 7 — Clause minimization, real LBD, GC
 
-**Status:** identified during phase 6 analysis. Not started.
+**Status:** partial. LBD computation + clause-GC infrastructure
+landed. Cheap self-subsumption minimization tried and reverted (net
+−1 fixture). No fixture recovered from this phase, but the
+groundwork is in place for clause-quality-aware GC later.
 **Estimated size:** ~one to two sessions.
 **Risk:** medium.
 
@@ -332,10 +335,69 @@ for each body literal `l`, walk its reason clause and check whether
 all other reasons are already in the learnt clause. If yes, the
 literal is redundant.
 
+### What was actually built / what was learned
+
+- `lcg_analyze_conflict` now returns LBD (distinct decision levels
+  among the clause's literals, computed via opposite-kind trail
+  lookups). LBD is recorded in `Clause.lbd` instead of the prior
+  placeholder `lbd = n_lits`.
+- Search restart loop calls `clause_db_gc(threshold=4)` once the
+  DB exceeds 2048 clauses. GC marks clauses with LBD > 4 as NULL
+  (watch lists tolerate NULL via `_check_clause` early-out).
+- Cheap self-subsumption minimization (drop a body literal whose
+  reason's antecedents are all already covered by other clause
+  literals): implemented and tried. Result: **net −1 fixture**
+  (`regfile_simple_d2` flipped to skip, no new wins). Reverted.
+  Reason in the post-hoc analysis: minimization removes literals
+  that were participating in unit-prop chains, weakening clauses
+  for search even though the resulting clause is still sound.
+
+**Empirical finding:** the 10 remaining tier2/3 skips produce
+clauses with LBD = 2 (glue-quality). GC threshold = 4 leaves them
+untouched. Conflict count is the bottleneck — the search makes
+thousands of conflicts of essentially the same shape, learning
+high-quality but redundant clauses. Standard CDCL self-improvement
+doesn't kick in because each conflict already produces a glue
+clause; the problem is search heuristic, not clause quality.
+
 ### Exit criteria
 
-- [ ] Clause minimization implemented (cheap pass).
-- [ ] Most of the 10 remaining skips return to definitive.
+- [x] Real LBD landed; clause GC infra wired at restart.
+- [ ] Most of the 10 remaining skips return to definitive — **not**
+      achieved by Phase 7. Next leverage point is decision/restart
+      heuristics (see Phase 8 below).
+
+## Phase 8 (NEW) — Decision/restart heuristics for ITE-heavy fixtures
+
+**Status:** identified during Phase 7 analysis. Not started.
+
+### Problem
+
+Per Phase 7 traces, regfile_simple/cache_direct_1way fixtures
+produce thousands of glue-quality (LBD=2) clauses, each forbidding
+a slightly different combination of ITE-condition values + a target
+value. Search keeps hitting the same conflict pattern because:
+
+1. VSIDS keeps bumping the same conflict-set variables.
+2. Decision variables fall in the same range every time.
+3. Phase-saving picks the same direction.
+
+Standard CDCL infrastructure (clauses, restarts, GC) is in place
+and operating correctly. The bottleneck is search wandering, not
+clause management.
+
+### Approach (sketches)
+
+- **Random-walk fallback** every N restarts: ignore VSIDS for K
+  decisions to break out of repetitive conflict loops.
+- **Polarity flipping at restart**: invert phase_save once every M
+  restarts so the search tries the opposite direction.
+- **Conflict-set tabu**: temporarily down-weight vars that
+  appeared in the last L conflicts.
+
+### Exit criteria
+
+- [ ] At least 5 of the 10 currently-skipped fixtures recover.
 
 ## Cross-cutting tracking
 
@@ -353,6 +415,7 @@ and update the headline numbers below.
 | after multi-UIP + bvor | 0 | 103 | 15 | current commit `605bd61` |
 | after phase 1 | 0 | 104 | 14 | only fsm_onehot_d32 recovered |
 | after phase 6 | 0 | 105 | 13 | +regfile_simple_d2; wall 112s→102s |
+| after phase 7 | 0 | 105 | 13 | LBD+GC infra in; no fixture moved |
 | after phase 2 | TBD | TBD | TBD | aim: 0 latent unsoundness |
 | after phase 3 | TBD | TBD | TBD | audit complete |
 | after phase 4 | TBD | TBD | TBD | int64 lifted |

@@ -221,7 +221,7 @@ uint32_t lcg_n_clauses(const LCGCtx *lcg);
  */
 int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
                           Literal *out_lits, uint32_t *out_n,
-                          uint32_t *out_bt);
+                          uint32_t *out_bt, uint32_t *out_lbd);
 
 /* ================================================================== */
 /* Event-driven clause propagation                                     */

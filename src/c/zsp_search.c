@@ -415,6 +415,19 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                 if (max_restarts > 0 && restart_count >= max_restarts)
                     return SOLVE_TIMEOUT;
 
+                /* Clause GC: drop clauses with high LBD (literal block
+                 * distance — distinct decision levels in the clause).
+                 * Keep glue clauses (LBD ≤ 4) which are most useful for
+                 * unit propagation; ditch the rest after the DB grows
+                 * past a threshold. */
+                if (ctx->lcg) {
+                    LCGCtx *lcg_gc = (LCGCtx *)ctx->lcg;
+                    if (lcg_gc->enabled &&
+                        lcg_gc->clause_db.n_clauses > 2048) {
+                        clause_db_gc(&lcg_gc->clause_db, /* lbd_threshold */ 4);
+                    }
+                }
+
                 pr = solver_propagate(ctx);
                 if (pr == PROP_CONFLICT) return SOLVE_UNSAT;
                 break;  /* restart outer for-loop */
@@ -433,21 +446,22 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                     Literal  learnt_buf[MAX_CLAUSE_LITS];
                     uint32_t n_lits   = 0;
                     uint32_t bt_level = 0;
+                    uint32_t lbd = 0;
                     int rc = lcg_analyze_conflict(lcg, ctx,
                                                    learnt_buf, &n_lits,
-                                                   &bt_level);
+                                                   &bt_level, &lbd);
                     if (rc == 0 && n_lits > 0) {
                         /* Backjump first so trail state matches the
                          * level the asserting literal will fire at. */
                         if (bt_level >= cur) bt_level = cur - 1;
                         trail_backtrack(ctx, bt_level);
 
-                        /* Record the learnt clause.  LBD == n_lits is a
-                         * coarse over-estimate; real LBD requires the
-                         * level-of-each-literal pass.  Good enough for
-                         * the GC heuristic to keep short clauses. */
+                        /* Record the learnt clause with its LBD (count
+                         * of distinct decision levels). Clause GC at
+                         * restart uses this to discard low-utility
+                         * clauses. */
                         clause_db_add(&lcg->clause_db, n_lits,
-                                       learnt_buf, n_lits);
+                                       learnt_buf, lbd ? lbd : n_lits);
                         lcg->n_learnt++;
 
                         /* Force unit propagation from the new clause,
