@@ -428,6 +428,7 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                     }
                 }
 
+
                 pr = solver_propagate(ctx);
                 if (pr == PROP_CONFLICT) return SOLVE_UNSAT;
                 break;  /* restart outer for-loop */

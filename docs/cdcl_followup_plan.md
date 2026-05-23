@@ -367,9 +367,12 @@ clause; the problem is search heuristic, not clause quality.
       achieved by Phase 7. Next leverage point is decision/restart
       heuristics (see Phase 8 below).
 
-## Phase 8 (NEW) — Decision/restart heuristics for ITE-heavy fixtures
+## Phase 8 — Phase saving as opt-in
 
-**Status:** identified during Phase 7 analysis. Not started.
+**Status:** partial. Phase saving exposed via `DV_USE_PHASE_SAVE=1`
+in the SMT2 frontend; default remains off. Empirically a wash on
+the current corpus (5 fixtures recover, 5 different fixtures
+regress). Default-off keeps behavior identical to phase 6 / 7.
 
 ### Problem
 
@@ -397,7 +400,23 @@ clause management.
 
 ### Exit criteria
 
-- [ ] At least 5 of the 10 currently-skipped fixtures recover.
+- [x] Phase-saving opt-in exposed.
+- [ ] At least 5 of the 10 currently-skipped fixtures recover —
+      **not achieved**. With `DV_USE_PHASE_SAVE=1` we recover 5
+      fixtures but regress 5 different ones. Net zero on the
+      current corpus.
+
+### What was learned
+
+- Phase saving alone isn't enough; the conflict patterns are
+  structural to the problem shape, not search-trajectory noise.
+- "Diversification at restart" (resetting phase_save to mid-domain
+  every 4 restarts) was also tried — inert on the default config
+  since phase_save is off by default. Reverted.
+- The 10 remaining skips need something deeper than rearranging
+  the order of decisions — possibly: improved propagator
+  completeness for ITE chains, or lazy reification of branch
+  values to reduce conflict set width.
 
 ## Cross-cutting tracking
 
@@ -416,6 +435,7 @@ and update the headline numbers below.
 | after phase 1 | 0 | 104 | 14 | only fsm_onehot_d32 recovered |
 | after phase 6 | 0 | 105 | 13 | +regfile_simple_d2; wall 112s→102s |
 | after phase 7 | 0 | 105 | 13 | LBD+GC infra in; no fixture moved |
+| after phase 8 | 0 | 105 | 13 | phase_save opt-in; wash on default |
 | after phase 2 | TBD | TBD | TBD | aim: 0 latent unsoundness |
 | after phase 3 | TBD | TBD | TBD | audit complete |
 | after phase 4 | TBD | TBD | TBD | int64 lifted |

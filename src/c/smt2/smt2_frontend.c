@@ -1735,6 +1735,16 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         if (ev && *ev == '0') opts.use_lcg = 0;
     }
 
+    /* Phase saving: opt-in. Empirically a wash on the current
+     * cross-check corpus (different fixtures pass with vs without —
+     * cache_direct_1way recovers but regfile_addr_alias regresses).
+     * Default off; enable with DV_USE_PHASE_SAVE=1. */
+    opts.use_phase_save = 0;
+    {
+        const char *ev = getenv("DV_USE_PHASE_SAVE");
+        if (ev && *ev && *ev != '0') opts.use_phase_save = 1;
+    }
+
     fe->last_result = solver_solve(fe->ctx, &opts);
     fe->has_result = 1;
 
