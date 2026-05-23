@@ -2375,9 +2375,17 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
     ctx->watcher_heads = (uint32_t *)zsp_pool_ptr(&ctx->pool, wh_ref);
     for (uint32_t i = 0; i < capacity; i++) ctx->watcher_heads[i] = EXPR_NULL;
 
-    /* ---- Allocate prop_refs array for checkpoint/restore ---- */
-    #define PROP_SLACK 128u
-    uint32_t pr_cap = sp->n_constraints + sp->n_alldiffs + PROP_SLACK;
+    /* ---- Allocate prop_refs array for checkpoint/restore ----
+     * Capacity must cover all propagators, including aux ones created
+     * during compile-time materialisation of ITE chains, boolean trees,
+     * and array select/store. A fixed slack of 128 was hit by larger
+     * QF_AUFBV BMC fixtures, so we use a multiplicative slack mirroring
+     * the variable-slack policy. */
+    #define PROP_SLACK_FACTOR 32u
+    #define PROP_SLACK_MIN    128u
+    uint32_t pr_base = sp->n_constraints + sp->n_alldiffs;
+    uint32_t pr_cap  = pr_base * PROP_SLACK_FACTOR;
+    if (pr_cap < pr_base + PROP_SLACK_MIN) pr_cap = pr_base + PROP_SLACK_MIN;
     uint32_t pr_ref = zsp_pool_alloc(&ctx->pool,
                                       pr_cap * (uint32_t)sizeof(uint32_t),
                                       (uint32_t)_Alignof(uint32_t));

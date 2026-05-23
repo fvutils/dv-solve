@@ -2544,7 +2544,9 @@ void contra_register_explanations(SolveCtx *ctx) {
     };
     static const uint32_t n_entries = sizeof(table) / sizeof(table[0]);
 
-    for (uint32_t pi = 0; pi < ctx->n_props; pi++) {
+    uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
+                   ? ctx->n_props : ctx->n_prop_refs_capacity;
+    for (uint32_t pi = 0; pi < lim; pi++) {
         if (ctx->prop_refs[pi] == EXPR_NULL) continue;
         Propagator *p = (Propagator *)zsp_pool_ptr(&ctx->pool, ctx->prop_refs[pi]);
         if (p->explain) continue;  /* already set */

@@ -45,9 +45,15 @@ static void _wake_var(SolveCtx *ctx, uint32_t var_id) {
         prop_ref = next;
     }
 
-    /* Also re-enqueue any propagator whose guard is this variable */
+    /* Also re-enqueue any propagator whose guard is this variable.
+     * Cap to n_prop_refs_capacity: when n_props grows past the side-table
+     * capacity (e.g. via ITE-chain aux materialisation), the higher
+     * prop_ids weren't registered and reading prop_refs[i] there would
+     * be an out-of-bounds read into adjacent pool memory. */
     if (ctx->prop_guard_vars && ctx->prop_refs) {
-        for (uint32_t i = 0; i < ctx->n_props; i++) {
+        uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
+                       ? ctx->n_props : ctx->n_prop_refs_capacity;
+        for (uint32_t i = 0; i < lim; i++) {
             if (ctx->prop_guard_vars[i] == var_id &&
                 ctx->prop_refs[i] != EXPR_NULL) {
                 prop_enqueue(ctx, ctx->prop_refs[i]);

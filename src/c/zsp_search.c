@@ -58,6 +58,34 @@ static int64_t _rand_range64(SolveCtx *ctx, int64_t lo, int64_t hi) {
 /* ------------------------------------------------------------------ */
 
 static uint32_t _select_unassigned(SolveCtx *ctx) {
+    /* VSIDS path: when LCG is active and we have non-zero activity
+     * (i.e. at least one conflict has fired the bumper), pick the
+     * highest-activity unassigned, non-aux variable. Falls through to
+     * MRV when no var has activity (initial decisions before any
+     * conflict) so behavior matches the existing strategy until CDCL
+     * has something to say. */
+    if (ctx->lcg) {
+        const LCGCtx *L = (const LCGCtx *)ctx->lcg;
+        if (L->enabled && L->n_analyses > 0) {
+            uint32_t best_v = EXPR_NULL;
+            double   best_a = -1.0;
+            uint32_t lim = L->vsids.n_vars < ctx->n_vars
+                           ? L->vsids.n_vars : ctx->n_vars;
+            for (uint32_t i = 0; i < lim; i++) {
+                Variable *v = &ctx->vars[i];
+                if (v->flags & VAR_AUX) continue;
+                int64_t lo = var_lo64(ctx, v);
+                int64_t hi = var_hi64(ctx, v);
+                if (lo == hi) continue;
+                if (L->vsids.activity[i] > best_a) {
+                    best_a = L->vsids.activity[i];
+                    best_v = i;
+                }
+            }
+            if (best_v != EXPR_NULL) return best_v;
+        }
+    }
+
     uint32_t best         = EXPR_NULL;
     int64_t  best_dom     = INT64_MAX;
     uint32_t best_aux     = EXPR_NULL;
@@ -253,13 +281,17 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                           ? ctx->n_vars_capacity : ctx->n_vars;
             if (lcg_init(lcg, nv) == 0) {
                 ctx->lcg = lcg;
-                /* Register explain callbacks for all propagators so
-                 * lcg_analyze_conflict has something to work with. */
-                contra_register_explanations(ctx);
             } else {
                 free(lcg);
             }
         }
+    }
+    /* Register explain callbacks every solve — propagators added by
+     * compile-time aux materialisation or incremental paths after the
+     * first solve would otherwise miss their explain wiring. The walk
+     * skips propagators whose explain is already set. */
+    if (ctx->lcg) {
+        contra_register_explanations(ctx);
     }
 
     /* Allocate phase_save array on first call (lazily from static pool). */
@@ -606,14 +638,19 @@ void solver_reset(SolveCtx *ctx) {
         }
     }
 
-    /* Re-enqueue all non-entailed propagators */
-    for (uint32_t i = 0; i < ctx->n_props; i++) {
+    /* Re-enqueue all non-entailed propagators. Cap to the side-table
+     * capacity since prop_refs above that range is out of bounds. */
+    {
+    uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
+                   ? ctx->n_props : ctx->n_prop_refs_capacity;
+    for (uint32_t i = 0; i < lim; i++) {
         if (ctx->prop_refs[i] != EXPR_NULL) {
             Propagator *p = (Propagator *)zsp_pool_ptr(&ctx->pool,
                                                         ctx->prop_refs[i]);
             p->flags &= (uint8_t)~(PROP_FLAG_ENTAILED | PROP_FLAG_IN_QUEUE);
             prop_enqueue(ctx, ctx->prop_refs[i]);
         }
+    }
     }
 }
 

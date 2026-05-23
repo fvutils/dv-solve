@@ -9,7 +9,7 @@
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-#define CTX_BUF_SIZE  (16u * 1024u * 1024u)
+#define CTX_BUF_SIZE  (64u * 1024u * 1024u)
 #define BA_BLOCK_SIZE (64u * 1024u)
 
 static const TypedExpr TYPED_NULL = { EXPR_NULL, 0 };
