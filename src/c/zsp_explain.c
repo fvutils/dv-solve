@@ -479,22 +479,152 @@ static int _explain_binary_bitwise(Propagator *self, SolveCtx *ctx,
     return 0;
 }
 
+/* Rule-aware bvand explanation. Mirrors _fire_bounds_band_64's six
+ * propagation rules and cites only the antecedents the actually-fired
+ * rule needed. Soundness arguments per rule:
+ *
+ *   r.ub  (is_lb=0): rules 1 (r<=min(a.ub,b.ub)), 3 (a sing -> r<=a),
+ *     4 (b sing -> r<=b). For all three, "a.ub<=ahi AND b.ub<=bhi"
+ *     implies "r=a&b <= min(ahi,bhi) <= new_bound". Cite both ub's.
+ *   r.ub from both-singletons exact (rule 0): need full singletons.
+ *   r.lb=0 (is_lb=1, new_bound<=0): rule 2 needs a>=0 AND b>=0.
+ *   r.lb from both-singletons exact: need full singletons.
+ *   a.lb (var_id==aid): rule 5 needs r and b as singletons.
+ */
 int explain_bounds_band(Propagator *self, SolveCtx *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
-    return _explain_binary_bitwise(self, ctx, var_id, is_lb, new_bound, out);
+    PropWatchSect *ws = PROP_WS(self);
+    uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
+    int64_t alo = var_lo64(ctx, &ctx->vars[aid]);
+    int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
+    int64_t blo = var_lo64(ctx, &ctx->vars[bid]);
+    int64_t bhi = var_hi64(ctx, &ctx->vars[bid]);
+    int both_singleton = (alo == ahi && blo == bhi);
+    out->n_lits = 0;
+
+    if (var_id == rid) {
+        if (is_lb) {
+            if (both_singleton) {
+                out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
+                out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)alo);
+                out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
+                out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)blo);
+            } else if (new_bound <= 0 && alo >= 0 && blo >= 0) {
+                out->lits[out->n_lits++] = _mk_lb(aid, 0);
+                out->lits[out->n_lits++] = _mk_lb(bid, 0);
+            } else {
+                return -1;
+            }
+        } else {
+            if (both_singleton) {
+                out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
+                out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)alo);
+                out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
+                out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)blo);
+            } else {
+                out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)ahi);
+                out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)bhi);
+            }
+        }
+    } else if (var_id == aid) {
+        /* rule 5: a.lb |= r.val when r and b singletons */
+        int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
+        int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
+        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)rlo);
+        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)rhi);
+        out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
+        out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)bhi);
+    } else if (var_id == bid) {
+        /* symmetric of rule 5 (not currently fired by band fire) */
+        int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
+        int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
+        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)rlo);
+        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)rhi);
+        out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
+        out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)ahi);
+    } else {
+        return -1;
+    }
+    return 0;
 }
 
+/* Rule-aware bvor explanation. _fire_bounds_bor_64 only forward-props.
+ *
+ *   r.lb (is_lb=1) when both non-negative: r >= max(alo, blo). Citing
+ *     a.lb>=alo AND b.lb>=blo suffices because a|b >= a >= alo and
+ *     a|b >= b >= blo (when both non-negative).
+ *   r.lb / r.ub from both-singletons exact: full singletons.
+ */
 int explain_bounds_bor(Propagator *self, SolveCtx *ctx,
                         uint32_t var_id, uint8_t is_lb,
                         int64_t new_bound, Explanation *out) {
-    return _explain_binary_bitwise(self, ctx, var_id, is_lb, new_bound, out);
+    PropWatchSect *ws = PROP_WS(self);
+    uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
+    int64_t alo = var_lo64(ctx, &ctx->vars[aid]);
+    int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
+    int64_t blo = var_lo64(ctx, &ctx->vars[bid]);
+    int64_t bhi = var_hi64(ctx, &ctx->vars[bid]);
+    int both_singleton = (alo == ahi && blo == bhi);
+    out->n_lits = 0;
+    (void)new_bound;
+
+    if (var_id == rid) {
+        if (both_singleton) {
+            out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
+            out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)alo);
+            out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
+            out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)blo);
+        } else if (is_lb && alo >= 0 && blo >= 0) {
+            /* r.lb >= max(alo, blo) — cite both LBs */
+            out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
+            out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
+        } else {
+            return -1;
+        }
+    } else {
+        /* bor fire has no backward propagation */
+        return -1;
+    }
+    return 0;
 }
 
+/* Rule-aware bvxor explanation. _fire_bounds_bxor_64 only tightens
+ * exact values (both-singletons or one-singleton-and-r-singleton).
+ * Every rule needs both operands fully pinned, so cite full bounds. */
 int explain_bounds_bxor(Propagator *self, SolveCtx *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
-    return _explain_binary_bitwise(self, ctx, var_id, is_lb, new_bound, out);
+    PropWatchSect *ws = PROP_WS(self);
+    uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
+    int64_t alo = var_lo64(ctx, &ctx->vars[aid]);
+    int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
+    int64_t blo = var_lo64(ctx, &ctx->vars[bid]);
+    int64_t bhi = var_hi64(ctx, &ctx->vars[bid]);
+    int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
+    int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
+    out->n_lits = 0;
+    (void)is_lb; (void)new_bound;
+
+    if (var_id == rid) {
+        out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
+        out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)ahi);
+        out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
+        out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)bhi);
+    } else if (var_id == aid) {
+        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)rlo);
+        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)rhi);
+        out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
+        out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)bhi);
+    } else if (var_id == bid) {
+        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)rlo);
+        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)rhi);
+        out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
+        out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)ahi);
+    } else {
+        return -1;
+    }
+    return 0;
 }
 
 int explain_bounds_bnot(Propagator *self, SolveCtx *ctx,

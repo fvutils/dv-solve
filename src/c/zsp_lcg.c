@@ -597,10 +597,18 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
      * decision "v = c" which sets BOTH (v, LB=c) and (v, UB=c) as
      * separate trail entries. Both must be negated into the learnt
      * clause for it to correctly mean "v != c". */
+    /* Only cur_level seen slots remain to be emitted here. Earlier-level
+     * antecedents were already pushed onto learnt_buf as body literals
+     * inside ADD_EXPL_LIT; re-emitting them here would double-count.
+     * Multiple cur_level slots can be seen when a singleton decision
+     * (v=c) creates both (v,LB=c) and (v,UB=c) trail entries — for the
+     * learnt clause to mean "v != c" rather than just "v >= c+1", both
+     * bound negations must be in the clause. */
     {
         int uip_set = 0;
         e = ctx->trail_top;
         while (e) {
+            if (e->decision_level != cur_level) { e = e->prev; continue; }
             uint32_t e_slot = SEEN_IX(e->var_id, (e->kind == TRAIL_LB) ? 1 : 0);
             if (lcg->seen[e_slot]) {
                 Literal lit = lcg->seen_lit[e_slot];
@@ -614,10 +622,9 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
                     }
                     uip_set = 1;
                 } else if (learnt_idx < lcg->learnt_cap) {
-                    /* Companion literal from the same decision — append. */
                     lcg->learnt_buf[learnt_idx++] = neg;
                 }
-                lcg->seen[e_slot] = 0;  /* consume */
+                lcg->seen[e_slot] = 0;
             }
             e = e->prev;
         }
