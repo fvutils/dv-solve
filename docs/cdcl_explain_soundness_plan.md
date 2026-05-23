@@ -1,33 +1,52 @@
 # CDCL explain-callback soundness — fix plan
 
-## Status update (after phase A + B1)
+## Status update (after phases A + B1 + multi-UIP + bvor propagator fix)
 
-The root cause turned out to be in the **analyzer itself**, not in any
-explain callback. `lcg_analyze_conflict`'s `seen[]` was indexed
-per-variable; an antecedent of "v >= c AND v <= c" (singleton var,
-required by non-monotone propagators like `bvand`) silently dropped
-the second literal, producing an unsound learnt clause. Fix landed in
-`src/c/zsp_lcg.c`: `seen[]` and `seen_lit[]` now indexed per
-(var, is_lb) slot.
+Three patches landed in `src/c/zsp_lcg.c` and `src/c/zsp_prop_templates.c`:
 
-**Current state:**
-- tier1: 4 of 5 fixtures fixed (memmaptight32 still false-unsat, separate cause)
-- tier2/tier3: 0 disagreements; **6 fixtures regress to timeout**
-  (cache_direct_1way d2/d8, regfile_simple d1/d2/d4/d8). Conflict
-  counts up ~1000×. Cause: correct learnt clauses are ~2× larger,
-  VSIDS signal worse, search wanders.
-- `DV_LCG_TRACE=1` diagnostic tooling landed in zsp_lcg.c +
-  `prop_fire_name()` registry in zsp_prop_templates.c.
+1. **seen[] per (var, is_lb)** — root soundness fix. The original
+   per-variable dedup silently dropped the second literal in any
+   antecedent of shape "v >= c AND v <= c" (singleton var), which is
+   the standard reason set for non-monotone propagators like `bvand`.
+2. **Step-3 UIP emits ALL remaining seen literals at cur_level**, not
+   just the first. A singleton integer decision creates two trail
+   entries (LB and UB at the same level); for the learnt clause to
+   mean "v != c" rather than "v >= c+1", both negations must appear.
+3. **`_fire_bounds_bor_64` LB rule was unsound**: it set `r.lb` to
+   `alo|blo`, but the correct lower bound is `max(alo, blo)`. Counter:
+   `alo=2, blo=1` gives `alo|blo=3`, but `a=2, b=2` satisfies `b>=1`
+   and yields `a|b=2`.
 
-Remaining work, in priority order:
-1. **B2 (rule-aware bvand/bor/bxor explain)** — recover the lost perf
-   by citing only the antecedents the actually-fired rule needed
-   instead of all six watched-var literals. This was the prime suspect
-   in the original plan and is still the right fix for the *quality*
-   of explanations even though it wasn't the soundness root cause.
-2. **memmaptight32 trace** — get a minimal repro and find the second
-   unsound site.
-3. C / D / E remain as originally planned.
+**Current state across all 118 cross-check fixtures:**
+- **0 disagreements.** Every definitive dv-solve answer agrees with z3.
+- `memmaptight32` returns honest `unknown` instead of wrong `unsat`.
+- 12 fixtures regress from definitive to skip on the 10s test ceiling
+  (`cache_direct_1way d1/d2/d4/d8`, `regfile_simple d1/d2/d4/d8`,
+  `arbiter_fairness d4/d8/d16`, `fsm_onehot d32`). Conflict counts
+  exploded — correct learnt clauses are ~2× larger, VSIDS signal
+  worse, search wanders.
+
+**Secondary issue surfaced (not yet fixed):** learnt-clause unit
+propagations at level 0 record `prop_ref = NULL` on the trail, making
+them indistinguishable from decisions during conflict analysis. When
+the multi-UIP clause from a singleton decision is later unit-propagated
+into the trail, a subsequent analysis can produce a 1-literal clause
+that incorrectly generalizes (e.g., learns `v0 >= 11` at level 0 when
+the right learnt clause would have been `v0 != 10`). Repro:
+`/tmp/bor.smt2` (test harness has 5 lines after the set-logic).
+
+**Remaining work, in priority order:**
+1. **Learnt-clause antecedent on the trail.** Carry a "this LB/UB was
+   forced by clause C" reference so the analyzer can resolve through
+   it rather than treating it as a decision. Likely a new
+   `TRAIL_REASON_CLAUSE` enum + a per-clause id stored where prop_ref
+   lives, or a parallel side-table indexed by trail entry.
+2. **B2 (rule-aware bvand/bor/bxor explain)** — recover lost perf by
+   citing only the antecedents the actually-fired rule needed instead
+   of all six watched-var literals.
+3. **memmaptight32**: now returns `unknown`; check whether B2 helps it
+   reach a definitive `sat`, otherwise trace it specifically.
+4. C / D / E remain as originally planned.
 
 ## Headline
 

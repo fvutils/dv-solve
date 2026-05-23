@@ -1603,9 +1603,13 @@ static PropResult _fire_bounds_bor_64(Propagator *self, SolveCtx *ctx) {
         return PROP_OK;
     }
 
-    /* Lower bound: r >= a_lo | b_lo (OR can only set bits) */
+    /* Lower bound: r >= max(a_lo, b_lo) since a|b >= a and a|b >= b.
+     * NOT a_lo | b_lo — that's unsound when low bits of the OR'd value
+     * are not actually forced by the range constraints. Counter:
+     * a in [2,_], b in [1,_]; a=2, b=2 gives r=2 < (2|1)=3. */
     if (alo >= 0 && blo >= 0) {
-        if ((res = ctx_tighten_lb64(ctx, rid, alo | blo)) != PROP_OK) return res;
+        int64_t r_lb = (alo > blo) ? alo : blo;
+        if ((res = ctx_tighten_lb64(ctx, rid, r_lb)) != PROP_OK) return res;
     }
 
     /* Singleton: r >= singleton_val */

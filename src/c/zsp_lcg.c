@@ -340,6 +340,13 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
     } while(0)
 
     if (conflict_var != EXPR_NULL) {
+        if (_tron()) {
+            fprintf(stderr,
+                "[lcg-trace] empty-domain conflict on v%u (lo>%ld hi<%ld)\n",
+                conflict_var,
+                (long)var_lo64(ctx, &ctx->vars[conflict_var]),
+                (long)var_hi64(ctx, &ctx->vars[conflict_var]));
+        }
         /* Empty-domain conflict: lo > hi for conflict_var.
          * Both the LB and UB bound tightenings contributed to the
          * conflict. Find the most recent trail entries for both. */
@@ -583,24 +590,37 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
 
     #undef ADD_EXPL_LIT
 
-    /* Step 3: The single remaining seen literal at cur_level is the 1UIP.
-     * Add its negation as the asserting literal (first in clause). */
-    e = ctx->trail_top;
-    while (e) {
-        uint32_t e_slot = SEEN_IX(e->var_id, (e->kind == TRAIL_LB) ? 1 : 0);
-        if (lcg->seen[e_slot]) {
-            /* Use the explanation literal stored in seen_lit, which
-             * carries the geometric threshold from the explanation. */
-            Literal uip = lcg->seen_lit[e_slot];
-            if (learnt_idx < lcg->learnt_cap) {
-                for (uint32_t j = learnt_idx; j > 0; j--)
-                    lcg->learnt_buf[j] = lcg->learnt_buf[j - 1];
-                lcg->learnt_buf[0] = literal_negate(uip);
-                learnt_idx++;
+    /* Step 3: Emit the remaining seen literals at cur_level. The first
+     * one walked back from trail_top is the 1UIP (the asserting literal,
+     * placed at learnt_buf[0]). Any other still-seen slots are *also*
+     * antecedents at cur_level — they typically come from a singleton
+     * decision "v = c" which sets BOTH (v, LB=c) and (v, UB=c) as
+     * separate trail entries. Both must be negated into the learnt
+     * clause for it to correctly mean "v != c". */
+    {
+        int uip_set = 0;
+        e = ctx->trail_top;
+        while (e) {
+            uint32_t e_slot = SEEN_IX(e->var_id, (e->kind == TRAIL_LB) ? 1 : 0);
+            if (lcg->seen[e_slot]) {
+                Literal lit = lcg->seen_lit[e_slot];
+                Literal neg = literal_negate(lit);
+                if (!uip_set) {
+                    if (learnt_idx < lcg->learnt_cap) {
+                        for (uint32_t j = learnt_idx; j > 0; j--)
+                            lcg->learnt_buf[j] = lcg->learnt_buf[j - 1];
+                        lcg->learnt_buf[0] = neg;
+                        learnt_idx++;
+                    }
+                    uip_set = 1;
+                } else if (learnt_idx < lcg->learnt_cap) {
+                    /* Companion literal from the same decision — append. */
+                    lcg->learnt_buf[learnt_idx++] = neg;
+                }
+                lcg->seen[e_slot] = 0;  /* consume */
             }
-            break;
+            e = e->prev;
         }
-        e = e->prev;
     }
 
     /* Output */
