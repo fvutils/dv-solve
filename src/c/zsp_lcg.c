@@ -315,8 +315,7 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
             lcg->seen[_slot] = 1;                                   \
             lcg->seen_lit[_slot] = (lit);                            \
             vsids_bump(&lcg->vsids, _vid);                          \
-            /* Find the decision level where this literal became     \
-             * true by matching the trail entry's bound kind. */     \
+            /* Find the decision level for this literal's trail entry. */\
             uint16_t _vlevel = 0;                                   \
             uint8_t _match_kind = (lit).is_lb ? TRAIL_LB : TRAIL_UB;\
             TrailEntry *_ts = ctx->trail_top;                       \
@@ -584,6 +583,37 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
         }
         for (uint32_t i = 0; i < expl.n_lits; i++)
             ADD_EXPL_LIT(expl.lits[i]);
+
+        /* If this trail entry is part of a singleton pin (both LB and
+         * UB tightened by the same propagator at the same level to the
+         * same value), process the companion bound in the same step.
+         * Saves a trail-walk iteration and any redundant restart in the
+         * resolution loop. */
+        if (e->flags & TRAIL_FLAG_SINGLETON) {
+            uint32_t comp_slot = SEEN_IX(e->var_id, !e_is_lb);
+            if (lcg->seen[comp_slot]) {
+                Explanation expl2;
+                int64_t bv2 = (e->kind == TRAIL_LB)
+                    ? var_hi64(ctx, &ctx->vars[e->var_id])
+                    : var_lo64(ctx, &ctx->vars[e->var_id]);
+                int rc2 = p->explain(p, ctx, e->var_id,
+                                     (e->kind == TRAIL_LB) ? 0 : 1,
+                                     bv2, &expl2);
+                if (rc2 == 0) {
+                    if (_tron()) {
+                        fprintf(stderr,
+                            "[lcg-trace] resolve+ prop=%s v%u %s=%ld (singleton pair) -> %u lits\n",
+                            prop_fire_name(p->fire), e->var_id,
+                            (e->kind == TRAIL_LB) ? "ub" : "lb",
+                            (long)bv2, expl2.n_lits);
+                    }
+                    for (uint32_t i = 0; i < expl2.n_lits; i++)
+                        ADD_EXPL_LIT(expl2.lits[i]);
+                }
+                lcg->seen[comp_slot] = 0;
+                n_at_cur_level--;
+            }
+        }
         e = e->prev;
         continue;
     }

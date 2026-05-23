@@ -36,6 +36,15 @@ typedef enum {
 /* Entries are allocated newest-first; prev points toward older        */
 /* entries.  Backtracking walks the chain from trail_top backward.     */
 /* ------------------------------------------------------------------ */
+/* TrailEntry.flags bits */
+#define TRAIL_FLAG_SINGLETON 0x1u   /* this entry is one half of a
+                                     * paired LB+UB tightening that
+                                     * encodes a singleton pin
+                                     * (decision "v = c" or propagator
+                                     * exact assignment). Both halves
+                                     * carry the flag; analyzer treats
+                                     * the pair as one logical event. */
+
 typedef struct TrailEntry {
     struct TrailEntry *prev;          /* 8: previous entry (or NULL)   */
     uint32_t           var_id;        /* 4: which variable changed     */
@@ -45,7 +54,7 @@ typedef struct TrailEntry {
     int64_t            old_value;     /* 8: old bound (LB or UB)       */
     uint32_t           prop_ref;      /* 4: pool offset of causing propagator
                                        *    EXPR_NULL = decision (no propagator) */
-    uint32_t           _te_pad;       /* 4: alignment padding          */
+    uint32_t           flags;         /* 4: TRAIL_FLAG_* bits          */
 } TrailEntry;                         /* 32 bytes                      */
 
 /* ------------------------------------------------------------------ */

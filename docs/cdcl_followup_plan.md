@@ -229,9 +229,10 @@ follow-up.
 6. **Phase 4** (int64 widen) — independent; can land any time, but
    easier to measure deltas after timing stabilizes.
 
-## Phase 6 (NEW) — Singleton decision as a single trail event
+## Phase 6 — Singleton trail-entry coalescing
 
-**Status:** identified during phase 1 analysis. Not started.
+**Status:** landed. Net +1 fixture recovered (`regfile_simple_bmc_d2`).
+Wall time on the full cross-check dropped 112s → 102s.
 **Estimated size:** ~one session.
 **Risk:** medium-high. Touches trail layout + propagator queue + analyzer.
 
@@ -263,15 +264,78 @@ keep tightening lb then ub separately. The analyzer can later add
 with the same value and same prop_ref, collapse to one event" as a
 cheap coalescing step in ADD_EXPL_LIT.
 
+### What was actually built (slightly different shape from the original)
+
+- `TrailEntry._te_pad` repurposed as `flags`; `TRAIL_FLAG_SINGLETON`
+  defined in `zsp_trail.h`.
+- **Auto-detection** at tighten time: `_mark_singleton_pair` in
+  `zsp_propagate.c` watches every `ctx_tighten_lb/ub` and, when the
+  variable becomes singleton (`lo == hi`), scans back to find the
+  companion bound entry at the same level from the same propagator
+  (or same decision) and flags both. Covers decisions, eq, ITE,
+  bvand exact, and any future propagator that pins by tightening
+  both bounds — no per-propagator code changes needed.
+- **Resolution coalescing** in `lcg_analyze_conflict`: when a
+  resolution step processes a singleton-flagged entry, it also
+  immediately calls the propagator's `explain` for the companion
+  bound direction, clears the companion `seen[]`, decrements
+  `n_at_cur_level` once more, and skips the companion's own trail
+  walk. Halves the resolution-loop iterations for singleton-heavy
+  propagation chains (visible in DV_LCG_TRACE as `resolve+` lines).
+
 ### Exit criteria
 
-- [ ] `TrailEntry` carries a `TRAIL_SINGLETON` kind (or flag) recording
-      both bound changes from a singleton pin.
-- [ ] Search decision-push uses the singleton helper.
-- [ ] `lcg_analyze_conflict` treats singleton entries as one logical
-      antecedent (one slot in seen, one increment of n_at_cur_level,
-      learnt clause still emits both bound negations).
-- [ ] Aim: most of the 11 remaining tier2/3 skips return to definitive.
+- [x] `TrailEntry` carries `TRAIL_FLAG_SINGLETON` bit (repurposed _te_pad).
+- [x] Tighten helpers auto-detect and mark singleton pairs.
+- [x] `lcg_analyze_conflict` consumes both halves in one resolve step.
+- [ ] Aim: most of the 10 remaining tier2/3 skips return to definitive.
+      Only +1 (regfile_simple_d2) on this commit; the others have
+      conflict counts so high that even halved resolution-loop work
+      isn't enough. Clause minimization / better search heuristics
+      are the next levers (new Phase 7).
+
+## Phase 7 (NEW) — Clause minimization / search heuristics
+
+**Status:** identified during phase 6 analysis. Not started.
+**Estimated size:** ~one to two sessions.
+**Risk:** medium.
+
+### Problem
+
+After phases 1+6, the 10 remaining tier2/3 skips have learnt-clause
+counts in the thousands per fixture (`regfile_simple_bmc_d1` hits
+the DV_MAX_RESTARTS=1 ceiling of 10000 conflicts well under 1s).
+Clauses average 8–10 literals after propagation chains through ITE
++ equality. The clauses are *correct* (negations of valid
+conflict cores) but don't propagate well — each one is a long
+disjunction over condition variables that doesn't force a single
+direction.
+
+The original (pre-fix) variable-dedup produced shorter, more
+restrictive clauses by silently dropping antecedents. That was
+unsound but heuristically effective. We can't go back to that.
+Standard CDCL techniques to recover:
+
+1. **Self-subsumption / clause minimization.** For each learnt
+   clause literal, check whether its negation is implied by a
+   subset of the other clause literals' negations via an existing
+   clause. If so, drop it. MiniSAT-style "expensive" + "cheap"
+   minimization passes.
+2. **Better restart policy.** Luby restarts + phase saving.
+3. **Decision heuristics.** VSIDS already in; tune decay or add
+   activity bumping on clause-prop conflicts.
+
+### Approach
+
+Start with cheap minimization in `lcg_analyze_conflict` after Step 3:
+for each body literal `l`, walk its reason clause and check whether
+all other reasons are already in the learnt clause. If yes, the
+literal is redundant.
+
+### Exit criteria
+
+- [ ] Clause minimization implemented (cheap pass).
+- [ ] Most of the 10 remaining skips return to definitive.
 
 ## Cross-cutting tracking
 
@@ -288,6 +352,7 @@ and update the headline numbers below.
 | after first fix    | 1 | 109 | 8 | memmaptight32 still wrong |
 | after multi-UIP + bvor | 0 | 103 | 15 | current commit `605bd61` |
 | after phase 1 | 0 | 104 | 14 | only fsm_onehot_d32 recovered |
+| after phase 6 | 0 | 105 | 13 | +regfile_simple_d2; wall 112s→102s |
 | after phase 2 | TBD | TBD | TBD | aim: 0 latent unsoundness |
 | after phase 3 | TBD | TBD | TBD | audit complete |
 | after phase 4 | TBD | TBD | TBD | int64 lifted |

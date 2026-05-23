@@ -101,6 +101,29 @@ void prop_set_guard(SolveCtx *ctx, uint32_t prop_ref, uint32_t guard_var_id) {
 /* Domain-tightening                                                   */
 /* ------------------------------------------------------------------ */
 
+#include "zsp_trail.h"
+
+/* When a tighten makes a variable singleton (lo == hi), find the most
+ * recent companion-bound trail entry on the same var at the current
+ * decision level and mark both with TRAIL_FLAG_SINGLETON. The CDCL
+ * analyzer uses this to count the LB+UB pair as a single logical
+ * antecedent in n_at_cur_level. */
+static void _mark_singleton_pair(SolveCtx *ctx, uint32_t var_id,
+                                  uint8_t this_kind) {
+    if (!ctx->trail_top) return;
+    /* The just-pushed entry. */
+    ctx->trail_top->flags |= TRAIL_FLAG_SINGLETON;
+    uint8_t companion_kind = (this_kind == TRAIL_LB) ? TRAIL_UB : TRAIL_LB;
+    uint16_t cur_lvl = ctx->trail_top->decision_level;
+    for (TrailEntry *e = ctx->trail_top->prev; e; e = e->prev) {
+        if (e->decision_level != cur_lvl) return; /* off-level */
+        if (e->var_id == var_id && e->kind == companion_kind) {
+            e->flags |= TRAIL_FLAG_SINGLETON;
+            return;
+        }
+    }
+}
+
 /* When LCG is active, notify the clause DB so that learnt clauses
  * containing literals on this variable can propagate (or detect
  * conflict).  Returns PROP_OK or PROP_CONFLICT. */
@@ -128,8 +151,11 @@ PropResult ctx_tighten_lb32(SolveCtx *ctx, uint32_t var_id, int32_t new_lb) {
 
     if (v->lo > v->hi) return PROP_CONFLICT;
     /* Update unassigned_mask: clear bit when variable becomes singleton */
-    if (v->lo == v->hi && var_id < 64)
-        ctx->unassigned_mask &= ~(1ULL << var_id);
+    if (v->lo == v->hi) {
+        if (var_id < 64)
+            ctx->unassigned_mask &= ~(1ULL << var_id);
+        _mark_singleton_pair(ctx, var_id, TRAIL_LB);
+    }
     if (ctx->watcher_heads) _wake_var(ctx, var_id);
     return _lcg_notify_lb(ctx, var_id, (int64_t)new_lb);
 }
@@ -141,8 +167,11 @@ PropResult ctx_tighten_ub32(SolveCtx *ctx, uint32_t var_id, int32_t new_ub) {
     trail_record_ub(ctx, var_id, (int64_t)new_ub);  /* applies change */
 
     if (v->lo > v->hi) return PROP_CONFLICT;
-    if (v->lo == v->hi && var_id < 64)
-        ctx->unassigned_mask &= ~(1ULL << var_id);
+    if (v->lo == v->hi) {
+        if (var_id < 64)
+            ctx->unassigned_mask &= ~(1ULL << var_id);
+        _mark_singleton_pair(ctx, var_id, TRAIL_UB);
+    }
     if (ctx->watcher_heads) _wake_var(ctx, var_id);
     return _lcg_notify_ub(ctx, var_id, (int64_t)new_ub);
 }
@@ -158,8 +187,11 @@ PropResult ctx_tighten_lb64(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
     int64_t lo = var_lo64(ctx, v);
     int64_t hi = var_hi64(ctx, v);
     if (lo > hi) return PROP_CONFLICT;
-    if (lo == hi && var_id < 64)
-        ctx->unassigned_mask &= ~(1ULL << var_id);
+    if (lo == hi) {
+        if (var_id < 64)
+            ctx->unassigned_mask &= ~(1ULL << var_id);
+        _mark_singleton_pair(ctx, var_id, TRAIL_LB);
+    }
     if (ctx->watcher_heads) _wake_var(ctx, var_id);
     return _lcg_notify_lb(ctx, var_id, new_lb);
 }
@@ -174,8 +206,11 @@ PropResult ctx_tighten_ub64(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
     int64_t lo = var_lo64(ctx, v);
     int64_t hi = var_hi64(ctx, v);
     if (lo > hi) return PROP_CONFLICT;
-    if (lo == hi && var_id < 64)
-        ctx->unassigned_mask &= ~(1ULL << var_id);
+    if (lo == hi) {
+        if (var_id < 64)
+            ctx->unassigned_mask &= ~(1ULL << var_id);
+        _mark_singleton_pair(ctx, var_id, TRAIL_UB);
+    }
     if (ctx->watcher_heads) _wake_var(ctx, var_id);
     return _lcg_notify_ub(ctx, var_id, new_ub);
 }

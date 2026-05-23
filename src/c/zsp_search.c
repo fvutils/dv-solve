@@ -380,7 +380,10 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
         ctx->decisions[dec_idx].tried_value = v;
         ctx->decisions[dec_idx].tried_lower = 0;
 
-        /* ── Push level and assign ── */
+        /* ── Push level and assign ──
+         * The tighten helpers auto-detect singleton pinning (lo == hi
+         * after the change) and stamp TRAIL_FLAG_SINGLETON on the new
+         * entry plus the companion-bound entry at the same level. */
         trail_push_level(ctx);
         PropResult pr = ctx_tighten_lb64(ctx, x_id, v);
         if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x_id, v);

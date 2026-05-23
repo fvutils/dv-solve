@@ -63,7 +63,7 @@ int trail_record_lb(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
     e->decision_level = (uint16_t)ctx->decision_level;
     e->old_value      = old_lb;
     e->prop_ref       = ctx->current_prop_ref;
-    e->_te_pad        = 0;
+    e->flags          = ctx->current_trail_flags;
     _push_entry(ctx, e);
     return 0;
 }
@@ -101,7 +101,7 @@ int trail_record_ub(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
     e->decision_level = (uint16_t)ctx->decision_level;
     e->old_value      = old_ub;
     e->prop_ref       = ctx->current_prop_ref;
-    e->_te_pad        = 0;
+    e->flags          = ctx->current_trail_flags;
     _push_entry(ctx, e);
     return 0;
 }
@@ -120,7 +120,7 @@ int trail_record_hole(SolveCtx *ctx, uint32_t var_id, int64_t removed_val) {
     e->decision_level = (uint16_t)ctx->decision_level;
     e->old_value      = removed_val;
     e->prop_ref       = ctx->current_prop_ref;
-    e->_te_pad        = 0;
+    e->flags          = ctx->current_trail_flags;
     _push_entry(ctx, e);
     return 0;
     /* Phase 6 will remove the value from the variable's domain here */

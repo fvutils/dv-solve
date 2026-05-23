@@ -95,6 +95,9 @@ typedef struct SolveCtx {
     /* LCG solver fields */
     uint32_t           current_prop_ref;  /* prop being fired (for trail) */
     uint32_t           conflict_prop_ref; /* prop that caused conflict    */
+    uint32_t           current_trail_flags; /* TRAIL_FLAG_* bits to stamp
+                                             * on the next trail entry;
+                                             * caller sets, callee resets. */
     /* CDCL: heap-allocated LCG context, NULL when use_lcg=0. Lazily
      * created on first solve with use_lcg=1; freed in solver_destroy. */
     void              *lcg;               /* LCGCtx* (opaque to avoid header dep) */

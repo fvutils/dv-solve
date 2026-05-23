@@ -51,6 +51,7 @@ SolveCtx *solver_create(void *static_buf, size_t static_size,
     ctx->var_alias       = NULL;
     ctx->current_prop_ref  = EXPR_NULL;
     ctx->conflict_prop_ref = EXPR_NULL;
+    ctx->current_trail_flags = 0;
     ctx->lcg               = NULL;
 
     /* Init PropQueue — all levels empty */
