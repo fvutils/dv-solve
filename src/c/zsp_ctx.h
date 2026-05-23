@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include "zsp_variable.h"
 #include "zsp_pool.h"
 #include "zsp_stack.h"
@@ -94,6 +95,9 @@ typedef struct SolveCtx {
     /* LCG solver fields */
     uint32_t           current_prop_ref;  /* prop being fired (for trail) */
     uint32_t           conflict_prop_ref; /* prop that caused conflict    */
+    /* CDCL: heap-allocated LCG context, NULL when use_lcg=0. Lazily
+     * created on first solve with use_lcg=1; freed in solver_destroy. */
+    void              *lcg;               /* LCGCtx* (opaque to avoid header dep) */
     /* Custom value selector hook (for cost-guided search) */
     int64_t          (*value_selector_fn)(struct SolveCtx *, uint32_t, void *);
     void              *value_selector_data;
@@ -149,6 +153,23 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp);
  *         -2 if UNSAT detected during propagation.
  */
 int solver_add_constraint(SolveCtx *ctx, SolveProblem *aux_sp);
+
+/**
+ * Validate that the current variable assignment satisfies every
+ * top-level constraint in `sp`. Intended to be called after solver_solve
+ * returns SOLVE_OK as a sanity check against silently-dropped or
+ * incorrectly-compiled constraints.
+ *
+ * Evaluates each ConstraintSpec root expression under the assignment;
+ * a 0 value is treated as a violation. Constraints involving constructs
+ * the evaluator can't handle (arrays, sums, countones, clog2, in_set,
+ * in_range) are skipped — they don't count as violations or successes.
+ *
+ * @return 0 if every evaluated constraint was satisfied; positive count
+ *         of violations otherwise. Diagnostic messages for each violation
+ *         are written to `err` (skipped when err is NULL).
+ */
+int solver_validate_model(SolveCtx *ctx, SolveProblem *sp, FILE *err);
 
 /**
  * Save a checkpoint of the current solver state.

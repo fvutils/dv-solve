@@ -144,6 +144,14 @@ typedef struct {
     SolveCtx            *ctx;          /* NULL until check-sat */
     SolveProblem        *problem;      /* finalized; NULL until check-sat */
     size_t               problem_size;
+
+    /* Retained aux SolveProblems from _flush_aux. The model-validation
+     * pass walks these in addition to fe->problem so that user-asserts
+     * added incrementally (after the first check-sat) can also be
+     * checked. Each entry is freed in smt2_frontend_destroy. */
+    SolveProblem       **aux_problems;
+    uint32_t             n_aux_problems;
+    uint32_t             aux_problems_cap;
     zsp_block_alloc_t   *block_alloc;
     void                *ctx_buf;      /* raw buffer for SolveCtx */
     size_t               ctx_buf_size;

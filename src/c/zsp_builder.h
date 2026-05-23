@@ -184,6 +184,15 @@ ExprRef builder_add_var(SolveProblemBuilder *b, uint32_t var_id,
                         int64_t lo, int64_t hi);
 
 /**
+ * Mark a previously-added variable as a compiler-generated auxiliary.
+ * Aux variables are never picked as a search decision; their value is
+ * determined entirely by propagation from the constraints that define
+ * them. Mis-marking a user variable as aux can lead to unknown results
+ * when search would have been needed.
+ */
+void builder_mark_var_aux(SolveProblemBuilder *b, ExprRef var_ref);
+
+/**
  * Add a constraint to the problem.
  * @param root  ExprRef of the constraint expression root.
  * @return ExprRef to the ConstraintSpec, or EXPR_NULL on alloc failure.

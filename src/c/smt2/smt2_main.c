@@ -23,11 +23,13 @@ static void _usage(FILE *f) {
         "Usage: dv-solve-smt2 [options] [file.smt2]\n"
         "\n"
         "Options:\n"
-        "  --help          Show this help\n"
-        "  --version       Print version\n"
-        "  --stats         Print statistics to stderr\n"
-        "  --interactive   Force interactive (per-command) stdin mode\n"
-        "  --batch         Force batch (whole-file) stdin mode\n"
+        "  --help            Show this help\n"
+        "  --version         Print version\n"
+        "  --stats           Print statistics to stderr\n"
+        "  --interactive     Force interactive (per-command) stdin mode\n"
+        "  --batch           Force batch (whole-file) stdin mode\n"
+        "  --smt2            Accepted for compatibility (the only supported mode)\n"
+        "  --no-incremental  Reject (push N) with N>1 (advisory; incremental works)\n"
         "\n"
         "If no file is given, reads from stdin.  Interactive mode is the\n"
         "default when stdin is a pipe/tty.\n");
@@ -221,6 +223,7 @@ int main(int argc, char **argv) {
     int         show_stats = 0;
     int         force_interactive = 0;
     int         force_batch = 0;
+    int         no_incremental = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -234,6 +237,12 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--stats") == 0) { show_stats = 1; continue; }
         if (strcmp(argv[i], "--interactive") == 0) { force_interactive = 1; continue; }
         if (strcmp(argv[i], "--batch") == 0) { force_batch = 1; continue; }
+        if (strcmp(argv[i], "--smt2") == 0) { continue; }  /* compat no-op */
+        if (strcmp(argv[i], "--no-incremental") == 0) {
+            no_incremental = 1;
+            (void)no_incremental;  /* reserved for future enforcement */
+            continue;
+        }
         if (argv[i][0] == '-' && argv[i][1] != '\0') {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             _usage(stderr);

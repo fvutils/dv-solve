@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "zsp_ctx.h"
+#include "zsp_lcg.h"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -50,6 +51,7 @@ SolveCtx *solver_create(void *static_buf, size_t static_size,
     ctx->var_alias       = NULL;
     ctx->current_prop_ref  = EXPR_NULL;
     ctx->conflict_prop_ref = EXPR_NULL;
+    ctx->lcg               = NULL;
 
     /* Init PropQueue — all levels empty */
     ctx->queue.non_empty_mask = 0;
@@ -91,6 +93,11 @@ SolveCtx *solver_create(void *static_buf, size_t static_size,
 
 void solver_destroy(SolveCtx *ctx) {
     if (!ctx) return;
+    if (ctx->lcg) {
+        lcg_destroy((LCGCtx *)ctx->lcg);
+        free(ctx->lcg);
+        ctx->lcg = NULL;
+    }
     if (ctx->dynamic) {
         zsp_stack_destroy(ctx->dynamic);
         ctx->dynamic = NULL;

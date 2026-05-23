@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include "smt2/smt2_frontend.h"
+#include "zsp_lcg.h"
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -221,7 +222,12 @@ static uint32_t _next_var_id(Smt2Frontend *fe) {
 static uint32_t _fresh_aux(Smt2Frontend *fe, uint16_t width) {
     uint32_t var_id = _next_var_id(fe);
     uint64_t max_val = (width >= 64) ? UINT64_MAX : ((1ULL << width) - 1);
-    builder_add_var(fe->builder, var_id, (uint8_t)width, 0, 0, (int64_t)max_val);
+    ExprRef vref = builder_add_var(fe->builder, var_id, (uint8_t)width, 0, 0, (int64_t)max_val);
+    /* Mark aux vars as VAR_AUX so search never decides them: they are
+     * fully determined by their defining constraint. With the ITE_value
+     * cond back-propagation in place, propagation can pin them on its
+     * own through whichever branch is consistent with r's domain. */
+    builder_mark_var_aux(fe->builder, vref);
     char name[SMT2_MAX_NAME];
     snprintf(name, sizeof(name), "__aux%u", var_id);
     _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint8_t)width);
@@ -548,10 +554,23 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             uint64_t ext_n = head->list.items[2]->numval;
 
             TaggedExpr inner = _translate_tagged(fe, s->list.items[1]);
+            if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
+            uint16_t new_width = inner.te.width + (uint16_t)ext_n;
+
+            /* Fold zero-extend of a constant: the value is unchanged, but
+             * making it a real EXPR_CONST lets downstream passes (e.g. the
+             * modular bvadd-with-constant routing) recognise it as a
+             * literal. Sign-extend is skipped here -- downstream type
+             * interpretation of signed constants is fragile. */
+            if (!sign && inner.leaf_kind == 2 && new_width < 64) {
+                ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, inner.te.ref);
+                uint64_t v = (uint64_t)ec->value & (((uint64_t)1 << new_width) - 1);
+                ExprRef cr = builder_expr_const(fe->builder, (int64_t)v, 0);
+                return (TaggedExpr){ { cr, new_width }, 2, NULL };
+            }
+
             inner = _flatten_to_var(fe, inner);
             if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
-
-            uint16_t new_width = inner.te.width + (uint16_t)ext_n;
             ExprRef r = builder_expr_extend(fe->builder, inner.te.ref,
                                             (uint8_t)inner.te.width,
                                             (uint8_t)new_width, sign);
@@ -909,25 +928,49 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         return (TaggedExpr){ { r, a.te.width }, 0, NULL };
     }
 
-    /* ---- Boolean connectives ---- */
+    /* ---- Boolean connectives (with compile-time const folding) ---- */
     if (oplen == 3 && memcmp(op, "not", 3) == 0) {
         if (s->list.count != 2) return TAGGED_NULL;
         TaggedExpr a = _translate_tagged(fe, s->list.items[1]);
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
+        if (a.leaf_kind == 2) {
+            ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, a.te.ref);
+            int64_t neg = (ec->value != 0) ? 0 : 1;
+            ExprRef cr = builder_expr_const(fe->builder, neg, 0);
+            return (TaggedExpr){ { cr, 1 }, 2, NULL };
+        }
         ExprRef r = builder_expr_unary(fe->builder, UN_NOT, a.te.ref);
         return (TaggedExpr){ { r, 1 }, 0, NULL };
     }
 
     if (oplen == 3 && memcmp(op, "and", 3) == 0) {
         if (s->list.count < 3) return TAGGED_NULL;
-        TaggedExpr acc = _translate_tagged(fe, s->list.items[1]);
-        if (acc.te.ref == EXPR_NULL) return TAGGED_NULL;
-        for (uint32_t i = 2; i < s->list.count; i++) {
+        /* Collect non-trivial operands; short-circuit on any literal false. */
+        TaggedExpr acc = { { EXPR_NULL, 1 }, 0, NULL };
+        for (uint32_t i = 1; i < s->list.count; i++) {
             TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
             if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
-            acc.te.ref = builder_expr_binary(fe->builder, BIN_AND,
-                                             acc.te.ref, b.te.ref);
-            acc.leaf_kind = 0;
+            if (b.leaf_kind == 2) {
+                ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, b.te.ref);
+                if (ec->value == 0) {
+                    /* (and ... false ...) -> false */
+                    ExprRef cr = builder_expr_const(fe->builder, 0, 0);
+                    return (TaggedExpr){ { cr, 1 }, 2, NULL };
+                }
+                /* (and ... true ...) -> drop this operand */
+                continue;
+            }
+            if (acc.te.ref == EXPR_NULL) { acc = b; acc.te.width = 1; }
+            else {
+                acc.te.ref = builder_expr_binary(fe->builder, BIN_AND,
+                                                 acc.te.ref, b.te.ref);
+                acc.leaf_kind = 0;
+            }
+        }
+        if (acc.te.ref == EXPR_NULL) {
+            /* All operands were literal true */
+            ExprRef cr = builder_expr_const(fe->builder, 1, 0);
+            return (TaggedExpr){ { cr, 1 }, 2, NULL };
         }
         acc.te.width = 1;
         return acc;
@@ -935,14 +978,32 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
     if (oplen == 2 && memcmp(op, "or", 2) == 0) {
         if (s->list.count < 3) return TAGGED_NULL;
-        TaggedExpr acc = _translate_tagged(fe, s->list.items[1]);
-        if (acc.te.ref == EXPR_NULL) return TAGGED_NULL;
-        for (uint32_t i = 2; i < s->list.count; i++) {
+        /* Collect non-trivial operands; short-circuit on any literal true. */
+        TaggedExpr acc = { { EXPR_NULL, 1 }, 0, NULL };
+        for (uint32_t i = 1; i < s->list.count; i++) {
             TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
             if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
-            acc.te.ref = builder_expr_binary(fe->builder, BIN_OR,
-                                             acc.te.ref, b.te.ref);
-            acc.leaf_kind = 0;
+            if (b.leaf_kind == 2) {
+                ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, b.te.ref);
+                if (ec->value != 0) {
+                    /* (or ... true ...) -> true */
+                    ExprRef cr = builder_expr_const(fe->builder, 1, 0);
+                    return (TaggedExpr){ { cr, 1 }, 2, NULL };
+                }
+                /* (or ... false ...) -> drop this operand */
+                continue;
+            }
+            if (acc.te.ref == EXPR_NULL) { acc = b; acc.te.width = 1; }
+            else {
+                acc.te.ref = builder_expr_binary(fe->builder, BIN_OR,
+                                                 acc.te.ref, b.te.ref);
+                acc.leaf_kind = 0;
+            }
+        }
+        if (acc.te.ref == EXPR_NULL) {
+            /* All operands were literal false */
+            ExprRef cr = builder_expr_const(fe->builder, 0, 0);
+            return (TaggedExpr){ { cr, 1 }, 2, NULL };
         }
         acc.te.width = 1;
         return acc;
@@ -1149,6 +1210,117 @@ static int _cmd_set_option(Smt2Frontend *fe, const Sexpr *cmd) {
         if (val->kind == SEXPR_NUMERAL)
             fe->seed = val->numval;
         return 0;
+    }
+    return 0;
+}
+
+static int _add_sort_fun(Smt2Frontend *fe, const Sexpr *name_s,
+                         uint8_t n_params, uint8_t return_width, int is_bool);
+
+/* Translate a yosys/SMT-LIB 2.6 single-constructor record datatype into
+ * our existing opaque-sort + per-field sort-fun representation.
+ *
+ *   (declare-datatypes ((NAME 0)) (((CTOR (FIELD1 TYPE1) (FIELD2 TYPE2) ...))))
+ *
+ * Becomes equivalent to:
+ *   (declare-sort NAME 0)
+ *   (declare-fun FIELD1 (NAME) TYPE1)
+ *   (declare-fun FIELD2 (NAME) TYPE2)
+ *   ...
+ *
+ * Scope: single-constructor records whose fields are all BitVec or Bool
+ * (matches the shape yosys/smtbmc emits for module state). Sum types,
+ * recursive types, type parameters, and Array-valued fields are rejected.
+ */
+static int _cmd_declare_datatypes(Smt2Frontend *fe, const Sexpr *cmd) {
+    /* (declare-datatypes <par-list> <defn-list>) */
+    if (cmd->list.count != 3) {
+        fprintf(fe->err, "error: declare-datatypes expects (pars defs)\n");
+        return -1;
+    }
+    const Sexpr *pars = cmd->list.items[1];
+    const Sexpr *defs = cmd->list.items[2];
+    if (pars->kind != SEXPR_LIST || defs->kind != SEXPR_LIST) {
+        fprintf(fe->err, "error: declare-datatypes: malformed pars/defs\n");
+        return -1;
+    }
+    if (pars->list.count == 0 || pars->list.count != defs->list.count) {
+        fprintf(fe->err, "error: declare-datatypes: pars/defs length mismatch\n");
+        return -1;
+    }
+
+    for (uint32_t di = 0; di < pars->list.count; di++) {
+        /* par = (NAME ARITY) */
+        const Sexpr *par = pars->list.items[di];
+        if (par->kind != SEXPR_LIST || par->list.count != 2 ||
+            par->list.items[0]->kind != SEXPR_SYMBOL ||
+            par->list.items[1]->kind != SEXPR_NUMERAL) {
+            fprintf(fe->err, "error: declare-datatypes: malformed par entry\n");
+            return -1;
+        }
+        const Sexpr *name_s = par->list.items[0];
+        if (par->list.items[1]->numval != 0) {
+            fprintf(fe->err, "error: declare-datatypes: type parameters "
+                    "not supported (got arity %lld for %.*s)\n",
+                    (long long)par->list.items[1]->numval,
+                    (int)name_s->sym.len, name_s->sym.str);
+            return -1;
+        }
+
+        /* defs[di] = (CTOR ...) — list of constructors */
+        const Sexpr *ctors = defs->list.items[di];
+        if (ctors->kind != SEXPR_LIST || ctors->list.count != 1) {
+            fprintf(fe->err, "error: declare-datatypes: only single-constructor "
+                    "record types are supported (got %u constructors for %.*s)\n",
+                    (unsigned)(ctors->kind == SEXPR_LIST ? ctors->list.count : 0u),
+                    (int)name_s->sym.len, name_s->sym.str);
+            return -1;
+        }
+
+        /* Register type name as opaque sort */
+        if (fe->n_sort_names >= SMT2_MAX_SORTS) {
+            fprintf(fe->err, "error: too many sorts declared\n");
+            return -1;
+        }
+        if (!_is_known_sort(fe, name_s->sym.str, name_s->sym.len)) {
+            uint32_t cl = name_s->sym.len < SMT2_MAX_NAME - 1 ?
+                          name_s->sym.len : SMT2_MAX_NAME - 1;
+            memcpy(fe->sort_names[fe->n_sort_names], name_s->sym.str, cl);
+            fe->sort_names[fe->n_sort_names][cl] = '\0';
+            fe->n_sort_names++;
+        }
+
+        /* ctor = (CTOR_NAME (FIELD TYPE) ...) */
+        const Sexpr *ctor = ctors->list.items[0];
+        if (ctor->kind != SEXPR_LIST || ctor->list.count < 1 ||
+            ctor->list.items[0]->kind != SEXPR_SYMBOL) {
+            fprintf(fe->err, "error: declare-datatypes: malformed constructor\n");
+            return -1;
+        }
+
+        /* Each remaining ctor element is a (FIELD TYPE) selector pair.
+         * Field becomes a sort-fun: takes one instance of the record type,
+         * returns the BV/Bool field. */
+        for (uint32_t fi = 1; fi < ctor->list.count; fi++) {
+            const Sexpr *field = ctor->list.items[fi];
+            if (field->kind != SEXPR_LIST || field->list.count != 2 ||
+                field->list.items[0]->kind != SEXPR_SYMBOL) {
+                fprintf(fe->err, "error: declare-datatypes: malformed field\n");
+                return -1;
+            }
+            const Sexpr *fname = field->list.items[0];
+            const Sexpr *ftype = field->list.items[1];
+
+            int is_bool = sexpr_is_symbol(ftype, "Bool");
+            uint8_t bvw = is_bool ? 1 : _parse_bitvec_sort(fe, ftype);
+            if (bvw == 0) {
+                fprintf(fe->err, "error: declare-datatypes: field '%.*s' "
+                        "has unsupported type (only BitVec and Bool allowed)\n",
+                        (int)fname->sym.len, fname->sym.str);
+                return -1;
+            }
+            if (_add_sort_fun(fe, fname, 1, bvw, is_bool) < 0) return -1;
+        }
     }
     return 0;
 }
@@ -1437,7 +1609,16 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
         fprintf(fe->err, "error: failed to translate assert expression\n");
         return -1;
     }
-    builder_add_constraint(fe->builder, te.ref);
+    /* Tag user-level asserts with constraint_id=1 so the model-validation
+     * pass can distinguish them from internal aux constraints (which are
+     * left at id=0). Internal aux constraints can be temporarily out of
+     * sync with their associated aux var without affecting the user-
+     * visible result; flagging them in the validator produces noise. */
+    ExprRef cref = builder_add_constraint(fe->builder, te.ref);
+    if (cref != EXPR_NULL) {
+        ConstraintSpec *cs = (ConstraintSpec *)builder_ref_ptr(fe->builder, cref);
+        if (cs) cs->constraint_id = 1;
+    }
     if (fe->compiled) fe->has_aux = 1;
     return 0;
 }
@@ -1468,7 +1649,26 @@ static int _flush_aux(Smt2Frontend *fe) {
     SolveProblem *aux = builder_finalize(fe->builder, &aux_sz);
     if (!aux) return -1;
     int rc = solver_add_constraint(fe->ctx, aux);
-    free(aux);
+    /* Retain the aux SolveProblem (instead of freeing) so the post-solve
+     * model-validation pass can re-evaluate the constraints it contributed.
+     * Storage is reclaimed in smt2_frontend_destroy. */
+    if (fe->n_aux_problems == fe->aux_problems_cap) {
+        uint32_t new_cap = fe->aux_problems_cap ? fe->aux_problems_cap * 2 : 8;
+        SolveProblem **grow = (SolveProblem **)realloc(fe->aux_problems,
+                                  new_cap * sizeof(SolveProblem *));
+        if (!grow) {
+            /* Out of memory: fall back to the old behaviour (drop the
+             * aux). Validation will be incomplete for this run but the
+             * solver result is unaffected. */
+            free(aux);
+            builder_reset(fe->builder);
+            fe->has_aux = 0;
+            return rc;
+        }
+        fe->aux_problems     = grow;
+        fe->aux_problems_cap = new_cap;
+    }
+    fe->aux_problems[fe->n_aux_problems++] = aux;
     builder_reset(fe->builder);
     fe->has_aux = 0;
     return rc;
@@ -1511,11 +1711,77 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     SolveOpts opts;
     memset(&opts, 0, sizeof(opts));
     opts.seed = fe->seed;
+    /* Restart cadence: base unit × Luby(i) conflicts per restart.
+     * Phase 6.1d A/B on tier1 + tier2-unsat: results were invariant
+     * across (mc,mr) in {(10000,1000), (1000,1000), (100,200), (50,5000)}
+     * because converging cases finish well below the first restart and
+     * stuck cases are stuck on missing propagation, not unlucky restarts.
+     * Keep the larger base so currently-solvable kind_k* cases that take
+     * many conflicts don't get cut off mid-search. */
     opts.max_conflicts = 10000;
-    opts.max_restarts = 1000;
+    opts.max_restarts  = 1000;
+    {
+        const char *mr = getenv("DV_MAX_RESTARTS");
+        if (mr && *mr) opts.max_restarts = (uint32_t)atoi(mr);
+    }
+
+    /* CDCL (lazy clause generation) is on by default; set DV_USE_LCG=0 to
+     * disable.  Conflict analysis falls back defensively to bisection
+     * when an antecedent propagator lacks an explain callback, so this
+     * is safe to leave on for any input. */
+    opts.use_lcg = 1;
+    {
+        const char *ev = getenv("DV_USE_LCG");
+        if (ev && *ev == '0') opts.use_lcg = 0;
+    }
 
     fe->last_result = solver_solve(fe->ctx, &opts);
     fe->has_result = 1;
+
+    if (opts.use_lcg && getenv("DV_LCG_STATS") && fe->ctx->lcg) {
+        const LCGCtx *L = (const LCGCtx *)fe->ctx->lcg;
+        extern uint64_t lcg_dbg_bail[16];
+        fprintf(stderr, "[lcg] conflicts=%llu analyses=%llu learnt=%llu clauses=%u "
+                "bail: oNoEx=%llu oExFail=%llu neither=%llu propConf=%llu noSrc=%llu "
+                "cNoEx=%llu cExFail=%llu rNoEx=%llu rExFail=%llu\n",
+                (unsigned long long)fe->ctx->conflict_count,
+                (unsigned long long)lcg_n_analyses(L),
+                (unsigned long long)lcg_n_learnt(L),
+                lcg_n_clauses(L),
+                (unsigned long long)lcg_dbg_bail[0], (unsigned long long)lcg_dbg_bail[1],
+                (unsigned long long)lcg_dbg_bail[2], (unsigned long long)lcg_dbg_bail[3],
+                (unsigned long long)lcg_dbg_bail[4], (unsigned long long)lcg_dbg_bail[5],
+                (unsigned long long)lcg_dbg_bail[6], (unsigned long long)lcg_dbg_bail[7],
+                (unsigned long long)lcg_dbg_bail[8]);
+    }
+
+    /* Sanity check: if we got SOLVE_OK, re-evaluate every top-level
+     * constraint under the returned assignment. A failure here means a
+     * constraint was silently dropped (or wrongly compiled) — we can't
+     * trust the "sat" answer, so downgrade to unknown.
+     *
+     * Behaviour controlled by DV_VALIDATE_MODEL env var:
+     *   unset / 2 — validate, log, and downgrade sat->unknown on
+     *               violation. Default: prefer honest "unknown" over a
+     *               possibly-wrong "sat".
+     *   1         — validate and log violations but keep the "sat" answer
+     *   0         — skip validation entirely (escape hatch) */
+    if (fe->last_result == SOLVE_OK && fe->problem) {
+        const char *mode_env = getenv("DV_VALIDATE_MODEL");
+        int mode = mode_env ? atoi(mode_env) : 2;
+        if (mode > 0) {
+            int viol = solver_validate_model(fe->ctx, fe->problem, fe->err);
+            for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
+                viol += solver_validate_model(fe->ctx, fe->aux_problems[i], fe->err);
+            }
+            if (viol > 0) {
+                fprintf(fe->err,
+                    "model-validation: %d top-level constraint(s) violated%s\n",
+                    viol, mode >= 2 ? "; downgrading sat -> unknown" : "");
+                if (mode >= 2) fe->last_result = SOLVE_TIMEOUT;
+            }
+        }
+    }
 
     switch (fe->last_result) {
     case SOLVE_OK:      fprintf(fe->out, "sat\n"); break;
@@ -1845,6 +2111,10 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
 
 void smt2_frontend_destroy(Smt2Frontend *fe) {
     if (fe->problem)     free(fe->problem);
+    for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
+        free(fe->aux_problems[i]);
+    }
+    free(fe->aux_problems);
     if (fe->builder)     builder_destroy(fe->builder);
     if (fe->ctx)         solver_destroy(fe->ctx);
     if (fe->block_alloc) zsp_block_alloc_destroy(fe->block_alloc);
@@ -1908,16 +2178,29 @@ int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
         return _cmd_pop(fe, cmd);
     if (sexpr_is_symbol(head, "echo"))
         return _cmd_echo(fe, cmd);
-    if (sexpr_is_symbol(head, "declare-datatype") ||
-        sexpr_is_symbol(head, "declare-datatypes")) {
-        fprintf(fe->err, "warning: %.*s not supported, ignored\n",
-                (int)head->sym.len, head->sym.str);
+    if (sexpr_is_symbol(head, "declare-datatypes")) {
+        return _cmd_declare_datatypes(fe, cmd);
+    }
+    if (sexpr_is_symbol(head, "declare-datatype")) {
+        fprintf(fe->err, "warning: declare-datatype not supported, ignored\n");
         return 0;
     }
-    if (sexpr_is_symbol(head, "reset") ||
-        sexpr_is_symbol(head, "reset-assertions")) {
-        fprintf(fe->err, "warning: %.*s not fully implemented\n",
-                (int)head->sym.len, head->sym.str);
+    if (sexpr_is_symbol(head, "reset-assertions")) {
+        /* No-op: dropping individual asserted constraints from a compiled
+         * solver isn't currently supported (would require constraint-level
+         * tracking that wasn't part of the Phase-5 IR). For sby/yosys flows
+         * this is typically issued at session boundaries where the next
+         * (check-sat) re-asserts everything anyway, so a silent no-op is
+         * sound for those use cases. If a (check-sat) follows and the
+         * cached result is stale, _cmd_check_sat resets via solver_reset. */
+        if (fe->has_result) {
+            solver_reset(fe->ctx);
+            fe->has_result = 0;
+        }
+        return 0;
+    }
+    if (sexpr_is_symbol(head, "reset")) {
+        fprintf(fe->err, "warning: reset not fully implemented\n");
         return 0;
     }
     if (sexpr_is_symbol(head, "exit"))

@@ -197,7 +197,9 @@ typedef struct {
     uint32_t var_id;     /* 0-based index              */
     uint8_t  width;      /* bit width (1–64)           */
     uint8_t  is_signed;  /* non-zero = signed          */
-    uint8_t  _pad[2];
+    uint8_t  is_aux;     /* non-zero = compiler-generated aux (never a
+                          * search decision; determined by propagation) */
+    uint8_t  _pad;
     int64_t  lo;         /* initial lower bound        */
     int64_t  hi;         /* initial upper bound        */
 } VarSpec;

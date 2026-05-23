@@ -42,7 +42,8 @@ typedef struct {
     uint32_t max_conflicts;     /* max conflicts per restart (0=unlimited)*/
     uint32_t max_restarts;      /* max total restarts (0=unlimited)       */
     uint8_t  use_phase_save;    /* 1 = remember last assigned value       */
-    uint8_t  _pad[3];
+    uint8_t  use_lcg;           /* 1 = enable lazy clause generation (CDCL) */
+    uint8_t  _pad[2];
     uint32_t max_shave_iters;   /* pre-search bounds shaving budget (0=use default 1000) */
 } SolveOpts;
 

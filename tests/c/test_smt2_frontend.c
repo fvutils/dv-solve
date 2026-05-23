@@ -324,16 +324,36 @@ static void test_array_ite(void) {
 /* Task 5.5: declare-datatypes stub                                    */
 /* ------------------------------------------------------------------ */
 
-static void test_declare_datatypes_warning(void) {
+static void test_declare_datatypes_record_of_bv(void) {
+    Smt2Frontend fe;
+    smt2_frontend_init(&fe, stderr, stderr);
+    /* Phase 6.5.3: single-constructor record-of-BV is supported. */
+    int rc = _run(&fe, "(declare-datatypes ((T 0)) (((mk-t (fld (_ BitVec 8))))))\n");
+    ASSERT_EQ_INT(rc, 0);
+    /* Sort name 'T' should be registered as opaque, 'fld' as a sort-fun */
+    ASSERT_TRUE(fe.n_sort_names >= 1);
+    ASSERT_TRUE(fe.n_sort_funs  >= 1);
+    /* Round-trip: declare an instance, read its field, assert a value */
+    int rc2 = _run(&fe,
+        "(declare-const x T)"
+        "(assert (= (fld x) (_ bv5 8)))"
+        "(check-sat)");
+    ASSERT_EQ_INT(rc2, 0);
+    smt2_frontend_destroy(&fe);
+}
+
+static void test_declare_datatypes_rejects_sum(void) {
     Smt2Frontend fe;
     FILE *err_f = tmpfile();
     smt2_frontend_init(&fe, stderr, err_f);
-    int rc = _run(&fe, "(declare-datatypes ((T 0)) (((mk-t (fld (_ BitVec 8))))))\n");
-    ASSERT_EQ_INT(rc, 0);   /* session continues */
+    /* Two constructors → sum type, rejected. */
+    int rc = _run(&fe,
+        "(declare-datatypes ((Color 0)) (((red) (green) (blue))))");
+    ASSERT_EQ_INT(rc, -1);
     rewind(err_f);
     char buf[256] = {0};
     (void)fread(buf, 1, sizeof(buf)-1, err_f);
-    ASSERT_TRUE(strstr(buf, "warning") != NULL || strstr(buf, "not supported") != NULL);
+    ASSERT_TRUE(strstr(buf, "single-constructor") != NULL);
     fclose(err_f);
     smt2_frontend_destroy(&fe);
 }
@@ -544,6 +564,53 @@ static void test_let_malformed(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Modular bvadd-with-constant (Phase 6 follow-up #1).                */
+/* The non-modular bounds_add path produced unsound results on wrap;  */
+/* the new propagator must report unsat when the wrap rules things out */
+/* and sat when a valid wrap-yielding model exists.                   */
+/* ------------------------------------------------------------------ */
+
+static void test_bvadd_const_no_wrap_chain_unsat(void) {
+    Smt2Frontend fe;
+    char out[512];
+    smt2_frontend_init(&fe, stderr, stderr);
+    _run_capture(&fe,
+        "(set-logic QF_BV)"
+        "(declare-const c0 (_ BitVec 8))"
+        "(declare-const c1 (_ BitVec 8))"
+        "(declare-const c2 (_ BitVec 8))"
+        "(assert (= c0 #b00000000))"
+        "(assert (= c1 (bvadd c0 ((_ zero_extend 7) #b1))))"
+        "(assert (= c2 (bvadd c1 ((_ zero_extend 7) #b1))))"
+        /* both c1, c2 < 256 since they are 8-bit; assertion forces one >= 256 */
+        "(assert (or (bvuge ((_ zero_extend 1) c1) #b100000000)"
+        "            (bvuge ((_ zero_extend 1) c2) #b100000000)))"
+        "(check-sat)",
+        out, sizeof(out));
+    ASSERT_TRUE(strstr(out, "unsat") != NULL);
+    smt2_frontend_destroy(&fe);
+}
+
+static void test_bvadd_const_wrap_to_zero_sat(void) {
+    Smt2Frontend fe;
+    char out[512];
+    smt2_frontend_init(&fe, stderr, stderr);
+    /* a + 1 == 0 (mod 256) is satisfiable with a = 255; the non-modular
+     * propagator used to reject this as a contradiction. */
+    _run_capture(&fe,
+        "(set-logic QF_BV)"
+        "(declare-const a (_ BitVec 8))"
+        "(declare-const b (_ BitVec 8))"
+        "(assert (= b (bvadd a #b00000001)))"
+        "(assert (= b #b00000000))"
+        "(check-sat)",
+        out, sizeof(out));
+    ASSERT_TRUE(strstr(out, "sat") != NULL);
+    ASSERT_TRUE(strstr(out, "unsat") == NULL);
+    smt2_frontend_destroy(&fe);
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -563,7 +630,8 @@ int main(void) {
     RUN(test_array_select_of_store_R2);
     RUN(test_array_eq_elementwise);
     RUN(test_array_ite);
-    RUN(test_declare_datatypes_warning);
+    RUN(test_declare_datatypes_record_of_bv);
+    RUN(test_declare_datatypes_rejects_sum);
     RUN(test_regfile_simple_unsat);
     RUN(test_regfile_simple_sat);
     RUN(test_array_in_define_fun_param);
@@ -578,6 +646,10 @@ int main(void) {
     /* Task 6.4: declare-const Array under push/pop */
     RUN(test_array_push_pop_basic);
     RUN(test_array_push_pop_repeated);
+
+    /* Phase 6 follow-up #1: modular bvadd-with-constant */
+    RUN(test_bvadd_const_no_wrap_chain_unsat);
+    RUN(test_bvadd_const_wrap_to_zero_sat);
 
     printf("\n%d passed, %d failed\n", _passed, _failed);
     return _failed ? 1 : 0;

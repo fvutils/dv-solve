@@ -2,6 +2,7 @@
 #include "zsp_propagator.h"
 #include "zsp_ctx.h"
 #include "zsp_trail.h"
+#include "zsp_lcg.h"
 
 /* ------------------------------------------------------------------ */
 /* Internal: wake all watchers on a variable                          */
@@ -94,6 +95,25 @@ void prop_set_guard(SolveCtx *ctx, uint32_t prop_ref, uint32_t guard_var_id) {
 /* Domain-tightening                                                   */
 /* ------------------------------------------------------------------ */
 
+/* When LCG is active, notify the clause DB so that learnt clauses
+ * containing literals on this variable can propagate (or detect
+ * conflict).  Returns PROP_OK or PROP_CONFLICT. */
+static inline PropResult _lcg_notify_lb(SolveCtx *ctx, uint32_t var_id,
+                                         int64_t new_lb) {
+    if (!ctx->lcg) return PROP_OK;
+    LCGCtx *lcg = (LCGCtx *)ctx->lcg;
+    if (!lcg->enabled) return PROP_OK;
+    return clause_notify_lb(&lcg->clause_db, ctx, var_id, new_lb);
+}
+
+static inline PropResult _lcg_notify_ub(SolveCtx *ctx, uint32_t var_id,
+                                         int64_t new_ub) {
+    if (!ctx->lcg) return PROP_OK;
+    LCGCtx *lcg = (LCGCtx *)ctx->lcg;
+    if (!lcg->enabled) return PROP_OK;
+    return clause_notify_ub(&lcg->clause_db, ctx, var_id, new_ub);
+}
+
 PropResult ctx_tighten_lb32(SolveCtx *ctx, uint32_t var_id, int32_t new_lb) {
     Variable *v = &ctx->vars[var_id];
     if (new_lb <= v->lo) return PROP_OK;
@@ -105,7 +125,7 @@ PropResult ctx_tighten_lb32(SolveCtx *ctx, uint32_t var_id, int32_t new_lb) {
     if (v->lo == v->hi && var_id < 64)
         ctx->unassigned_mask &= ~(1ULL << var_id);
     if (ctx->watcher_heads) _wake_var(ctx, var_id);
-    return PROP_OK;
+    return _lcg_notify_lb(ctx, var_id, (int64_t)new_lb);
 }
 
 PropResult ctx_tighten_ub32(SolveCtx *ctx, uint32_t var_id, int32_t new_ub) {
@@ -118,7 +138,7 @@ PropResult ctx_tighten_ub32(SolveCtx *ctx, uint32_t var_id, int32_t new_ub) {
     if (v->lo == v->hi && var_id < 64)
         ctx->unassigned_mask &= ~(1ULL << var_id);
     if (ctx->watcher_heads) _wake_var(ctx, var_id);
-    return PROP_OK;
+    return _lcg_notify_ub(ctx, var_id, (int64_t)new_ub);
 }
 
 PropResult ctx_tighten_lb64(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
@@ -135,7 +155,7 @@ PropResult ctx_tighten_lb64(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
     if (lo == hi && var_id < 64)
         ctx->unassigned_mask &= ~(1ULL << var_id);
     if (ctx->watcher_heads) _wake_var(ctx, var_id);
-    return PROP_OK;
+    return _lcg_notify_lb(ctx, var_id, new_lb);
 }
 
 PropResult ctx_tighten_ub64(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
@@ -151,7 +171,7 @@ PropResult ctx_tighten_ub64(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
     if (lo == hi && var_id < 64)
         ctx->unassigned_mask &= ~(1ULL << var_id);
     if (ctx->watcher_heads) _wake_var(ctx, var_id);
-    return PROP_OK;
+    return _lcg_notify_ub(ctx, var_id, new_ub);
 }
 
 /* ------------------------------------------------------------------ */

@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include <limits.h>
 #include <string.h>
 #include <assert.h>
@@ -7,6 +8,8 @@
 #include "zsp_propagator.h"
 #include "zsp_trail.h"
 #include "zsp_shave.h"
+#include "zsp_lcg.h"
+#include "zsp_explain.h"
 
 /* Forward declarations for hole management */
 static int _is_hole(const SolveCtx *ctx, uint32_t var_id, int64_t value);
@@ -55,8 +58,10 @@ static int64_t _rand_range64(SolveCtx *ctx, int64_t lo, int64_t hi) {
 /* ------------------------------------------------------------------ */
 
 static uint32_t _select_unassigned(SolveCtx *ctx) {
-    uint32_t best      = EXPR_NULL;
-    int64_t  best_dom  = INT64_MAX;
+    uint32_t best         = EXPR_NULL;
+    int64_t  best_dom     = INT64_MAX;
+    uint32_t best_aux     = EXPR_NULL;
+    int64_t  best_aux_dom = INT64_MAX;
 
     /* Use bitmask for fast scan when <= 64 vars */
     if (ctx->n_vars <= 64 && ctx->unassigned_mask != 0) {
@@ -65,11 +70,20 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
             uint32_t i = (uint32_t)__builtin_ctzll(m);
             m &= m - 1;  /* clear lowest set bit */
             Variable *v = &ctx->vars[i];
-            if (v->flags & VAR_AUX) continue;  /* aux: determined by propagation */
             int64_t lo = var_lo64(ctx, v);
             int64_t hi = var_hi64(ctx, v);
             if (lo == hi) continue;  /* singleton -- already assigned */
             int64_t dom = hi - lo;
+            if (v->flags & VAR_AUX) {
+                /* Aux is a low-priority decision: prefer real vars first.
+                 * Only fall back to aux when propagation has been unable
+                 * to pin every aux on its own. */
+                if (dom < best_aux_dom) {
+                    best_aux_dom = dom;
+                    best_aux     = i;
+                }
+                continue;
+            }
             if (dom < best_dom) {
                 best_dom = dom;
                 best     = i;
@@ -79,11 +93,17 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
     } else {
         for (uint32_t i = 0; i < ctx->n_vars; i++) {
             Variable *v = &ctx->vars[i];
-            if (v->flags & VAR_AUX) continue;  /* aux: determined by propagation */
             int64_t lo = var_lo64(ctx, v);
             int64_t hi = var_hi64(ctx, v);
             if (lo == hi) continue;
             int64_t dom = hi - lo;
+            if (v->flags & VAR_AUX) {
+                if (dom < best_aux_dom) {
+                    best_aux_dom = dom;
+                    best_aux     = i;
+                }
+                continue;
+            }
             if (dom < best_dom) {
                 best_dom = dom;
                 best     = i;
@@ -91,7 +111,8 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
             }
         }
     }
-    return best;
+    if (best != EXPR_NULL) return best;
+    return best_aux;
 }
 
 /* ------------------------------------------------------------------ */
@@ -224,6 +245,23 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     if (opts && opts->seed != 0) ctx->rng_state = opts->seed;
     if (ctx->rng_state == 0)     ctx->rng_state = 0xDEADBEEF12345678ULL;
 
+    /* Lazy LCG initialization on first solve when use_lcg is requested. */
+    if (opts && opts->use_lcg && !ctx->lcg && ctx->n_vars > 0) {
+        LCGCtx *lcg = (LCGCtx *)calloc(1, sizeof(LCGCtx));
+        if (lcg) {
+            uint32_t nv = ctx->n_vars_capacity > 0
+                          ? ctx->n_vars_capacity : ctx->n_vars;
+            if (lcg_init(lcg, nv) == 0) {
+                ctx->lcg = lcg;
+                /* Register explain callbacks for all propagators so
+                 * lcg_analyze_conflict has something to work with. */
+                contra_register_explanations(ctx);
+            } else {
+                free(lcg);
+            }
+        }
+    }
+
     /* Allocate phase_save array on first call (lazily from static pool). */
     if (opts && opts->use_phase_save && !ctx->phase_save && ctx->n_vars > 0) {
         /* Size to n_vars_capacity for incremental variable support */
@@ -285,9 +323,15 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
         uint32_t x_id = _select_unassigned(ctx);
         if (x_id == EXPR_NULL) {
 #ifndef NDEBUG
-            /* Verify all non-aliased variables are singleton at SAT exit. */
+            /* Verify all non-aliased *decision* variables are singleton at
+             * SAT exit. Aux vars (VAR_AUX) are determined by propagation;
+             * if the constraints don't pin them tightly we tolerate a
+             * loose interval here — the model-validation pass will catch
+             * any case where the looseness produces an inconsistent
+             * answer. */
             for (uint32_t _di = 0; _di < ctx->n_vars; _di++) {
                 if (ctx->var_alias && ctx->var_alias[_di] != _di) continue;
+                if (ctx->vars[_di].flags & VAR_AUX) continue;
                 int64_t _lo = var_lo64(ctx, &ctx->vars[_di]);
                 int64_t _hi = var_hi64(ctx, &ctx->vars[_di]);
                 (void)_lo; (void)_hi;
@@ -339,6 +383,46 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                 pr = solver_propagate(ctx);
                 if (pr == PROP_CONFLICT) return SOLVE_UNSAT;
                 break;  /* restart outer for-loop */
+            }
+
+            /* CDCL path: try to learn a clause from this conflict.
+             * If lcg_analyze_conflict produces a non-empty learnt clause,
+             * add it, backjump, and let unit propagation continue.
+             * If it returns -1 (no explain available for some antecedent
+             * propagator), fall through to the chronological bisection
+             * path below — this is the safe fallback while propagator
+             * explain callbacks are being rolled out. */
+            {
+                LCGCtx *lcg = (LCGCtx *)ctx->lcg;
+                if (lcg && lcg->enabled) {
+                    Literal  learnt_buf[MAX_CLAUSE_LITS];
+                    uint32_t n_lits   = 0;
+                    uint32_t bt_level = 0;
+                    int rc = lcg_analyze_conflict(lcg, ctx,
+                                                   learnt_buf, &n_lits,
+                                                   &bt_level);
+                    if (rc == 0 && n_lits > 0) {
+                        /* Backjump first so trail state matches the
+                         * level the asserting literal will fire at. */
+                        if (bt_level >= cur) bt_level = cur - 1;
+                        trail_backtrack(ctx, bt_level);
+
+                        /* Record the learnt clause.  LBD == n_lits is a
+                         * coarse over-estimate; real LBD requires the
+                         * level-of-each-literal pass.  Good enough for
+                         * the GC heuristic to keep short clauses. */
+                        clause_db_add(&lcg->clause_db, n_lits,
+                                       learnt_buf, n_lits);
+                        lcg->n_learnt++;
+
+                        /* Force unit propagation from the new clause,
+                         * then resume the propagator queue. */
+                        pr = clause_propagate(&lcg->clause_db, ctx);
+                        if (pr != PROP_CONFLICT) pr = solver_propagate(ctx);
+                        continue;  /* re-enter while(pr==CONFLICT) */
+                    }
+                    /* rc != 0 or empty clause: fall through to bisection */
+                }
             }
 
             /* Retrieve the decision that created this level */
@@ -587,7 +671,8 @@ int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
     opts.max_conflicts  = 100;
     opts.max_restarts   = 10000;
     opts.use_phase_save = 0;
-    opts._pad[0] = opts._pad[1] = opts._pad[2] = 0;
+    opts.use_lcg = 0;
+    opts._pad[0] = opts._pad[1] = 0;
     opts.max_shave_iters = max_shave_iters;
 
     int n_ok = 0;

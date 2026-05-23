@@ -182,6 +182,16 @@ typedef struct { Propagator hdr; PropWatchSect ws; } Reification_64_t;
 typedef struct { Propagator hdr; PropWatchSect ws; } ReificationEq_32_t;
 
 
+/* BvAddConst_64: r = (x + c) mod 2^width  (BV modular add with constant).
+   var_ids[0]=r, var_ids[1]=x.  Width is 1..64. */
+typedef struct {
+    Propagator    hdr;
+    PropWatchSect ws;
+    uint64_t      c;        /* reduced mod 2^width */
+    uint8_t       width;    /* 1..64 */
+    uint8_t       _cpad[7];
+} BvAddConst_64_t;
+
 /* BitSlice_32: r = a[hi_bit:lo_bit]  var_ids[0]=r, var_ids[1]=a */
 typedef struct {
     Propagator  hdr;
@@ -268,6 +278,9 @@ uint32_t prop_add_bounds_lt_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint
 uint32_t prop_add_bounds_eq_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
 uint32_t prop_add_bounds_ne_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
 uint32_t prop_add_bounds_add_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
+/** Modular BV add with constant: r = (x + c) mod 2^width. width is 1..64. */
+uint32_t prop_add_bvadd_const_64(SolveCtx *ctx, uint32_t r_id, uint32_t x_id,
+                                  uint64_t c, uint8_t width, uint8_t priority);
 uint32_t prop_add_bounds_mul_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
 uint32_t prop_add_bounds_div_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
 uint32_t prop_add_bounds_mod_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);

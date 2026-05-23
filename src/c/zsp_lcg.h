@@ -201,6 +201,11 @@ typedef struct {
 int  lcg_init(LCGCtx *lcg, uint32_t n_vars);
 void lcg_destroy(LCGCtx *lcg);
 
+/* Diagnostic accessors */
+uint64_t lcg_n_learnt(const LCGCtx *lcg);
+uint64_t lcg_n_analyses(const LCGCtx *lcg);
+uint32_t lcg_n_clauses(const LCGCtx *lcg);
+
 /**
  * Perform 1UIP conflict analysis.
  *

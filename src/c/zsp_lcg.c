@@ -4,6 +4,8 @@
 #include "zsp_ctx.h"
 #include "zsp_propagator.h"
 
+#define PROP_WS(p) ((PropWatchSect *)((char *)(p) + sizeof(Propagator)))
+
 /* ================================================================== */
 /* Clause Database                                                     */
 /* ================================================================== */
@@ -197,6 +199,10 @@ int lcg_init(LCGCtx *lcg, uint32_t n_vars) {
     return 0;
 }
 
+uint64_t lcg_n_learnt(const LCGCtx *lcg)   { return lcg ? lcg->n_learnt : 0; }
+uint64_t lcg_n_analyses(const LCGCtx *lcg) { return lcg ? lcg->n_analyses : 0; }
+uint32_t lcg_n_clauses(const LCGCtx *lcg)  { return lcg ? lcg->clause_db.n_clauses : 0; }
+
 void lcg_destroy(LCGCtx *lcg) {
     clause_db_destroy(&lcg->clause_db);
     vsids_destroy(&lcg->vsids);
@@ -205,6 +211,13 @@ void lcg_destroy(LCGCtx *lcg) {
     free(lcg->learnt_buf);
     memset(lcg, 0, sizeof(*lcg));
 }
+
+/* Debug counters for analyzer bail-outs. Printed by smt2 frontend when
+ * DV_LCG_STATS is set.  Tagged: A=other_no_explain, B=other_explain_fail,
+ * C=neither_at_cur_level, D=propagator_conflict_no_var,
+ * E=cannot_determine_source, F=cur_no_explain, G=cur_explain_fail,
+ * H=resolution_no_explain, I=resolution_explain_fail. */
+uint64_t lcg_dbg_bail[16];
 
 int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
                           Literal *out_lits, uint32_t *out_n,
@@ -333,17 +346,17 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
             if (other_entry->prop_ref != EXPR_NULL) {
                 Propagator *p = (Propagator *)zsp_pool_ptr(
                     &ctx->pool, other_entry->prop_ref);
-                if (p->explain) {
-                    Explanation expl;
-                    int64_t bv = other_lit.is_lb
-                        ? var_lo64(ctx, &ctx->vars[conflict_var])
-                        : var_hi64(ctx, &ctx->vars[conflict_var]);
-                    if (p->explain(p, ctx, conflict_var,
-                                   other_lit.is_lb, bv, &expl) == 0) {
-                        for (uint32_t i = 0; i < expl.n_lits; i++)
-                            ADD_EXPL_LIT(expl.lits[i]);
-                    }
+                if (!p->explain) { lcg_dbg_bail[0]++; return -1; }
+                Explanation expl;
+                int64_t bv = other_lit.is_lb
+                    ? var_lo64(ctx, &ctx->vars[conflict_var])
+                    : var_hi64(ctx, &ctx->vars[conflict_var]);
+                if (p->explain(p, ctx, conflict_var,
+                               other_lit.is_lb, bv, &expl) != 0) {
+                    lcg_dbg_bail[1]++; return -1;
                 }
+                for (uint32_t i = 0; i < expl.n_lits; i++)
+                    ADD_EXPL_LIT(expl.lits[i]);
             }
             /* Count the other_entry as being at the current level.
              * Since it was resolved (explained), don't increment
@@ -360,7 +373,7 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
             other_entry = lb_entry;
         } else {
             /* Neither at current level: shouldn't happen. */
-            return -1;
+            lcg_dbg_bail[2]++; return -1;
         }
 
         /* Process the current-level entry as the UIP candidate */
@@ -382,17 +395,17 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
             if (cur_entry->prop_ref != EXPR_NULL) {
                 Propagator *p = (Propagator *)zsp_pool_ptr(
                     &ctx->pool, cur_entry->prop_ref);
-                if (p->explain) {
-                    Explanation expl;
-                    int64_t bv = cl.is_lb
-                        ? var_lo64(ctx, &ctx->vars[conflict_var])
-                        : var_hi64(ctx, &ctx->vars[conflict_var]);
-                    if (p->explain(p, ctx, conflict_var,
-                                   cl.is_lb, bv, &expl) == 0) {
-                        for (uint32_t i = 0; i < expl.n_lits; i++)
-                            ADD_EXPL_LIT(expl.lits[i]);
-                    }
+                if (!p->explain) { lcg_dbg_bail[5]++; return -1; }
+                Explanation expl;
+                int64_t bv = cl.is_lb
+                    ? var_lo64(ctx, &ctx->vars[conflict_var])
+                    : var_hi64(ctx, &ctx->vars[conflict_var]);
+                if (p->explain(p, ctx, conflict_var,
+                               cl.is_lb, bv, &expl) != 0) {
+                    lcg_dbg_bail[6]++; return -1;
                 }
+                for (uint32_t i = 0; i < expl.n_lits; i++)
+                    ADD_EXPL_LIT(expl.lits[i]);
             }
         }
 
@@ -415,14 +428,40 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
                 bt_level = other_entry->decision_level;
         }
     } else if (ctx->conflict_prop_ref != EXPR_NULL) {
-        /* Propagator conflict (e.g. NoOverlap2D detected geometric
-         * infeasibility without emptying a domain). For now, skip
-         * clause learning for this case -- fall through to
-         * chronological backtracking.  The propagator-conflict
-         * explanation path needs more work to produce sound clauses. */
-        return -1;
+        /* Propagator-conflict path: a propagator's fire returned
+         * PROP_CONFLICT without any var hitting lo > hi (e.g.
+         * bounds_eq saw x ∩ y = ∅ before tightening).  Build the
+         * antecedent set from the propagator's current watch-var
+         * bounds: the conjunction of these current LB/UB literals
+         * implies the conflict.  The learnt clause is their negation,
+         * which says "at least one of these bounds must change". */
+        Propagator *cp = (Propagator *)zsp_pool_ptr(
+            &ctx->pool, ctx->conflict_prop_ref);
+        PropWatchSect *ws = PROP_WS(cp);
+        if (ws->n_watches == 0) {
+            lcg_dbg_bail[3]++; return -1;
+        }
+        for (uint32_t i = 0; i < ws->n_watches; i++) {
+            uint32_t vid = ws->var_ids[i];
+            if (vid >= ctx->n_vars) continue;
+            int64_t vlo = var_lo64(ctx, &ctx->vars[vid]);
+            int64_t vhi = var_hi64(ctx, &ctx->vars[vid]);
+            Literal llb; llb.var_id = vid; llb.is_lb = 1;
+            llb.bound = (int32_t)vlo;
+            llb._pad[0] = llb._pad[1] = llb._pad[2] = 0;
+            ADD_EXPL_LIT(llb);
+            Literal lub; lub.var_id = vid; lub.is_lb = 0;
+            lub.bound = (int32_t)vhi;
+            lub._pad[0] = lub._pad[1] = lub._pad[2] = 0;
+            ADD_EXPL_LIT(lub);
+        }
+        /* If nothing got added at current level, we can't form a UIP.
+         * Fall back to chronological backtracking. */
+        if (n_at_cur_level == 0) {
+            lcg_dbg_bail[3]++; return -1;
+        }
     } else {
-        /* Cannot determine conflict source */
+        lcg_dbg_bail[4]++;
         return -1;
     }
 
@@ -449,26 +488,18 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
 
         /* Resolve through propagator explanation */
         Propagator *p = (Propagator *)zsp_pool_ptr(&ctx->pool, e->prop_ref);
-        if (p->explain) {
-            Explanation expl;
-            int64_t bv = (e->kind == TRAIL_LB)
-                ? var_lo64(ctx, &ctx->vars[e->var_id])
-                : var_hi64(ctx, &ctx->vars[e->var_id]);
-            int rc = p->explain(p, ctx, e->var_id,
-                                 (e->kind == TRAIL_LB) ? 1 : 0,
-                                 bv, &expl);
-            if (rc == 0) {
-                for (uint32_t i = 0; i < expl.n_lits; i++)
-                    ADD_EXPL_LIT(expl.lits[i]);
-                e = e->prev;
-                continue;
-            }
-        }
-
-        /* No explanation available: treat as decision */
-        /* Can't resolve: treat as UIP */
-        n_at_cur_level = 1;
-        lcg->seen[e->var_id] = 1;
+        if (!p->explain) { lcg_dbg_bail[7]++; return -1; }
+        Explanation expl;
+        int64_t bv = (e->kind == TRAIL_LB)
+            ? var_lo64(ctx, &ctx->vars[e->var_id])
+            : var_hi64(ctx, &ctx->vars[e->var_id]);
+        int rc = p->explain(p, ctx, e->var_id,
+                             (e->kind == TRAIL_LB) ? 1 : 0,
+                             bv, &expl);
+        if (rc != 0) { lcg_dbg_bail[8]++; return -1; }
+        for (uint32_t i = 0; i < expl.n_lits; i++)
+            ADD_EXPL_LIT(expl.lits[i]);
+        e = e->prev;
         continue;
     }
 

@@ -503,12 +503,19 @@ ExprRef builder_add_var(SolveProblemBuilder *b, uint32_t var_id,
     v->var_id     = var_id;
     v->width      = width;
     v->is_signed  = is_signed;
-    v->_pad[0]    = v->_pad[1] = 0;
+    v->is_aux     = 0;
+    v->_pad       = 0;
     v->lo         = lo;
     v->hi         = hi;
     b->vars_head  = ref;
     b->n_vars++;
     return ref;
+}
+
+void builder_mark_var_aux(SolveProblemBuilder *b, ExprRef var_ref) {
+    if (var_ref == EXPR_NULL) return;
+    VarSpec *v = (VarSpec *)builder_ref_ptr(b, var_ref);
+    if (v) v->is_aux = 1;
 }
 
 ExprRef builder_add_constraint(SolveProblemBuilder *b, ExprRef root) {
