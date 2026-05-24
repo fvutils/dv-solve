@@ -46,7 +46,7 @@ typedef struct {
     uint32_t         decision_level;
     uint32_t         n_vars_at_cp;
     uint32_t         n_props_at_cp;
-    uint32_t         _cp_pad;
+    uint32_t         n_clauses_at_cp;  /* learnt-clause count at checkpoint */
     TrailEntry      *trail_top;
     uint64_t         trail_count;
     zsp_stack_mark_t stack_mark;

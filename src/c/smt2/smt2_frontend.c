@@ -216,7 +216,14 @@ static int _parse_bv_sym(const Sexpr *sym, uint64_t *val_out) {
 /* ------------------------------------------------------------------ */
 
 static uint32_t _next_var_id(Smt2Frontend *fe) {
-    return fe->n_vars;
+    /* The frontend allocates IDs starting from its own n_vars, but the
+     * backend may have allocated extra internal aux vars (constant-aux
+     * for reification, ITE result aux, etc.) inside solver_compile that
+     * the frontend never saw. Skip past those so a fresh frontend aux
+     * doesn't collide with a backend slot already in use. */
+    uint32_t id = fe->n_vars;
+    if (fe->ctx && fe->ctx->n_vars > id) id = fe->ctx->n_vars;
+    return id;
 }
 
 static uint32_t _fresh_aux(Smt2Frontend *fe, uint16_t width) {
@@ -231,6 +238,10 @@ static uint32_t _fresh_aux(Smt2Frontend *fe, uint16_t width) {
     char name[SMT2_MAX_NAME];
     snprintf(name, sizeof(name), "__aux%u", var_id);
     _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint8_t)width);
+    /* If _next_var_id skipped past fe->n_vars to dodge backend-internal
+     * aux slots, sync fe->n_vars up so the next allocation doesn't
+     * collide with the var we just claimed. */
+    if (var_id + 1 > fe->n_vars) fe->n_vars = var_id + 1;
     if (fe->compiled) fe->has_aux = 1;
     return var_id;
 }

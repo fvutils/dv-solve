@@ -764,10 +764,26 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
     /* Comparison: turn into a reified guard. Supported shapes are
      * (cmp var const), (cmp const var), and (cmp var var). For non-EQ
      * comparisons we canonicalise to `x ≤ y` (the form reification_32
-     * speaks) and invert when needed via an extra add-to-1 var. */
+     * speaks) and invert when needed via an extra add-to-1 var.
+     *
+     * Also accept EXTRACT (and other value-producing) shapes on
+     * either side by materialising them to an aux var via
+     * _value_to_var. Without this, an incrementally-added
+     * (or (= ((_ extract H L) v) k) ...) silently drops to
+     * _compile_constraint's "uncompiled" path and search returns
+     * spurious unsat (see regression_or_extract_xfail.smt2). */
     uint32_t cmp_vid; int64_t cmp_cv;
     int is_vc = _is_var(sp, eb->lhs, &cmp_vid) && _is_const(sp, eb->rhs, &cmp_cv);
     int is_cv = !is_vc && _is_const(sp, eb->lhs, &cmp_cv) && _is_var(sp, eb->rhs, &cmp_vid);
+    if (!is_vc && !is_cv) {
+        if (_is_const(sp, eb->rhs, &cmp_cv)) {
+            uint32_t v = _value_to_var(ctx, sp, eb->lhs, 0);
+            if (v != EXPR_NULL) { cmp_vid = v; is_vc = 1; }
+        } else if (_is_const(sp, eb->lhs, &cmp_cv)) {
+            uint32_t v = _value_to_var(ctx, sp, eb->rhs, 0);
+            if (v != EXPR_NULL) { cmp_vid = v; is_cv = 1; }
+        }
+    }
 
     if (is_vc || is_cv) {
         /* Effective op as if var is on the left. */
@@ -2724,7 +2740,23 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
 int solver_add_constraint(SolveCtx *ctx, SolveProblem *aux_sp) {
     int n_uncompiled = 0;
 
-    /* ---- Add new variables ---- */
+    /* ---- Add new variables ----
+     * Builder's vars_head is LIFO, so we need to walk twice: first
+     * to find the max new var id (giving us the right ctx->n_vars
+     * target), then to actually initialise. Otherwise lower-id new
+     * vars get skipped because the LIFO walk has already pushed
+     * ctx->n_vars past them. */
+    uint32_t init_base_n_vars = ctx->n_vars;
+    {
+        ExprRef vref = aux_sp->vars_head;
+        while (vref != EXPR_NULL) {
+            VarSpec *vs = (VarSpec *)zsp_pool_ptr(&aux_sp->pool, vref);
+            if (vs->var_id + 1 > ctx->n_vars)
+                ctx->n_vars = vs->var_id + 1;
+            vref = vs->next;
+        }
+    }
+
     ExprRef vref = aux_sp->vars_head;
     while (vref != EXPR_NULL) {
         VarSpec *vs = (VarSpec *)zsp_pool_ptr(&aux_sp->pool, vref);
@@ -2732,7 +2764,11 @@ int solver_add_constraint(SolveCtx *ctx, SolveProblem *aux_sp) {
 
         if (id >= ctx->n_vars_capacity) return -1;  /* no room */
 
-        if (id >= ctx->n_vars) {
+        /* "New" means added to the SolveProblem this call. Use the
+         * pre-call n_vars as the discriminator. Vars at ids below
+         * that boundary already exist in the solver context and
+         * mustn't be re-initialised. */
+        if (id >= init_base_n_vars) {
             /* New variable: initialise it */
             Variable *v = &ctx->vars[id];
             uint8_t flags = 0;

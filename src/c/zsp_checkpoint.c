@@ -1,5 +1,6 @@
 #include <string.h>
 #include "zsp_ctx.h"
+#include "zsp_lcg.h"
 #include "zsp_propagator.h"
 #include "zsp_trail.h"
 
@@ -16,9 +17,9 @@ int solver_checkpoint(SolveCtx *ctx) {
     m->decision_level = ctx->decision_level;
     m->n_vars_at_cp   = ctx->n_vars;
     m->n_props_at_cp  = ctx->n_props;
+    m->n_clauses_at_cp = ctx->lcg ? ((LCGCtx *)ctx->lcg)->clause_db.n_clauses : 0;
     m->trail_top      = ctx->trail_top;
     m->trail_count    = ctx->trail_count;
-    m->_cp_pad        = 0;
 
     if (ctx->dynamic)
         m->stack_mark = zsp_stack_push(ctx->dynamic);
@@ -41,20 +42,48 @@ void solver_restore(SolveCtx *ctx, uint32_t cp) {
     /* Backtrack trail to undo all domain changes since checkpoint */
     trail_backtrack(ctx, m->decision_level);
 
-    /* Deactivate propagators added after checkpoint by setting ENTAILED.
-       They remain in watcher chains but fire as no-ops. */
+    /* Remove propagators added after checkpoint. NULL'ing the
+     * prop_refs[] slot is enough — watcher chains may still point
+     * at the (now-dead) propagator memory, but neither _wake_var nor
+     * solver_propagate iterate prop_refs slots that are NULL.
+     * Marking ENTAILED alone wasn't sufficient: solver_reset()
+     * clears the ENTAILED bit on every slot in prop_refs, which
+     * silently re-activated post-checkpoint props after a pop +
+     * subsequent check-sat. The new vars at reused IDs would then
+     * be constrained by stale propagators from the popped scope
+     * and search returned spurious unsat. */
     if (ctx->prop_refs) {
         for (uint32_t i = m->n_props_at_cp; i < ctx->n_props; i++) {
             uint32_t pref = ctx->prop_refs[i];
             if (pref != EXPR_NULL) {
                 Propagator *p = (Propagator *)zsp_pool_ptr(&ctx->pool, pref);
+                /* Mark entailed too in case the watcher chain still
+                 * iterates the propagator before its slot is checked. */
                 p->flags |= PROP_FLAG_ENTAILED;
+                ctx->prop_refs[i] = EXPR_NULL;
             }
         }
     }
+    /* Roll back n_props as well so future allocations get fresh
+     * slots rather than colliding with the dead entries. */
+    ctx->n_props = m->n_props_at_cp;
 
     /* Restore variable count */
     ctx->n_vars = m->n_vars_at_cp;
+
+    /* Drop learnt clauses added between checkpoint and now. Their
+     * literals reference var IDs that may be reused for fresh aux
+     * vars in the post-pop scope — keeping the clauses around would
+     * mis-interpret them against the new vars and produce spurious
+     * unsat results. Set to NULL (the arena memory stays; clause_db
+     * scans skip NULL entries). */
+    if (ctx->lcg) {
+        ClauseDB *db = &((LCGCtx *)ctx->lcg)->clause_db;
+        for (uint32_t i = m->n_clauses_at_cp; i < db->n_clauses; i++) {
+            db->clauses[i] = NULL;
+        }
+        db->n_clauses = m->n_clauses_at_cp;
+    }
 
     /* Pop this and all later checkpoints */
     ctx->n_checkpoints = cp;
