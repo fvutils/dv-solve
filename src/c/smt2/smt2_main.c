@@ -148,7 +148,20 @@ static int _run_batch(FILE *f, int show_stats) {
     sexpr_arena_init(&arena, 8192);
 
     Smt2Frontend fe;
-    smt2_frontend_init(&fe, stdout, stderr);
+    /* When stdout is a pipe (e.g. driven by yosys-smtbmc whose
+     * Popen has stderr=STDOUT), routing diagnostics to stderr
+     * pollutes the response channel — yosys-smtbmc reads the
+     * combined stream and treats any non-protocol line as an
+     * "unexpected response". Redirect diagnostics to a log file
+     * in that case so the SMT2 response channel stays clean. */
+    FILE *err_fp = stderr;
+    if (!isatty(fileno(stdout))) {
+        const char *log_env = getenv("DV_LOG");
+        const char *log_path = (log_env && *log_env) ? log_env : "/tmp/dv-solve.log";
+        FILE *lf = fopen(log_path, "a");
+        if (lf) err_fp = lf;
+    }
+    smt2_frontend_init(&fe, stdout, err_fp);
     fe.print_stats = show_stats;
 
     int exit_code = 0;
@@ -182,7 +195,20 @@ static int _run_interactive(FILE *f, int show_stats) {
     sexpr_arena_init(&arena, 8192);
 
     Smt2Frontend fe;
-    smt2_frontend_init(&fe, stdout, stderr);
+    /* When stdout is a pipe (e.g. driven by yosys-smtbmc whose
+     * Popen has stderr=STDOUT), routing diagnostics to stderr
+     * pollutes the response channel — yosys-smtbmc reads the
+     * combined stream and treats any non-protocol line as an
+     * "unexpected response". Redirect diagnostics to a log file
+     * in that case so the SMT2 response channel stays clean. */
+    FILE *err_fp = stderr;
+    if (!isatty(fileno(stdout))) {
+        const char *log_env = getenv("DV_LOG");
+        const char *log_path = (log_env && *log_env) ? log_env : "/tmp/dv-solve.log";
+        FILE *lf = fopen(log_path, "a");
+        if (lf) err_fp = lf;
+    }
+    smt2_frontend_init(&fe, stdout, err_fp);
     fe.print_stats = show_stats;
 
     int exit_code = 0;

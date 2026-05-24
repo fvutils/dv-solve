@@ -1931,10 +1931,19 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
             }
             if (cat_var_side != EXPR_NULL && cat_cat_side != EXPR_NULL) {
                 ExprVar *ev = (ExprVar *)zsp_pool_ptr(&sp->pool, cat_var_side);
-                uint32_t r_id = ev->var_id;
+                uint32_t r_id = _resolve(ctx, ev->var_id);
                 ExprConcat *cat = (ExprConcat *)zsp_pool_ptr(&sp->pool, cat_cat_side);
-                uint32_t hi_id, lo_id;
-                if (_is_var(sp, cat->hi, &hi_id) && _is_var(sp, cat->lo, &lo_id)) {
+                /* Materialise hi and lo to vars. Const operands need
+                 * to become aux singleton vars so the concat propagator
+                 * has a real var to watch on each side. Without this,
+                 * a (concat #b0 v27) (very common in yosys output)
+                 * silently dropped the binding constraint. */
+                uint8_t r_w = ctx->vars[r_id].width;
+                uint8_t lo_w = cat->lo_width;
+                uint8_t hi_w = (r_w >= lo_w) ? (uint8_t)(r_w - lo_w) : 0;
+                uint32_t hi_id = _value_to_var(ctx, sp, cat->hi, hi_w);
+                uint32_t lo_id = _value_to_var(ctx, sp, cat->lo, lo_w);
+                if (hi_id != EXPR_NULL && lo_id != EXPR_NULL) {
                     prop_add_bounds_concat_64(ctx, r_id, hi_id, lo_id,
                                               cat->lo_width, 0);
                     return 1;

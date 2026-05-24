@@ -41,7 +41,10 @@ static void _cmd_alloc_reset(Smt2Frontend *fe) {
 
 static int _add_var(Smt2Frontend *fe, const char *name, uint32_t len,
                     uint32_t var_id, uint8_t width) {
-    if (fe->n_vars == fe->vars_cap) {
+    /* Grow to fit. n_vars may have been bumped past vars_cap by
+     * _next_var_id syncing with backend-allocated ctx->n_vars
+     * (see _fresh_aux). Loop until the slot at n_vars is valid. */
+    while (fe->n_vars >= fe->vars_cap) {
         uint32_t newcap = fe->vars_cap ? fe->vars_cap * 2 : 16;
         Smt2Var *tmp = (Smt2Var *)realloc(fe->vars, newcap * sizeof(Smt2Var));
         if (!tmp) return -1;

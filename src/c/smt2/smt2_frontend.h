@@ -18,7 +18,7 @@ extern "C" {
 /* ------------------------------------------------------------------ */
 
 #define SMT2_MAX_NAME       128
-#define SMT2_MAX_FUNS        64
+#define SMT2_MAX_FUNS      8192   /* yosys-smtbmc emits one per BMC unroll step */
 #define SMT2_MAX_FUN_PARAMS   8
 #define SMT2_MAX_SORTS       16
 #define SMT2_MAX_SORT_FUNS  256
