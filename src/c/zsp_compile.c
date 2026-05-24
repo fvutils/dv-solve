@@ -1846,10 +1846,15 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
             }
             if (ext_var_side != EXPR_NULL && ext_ext_side != EXPR_NULL) {
                 ExprVar *ev = (ExprVar *)zsp_pool_ptr(&sp->pool, ext_var_side);
-                uint32_t r_id = ev->var_id;
+                uint32_t r_id = _resolve(ctx, ev->var_id);
                 ExprExtend *ext = (ExprExtend *)zsp_pool_ptr(&sp->pool, ext_ext_side);
-                uint32_t operand_id;
-                if (_is_var(sp, ext->operand, &operand_id)) {
+                /* Materialise the operand (could be EXTRACT, ITE, or
+                 * any value-producing expr — yosys produces all of
+                 * these). Without this fallback, the EQ binding
+                 * dropped silently and the validator flagged the
+                 * resulting model as a (zext ...) mismatch. */
+                uint32_t operand_id = _value_to_var(ctx, sp, ext->operand, ext->from_bits);
+                if (operand_id != EXPR_NULL) {
                     if (!ext->sign_extend) {
                         /* Zero-extend: r in [0, (1<<from_bits)-1] */
                         int64_t max_val = (ext->from_bits < 64)

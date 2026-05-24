@@ -53,7 +53,9 @@ void solver_restore(SolveCtx *ctx, uint32_t cp) {
      * be constrained by stale propagators from the popped scope
      * and search returned spurious unsat. */
     if (ctx->prop_refs) {
-        for (uint32_t i = m->n_props_at_cp; i < ctx->n_props; i++) {
+        uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
+                       ? ctx->n_props : ctx->n_prop_refs_capacity;
+        for (uint32_t i = m->n_props_at_cp; i < lim; i++) {
             uint32_t pref = ctx->prop_refs[i];
             if (pref != EXPR_NULL) {
                 Propagator *p = (Propagator *)zsp_pool_ptr(&ctx->pool, pref);
@@ -67,6 +69,31 @@ void solver_restore(SolveCtx *ctx, uint32_t cp) {
     /* Roll back n_props as well so future allocations get fresh
      * slots rather than colliding with the dead entries. */
     ctx->n_props = m->n_props_at_cp;
+
+    /* Clear the propagator queue. Stale entries from inside-push
+     * propagators (now NULL'd in prop_refs but possibly queued by
+     * watcher-chain side effects) could otherwise be dequeued and
+     * deref'd as ENTAILED check happens after dequeue — but the
+     * pool memory may be in an inconsistent state. */
+    ctx->queue.non_empty_mask = 0;
+    for (int i = 0; i < 16; i++) {
+        ctx->queue.heads[i] = EXPR_NULL;
+        ctx->queue.tails[i] = EXPR_NULL;
+    }
+    /* Re-enqueue pre-checkpoint props (capped at side-table size). */
+    if (ctx->prop_refs) {
+        uint32_t lim = m->n_props_at_cp < ctx->n_prop_refs_capacity
+                       ? m->n_props_at_cp : ctx->n_prop_refs_capacity;
+        for (uint32_t i = 0; i < lim; i++) {
+            uint32_t pref = ctx->prop_refs[i];
+            if (pref != EXPR_NULL) {
+                Propagator *p = (Propagator *)zsp_pool_ptr(&ctx->pool, pref);
+                p->flags &= (uint8_t)~(PROP_FLAG_ENTAILED | PROP_FLAG_IN_QUEUE);
+                p->queue_next = EXPR_NULL;
+                prop_enqueue(ctx, pref);
+            }
+        }
+    }
 
     /* Restore variable count */
     ctx->n_vars = m->n_vars_at_cp;
