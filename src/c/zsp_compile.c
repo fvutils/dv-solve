@@ -2326,6 +2326,13 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
     #define VAR_SLACK_FACTOR 32u
     uint32_t slack = n * VAR_SLACK_FACTOR;
     if (slack < VAR_SLACK_MIN) slack = VAR_SLACK_MIN;
+    /* When the SMT2 frontend signals incremental mode (yosys-smtbmc
+     * emits unboundedly many aux vars per BMC step), grow capacity
+     * generously so we don't have to realloc the vars array. */
+    if (ctx->incremental_capacity_hint) {
+        uint32_t want = ctx->incremental_capacity_hint;
+        if (want > n + slack) { slack = want - n; }
+    }
     uint32_t capacity = n + slack;
     uint32_t vars_ref = zsp_pool_alloc(&ctx->pool,
                                         capacity * (uint32_t)sizeof(Variable),

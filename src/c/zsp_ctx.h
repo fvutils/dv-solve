@@ -91,7 +91,9 @@ typedef struct SolveCtx {
      * If var_alias[i] == i, the var is its own representative.
      * NULL if aliasing is not enabled. */
     uint32_t          *var_alias;
-    uint32_t           _pad;          /* keep pool 16-byte aligned     */
+    uint32_t           incremental_capacity_hint; /* SMT2 frontend uses
+                                       * to request a larger vars[] for
+                                       * incremental mode (yosys-smtbmc) */
     /* LCG solver fields */
     uint32_t           current_prop_ref;  /* prop being fired (for trail) */
     uint32_t           conflict_prop_ref; /* prop that caused conflict    */

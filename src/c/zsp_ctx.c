@@ -47,7 +47,7 @@ SolveCtx *solver_create(void *static_buf, size_t static_size,
     ctx->assumption_priorities = NULL;
     ctx->n_assumptions   = 0;
     ctx->assumption_active_mask = 0;
-    ctx->_pad            = 0;
+    ctx->incremental_capacity_hint = 0;
     ctx->var_alias       = NULL;
     ctx->current_prop_ref  = EXPR_NULL;
     ctx->conflict_prop_ref = EXPR_NULL;

@@ -1648,6 +1648,11 @@ static int _ensure_compiled(Smt2Frontend *fe) {
     if (!fe->block_alloc) return -1;
     fe->ctx = solver_create(fe->ctx_buf, fe->ctx_buf_size, fe->block_alloc);
     if (!fe->ctx) return -1;
+    /* Request a large vars[] capacity since yosys-smtbmc-style use
+     * adds dozens of aux vars per BMC step incrementally. Cheap:
+     * Variable is 16 B, watcher_heads is 4 B; 8192 caps cost ~196 KiB
+     * of pool memory, well under CTX_BUF_SIZE. */
+    fe->ctx->incremental_capacity_hint = 8192;
     int rc = solver_compile(fe->ctx, fe->problem);
     if (rc == 0) {
         fe->compiled = 1;
