@@ -85,6 +85,13 @@ uint64_t zsp_sat_num_clauses(const zsp_sat_t *s);
 /** Return highest variable id seen so far. */
 zsp_sat_var_t zsp_sat_max_var(const zsp_sat_t *s);
 
+/* Phase B.1 step 3: clause-arena observers. Forward calls to the
+ * underlying kissat fork. Used by telemetry now; substrate for the
+ * future LevelMark integration that ties the SAT clause DB into the
+ * dv-solve checkpoint system. */
+size_t zsp_sat_arena_size_bytes(zsp_sat_t *s);
+size_t zsp_sat_arena_capacity_bytes(zsp_sat_t *s);
+
 #ifdef __cplusplus
 }
 #endif

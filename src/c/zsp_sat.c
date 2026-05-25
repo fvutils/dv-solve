@@ -105,3 +105,11 @@ uint64_t zsp_sat_num_clauses(const zsp_sat_t *s) {
 zsp_sat_var_t zsp_sat_max_var(const zsp_sat_t *s) {
     return s->max_var;
 }
+
+size_t zsp_sat_arena_size_bytes(zsp_sat_t *s) {
+    return s && s->kissat ? kissat_arena_size_bytes(s->kissat) : 0;
+}
+
+size_t zsp_sat_arena_capacity_bytes(zsp_sat_t *s) {
+    return s && s->kissat ? kissat_arena_capacity_bytes(s->kissat) : 0;
+}

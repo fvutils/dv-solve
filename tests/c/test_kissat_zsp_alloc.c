@@ -55,6 +55,12 @@ int main(void) {
     printf("       in-flight: %zu allocs, %zu frees, bytes %zu / %zu\n",
            ca.n_allocs, ca.n_frees, ca.bytes_alloced, ca.bytes_freed);
 
+    /* Phase B.1 step 3: arena observers. */
+    size_t arena_size = zsp_sat_arena_size_bytes(s);
+    size_t arena_cap  = zsp_sat_arena_capacity_bytes(s);
+    printf("       arena: %zu / %zu bytes\n", arena_size, arena_cap);
+    CHECK(arena_size <= arena_cap, "arena size <= capacity");
+
     zsp_sat_free(s);
 
     /* Critical invariant: after release, every byte we handed out via

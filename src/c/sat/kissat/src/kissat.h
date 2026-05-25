@@ -50,4 +50,13 @@ void kissat_set_decision_limit (kissat *solver, unsigned);
 
 void kissat_print_statistics (kissat *solver);
 
+/* dv-solve fork: clause-arena observation. Lets external machinery
+ * (e.g., dv-solve's checkpoint/LevelMark system) measure SAT-layer
+ * state without poking at kissat internals. Cheap getters; no side
+ * effects. Useful for telemetry now; required substrate for step 5
+ * (LevelMark integration) later. */
+#include <stddef.h>
+size_t kissat_arena_size_bytes (kissat *solver);
+size_t kissat_arena_capacity_bytes (kissat *solver);
+
 #endif

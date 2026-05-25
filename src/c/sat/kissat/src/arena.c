@@ -88,6 +88,17 @@ void kissat_shrink_arena (kissat *solver) {
   report_resized (solver, "shrunken", before);
 }
 
+/* dv-solve fork: public observation API. Lets callers (e.g., the dv-solve
+ * checkpoint/LevelMark machinery) measure the SAT-side clause DB without
+ * touching kissat internals. Sets up the surface step 5 needs. */
+size_t kissat_arena_size_bytes (kissat *solver) {
+  return SIZE_STACK (solver->arena) * sizeof (ward);
+}
+
+size_t kissat_arena_capacity_bytes (kissat *solver) {
+  return CAPACITY_STACK (solver->arena) * sizeof (ward);
+}
+
 #if !defined(NDEBUG) || defined(LOGGING)
 
 bool kissat_clause_in_arena (const kissat *solver, const clause *c) {
