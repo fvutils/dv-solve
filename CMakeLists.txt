@@ -161,6 +161,11 @@ target_link_libraries(test_kissat_zsp_alloc PRIVATE dv_solve kissat)
 target_include_directories(test_kissat_zsp_alloc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_kissat_zsp_alloc COMMAND test_kissat_zsp_alloc)
 
+add_executable(test_zsp_sat_incremental tests/c/test_zsp_sat_incremental.c)
+target_link_libraries(test_zsp_sat_incremental PRIVATE dv_solve kissat)
+target_include_directories(test_zsp_sat_incremental PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_sat_incremental COMMAND test_zsp_sat_incremental)
+
 add_executable(test_zsp_aig tests/c/test_zsp_aig.c)
 target_link_libraries(test_zsp_aig PRIVATE dv_solve)
 target_include_directories(test_zsp_aig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
