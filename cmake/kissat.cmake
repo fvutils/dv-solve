@@ -1,11 +1,12 @@
 # Build kissat as a static library directly from its sources.
 #
-# Phase B.0 of the bitwuzla adoption plan: kissat is linked as a submodule-
-# style static library. No incremental support yet (kissat doesn't have it);
-# the SAT layer is rebuilt per check-sat call. Phase B.1 will fork these
-# sources into src/c/sat/ and route allocations through zsp_alloc_t.
+# Phase B.0 — Phase B.1 transition: kissat source was originally vendored
+# at resources/kissat/ and built from there. Phase B.1 forks it into
+# src/c/sat/kissat/ — see docs/phase_b1_plan.md. The vendored snapshot
+# at resources/kissat/ is preserved as the upstream baseline so we can
+# diff our changes against it.
 
-set(KISSAT_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/resources/kissat)
+set(KISSAT_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/src/c/sat/kissat)
 set(KISSAT_SRC ${KISSAT_SRC_ROOT}/src)
 
 # Read VERSION file
@@ -19,7 +20,7 @@ set(KISSAT_BUILD_H ${CMAKE_CURRENT_BINARY_DIR}/kissat_gen/build.h)
 file(WRITE ${KISSAT_BUILD_H}
 "#define VERSION \"${KISSAT_VERSION}\"\n"
 "#define COMPILER \"${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}\"\n"
-"#define ID \"dv-solve-vendored\"\n"
+"#define ID \"dv-solve-forked\"\n"
 "#define BUILD \"dv-solve\"\n"
 "#define DIR \"${KISSAT_SRC_ROOT}\"\n"
 )
