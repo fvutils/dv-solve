@@ -3,10 +3,19 @@
 
 typedef struct kissat kissat;
 
+/* dv-solve fork: optional zsp_alloc_t routing for internal allocations.
+ * Forward-declared here so kissat.h doesn't pull in dv-solve headers. */
+struct zsp_alloc_s;
+
 // Default (partial) IPASIR interface.
 
 const char *kissat_signature (void);
 kissat *kissat_init (void);
+
+/* dv-solve fork: like kissat_init but routes ALL internal allocations
+ * (including the kissat struct itself) through the given allocator.
+ * Pass NULL for upstream-equivalent behavior. */
+kissat *kissat_init_with_alloc (struct zsp_alloc_s *alloc);
 void kissat_add (kissat *solver, int lit);
 int kissat_solve (kissat *solver);
 int kissat_value (kissat *solver, int lit);

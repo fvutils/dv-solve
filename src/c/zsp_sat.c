@@ -28,7 +28,9 @@ zsp_sat_t *zsp_sat_new(zsp_alloc_t *alloc) {
     if (!s) return NULL;
     memset(s, 0, sizeof(*s));
     s->alloc = alloc;
-    s->kissat = kissat_init();
+    /* Phase B.1: route kissat's internal allocations through our allocator
+     * when one is provided. NULL means upstream behavior (libc). */
+    s->kissat = kissat_init_with_alloc(alloc);
     if (!s->kissat) {
         xfree(alloc, s, sizeof(*s));
         return NULL;

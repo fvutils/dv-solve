@@ -43,6 +43,10 @@ target_include_directories(kissat PUBLIC ${KISSAT_SRC})
 # build.h is included as "build.h"; expose its directory privately to the
 # kissat sources so other code can't accidentally pick it up.
 target_include_directories(kissat PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/kissat_gen)
+# dv-solve fork: kissat sources can #include "zsp_alloc.h" for the optional
+# allocator routing. The include must be PRIVATE — upstream Kissat must not
+# acquire dv-solve as a transitive dependency.
+target_include_directories(kissat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 
 # Compile flags mirroring kissat's default release configuration:
 #   NDEBUG    - production assertions off
