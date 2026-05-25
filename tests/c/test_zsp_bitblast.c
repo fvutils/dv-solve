@@ -118,37 +118,50 @@ static void test_mul_solve(void) {
 }
 
 static void test_ult(void) {
-    /* 0 <_u 1 SAT, 5 <_u 5 UNSAT, 255 <_u 0 UNSAT (unsigned) */
+    /* 0 <_u 1 SAT, 5 <_u 5 UNSAT, 255 <_u 0 UNSAT (unsigned).
+     * zsp_bv_t values carry pointers owned by their originating bb
+     * context — they MUST be recreated in each fresh context. */
     ctx_t c = ctx_new();
-    zsp_bv_t v0   = zsp_bb_value_u64(c.bb, 8, 0);
-    zsp_bv_t v1   = zsp_bb_value_u64(c.bb, 8, 1);
-    zsp_bv_t v5   = zsp_bb_value_u64(c.bb, 8, 5);
-    zsp_bv_t v255 = zsp_bb_value_u64(c.bb, 8, 255);
-    CHECK(solve_assert(&c, zsp_bb_ult(c.bb, v0, v1)) == ZSP_SAT_SAT, "0 < 1");
+    {
+        zsp_bv_t v0 = zsp_bb_value_u64(c.bb, 8, 0);
+        zsp_bv_t v1 = zsp_bb_value_u64(c.bb, 8, 1);
+        CHECK(solve_assert(&c, zsp_bb_ult(c.bb, v0, v1)) == ZSP_SAT_SAT, "0 < 1");
+    }
     ctx_free(&c);
 
     c = ctx_new();
-    CHECK(solve_assert(&c, zsp_bb_ult(c.bb, v5, v5)) == ZSP_SAT_UNSAT, "~(5 < 5)");
+    {
+        zsp_bv_t v5 = zsp_bb_value_u64(c.bb, 8, 5);
+        CHECK(solve_assert(&c, zsp_bb_ult(c.bb, v5, v5)) == ZSP_SAT_UNSAT, "~(5 < 5)");
+    }
     ctx_free(&c);
 
     c = ctx_new();
-    CHECK(solve_assert(&c, zsp_bb_ult(c.bb, v255, v0)) == ZSP_SAT_UNSAT, "~(255 <_u 0)");
+    {
+        zsp_bv_t v0   = zsp_bb_value_u64(c.bb, 8, 0);
+        zsp_bv_t v255 = zsp_bb_value_u64(c.bb, 8, 255);
+        CHECK(solve_assert(&c, zsp_bb_ult(c.bb, v255, v0)) == ZSP_SAT_UNSAT, "~(255 <_u 0)");
+    }
     ctx_free(&c);
-
-    (void)v0; (void)v1; (void)v5; (void)v255;
 }
 
 static void test_slt(void) {
-    /* signed: -1 (=255) <_s 0 SAT; 1 <_s -1 UNSAT */
+    /* signed: -1 (=255) <_s 0 SAT; 1 <_s -1 UNSAT.
+     * bv handles do not survive ctx_free — recreate per context. */
     ctx_t c = ctx_new();
-    zsp_bv_t v0   = zsp_bb_value_u64(c.bb, 8, 0);
-    zsp_bv_t vN1  = zsp_bb_value_u64(c.bb, 8, 255);  /* -1 */
-    zsp_bv_t v1   = zsp_bb_value_u64(c.bb, 8, 1);
-    CHECK(solve_assert(&c, zsp_bb_slt(c.bb, vN1, v0)) == ZSP_SAT_SAT, "-1 <_s 0");
+    {
+        zsp_bv_t v0  = zsp_bb_value_u64(c.bb, 8, 0);
+        zsp_bv_t vN1 = zsp_bb_value_u64(c.bb, 8, 255);  /* -1 */
+        CHECK(solve_assert(&c, zsp_bb_slt(c.bb, vN1, v0)) == ZSP_SAT_SAT, "-1 <_s 0");
+    }
     ctx_free(&c);
 
     c = ctx_new();
-    CHECK(solve_assert(&c, zsp_bb_slt(c.bb, v1, vN1)) == ZSP_SAT_UNSAT, "~(1 <_s -1)");
+    {
+        zsp_bv_t vN1 = zsp_bb_value_u64(c.bb, 8, 255);  /* -1 */
+        zsp_bv_t v1  = zsp_bb_value_u64(c.bb, 8, 1);
+        CHECK(solve_assert(&c, zsp_bb_slt(c.bb, v1, vN1)) == ZSP_SAT_UNSAT, "~(1 <_s -1)");
+    }
     ctx_free(&c);
 }
 
