@@ -1696,21 +1696,26 @@ static int _flush_aux(Smt2Frontend *fe) {
 
 /* Phase B.0: bit-blast + kissat engine. Bypasses solver_solve() and runs
  * directly on fe->problem. Triggered by DV_ENGINE=bitblast (set by the
- * --engine=bitblast CLI flag). No model readback yet — only the sat/unsat
- * verdict is printed. */
+ * --engine=bitblast CLI flag). The bbsolver is kept alive on fe->bb_solver
+ * so that subsequent (get-value) calls can read back model values. */
 static int _check_sat_bitblast(Smt2Frontend *fe) {
     if (!fe->problem) {
         fprintf(fe->out, "unknown\n");
         fflush(fe->out);
         return -1;
     }
-    zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, fe->problem);
-    if (!S) {
+    /* Drop any prior bbsolver so we don't leak across check-sat calls. */
+    if (fe->bb_solver) {
+        zsp_bbsolver_free(fe->bb_solver);
+        fe->bb_solver = NULL;
+    }
+    fe->bb_solver = zsp_bbsolver_new(NULL, fe->problem);
+    if (!fe->bb_solver) {
         fprintf(fe->out, "unknown\n");
         fflush(fe->out);
         return -1;
     }
-    int rc = zsp_bbsolver_check(S);
+    int rc = zsp_bbsolver_check(fe->bb_solver);
     if (rc == ZSP_BB_SAT) {
         fprintf(fe->out, "sat\n");
         fe->last_result = SOLVE_OK;
@@ -1723,7 +1728,6 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
         fprintf(fe->out, "unknown\n");
     }
     fflush(fe->out);
-    zsp_bbsolver_free(S);
     /* The CDCL path returns 0 for both SAT and UNSAT (only protocol errors
      * are negative). Mirror that — UNSAT is a valid result, not an error. */
     return rc == ZSP_BB_ERROR ? -1 : 0;
@@ -1732,6 +1736,17 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
 static int _engine_is_bitblast(void) {
     const char *e = getenv("DV_ENGINE");
     return e && (strcmp(e, "bitblast") == 0 || strcmp(e, "bb") == 0);
+}
+
+/* Route variable value lookup through the bbsolver when it's the active
+ * engine; otherwise fall back to the CDCL solver_get_value path. */
+static int64_t _fe_get_var_value(Smt2Frontend *fe, uint32_t var_id) {
+    if (fe->bb_solver) {
+        int64_t v = 0;
+        if (zsp_bbsolver_value(fe->bb_solver, var_id, &v) == 0) return v;
+        /* fall through to CDCL on bbsolver miss */
+    }
+    return solver_get_value(fe->ctx, var_id);
 }
 
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
@@ -1883,7 +1898,7 @@ static void _emit_array_store_chain(Smt2Frontend *fe, Smt2ArrayVar *av) {
     for (uint32_t i = 0; i < n; i++) {
         snprintf(elem_name, sizeof(elem_name), "%s[%u]", av->name, i);
         Smt2Var *vvar = _find_var(fe, elem_name, (uint32_t)strlen(elem_name));
-        vals[i] = vvar ? solver_get_value(fe->ctx, vvar->var_id) : 0;
+        vals[i] = vvar ? _fe_get_var_value(fe, vvar->var_id) : 0;
     }
 
     /* Emit (store (store ... (as const ...) ...) ...) chain.
@@ -1936,7 +1951,7 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
                     (int)name_s->sym.len, name_s->sym.str);
             continue;
         }
-        int64_t val = solver_get_value(fe->ctx, v->var_id);
+        int64_t val = _fe_get_var_value(fe, v->var_id);
         fprintf(fe->out, "(%.*s (_ bv%" PRIu64 " %u))",
                 (int)name_s->sym.len, name_s->sym.str,
                 (uint64_t)val, (unsigned)v->width);
@@ -1959,7 +1974,7 @@ static int _cmd_get_model(Smt2Frontend *fe, const Sexpr *cmd) {
         if (strncmp(v->name, "__aux", 5) == 0) continue;
         /* Skip array element vars (they appear as part of array model) */
         if (strchr(v->name, '[') != NULL) continue;
-        int64_t val = solver_get_value(fe->ctx, v->var_id);
+        int64_t val = _fe_get_var_value(fe, v->var_id);
         fprintf(fe->out, "  (define-fun %s () (_ BitVec %u) (_ bv%" PRIu64 " %u))\n",
                 v->name, (unsigned)v->width,
                 (uint64_t)val, (unsigned)v->width);
@@ -2200,6 +2215,7 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
 }
 
 void smt2_frontend_destroy(Smt2Frontend *fe) {
+    if (fe->bb_solver)   { zsp_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
     if (fe->problem)     free(fe->problem);
     for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
         free(fe->aux_problems[i]);

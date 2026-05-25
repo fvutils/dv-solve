@@ -9,6 +9,11 @@
 #include "zsp_block_alloc.h"
 #include "smt2/smt2_parser.h"
 
+/* Forward declaration: full definition in zsp_bbsolver.h. Used when
+ * DV_ENGINE=bitblast to keep the bit-blast solver alive across check-sat
+ * and get-value commands. */
+typedef struct zsp_bbsolver_s zsp_bbsolver_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -168,6 +173,11 @@ typedef struct {
     /* Result of last check-sat */
     SolveResult          last_result;
     int                  has_result;   /* 1 after check-sat */
+
+    /* Bit-blast solver kept alive across check-sat and get-value when
+     * DV_ENGINE=bitblast. NULL when the CDCL engine is in use. Freed in
+     * smt2_frontend_destroy and replaced on each (check-sat). */
+    zsp_bbsolver_t      *bb_solver;
 
     /* Output */
     FILE                *out;
