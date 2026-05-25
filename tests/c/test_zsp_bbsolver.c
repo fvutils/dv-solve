@@ -168,11 +168,66 @@ static void test_signed(void) {
     builder_destroy(b);
 }
 
+/* Verify bit-fix shrinks the SAT problem for tightly-bounded vars. */
+static void test_bit_fix(void) {
+    /* Variable x of declared width 32 but bounds [0, 7]: should have
+     * 29 top bits bit-fixed to 0, leaving only 3 free bits. */
+    SolveProblemBuilder *b = builder_create(4096, NULL);
+    builder_add_var(b, 0, 32, 0, 0, 7);
+    /* Add a constraint that the variable equals 5 (so the SAT solver
+     * actually has work to do — we don't want a no-op). */
+    ExprRef x = builder_expr_var(b, 0);
+    ExprRef k5 = builder_expr_const(b, 5, 0);
+    builder_add_constraint(b, builder_expr_binary(b, BIN_EQ, x, k5));
+
+    size_t sz;
+    SolveProblem *p = builder_finalize(b, &sz);
+
+    zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
+    int rc = zsp_bbsolver_check(S);
+    CHECK(rc == ZSP_BB_SAT, "32-bit var bounded [0,7] equals 5 is SAT");
+    int64_t v;
+    zsp_bbsolver_value(S, 0, &v);
+    CHECK(v == 5, "model x=5");
+
+    /* Get baseline stats. */
+    uint64_t ands_fixed = zsp_bbsolver_num_aig_ands(S);
+    uint64_t vars_fixed = zsp_bbsolver_num_sat_vars(S);
+    printf("       with bit-fix: aig_ands=%llu sat_vars=%llu\n",
+           (unsigned long long)ands_fixed, (unsigned long long)vars_fixed);
+    zsp_bbsolver_free(S);
+    builder_free_problem(b, p, sz);
+    builder_destroy(b);
+
+    /* Same problem but with no useful bounds (full 32-bit). The bbsolver
+     * will allocate 32 fresh AIG inputs, leading to more SAT vars/clauses. */
+    b = builder_create(4096, NULL);
+    builder_add_var(b, 0, 32, 0, 0, 0xffffffff);
+    x = builder_expr_var(b, 0);
+    k5 = builder_expr_const(b, 5, 0);
+    builder_add_constraint(b, builder_expr_binary(b, BIN_EQ, x, k5));
+    p = builder_finalize(b, &sz);
+    S = zsp_bbsolver_new(NULL, p);
+    rc = zsp_bbsolver_check(S);
+    CHECK(rc == ZSP_BB_SAT, "unbounded version also SAT");
+    uint64_t ands_full = zsp_bbsolver_num_aig_ands(S);
+    uint64_t vars_full = zsp_bbsolver_num_sat_vars(S);
+    printf("       no bit-fix:  aig_ands=%llu sat_vars=%llu\n",
+           (unsigned long long)ands_full, (unsigned long long)vars_full);
+    CHECK(vars_fixed < vars_full,
+          "bit-fix produces fewer SAT vars than full-range version");
+
+    zsp_bbsolver_free(S);
+    builder_free_problem(b, p, sz);
+    builder_destroy(b);
+}
+
 int main(void) {
     test_add_eq();
     test_unsat();
     test_var_bounds();
     test_bvand_masked_bound();
     test_signed();
+    test_bit_fix();
     return failures ? 1 : 0;
 }

@@ -26,6 +26,39 @@ void zsp_bvdom_init_lohi(zsp_bvdom_t *d, uint8_t w, uint64_t lo, uint64_t hi) {
     d->hi = hi & m;
 }
 
+int zsp_bvdom_init_from_range_u(zsp_bvdom_t *d, uint8_t w,
+                                uint64_t lo_val, uint64_t hi_val) {
+    uint64_t m = zsp_bvdom_mask(w);
+    lo_val &= m;
+    hi_val &= m;
+    if (lo_val > hi_val) {
+        zsp_bvdom_init_unknown(d, w);
+        return -1;
+    }
+    /* Bits above the highest differing bit are common to every value in
+     * [lo_val, hi_val]. Below that bit, every bit value is possible. */
+    uint64_t diff = lo_val ^ hi_val;
+    /* find index of highest set bit in diff (0..w-1), or "no bits differ" */
+    int first_diff = -1;
+    for (int i = (int)w - 1; i >= 0; i--) {
+        if (diff & ((uint64_t)1 << i)) { first_diff = i; break; }
+    }
+    if (first_diff < 0) {
+        /* lo_val == hi_val: fixed */
+        zsp_bvdom_init_value(d, w, lo_val);
+        return 0;
+    }
+    /* Mask of bits 0..first_diff is "unknown"; mask of bits above is fixed. */
+    uint64_t below_mask = ((uint64_t)1 << first_diff) | (((uint64_t)1 << first_diff) - 1);
+    uint64_t fixed_mask = m & ~below_mask;
+    /* The fixed bits all agree in lo_val and hi_val. */
+    uint64_t fixed_val = lo_val & fixed_mask;
+    d->width = w;
+    d->lo = fixed_val;
+    d->hi = fixed_val | below_mask;
+    return 0;
+}
+
 int zsp_bvdom_is_valid(const zsp_bvdom_t *d) {
     uint64_t m = zsp_bvdom_mask(d->width);
     return ((d->lo & ~d->hi) & m) == 0;

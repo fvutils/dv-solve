@@ -42,6 +42,18 @@ zsp_aig_t *zsp_bitblast_aig(zsp_bitblast_t *bb);
 /** Allocate a fresh `size`-bit symbolic constant (each bit is a new AIG input). */
 zsp_bv_t zsp_bb_constant(zsp_bitblast_t *bb, uint32_t size);
 
+/**
+ * Allocate a `size`-bit BV with per-bit domain: each bit is a fresh AIG
+ * input where the corresponding bit in `unknown_mask` is 1, otherwise the
+ * corresponding bit in `fixed_value` (0 -> FALSE, 1 -> TRUE).
+ *
+ * Mapping: bit position `i` of the value (LSB = 0) lands at array index
+ * `size - 1 - i` (since the bit-blaster's bv arrays are MSB-first).
+ * This is what bvdom + VarSpec bounds want.
+ */
+zsp_bv_t zsp_bb_constant_dom(zsp_bitblast_t *bb, uint32_t size,
+                             uint64_t fixed_value, uint64_t unknown_mask);
+
 /** Allocate a `size`-bit literal from a uint64 value. MSB is bit 0. */
 zsp_bv_t zsp_bb_value_u64(zsp_bitblast_t *bb, uint32_t size, uint64_t value);
 

@@ -9,6 +9,7 @@
 #include "zsp_aig.h"
 #include "zsp_aig_cnf.h"
 #include "zsp_bitblast.h"
+#include "zsp_bvdom.h"
 #include "zsp_pool.h"
 #include "zsp_sat.h"
 
@@ -62,12 +63,33 @@ static zsp_bv_t sext_to(zsp_bbsolver_t *S, zsp_bv_t v, uint16_t target) {
     return zsp_bb_sign_ext(S->bb, v, (uint32_t)(target - v.size));
 }
 
-/* Build (or fetch) the bit-vector for a declared variable. */
+/* Build (or fetch) the bit-vector for a declared variable.
+ *
+ * If the variable's bounds [lo, hi] (interpreted unsigned) yield a useful
+ * bit-fix mask — e.g. an 8-bit variable bounded to [0, 7] has its top 5
+ * bits fixed-0 — those bits are emitted as AIG constants instead of fresh
+ * inputs. Saves SAT variables and clauses on every bounded variable.
+ *
+ * Signed variables with mixed-sign ranges are not folded (the unsigned
+ * range straddles the midpoint and no bit is uniformly fixed); they get
+ * the all-fresh behavior. */
 static zsp_bv_t bv_for_var(zsp_bbsolver_t *S, uint32_t var_id) {
     assert(var_id < S->n_vars);
     bb_var_t *v = &S->vars[var_id];
     if (!v->bv_built) {
-        v->bv = zsp_bb_constant(S->bb, v->width);
+        int use_fix = !v->is_signed && v->lo >= 0 && v->hi >= v->lo;
+        if (use_fix) {
+            zsp_bvdom_t d;
+            zsp_bvdom_init_from_range_u(&d, v->width,
+                                        (uint64_t)v->lo, (uint64_t)v->hi);
+            uint64_t mask = zsp_bvdom_mask(v->width);
+            /* fixed bit mask = bits where lo == hi (within width). */
+            uint64_t fixed_mask = ~(d.lo ^ d.hi) & mask;
+            uint64_t unknown_mask = ~fixed_mask & mask;
+            v->bv = zsp_bb_constant_dom(S->bb, v->width, d.lo, unknown_mask);
+        } else {
+            v->bv = zsp_bb_constant(S->bb, v->width);
+        }
         v->bv_built = 1;
     }
     return v->bv;

@@ -86,6 +86,21 @@ zsp_bv_t zsp_bb_constant(zsp_bitblast_t *bb, uint32_t size) {
     return r;
 }
 
+zsp_bv_t zsp_bb_constant_dom(zsp_bitblast_t *bb, uint32_t size,
+                             uint64_t fixed_value, uint64_t unknown_mask) {
+    zsp_bv_t r = bb_alloc(bb, size);
+    for (uint32_t i = 0; i < size; i++) {
+        uint32_t bitpos = size - 1 - i;
+        uint64_t bit = (bitpos < 64) ? ((uint64_t)1 << bitpos) : 0;
+        if (bitpos >= 64 || (unknown_mask & bit)) {
+            r.bits[i] = zsp_aig_mk_input(bb->aig);
+        } else {
+            r.bits[i] = (fixed_value & bit) ? ZSP_AIG_TRUE : ZSP_AIG_FALSE;
+        }
+    }
+    return r;
+}
+
 zsp_bv_t zsp_bb_value_u64(zsp_bitblast_t *bb, uint32_t size, uint64_t value) {
     zsp_bv_t r = bb_alloc(bb, size);
     /* index 0 is MSB */

@@ -183,7 +183,49 @@ static void test_to_str(void) {
     CHECK(strcmp(buf, "1xx0") == 0, "to_str produces '1xx0'");
 }
 
+static void test_from_range_u(void) {
+    zsp_bvdom_t d;
+    char buf[16];
+
+    /* [0, 5] on 8 bits: top 5 bits fixed-0, bottom 3 bits unknown */
+    zsp_bvdom_init_from_range_u(&d, 8, 0, 5);
+    zsp_bvdom_to_str(&d, buf, sizeof(buf));
+    CHECK(strcmp(buf, "00000xxx") == 0, "[0,5] -> 00000xxx");
+
+    /* [0, 7]: bottom 3 free, top 5 fixed-0 */
+    zsp_bvdom_init_from_range_u(&d, 8, 0, 7);
+    zsp_bvdom_to_str(&d, buf, sizeof(buf));
+    CHECK(strcmp(buf, "00000xxx") == 0, "[0,7] -> 00000xxx");
+
+    /* [0, 8]: bottom 4 free, top 4 fixed-0 (8 = 0000_1000, diff bit 3) */
+    zsp_bvdom_init_from_range_u(&d, 8, 0, 8);
+    zsp_bvdom_to_str(&d, buf, sizeof(buf));
+    CHECK(strcmp(buf, "0000xxxx") == 0, "[0,8] -> 0000xxxx");
+
+    /* [16, 31]: top bits agree at 0001, bottom 4 free */
+    zsp_bvdom_init_from_range_u(&d, 8, 16, 31);
+    zsp_bvdom_to_str(&d, buf, sizeof(buf));
+    CHECK(strcmp(buf, "0001xxxx") == 0, "[16,31] -> 0001xxxx");
+
+    /* [10, 10]: fixed */
+    zsp_bvdom_init_from_range_u(&d, 8, 10, 10);
+    zsp_bvdom_to_str(&d, buf, sizeof(buf));
+    CHECK(strcmp(buf, "00001010") == 0, "[10,10] -> 00001010 (fixed)");
+
+    /* [128, 255]: top bit fixed-1, rest unknown */
+    zsp_bvdom_init_from_range_u(&d, 8, 128, 255);
+    zsp_bvdom_to_str(&d, buf, sizeof(buf));
+    CHECK(strcmp(buf, "1xxxxxxx") == 0, "[128,255] -> 1xxxxxxx");
+
+    /* Invalid: lo > hi → falls back to unknown */
+    int rc = zsp_bvdom_init_from_range_u(&d, 8, 100, 50);
+    CHECK(rc != 0, "lo>hi returns nonzero");
+    zsp_bvdom_to_str(&d, buf, sizeof(buf));
+    CHECK(strcmp(buf, "xxxxxxxx") == 0, "lo>hi -> all unknown");
+}
+
 int main(void) {
+    test_from_range_u();
     test_init_and_predicates();
     test_match_and_copy();
     test_meet();

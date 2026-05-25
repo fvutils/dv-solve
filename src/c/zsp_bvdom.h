@@ -54,6 +54,18 @@ void zsp_bvdom_init_value(zsp_bvdom_t *d, uint8_t w, uint64_t v);
 /** Initialize from lo / hi components (caller-supplied; result may be invalid). */
 void zsp_bvdom_init_lohi(zsp_bvdom_t *d, uint8_t w, uint64_t lo, uint64_t hi);
 
+/**
+ * Initialize from an unsigned value range [lo_val, hi_val]. The leading bits
+ * where lo_val and hi_val agree become fixed; below the first differing bit
+ * every bit is unknown. Returns 0 on success, non-zero if lo_val > hi_val
+ * (caller's responsibility — the domain will be set to fully-unknown).
+ *
+ * Example: width=8, [0, 5] -> leading 5 bits are fixed-0 (since 0..5 all
+ * have bits 7..3 = 0), bits 2..0 are unknown.
+ */
+int zsp_bvdom_init_from_range_u(zsp_bvdom_t *d, uint8_t w,
+                                uint64_t lo_val, uint64_t hi_val);
+
 /** True iff `(lo & ~hi) & mask == 0`. */
 int zsp_bvdom_is_valid(const zsp_bvdom_t *d);
 
