@@ -145,6 +145,10 @@ size_t zsp_sat_arena_capacity_bytes(zsp_sat_t *s) {
     return s && s->kissat ? kissat_arena_capacity_bytes(s->kissat) : 0;
 }
 
+zsp_sat_arena_mark_t zsp_sat_arena_save_mark(zsp_sat_t *s) {
+    return s && s->kissat ? kissat_arena_size_words(s->kissat) : 0;
+}
+
 void zsp_sat_push(zsp_sat_t *s) {
     if (!s) return;
     if (s->push_depth >= ZSP_SAT_MAX_PUSH) {

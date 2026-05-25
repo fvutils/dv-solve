@@ -99,6 +99,10 @@ size_t kissat_arena_capacity_bytes (kissat *solver) {
   return CAPACITY_STACK (solver->arena) * sizeof (ward);
 }
 
+size_t kissat_arena_size_words (kissat *solver) {
+  return SIZE_STACK (solver->arena);
+}
+
 #if !defined(NDEBUG) || defined(LOGGING)
 
 bool kissat_clause_in_arena (const kissat *solver, const clause *c) {

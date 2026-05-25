@@ -71,10 +71,36 @@ static void test_assume_consistent(void) {
     zsp_sat_free(s);
 }
 
+static void test_arena_mark_monotonic(void) {
+    /* Phase B.1 step 5 (plumbing slice): the arena mark is just the
+     * arena top in `ward` units. It must be monotonically non-decreasing
+     * as clauses are added (the deep refactor that would let it shrink
+     * via rewind is intentionally not in this slice). Note: small
+     * clauses (binary, ternary) are stored inline in watch lists, not
+     * in the clause arena, so we need a longer clause to actually grow
+     * the arena. */
+    zsp_sat_t *s = zsp_sat_new(NULL);
+    zsp_sat_arena_mark_t m0 = zsp_sat_arena_save_mark(s);
+    /* A 5-literal clause goes into the arena. */
+    for (int i = 1; i <= 5; i++) zsp_sat_add(s, i);
+    zsp_sat_add(s, 0);
+    zsp_sat_arena_mark_t m1 = zsp_sat_arena_save_mark(s);
+    CHECK(m1 >= m0, "arena mark non-decreasing after adding a 5-lit clause");
+    /* Another 5-lit clause — mark should grow strictly. */
+    for (int i = 1; i <= 5; i++) zsp_sat_add(s, -i);
+    zsp_sat_add(s, 0);
+    zsp_sat_arena_mark_t m2 = zsp_sat_arena_save_mark(s);
+    CHECK(m2 > m1, "arena mark strictly grows on additional general clause");
+    printf("       arena marks: m0=%zu m1=%zu m2=%zu\n",
+           (size_t)m0, (size_t)m1, (size_t)m2);
+    zsp_sat_free(s);
+}
+
 int main(void) {
     test_push_pop_clean();
     test_push_add_pop_taints();
     test_assume_forces_unsat();
     test_assume_consistent();
+    test_arena_mark_monotonic();
     return failures ? 1 : 0;
 }

@@ -92,6 +92,16 @@ zsp_sat_var_t zsp_sat_max_var(const zsp_sat_t *s);
 size_t zsp_sat_arena_size_bytes(zsp_sat_t *s);
 size_t zsp_sat_arena_capacity_bytes(zsp_sat_t *s);
 
+/* Phase B.1 step 5 (plumbing slice): arena mark. Opaque to callers;
+ * today aliases the kissat arena top in `ward` units. Saved into the
+ * dv-solve LevelMark/CheckpointMark by the checkpoint code so a single
+ * dv-solve checkpoint records the SAT-side arena position too.
+ * No matching _rewind_to is exposed yet — sound rewind needs the
+ * deep kissat refactor (invalidate watches/occurrences/etc.) which
+ * this slice does not attempt. */
+typedef size_t zsp_sat_arena_mark_t;
+zsp_sat_arena_mark_t zsp_sat_arena_save_mark(zsp_sat_t *s);
+
 /* Phase B.1 step 3 (incremental API surface — stub semantics).
  *
  * Kissat is non-incremental and the fork has not yet been adapted to
