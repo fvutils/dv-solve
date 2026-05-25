@@ -714,14 +714,14 @@ static int _explain_bounds_le_64(Propagator *self, SolveCtx *ctx,
         /* x.hi <= new_bound because y.hi <= new_bound */
         out->lits[0].var_id = yid;
         out->lits[0].is_lb  = 0;
-        out->lits[0].bound  = (int32_t)new_bound;
+        out->lits[0].bound = new_bound;
         return 0;
     }
     if (var_id == yid && is_lb) {
         /* y.lo >= new_bound because x.lo >= new_bound */
         out->lits[0].var_id = xid;
         out->lits[0].is_lb  = 1;
-        out->lits[0].bound  = (int32_t)new_bound;
+        out->lits[0].bound = new_bound;
         return 0;
     }
     return -1;
@@ -761,14 +761,14 @@ static int _explain_bounds_lt_64(Propagator *self, SolveCtx *ctx,
         /* x.hi <= new_bound because y.hi <= new_bound+1 i.e. (y <= new_bound+1) */
         out->lits[0].var_id = yid;
         out->lits[0].is_lb  = 0;
-        out->lits[0].bound  = (int32_t)(new_bound + 1);
+        out->lits[0].bound = new_bound + 1;
         return 0;
     }
     if (var_id == yid && is_lb) {
         /* y.lo >= new_bound because x.lo >= new_bound-1 i.e. (x >= new_bound-1) */
         out->lits[0].var_id = xid;
         out->lits[0].is_lb  = 1;
-        out->lits[0].bound  = (int32_t)(new_bound - 1);
+        out->lits[0].bound = new_bound - 1;
         return 0;
     }
     return -1;
@@ -813,7 +813,7 @@ static int _explain_bounds_eq_64(Propagator *self, SolveCtx *ctx,
     out->n_lits = 1;
     out->lits[0].var_id = other;
     out->lits[0].is_lb  = is_lb;
-    out->lits[0].bound  = (int32_t)new_bound;
+    out->lits[0].bound = new_bound;
     out->lits[0]._pad[0] = out->lits[0]._pad[1] = out->lits[0]._pad[2] = 0;
     return 0;
 }
@@ -889,44 +889,44 @@ static int _explain_bounds_add_64(Propagator *self, SolveCtx *ctx,
         /* r.lo >= new_bound because a.lo + b.lo >= new_bound */
         int64_t alo = var_lo64(ctx, &ctx->vars[aid]);
         int64_t blo = var_lo64(ctx, &ctx->vars[bid]);
-        out->lits[0].var_id = aid; out->lits[0].is_lb = 1; out->lits[0].bound = (int32_t)alo;
-        out->lits[1].var_id = bid; out->lits[1].is_lb = 1; out->lits[1].bound = (int32_t)blo;
+        out->lits[0].var_id = aid; out->lits[0].is_lb = 1; out->lits[0].bound = alo;
+        out->lits[1].var_id = bid; out->lits[1].is_lb = 1; out->lits[1].bound = blo;
         return 0;
     }
     if (var_id == rid && !is_lb) {
         int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
         int64_t bhi = var_hi64(ctx, &ctx->vars[bid]);
-        out->lits[0].var_id = aid; out->lits[0].is_lb = 0; out->lits[0].bound = (int32_t)ahi;
-        out->lits[1].var_id = bid; out->lits[1].is_lb = 0; out->lits[1].bound = (int32_t)bhi;
+        out->lits[0].var_id = aid; out->lits[0].is_lb = 0; out->lits[0].bound = ahi;
+        out->lits[1].var_id = bid; out->lits[1].is_lb = 0; out->lits[1].bound = bhi;
         return 0;
     }
     if (var_id == aid && is_lb) {
         /* a.lo >= new_bound because r.lo - b.hi >= new_bound */
         int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
         int64_t bhi = var_hi64(ctx, &ctx->vars[bid]);
-        out->lits[0].var_id = rid; out->lits[0].is_lb = 1; out->lits[0].bound = (int32_t)rlo;
-        out->lits[1].var_id = bid; out->lits[1].is_lb = 0; out->lits[1].bound = (int32_t)bhi;
+        out->lits[0].var_id = rid; out->lits[0].is_lb = 1; out->lits[0].bound = rlo;
+        out->lits[1].var_id = bid; out->lits[1].is_lb = 0; out->lits[1].bound = bhi;
         return 0;
     }
     if (var_id == aid && !is_lb) {
         int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
         int64_t blo = var_lo64(ctx, &ctx->vars[bid]);
-        out->lits[0].var_id = rid; out->lits[0].is_lb = 0; out->lits[0].bound = (int32_t)rhi;
-        out->lits[1].var_id = bid; out->lits[1].is_lb = 1; out->lits[1].bound = (int32_t)blo;
+        out->lits[0].var_id = rid; out->lits[0].is_lb = 0; out->lits[0].bound = rhi;
+        out->lits[1].var_id = bid; out->lits[1].is_lb = 1; out->lits[1].bound = blo;
         return 0;
     }
     if (var_id == bid && is_lb) {
         int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
         int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
-        out->lits[0].var_id = rid; out->lits[0].is_lb = 1; out->lits[0].bound = (int32_t)rlo;
-        out->lits[1].var_id = aid; out->lits[1].is_lb = 0; out->lits[1].bound = (int32_t)ahi;
+        out->lits[0].var_id = rid; out->lits[0].is_lb = 1; out->lits[0].bound = rlo;
+        out->lits[1].var_id = aid; out->lits[1].is_lb = 0; out->lits[1].bound = ahi;
         return 0;
     }
     if (var_id == bid && !is_lb) {
         int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
         int64_t alo = var_lo64(ctx, &ctx->vars[aid]);
-        out->lits[0].var_id = rid; out->lits[0].is_lb = 0; out->lits[0].bound = (int32_t)rhi;
-        out->lits[1].var_id = aid; out->lits[1].is_lb = 1; out->lits[1].bound = (int32_t)alo;
+        out->lits[0].var_id = rid; out->lits[0].is_lb = 0; out->lits[0].bound = rhi;
+        out->lits[1].var_id = aid; out->lits[1].is_lb = 1; out->lits[1].bound = alo;
         return 0;
     }
     return -1;
@@ -1042,9 +1042,9 @@ static int _explain_bvadd_const_64(Propagator *self, SolveCtx *ctx,
     int64_t olo = var_lo64(ctx, &ctx->vars[other]);
     int64_t ohi = var_hi64(ctx, &ctx->vars[other]);
     out->n_lits = 2;
-    out->lits[0].var_id = other; out->lits[0].is_lb = 1; out->lits[0].bound = (int32_t)olo;
+    out->lits[0].var_id = other; out->lits[0].is_lb = 1; out->lits[0].bound = olo;
     out->lits[0]._pad[0] = out->lits[0]._pad[1] = out->lits[0]._pad[2] = 0;
-    out->lits[1].var_id = other; out->lits[1].is_lb = 0; out->lits[1].bound = (int32_t)ohi;
+    out->lits[1].var_id = other; out->lits[1].is_lb = 0; out->lits[1].bound = ohi;
     out->lits[1]._pad[0] = out->lits[1]._pad[1] = out->lits[1]._pad[2] = 0;
     return 0;
 }

@@ -17,6 +17,7 @@ from pathlib import Path
 from harness.dv_solve_smt2_solver import DvSolveSMT2Solver
 from harness.z3_solver import Z3Solver
 from harness.boolector_solver import BoolectorSolver
+from harness.bitwuzla_solver import BitwuzlaSolver
 
 
 HERE = Path(__file__).resolve().parent
@@ -33,10 +34,15 @@ def main() -> int:
     ap.add_argument("--tier", type=int, default=None, action="append", help="restrict to tier(s); repeatable")
     ap.add_argument("--out", default=str(HERE / "results" / "compare.csv"))
     ap.add_argument("--filter", default=None, help="substring filter on benchmark name")
+    ap.add_argument("--solvers", default=None, help="comma-separated solver names to include")
     args = ap.parse_args()
 
+    all_solvers = (DvSolveSMT2Solver(), Z3Solver(), BoolectorSolver(), BitwuzlaSolver())
+    wanted = set(args.solvers.split(",")) if args.solvers else None
     solvers = []
-    for s in (DvSolveSMT2Solver(), Z3Solver(), BoolectorSolver()):
+    for s in all_solvers:
+        if wanted is not None and s.name not in wanted:
+            continue
         if s.is_available():
             solvers.append(s)
         else:

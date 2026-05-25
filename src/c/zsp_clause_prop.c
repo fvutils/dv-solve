@@ -2,6 +2,7 @@
 #include "zsp_lcg.h"
 #include "zsp_ctx.h"
 #include "zsp_propagator.h"
+#include "zsp_trail.h"
 
 /* ------------------------------------------------------------------ */
 /* Helper: check a single clause, propagate if unit.                  */
@@ -45,11 +46,21 @@ static PropResult _check_clause(ClauseDB *db, SolveCtx *ctx,
                                        : (cur <= unit.bound);
         if (already_tight) return PROP_OK;
 
+        /* Stamp clause-reason on the trail entry so lcg_analyze_conflict
+         * can resolve through this clause instead of treating the
+         * tightening as a level-N decision. prop_ref is repurposed as
+         * the clause index when TRAIL_FLAG_FROM_CLAUSE is set. */
+        uint32_t saved_pr   = ctx->current_prop_ref;
+        uint32_t saved_flag = ctx->current_trail_flags;
+        ctx->current_prop_ref    = ci;
+        ctx->current_trail_flags = saved_flag | TRAIL_FLAG_FROM_CLAUSE;
         PropResult pr;
         if (unit.is_lb)
             pr = ctx_tighten_lb64(ctx, unit.var_id, (int64_t)unit.bound);
         else
             pr = ctx_tighten_ub64(ctx, unit.var_id, (int64_t)unit.bound);
+        ctx->current_prop_ref    = saved_pr;
+        ctx->current_trail_flags = saved_flag;
         if (pr == PROP_CONFLICT) return PROP_CONFLICT;
         db->n_propagations++;
     }
@@ -159,6 +170,10 @@ PropResult clause_propagate(ClauseDB *db, SolveCtx *ctx) {
                                                : (cur_bound <= unit.bound);
                 if (already_tight) continue;
 
+                uint32_t saved_pr   = ctx->current_prop_ref;
+                uint32_t saved_flag = ctx->current_trail_flags;
+                ctx->current_prop_ref    = ci;
+                ctx->current_trail_flags = saved_flag | TRAIL_FLAG_FROM_CLAUSE;
                 PropResult pr;
                 if (unit.is_lb) {
                     pr = ctx_tighten_lb64(ctx, unit.var_id,
@@ -167,6 +182,8 @@ PropResult clause_propagate(ClauseDB *db, SolveCtx *ctx) {
                     pr = ctx_tighten_ub64(ctx, unit.var_id,
                                            (int64_t)unit.bound);
                 }
+                ctx->current_prop_ref    = saved_pr;
+                ctx->current_trail_flags = saved_flag;
                 if (pr == PROP_CONFLICT) return PROP_CONFLICT;
                 changed = 1;
                 db->n_propagations++;

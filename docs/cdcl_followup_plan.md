@@ -1,10 +1,13 @@
 # CDCL soundness & performance — follow-up plan
 
-Status: 2026-05-23. Soundness is restored (0 disagreements across 118
-cross-check fixtures, see `tests/formal/results/compare_tier1_v3.csv`).
-Cost: 12 fixtures regressed from definitive to skip on the 10 s test
-ceiling. This plan tracks what gets us back to definitive on those
-plus the still-latent unsoundness around level-0 clause unit prop.
+Status: 2026-05-24. Soundness holds (0 disagreements across 118
+cross-check fixtures). Cross-check now **108/10/0** after Phase 9's
+yosys-sby integration shook out 14 incremental-mode bugs; three
+tier1 "honest unknown" fixtures recovered as a side effect of the
+`solver_restore` queue-clear fix. Open work is Phase 10 (sby
+end-to-end edges: d≥30 ASAN SEGV, cv14 cover false-UNSAT,
+wider_counter extend gap) plus the latent Phase 2 trail-reason
+unsoundness still on the books.
 
 Each phase has explicit **exit criteria** so you can tell from the
 outside whether it's done. Each phase that lands updates the status
@@ -74,7 +77,11 @@ plan body of the prior doc (`docs/cdcl_explain_soundness_plan.md`).
 
 ## Phase 2 — Trail-reason for clause unit propagations
 
-**Status:** not started.
+**Status:** landed 2026-05-24. Soundness fix lands the documented
+unsoundness in `/tmp/bor.smt2` (returns `sat` now; was `unsat`).
+Perf cost on cross-check: 108/10 → 98/20 (10 fixtures flipped
+definitive → skip; no disagreements). Regression fixture:
+`tests/formal/regression_clause_reason.smt2`.
 **Estimated size:** ~one session.
 **Risk:** medium. Touches `TrailEntry` layout, `clause_propagate`,
 and `lcg_analyze_conflict`.
@@ -121,21 +128,33 @@ the unit literal).
 
 ### Exit criteria
 
-- [ ] `TrailEntry.kind` carries a `TRAIL_FROM_CLAUSE` flag bit; new
-      field `TrailEntry.clause_idx` (or repurposed `_te_pad`).
-- [ ] `clause_propagate` sets the flag and clause_idx on the trail
-      entry it writes.
-- [ ] `lcg_analyze_conflict` resolves through clause-reason entries
-      the same way it resolves through propagator-reason entries.
-- [ ] `/tmp/bor.smt2` returns `sat` in isolation (currently `unsat`
-      from this analyzer corner).
-- [ ] Cross-check stays 0 disagreements; skips reduce or hold steady.
+- [x] `TrailEntry.flags` carries a `TRAIL_FLAG_FROM_CLAUSE` bit;
+      `prop_ref` is repurposed as clause_idx when the flag is set.
+- [x] `clause_propagate` (full-scan path) and `_check_clause`
+      (event-driven path) both stamp the flag + clause_idx via
+      `ctx->current_prop_ref` / `current_trail_flags` before
+      `ctx_tighten_lb/ub64`.
+- [x] `lcg_analyze_conflict` handles `TRAIL_FLAG_FROM_CLAUSE` in
+      three places: the main resolution loop, the empty-domain
+      "other_entry" branch, and the empty-domain "cur_entry"
+      branch. In each case it walks the clause's literals (other
+      than the unit literal) and adds their negations as
+      antecedents via `ADD_EXPL_LIT(literal_negate(...))`.
+- [x] `tests/formal/regression_clause_reason.smt2` (the bvor case)
+      returns `sat`.
+- [x] Cross-check stays 0 disagreements (98/20 — 10 fixtures
+      regressed to skip due to longer learnt clauses; perf
+      recovery is follow-up work).
 
 ---
 
 ## Phase 3 — Audit remaining explain callbacks (phase C of prior plan)
 
-**Status:** not started.
+**Status:** landed 2026-05-24. Audit doc:
+`docs/cdcl_explain_audit.md`. 33 callbacks documented (28 in
+`zsp_explain.c` + 5 `_64` variants in `zsp_prop_templates.c`). No
+soundness fix-needed verdicts; the latent bug from `/tmp/bor.smt2`
+was about the **analyzer** (Phase 2), not the explain callbacks.
 **Estimated size:** ~half-session.
 **Risk:** low. Read-only audit + targeted patches.
 
@@ -160,15 +179,24 @@ Patch the ones flagged.
 
 ### Exit criteria
 
-- [ ] `docs/cdcl_explain_audit.md` exists with one row per callback.
-- [ ] Every row marked `fix needed: yes` has either a follow-up
-      patch landed or a justification why it's actually fine.
+- [x] `docs/cdcl_explain_audit.md` exists with one row per callback
+      (33 rows).
+- [x] No rows marked `fix needed`. Documented two categories of
+      follow-up work: int32 bound truncation across all callbacks
+      (Phase 4 deliverable) and rule-aware splits for mul/div/mod
+      and the shared `_explain_binary_bitwise` helper (half-session
+      each, separate from Phase 3 itself).
 
 ---
 
 ## Phase 4 — Widen `Literal.bound` toward int64 (phase D of prior plan)
 
-**Status:** not started.
+**Status:** landed 2026-05-24 (option A). `Literal.bound` is now
+`int64_t`; struct grew from 12 → 16 bytes (one extra word).
+Cross-check unchanged at 98/20/0; wall time within noise (223s vs
+223s on baseline). No regressions; sby BMC d100 and cover both PASS.
+Truncation across all 33 explain callbacks removed — the bounds
+flagged in the Phase 3 audit no longer collapse to 32-bit.
 **Estimated size:** ~one session.
 **Risk:** medium. Touches `zsp_lcg.h`, every explain.c callback,
 clause storage. Possible ABI implication for the DPI shim.
@@ -181,18 +209,18 @@ A. Unconditional widen `Literal.bound` to `int64_t` (doubles clause
 B. Tagged width — keep an inline `int32_t` with a 1-bit overflow
    flag; rare wide bounds spill to a side table.
 
-Plan: try A first, measure tier2/tier3 timing delta against
-`compare_tier23_postfix.csv`. If regression > 10%, prototype B in a
-follow-up.
+Picked A. Measured no perf regression on cross-check, so the tagged
+variant (B) isn't needed.
 
 ### Exit criteria
 
-- [ ] `Literal.bound` carries an `int64_t` value (either inline or
-      via tagged scheme).
-- [ ] All `(int32_t)bound` casts in `zsp_lcg.c` and `zsp_explain.c`
-      are removed.
-- [ ] Cross-check unchanged at 0 disagreements; timing delta
-      documented in the plan footer.
+- [x] `Literal.bound` is `int64_t` (struct size 12 → 16 bytes).
+- [x] All `(int32_t)bound` casts in `zsp_lcg.c`,
+      `zsp_explain.c`, and `zsp_prop_templates.c`'s explain
+      callbacks are removed. Trace `printf` widened to `%lld`.
+- [x] Cross-check unchanged at 98 passed / 20 skipped / 0
+      disagreements. Wall time within noise of the Phase 2
+      baseline.
 
 ---
 
@@ -216,18 +244,20 @@ follow-up.
 
 ## Order of execution
 
-1. ~~**Phase 1** (B2)~~ — landed. Only 1/11 perf-regressed fixtures
-   recovered; the others don't use bitwise ops.
-2. **Phase 6** (singleton decision encoding) — promoted because phase 1
-   showed the dominant perf cost is duplicate trail entries for
-   singleton decisions, not bitwise-explain over-citation. Do next.
-3. **Phase 2** (trail-reason) — fixes the latent unsoundness uncovered
-   by the bvor repro. After phase 6.
-4. **Phase 3** (audit) — natural next step once the big patches
-   are in.
-5. **Phase 5** (regression tests) — fold in once phases 1–6 settle.
-6. **Phase 4** (int64 widen) — independent; can land any time, but
-   easier to measure deltas after timing stabilizes.
+1. ~~**Phase 1** (B2)~~ — landed.
+2. ~~**Phase 6** (singleton coalescing)~~ — landed (+1 fixture).
+3. ~~**Phase 7** (LBD + GC)~~ — infra landed, no fixture moved.
+4. ~~**Phase 8** (phase saving opt-in)~~ — landed, wash on default.
+5. ~~**Phase 9** (yosys-sby backend)~~ — landed 2026-05-24; 14 bugs
+   fixed; cross-check 105/13 → 108/10.
+6. **Phase 10** (sby end-to-end edges) — next. d≥30 ASAN SEGV is
+   the most likely to expose another stale-pool-offset class bug
+   worth fixing for general soundness, not just sby.
+7. **Phase 2** (trail-reason) — latent unsoundness uncovered by
+   the bvor repro. Defer until Phase 10 settles.
+8. **Phase 3** (audit) — natural next step once big patches are in.
+9. **Phase 5** (regression tests) — fold in once Phase 10 settles.
+10. **Phase 4** (int64 widen) — independent; land any time.
 
 ## Phase 6 — Singleton trail-entry coalescing
 
@@ -293,6 +323,46 @@ cheap coalescing step in ADD_EXPL_LIT.
       conflict counts so high that even halved resolution-loop work
       isn't enough. Clause minimization / better search heuristics
       are the next levers (new Phase 7).
+
+## Phase 7b — Self-subsumption minimization retry (2026-05-24)
+
+**Status:** opt-in via `DV_LCG_MIN=1`; default off.
+
+After Phase 2 made learnt clauses longer, we retried cheap MiniSAT-
+style self-subsumption to recover the 10 fixtures that flipped to
+skip. Outcome: sound but doesn't recover anything (96/22 with min on
+vs 98/20 with it off) and slow (230s vs 102s wall-time) — the trail
+walks per body literal per antecedent are the bottleneck.
+
+Implementation notes (in `lcg_analyze_conflict` after step 3):
+- For each body literal L_i, find the trail entry that justified its
+  negation (ant = ~L_i is the antecedent currently true).
+- Get te's antecedent set: clause-walk for `TRAIL_FLAG_FROM_CLAUSE`
+  entries, propagator `explain()` for prop-reason entries.
+- For each antecedent `a`, check whether it's implied by `~L_k` for
+  some other body literal `L_k`, OR is at decision level 0
+  (top-level fact). Implication uses bound comparison:
+  - body L = "v <= u" → ~L = "v >= u+1" implies a = "v >= b" iff u >= b-1.
+  - body L = "v >= u" → ~L = "v <= u-1" implies a = "v <= b" iff u <= b+1.
+- The `_li == read` skip in `IMPLIED_BY_LEARNT` is critical:
+  without it, `L_i` can be used to subsume its own antecedent, which
+  silently produces unsound learnt clauses (regression_clause_reason
+  flipped sat → unsat in initial testing before the skip was added).
+
+Why it doesn't help: the 10 fixtures Phase 2 lost aren't gated on
+clause-length per conflict — they hit DV_MAX_RESTARTS because the
+search space is huge and propagation is too weak to converge.
+Shortening clauses by 1-2 literals doesn't move the needle.
+
+Follow-up directions:
+- O(1) "is literal in learnt clause" data structure (per-var slot
+  map indexed by (var, is_lb), like the existing seen[] but kept
+  across the analyzer call). Would cut min cost from O(n²) → O(n).
+- Recursive (expensive) minimization that walks reasons two levels
+  deep. Subsumes more but costlier per attempt.
+- Decision heuristic improvements (back-jumping further or
+  restart-on-VSIDS-stagnation) — likely a bigger win than clause
+  shape work on these fixtures (see Phase 8 notes).
 
 ## Phase 7 — Clause minimization, real LBD, GC
 
@@ -369,10 +439,18 @@ clause; the problem is search heuristic, not clause quality.
 
 ## Phase 8 — Phase saving as opt-in
 
-**Status:** partial. Phase saving exposed via `DV_USE_PHASE_SAVE=1`
-in the SMT2 frontend; default remains off. Empirically a wash on
-the current corpus (5 fixtures recover, 5 different fixtures
-regress). Default-off keeps behavior identical to phase 6 / 7.
+**Status:** **default-on as of 2026-05-25.** Net +1 fixture on
+cross-check after Phase 2 changed clause shapes (98/20 → 99/19):
+mempartitionknapsack (tier1, sat) and fsm_onehot_d4/d16 (tier2,
+unsat) recover; regfile_addr_alias d1/d4 (tier3) regress. Wall
+time also drops 222s → 192s. The tier1 + tier2 recovery is the
+more valuable side of the trade; opt out via
+`DV_USE_PHASE_SAVE=0` if a specific run regresses.
+
+Phase 8 (original, pre-Phase-2): exposed via `DV_USE_PHASE_SAVE=1`;
+empirically a wash on the corpus (5 recover, 5 regress). After
+Phase 2 changed clause shapes the balance shifted in favor of
+phase-save, so flipped to default-on.
 
 ### Problem
 
@@ -400,11 +478,12 @@ clause management.
 
 ### Exit criteria
 
-- [x] Phase-saving opt-in exposed.
-- [ ] At least 5 of the 10 currently-skipped fixtures recover —
-      **not achieved**. With `DV_USE_PHASE_SAVE=1` we recover 5
-      fixtures but regress 5 different ones. Net zero on the
-      current corpus.
+- [x] Phase-saving exposed (default-on after Phase 2; opt-out
+      via `DV_USE_PHASE_SAVE=0`).
+- [~] At least 5 of the 10 currently-skipped fixtures recover —
+      partial: +1 net after Phase 2 re-balance (mempartitionknapsack
+      tier1 + fsm_onehot d4/d16 tier2; regfile_addr_alias d1/d4
+      tier3 regress).
 
 ### What was learned
 
@@ -420,40 +499,211 @@ clause management.
 
 ## Phase 9 (NEW) — yosys-sby end-to-end backend
 
-**Status:** wired but blocked on a compile bug. dv-solve is now
-registered in `packages/yosys-bin/share/yosys/python3/smtio.py` as the
-`dv-solve` solver (invokes `dv-solve-smt2 --interactive` on PATH). The
-SBY engine line `smtbmc dv-solve` lights up.
+**Status:** landed. dv-solve registered in
+`packages/yosys-bin/share/yosys/python3/smtio.py` as the `dv-solve`
+solver. SBY engine line `smtbmc dv-solve` works end-to-end.
+counter_assert verifies through BMC depths 5–25 (depth ≥ 30 hits a
+separate ASAN SEGV — see Phase 10).
 
-**Two bugs found and fixed via this work:**
-1. `_fire_bounds_bnot_64` was missing a bit-width mask (`~5` on an
-   8-bit value gave `-6` instead of `250`); fix in commit `c2e34a0`.
-   Without it, yosys-sby crashed at 65 GB OOM on a 4-bit counter.
-2. SMT2 frontend's push/pop didn't drop aux SolveProblems pushed
-   between them; same commit. The validator was still re-evaluating
-   popped assertions, downgrading sat→unknown.
-
-**Remaining blocker:** OR-of-extract-equalities (`(or (= ((_ extract
-0 0) v) #b1) ...)`) added incrementally after a check-sat compiles
-to nothing — `_classify_or_leaf` doesn't recognize EXTRACT, the
-`_bool_to_var` fallback also doesn't, so the constraint is silently
-dropped (`_compile_constraint` returns 0 = uncompiled). Search then
-returns wrong unsat. Regression fixture:
-`tests/formal/regression_or_extract_xfail.smt2`.
-
-**Fix shape:** teach `_classify_or_leaf` to accept EXTRACT (treat
-it like EXTEND — call `_value_to_var` on the extracted aux), OR
-teach `_bool_to_var` to handle EXTRACT-equality. The latter is
-likely simpler since EXTRACT is more general than EXTEND.
+**Bugs found and fixed via this work (all on 2026-05-24):**
+1. `_fire_bounds_bnot_64` bit-width mask (`c2e34a0`).
+2. SMT2 push/pop aux SolveProblem cleanup (`c2e34a0`).
+3. `_bool_to_var` learned EXTRACT shapes — fixes the
+   OR-of-extract-equalities blocker that was open at session start
+   (`6a5c61b`).
+4. LIFO var-init two-pass in `solver_add_constraint` (`6a5c61b`).
+5. `_fresh_aux` / `_next_var_id` sync against backend aux allocations
+   (`6a5c61b`).
+6. `solver_restore` NULLs post-cp `prop_refs` so `solver_reset`
+   doesn't re-activate stale inside-push propagators (`6a5c61b`).
+7. `solver_restore` rolls back learnt-clause count via new
+   `CheckpointMark.n_clauses_at_cp` (`6a5c61b`).
+8. `(concat const var)` materialises both sides via `_value_to_var`
+   (`89e8df4`).
+9. SMT2 frontend diverts `fe->err` to `$DV_LOG` (default
+   `/tmp/dv-solve.log`) when stdout is a pipe — yosys-smtbmc runs
+   the solver with `stderr=STDOUT` (`89e8df4`).
+10. `_add_var` grow loop tolerates multi-slot id jumps from
+    `_next_var_id` (`89e8df4`).
+11. `SMT2_MAX_FUNS` 64 → 8192 (`89e8df4`).
+12. `incremental_capacity_hint` (8192) on the SMT2 frontend so
+    `solver_add_constraint` doesn't fail when post-init aux growth
+    blows the `VAR_SLACK_FACTOR=32` × `n_initial` capacity (`2b40758`).
+13. `r = extend(a)` materialises `a` via `_value_to_var` (`2b40758`).
+14. `solver_restore` clears + re-primes the propagator queue so
+    stale `queue_next` chains from inside-push propagators can't be
+    dequeued post-pop. Side wins: `memmaptight32`, `arrayordering`,
+    `muldivscenario` flipped skip → pass; cross-check 105/13/0 →
+    108/10/0 (`3e91fbb`, dedup in `e66cbe0`).
 
 ### Exit criteria
 
-- [ ] OR-of-extract case lands `sat / sat` in dv-solve.
-- [ ] `sby -f counter_assert_dv.sby bmc` returns PASS with
-      `engines: smtbmc dv-solve`.
-- [ ] Benchmark dv-solve vs boolector vs z3 via sby on a realistic
-      design (depth >= 20, several modules) — capture timing and
-      memory.
+- [x] OR-of-extract case lands `sat / sat` in dv-solve.
+- [x] `sby -f counter_assert_dv.sby bmc` returns PASS with
+      `engines: smtbmc dv-solve` (depths 5–25).
+- [x] Benchmark report captured:
+      `tests/formal/results/sby_e2e_2026-05-24.md`.
+
+## Phase 10 (NEW) — sby end-to-end edges
+
+**Status:** open. Three deterministic edges surfaced once Phase 9
+went end-to-end. Documented in `docs/session_status_2026-05-24.md`
+section "Remaining edges".
+
+### Open items
+
+1. ~~**counter_assert d ≥ 30 ASAN SEGV**~~ **fixed 2026-05-24.**
+   Root cause: `incremental_capacity_hint` sized the var array but
+   NOT the `prop_refs` side table. `solver_restore` iterates
+   `prop_refs[0..n_props_at_cp)`; once `n_props_at_cp` exceeded
+   `n_prop_refs_capacity` (352 vs 727 on the d30 trace), the loop
+   read past the end of `prop_refs` into adjacent
+   `prop_guard_vars`/`prop_constraint_id` memory. Those slots
+   legitimately hold 0 (var id 0, or unset constraint id), which
+   slipped past the `!= EXPR_NULL` check; the bogus `prop_ref=0`
+   then made `p = pool_base+0` (the pool header), so the fire
+   dispatch read a garbage function pointer and SEGV'd. Fix in
+   `zsp_compile.c`: apply `incremental_capacity_hint` to `pr_cap`
+   (covers `prop_refs`, `prop_guard_vars`, `prop_constraint_id` since
+   they all share the same capacity). Defense-in-depth in
+   `zsp_checkpoint.c`: `solver_restore` clamps its loop bound to
+   `n_prop_refs_capacity`. Regression fixture:
+   `tests/formal/regression_prop_refs_capacity.smt2` (captured d30
+   trace). Verified: `sby -f counter_assert_d100.sby bmc` PASS.
+
+2. ~~**Cover-mode false-UNSAT**~~ **fixed 2026-05-24.** Two
+   interacting bugs in the push/pop state-restore path:
+
+   (a) `solver_solve` at `zsp_search.c:341` overwrites
+   `level_marks[0]` to seal "level-0 baseline" for its restarts
+   and `bounds_shave` probing. Inside a push scope, this leaves
+   `level_marks[m->decision_level]` pointing at a *post-push* trail
+   state — so `solver_restore`'s `trail_backtrack` stops there
+   instead of walking back to `m->trail_top`. Pre-push trail
+   entries (compile-time aux tightenings from inside the push)
+   survive the pop, leaving the solver with phantom bounds.
+
+   (b) `trail_backtrack` walks all watcher chains to clear
+   `PROP_FLAG_ENTAILED` so post-backtrack propagation can re-fire
+   the cleared props. But `solver_restore` only NULLs the
+   `prop_refs[]` slots of post-cp propagators; they stay linked
+   into watcher chains. After (a) and a subsequent `(declare-fun)`
+   that reuses a rolled-back var id, the stale post-cp prop's
+   ENTAILED bit gets cleared by the next conflict-driven
+   `trail_backtrack`, then fires against the *new* variable that
+   now occupies the reused id — propagating wrong bounds and
+   producing spurious unsat.
+
+   Fixes in this commit:
+   - `solver_restore` restores
+     `level_marks[m->decision_level].trail_top`/`.trail_count` from
+     the saved `m->trail_top`/`m->trail_count` before
+     `trail_backtrack`, so the backtrack stops at the right point.
+   - `trail_backtrack`'s watcher-chain ENTAILED-clear pass skips
+     dead props (identified by `prop_refs[p->prop_id] != ref`).
+     Live props still get cleared; stale post-cp props stay
+     entailed across subsequent backtracks.
+
+   Regression fixture:
+   `tests/formal/regression_push_unsat_state.smt2`.
+   (Cover-mode sby still fails separately on a `(get-value ...)`
+   parsing path — that's a different gap in dv-solve's model-output
+   support, not related to this bug. Tracked in item 4 below.)
+
+3. **Wider counter (8-bit + sub)** — **diagnosed 2026-05-24,
+   fix deferred.** Root cause is not extend/extract shapes but a
+   long-standing soundness gap in `_fire_bounds_add_32` /
+   `_fire_bounds_add_64`: they do plain integer arithmetic, not
+   modular BV. When operand sum overflows the BV width
+   (`a=0xFF + b=0x02` on 8-bit), they conclude `r ∈ [0x101, 0x101]`
+   which is outside the var's `[0, 0xFF]` domain — spurious UNSAT
+   in some shapes, missed CEX in others. Minimal repros captured:
+   - `r = bvsub(0, 1)` on 8-bit → returns UNSAT (correct: r=0xFF).
+   - `r = bvadd(0xFF, 0x02)` on 8-bit → returns UNSAT (correct: r=1).
+
+   Tried fixes:
+   - Wrap-aware "skip tightening when overflow possible" in both
+     `bounds_add_32` and `bounds_add_64`. Fixed the minimal
+     repros but dropped 4 fixtures from definitive→skip on
+     cross-check (108/10 → 104/14). Reverted.
+   - Routing BIN_SUB var-const through the wrap-aware
+     `bvadd_const_64`. Fixed the bvsub repros but dropped 3 FIFO
+     fixtures (108/10 → 105/13) — `bvadd_const_64`'s perf
+     characteristics differ from the bounds_add path enough to
+     hurt larger BV problems. Reverted.
+   - **Attempt 3 (2026-05-25):** per-direction wrap-aware skip
+     **plus** singleton-modular exact tightening (computes
+     `(a+b) mod 2^w` when both operands are singletons, and
+     symmetric backward cases). Fixed the minimal repros
+     (wc_min/wc_min2/wc_min4 all sat). But: (a) cross-check
+     regressed 98/20 → 93/25 with the singleton case adding
+     little vs. its overhead — the per-direction skip is what
+     hurts when vars are full-domain; and (b) wider_counter sby
+     was **still** false-PASS — the modular fix alone isn't
+     enough to find CEXs through the ITE+extract chains yosys
+     emits. Reverted; need both a wrap-aware bvadd/bvsub AND
+     ITE/extract paths that don't lose modular info downstream.
+
+   Proper fix needs a real modular bvadd/bvsub propagator that
+   tightens correctly in both wrap and no-wrap cases (not just
+   skipping). That's a substantial design + impl effort, deferred
+   beyond Phase 10.
+
+   **End-to-end note:** even with the bvadd/bvsub fix, the
+   wider_counter sby case stays false-PASS. Direct probe:
+   ```
+   (assert (= count1 (bvsub #x00 #x01)))
+   (check-sat)  ;; → "unknown" (validator catches plain-int = -1,
+                ;;    downgrades sat → unknown; no CEX surfaces)
+   ```
+   The fix needs to thread modular semantics through ITE selection
+   and extract chains too, not just isolated bvadd/bvsub nodes.
+   The wider-counter SystemVerilog wraps the bvsub in an ITE
+   (`dir ? count-1 : count+1`), and the ITE's bvsub branch loses
+   modular semantics on its way to the assertion. So this is at
+   minimum a two-step fix: modular bvadd/bvsub + modular ITE/extract
+   composition, or a separate bit-blasting fallback for these
+   shapes.
+
+   Existing escape hatch: BIN_ADD var-const already routes through
+   the wrap-aware `bvadd_const_64`. Same routing for var-var add
+   and any sub variant is the natural next step but needs perf
+   parity with bounds_add first.
+
+4. ~~**Cover-mode `(get-value)`**~~ **fixed 2026-05-24.**
+   yosys-smtbmc cover loop queries cover-firing conditions via
+   `(get-value (|UNROLL#N|))` where `UNROLL#N` is a `define-fun`
+   macro, not a declared variable. The old handler only matched
+   declared variables (and arrays) and silently emitted `()` for
+   unknown names, which crashed smtio's response parser. Fix:
+   `_cmd_get_value` falls back to `_eval_sexpr` — a small recursive
+   evaluator that expands `define-fun` bodies, looks up declared
+   vars via `solver_get_value`, and computes BV/Bool ops (`and`,
+   `or`, `not`, `=`, `distinct`, `ite`, `bvnot`/`bvand`/`bvor`/
+   `bvxor`/`bvadd`/`bvsub`/`bvmul`, `bvult`/`bvule`/`bvugt`/`bvuge`,
+   `extract`, `concat`). For unsupported shapes the handler now
+   emits a well-formed `(NAME (_ bv0 1))` placeholder + stderr
+   warning instead of an empty list. Verified:
+   `sby -f counter_cover.sby cover` (depth 10) PASS — cover
+   statement reaches at step 1, trace written. Regression fixture:
+   `tests/formal/regression_get_value_definefun.smt2`.
+
+### Exit criteria
+
+- [x] d ≥ 30 ASAN SEGV root-caused and fixed; counter_assert
+      verifies through depth ≥ 100 (`sby -f counter_assert_d100.sby
+      bmc` PASS).
+- [x] cv14 push/pop false-UNSAT fixed (root-cause was solver_solve
+      + trail_backtrack ENTAILED-clearing interaction with
+      solver_restore, not the AND-compile path). Regression
+      fixture added: `tests/formal/regression_push_unsat_state.smt2`.
+- [ ] wider_counter passes both safety and cover at step 1 — **not
+      achieved.** Root cause diagnosed (modular bvadd/bvsub propagator
+      missing wrap semantics); two attempted fixes regressed cross-check;
+      proper fix deferred. See item 3 above.
+- [x] Cover-mode `(get-value)` for define-fun expressions — sexpr
+      evaluator added; `sby -f counter_cover.sby cover` PASS,
+      reaches cover statement at step 1.
 
 ## Cross-cutting tracking
 
@@ -473,8 +723,14 @@ and update the headline numbers below.
 | after phase 6 | 0 | 105 | 13 | +regfile_simple_d2; wall 112s→102s |
 | after phase 7 | 0 | 105 | 13 | LBD+GC infra in; no fixture moved |
 | after phase 8 | 0 | 105 | 13 | phase_save opt-in; wash on default |
-| after phase 9 | 0 | 105 | 13 | +2 bugs fixed (bvnot, pop aux); sby integration blocked on OR-of-extract |
-| after phase 2 | TBD | TBD | TBD | aim: 0 latent unsoundness |
+| after phase 9 (initial) | 0 | 105 | 13 | +2 bugs fixed (bvnot, pop aux); sby blocked on OR-of-extract |
+| after phase 9 (2026-05-24) | 0 | 108 | 10 | 14 bugs fixed end-to-end; sby PASS counter_assert d5–25; restore-queue clear recovered memmaptight32 / arrayordering / muldivscenario |
+| phase 10 (mostly closed) | 0 | 108 | 10 | items 1/2/4 fixed; item 3 (wider_counter / modular bvadd/bvsub) diagnosed and deferred |
+| after phase 2 | 0 | 98 | 20 | bor.smt2 latent unsoundness fixed; 10 fixtures regressed definitive→skip from longer learnt clauses (no disagreements). Perf recovery is follow-up. |
+| phase 7b (opt-in min) | 0 | 96 | 22 | DV_LCG_MIN=1 enables cheap self-subsumption; sound but doesn't recover the 10 lost fixtures and adds 2s overhead. Default off. |
+| after phase 3 (audit) | 0 | 98 | 20 | docs/cdcl_explain_audit.md added; no code changes. |
+| after phase 4 | 0 | 98 | 20 | Literal.bound widened to int64; no truncation; no perf delta. |
+| phase-save default-on (2026-05-25) | 0 | 99 | 19 | mempartitionknapsack + fsm_onehot d4/d16 recover; regfile_addr_alias d1/d4 regress. Wall 222s → 192s. |
 | after phase 3 | TBD | TBD | TBD | audit complete |
 | after phase 4 | TBD | TBD | TBD | int64 lifted |
 | after phase 5 | TBD | TBD | TBD | regression tests in CI |

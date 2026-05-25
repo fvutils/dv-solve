@@ -38,13 +38,21 @@ static inline uint32_t _resolve_var(const SolveCtx *ctx, uint32_t var_id) {
     return root;
 }
 
-static Literal _mk_lb(uint32_t var_id, int32_t bound) {
-    Literal l = {var_id, bound, 1, {0, 0, 0}};  /* caller resolves alias */
+static Literal _mk_lb(uint32_t var_id, int64_t bound) {
+    Literal l;
+    l.var_id = var_id;
+    l.is_lb = 1;
+    l._pad[0] = l._pad[1] = l._pad[2] = 0;
+    l.bound = bound;
     return l;
 }
 
-static Literal _mk_ub(uint32_t var_id, int32_t bound) {
-    Literal l = {var_id, bound, 0, {0, 0, 0}};
+static Literal _mk_ub(uint32_t var_id, int64_t bound) {
+    Literal l;
+    l.var_id = var_id;
+    l.is_lb = 0;
+    l._pad[0] = l._pad[1] = l._pad[2] = 0;
+    l.bound = bound;
     return l;
 }
 
@@ -62,10 +70,10 @@ int explain_bounds_le(Propagator *self, SolveCtx *ctx,
 
     if (var_id == xid && !is_lb) {
         /* x's UB was tightened to y_hi. Reason: y <= y_hi */
-        out->lits[out->n_lits++] = _mk_ub(yid, (int32_t)new_bound);
+        out->lits[out->n_lits++] = _mk_ub(yid, new_bound);
     } else if (var_id == yid && is_lb) {
         /* y's LB was tightened to x_lo. Reason: x >= x_lo */
-        out->lits[out->n_lits++] = _mk_lb(xid, (int32_t)new_bound);
+        out->lits[out->n_lits++] = _mk_lb(xid, new_bound);
     } else {
         return -1;
     }
@@ -86,10 +94,10 @@ int explain_bounds_lt(Propagator *self, SolveCtx *ctx,
 
     if (var_id == xid && !is_lb) {
         /* x's UB tightened to y_hi - 1. Reason: y <= y_hi (where y_hi = new_bound + 1) */
-        out->lits[out->n_lits++] = _mk_ub(yid, (int32_t)(new_bound + 1));
+        out->lits[out->n_lits++] = _mk_ub(yid, new_bound + 1);
     } else if (var_id == yid && is_lb) {
         /* y's LB tightened to x_lo + 1. Reason: x >= x_lo (where x_lo = new_bound - 1) */
-        out->lits[out->n_lits++] = _mk_lb(xid, (int32_t)(new_bound - 1));
+        out->lits[out->n_lits++] = _mk_lb(xid, new_bound - 1);
     } else {
         return -1;
     }
@@ -111,10 +119,10 @@ int explain_bounds_eq(Propagator *self, SolveCtx *ctx,
 
     if (is_lb) {
         /* var's LB tightened. Reason: other >= new_bound */
-        out->lits[out->n_lits++] = _mk_lb(other, (int32_t)new_bound);
+        out->lits[out->n_lits++] = _mk_lb(other, new_bound);
     } else {
         /* var's UB tightened. Reason: other <= new_bound */
-        out->lits[out->n_lits++] = _mk_ub(other, (int32_t)new_bound);
+        out->lits[out->n_lits++] = _mk_ub(other, new_bound);
     }
     return 0;
 }
@@ -136,8 +144,8 @@ int explain_bounds_ne(Propagator *self, SolveCtx *ctx,
      * If other is singleton at value v, and var's bound was at v,
      * the reason is "other == v" (i.e., other >= v AND other <= v). */
     int64_t other_val = var_lo64(ctx, &ctx->vars[other]);
-    out->lits[out->n_lits++] = _mk_lb(other, (int32_t)other_val);
-    out->lits[out->n_lits++] = _mk_ub(other, (int32_t)other_val);
+    out->lits[out->n_lits++] = _mk_lb(other, other_val);
+    out->lits[out->n_lits++] = _mk_ub(other, other_val);
     return 0;
 }
 
@@ -157,30 +165,30 @@ int explain_bounds_add(Propagator *self, SolveCtx *ctx,
     if (var_id == rid) {
         if (is_lb) {
             /* r_lo tightened. Reason: a >= a_lo AND b >= b_lo */
-            out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)var_lo64(ctx, &ctx->vars[aid]));
-            out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)var_lo64(ctx, &ctx->vars[bid]));
+            out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
+            out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
         } else {
             /* r_hi tightened. Reason: a <= a_hi AND b <= b_hi */
-            out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)var_hi64(ctx, &ctx->vars[aid]));
-            out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)var_hi64(ctx, &ctx->vars[bid]));
+            out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
+            out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
         }
     } else if (var_id == aid) {
         if (is_lb) {
             /* a_lo tightened. Reason: r >= r_lo AND b <= b_hi */
-            out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)var_lo64(ctx, &ctx->vars[rid]));
-            out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)var_hi64(ctx, &ctx->vars[bid]));
+            out->lits[out->n_lits++] = _mk_lb(rid, var_lo64(ctx, &ctx->vars[rid]));
+            out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
         } else {
             /* a_hi tightened. Reason: r <= r_hi AND b >= b_lo */
-            out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)var_hi64(ctx, &ctx->vars[rid]));
-            out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)var_lo64(ctx, &ctx->vars[bid]));
+            out->lits[out->n_lits++] = _mk_ub(rid, var_hi64(ctx, &ctx->vars[rid]));
+            out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
         }
     } else if (var_id == bid) {
         if (is_lb) {
-            out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)var_lo64(ctx, &ctx->vars[rid]));
-            out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)var_hi64(ctx, &ctx->vars[aid]));
+            out->lits[out->n_lits++] = _mk_lb(rid, var_lo64(ctx, &ctx->vars[rid]));
+            out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
         } else {
-            out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)var_hi64(ctx, &ctx->vars[rid]));
-            out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)var_lo64(ctx, &ctx->vars[aid]));
+            out->lits[out->n_lits++] = _mk_ub(rid, var_hi64(ctx, &ctx->vars[rid]));
+            out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
         }
     } else {
         return -1;
@@ -205,13 +213,13 @@ int explain_bounds_mul(Propagator *self, SolveCtx *ctx,
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
     out->n_lits = 0;
     /* Conservative: both operand bounds are antecedents */
-    out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)var_lo64(ctx, &ctx->vars[aid]));
-    out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)var_hi64(ctx, &ctx->vars[aid]));
-    out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)var_lo64(ctx, &ctx->vars[bid]));
-    out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)var_hi64(ctx, &ctx->vars[bid]));
+    out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
+    out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
+    out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
+    out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
     if (var_id != rid) {
-        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)var_lo64(ctx, &ctx->vars[rid]));
-        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)var_hi64(ctx, &ctx->vars[rid]));
+        out->lits[out->n_lits++] = _mk_lb(rid, var_lo64(ctx, &ctx->vars[rid]));
+        out->lits[out->n_lits++] = _mk_ub(rid, var_hi64(ctx, &ctx->vars[rid]));
     }
     (void)new_bound; (void)is_lb;
     return 0;
@@ -225,13 +233,13 @@ int explain_bounds_div(Propagator *self, SolveCtx *ctx,
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
     out->n_lits = 0;
-    out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)var_lo64(ctx, &ctx->vars[aid]));
-    out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)var_hi64(ctx, &ctx->vars[aid]));
-    out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)var_lo64(ctx, &ctx->vars[bid]));
-    out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)var_hi64(ctx, &ctx->vars[bid]));
+    out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
+    out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
+    out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
+    out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
     if (var_id != rid) {
-        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)var_lo64(ctx, &ctx->vars[rid]));
-        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)var_hi64(ctx, &ctx->vars[rid]));
+        out->lits[out->n_lits++] = _mk_lb(rid, var_lo64(ctx, &ctx->vars[rid]));
+        out->lits[out->n_lits++] = _mk_ub(rid, var_hi64(ctx, &ctx->vars[rid]));
     }
     (void)new_bound; (void)is_lb;
     return 0;
@@ -245,10 +253,10 @@ int explain_bounds_mod(Propagator *self, SolveCtx *ctx,
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
     out->n_lits = 0;
-    out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)var_lo64(ctx, &ctx->vars[aid]));
-    out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)var_hi64(ctx, &ctx->vars[aid]));
-    out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)var_lo64(ctx, &ctx->vars[bid]));
-    out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)var_hi64(ctx, &ctx->vars[bid]));
+    out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
+    out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
+    out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
+    out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
     (void)var_id; (void)new_bound; (void)is_lb;
     return 0;
 }
@@ -264,16 +272,16 @@ int explain_unary_neg(Propagator *self, SolveCtx *ctx,
     if (var_id == rid) {
         if (is_lb) {
             /* r_lo = -a_hi. Reason: a <= a_hi */
-            out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)var_hi64(ctx, &ctx->vars[aid]));
+            out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
         } else {
             /* r_hi = -a_lo. Reason: a >= a_lo */
-            out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)var_lo64(ctx, &ctx->vars[aid]));
+            out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
         }
     } else {
         if (is_lb) {
-            out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)var_hi64(ctx, &ctx->vars[rid]));
+            out->lits[out->n_lits++] = _mk_ub(rid, var_hi64(ctx, &ctx->vars[rid]));
         } else {
-            out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)var_lo64(ctx, &ctx->vars[rid]));
+            out->lits[out->n_lits++] = _mk_lb(rid, var_lo64(ctx, &ctx->vars[rid]));
         }
     }
     (void)new_bound;
@@ -311,22 +319,22 @@ int explain_ite_value(Propagator *self, SolveCtx *ctx,
         /* cond is true -> r tracks a */
         out->lits[out->n_lits++] = _mk_lb(cid, 1);
         if (is_lb)
-            out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)var_lo64(ctx, &ctx->vars[aid]));
+            out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
         else
-            out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)var_hi64(ctx, &ctx->vars[aid]));
+            out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
     } else if (chi <= 0) {
         /* cond is false -> r tracks b */
         out->lits[out->n_lits++] = _mk_ub(cid, 0);
         if (is_lb)
-            out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)var_lo64(ctx, &ctx->vars[bid]));
+            out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
         else
-            out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)var_hi64(ctx, &ctx->vars[bid]));
+            out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
     } else {
         /* cond undecided -> both branches contribute */
-        out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)var_lo64(ctx, &ctx->vars[aid]));
-        out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)var_hi64(ctx, &ctx->vars[aid]));
-        out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)var_lo64(ctx, &ctx->vars[bid]));
-        out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)var_hi64(ctx, &ctx->vars[bid]));
+        out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
+        out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
+        out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
+        out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
     }
     (void)var_id; (void)new_bound; (void)rid;
     return 0;
@@ -342,8 +350,8 @@ int explain_in_set(Propagator *self, SolveCtx *ctx,
     PropWatchSect *ws = PROP_WS(self);
     uint32_t xid = ws->var_ids[0];
     out->n_lits = 0;
-    out->lits[out->n_lits++] = _mk_lb(xid, (int32_t)var_lo64(ctx, &ctx->vars[xid]));
-    out->lits[out->n_lits++] = _mk_ub(xid, (int32_t)var_hi64(ctx, &ctx->vars[xid]));
+    out->lits[out->n_lits++] = _mk_lb(xid, var_lo64(ctx, &ctx->vars[xid]));
+    out->lits[out->n_lits++] = _mk_ub(xid, var_hi64(ctx, &ctx->vars[xid]));
     (void)var_id; (void)is_lb; (void)new_bound;
     return 0;
 }
@@ -360,8 +368,8 @@ int explain_disj_clause(Propagator *self, SolveCtx *ctx,
     for (uint32_t i = 0; i < ws->n_watches && out->n_lits < MAX_EXPLAIN_LITS - 2; i++) {
         uint32_t vid = ws->var_ids[i];
         if (vid == var_id) continue;
-        out->lits[out->n_lits++] = _mk_lb(vid, (int32_t)var_lo64(ctx, &ctx->vars[vid]));
-        out->lits[out->n_lits++] = _mk_ub(vid, (int32_t)var_hi64(ctx, &ctx->vars[vid]));
+        out->lits[out->n_lits++] = _mk_lb(vid, var_lo64(ctx, &ctx->vars[vid]));
+        out->lits[out->n_lits++] = _mk_ub(vid, var_hi64(ctx, &ctx->vars[vid]));
     }
     (void)is_lb; (void)new_bound;
     return 0;
@@ -379,9 +387,9 @@ int explain_sum_eq(Propagator *self, SolveCtx *ctx,
         uint32_t vid = ws->var_ids[i];
         if (vid == var_id) continue;
         if (is_lb)
-            out->lits[out->n_lits++] = _mk_lb(vid, (int32_t)var_lo64(ctx, &ctx->vars[vid]));
+            out->lits[out->n_lits++] = _mk_lb(vid, var_lo64(ctx, &ctx->vars[vid]));
         else
-            out->lits[out->n_lits++] = _mk_ub(vid, (int32_t)var_hi64(ctx, &ctx->vars[vid]));
+            out->lits[out->n_lits++] = _mk_ub(vid, var_hi64(ctx, &ctx->vars[vid]));
     }
     (void)new_bound;
     return 0;
@@ -402,8 +410,8 @@ int explain_all_different(Propagator *self, SolveCtx *ctx,
         int64_t lo = var_lo64(ctx, &ctx->vars[vid]);
         int64_t hi = var_hi64(ctx, &ctx->vars[vid]);
         if (lo == hi) {
-            out->lits[out->n_lits++] = _mk_lb(vid, (int32_t)lo);
-            out->lits[out->n_lits++] = _mk_ub(vid, (int32_t)hi);
+            out->lits[out->n_lits++] = _mk_lb(vid, lo);
+            out->lits[out->n_lits++] = _mk_ub(vid, hi);
         }
     }
     (void)is_lb; (void)new_bound;
@@ -421,14 +429,14 @@ int explain_reification(Propagator *self, SolveCtx *ctx,
 
     if (var_id == gid) {
         /* Guard was tightened based on x and y bounds */
-        out->lits[out->n_lits++] = _mk_lb(xid, (int32_t)var_lo64(ctx, &ctx->vars[xid]));
-        out->lits[out->n_lits++] = _mk_ub(xid, (int32_t)var_hi64(ctx, &ctx->vars[xid]));
-        out->lits[out->n_lits++] = _mk_lb(yid, (int32_t)var_lo64(ctx, &ctx->vars[yid]));
-        out->lits[out->n_lits++] = _mk_ub(yid, (int32_t)var_hi64(ctx, &ctx->vars[yid]));
+        out->lits[out->n_lits++] = _mk_lb(xid, var_lo64(ctx, &ctx->vars[xid]));
+        out->lits[out->n_lits++] = _mk_ub(xid, var_hi64(ctx, &ctx->vars[xid]));
+        out->lits[out->n_lits++] = _mk_lb(yid, var_lo64(ctx, &ctx->vars[yid]));
+        out->lits[out->n_lits++] = _mk_ub(yid, var_hi64(ctx, &ctx->vars[yid]));
     } else {
         /* x or y was tightened based on guard value */
-        out->lits[out->n_lits++] = _mk_lb(gid, (int32_t)var_lo64(ctx, &ctx->vars[gid]));
-        out->lits[out->n_lits++] = _mk_ub(gid, (int32_t)var_hi64(ctx, &ctx->vars[gid]));
+        out->lits[out->n_lits++] = _mk_lb(gid, var_lo64(ctx, &ctx->vars[gid]));
+        out->lits[out->n_lits++] = _mk_ub(gid, var_hi64(ctx, &ctx->vars[gid]));
     }
     (void)is_lb; (void)new_bound;
     return 0;
@@ -452,8 +460,8 @@ int explain_bit_slice(Propagator *self, SolveCtx *ctx,
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1];
     out->n_lits = 0;
     uint32_t src = (var_id == rid) ? aid : rid;
-    out->lits[out->n_lits++] = _mk_lb(src, (int32_t)var_lo64(ctx, &ctx->vars[src]));
-    out->lits[out->n_lits++] = _mk_ub(src, (int32_t)var_hi64(ctx, &ctx->vars[src]));
+    out->lits[out->n_lits++] = _mk_lb(src, var_lo64(ctx, &ctx->vars[src]));
+    out->lits[out->n_lits++] = _mk_ub(src, var_hi64(ctx, &ctx->vars[src]));
     (void)is_lb; (void)new_bound;
     return 0;
 }
@@ -467,13 +475,13 @@ static int _explain_binary_bitwise(Propagator *self, SolveCtx *ctx,
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
     out->n_lits = 0;
-    out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)var_lo64(ctx, &ctx->vars[aid]));
-    out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)var_hi64(ctx, &ctx->vars[aid]));
-    out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)var_lo64(ctx, &ctx->vars[bid]));
-    out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)var_hi64(ctx, &ctx->vars[bid]));
+    out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
+    out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
+    out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
+    out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
     if (var_id != rid) {
-        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)var_lo64(ctx, &ctx->vars[rid]));
-        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)var_hi64(ctx, &ctx->vars[rid]));
+        out->lits[out->n_lits++] = _mk_lb(rid, var_lo64(ctx, &ctx->vars[rid]));
+        out->lits[out->n_lits++] = _mk_ub(rid, var_hi64(ctx, &ctx->vars[rid]));
     }
     (void)is_lb; (void)new_bound;
     return 0;
@@ -506,10 +514,10 @@ int explain_bounds_band(Propagator *self, SolveCtx *ctx,
     if (var_id == rid) {
         if (is_lb) {
             if (both_singleton) {
-                out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
-                out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)alo);
-                out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
-                out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)blo);
+                out->lits[out->n_lits++] = _mk_lb(aid, alo);
+                out->lits[out->n_lits++] = _mk_ub(aid, alo);
+                out->lits[out->n_lits++] = _mk_lb(bid, blo);
+                out->lits[out->n_lits++] = _mk_ub(bid, blo);
             } else if (new_bound <= 0 && alo >= 0 && blo >= 0) {
                 out->lits[out->n_lits++] = _mk_lb(aid, 0);
                 out->lits[out->n_lits++] = _mk_lb(bid, 0);
@@ -518,31 +526,31 @@ int explain_bounds_band(Propagator *self, SolveCtx *ctx,
             }
         } else {
             if (both_singleton) {
-                out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
-                out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)alo);
-                out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
-                out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)blo);
+                out->lits[out->n_lits++] = _mk_lb(aid, alo);
+                out->lits[out->n_lits++] = _mk_ub(aid, alo);
+                out->lits[out->n_lits++] = _mk_lb(bid, blo);
+                out->lits[out->n_lits++] = _mk_ub(bid, blo);
             } else {
-                out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)ahi);
-                out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)bhi);
+                out->lits[out->n_lits++] = _mk_ub(aid, ahi);
+                out->lits[out->n_lits++] = _mk_ub(bid, bhi);
             }
         }
     } else if (var_id == aid) {
         /* rule 5: a.lb |= r.val when r and b singletons */
         int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
         int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
-        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)rlo);
-        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)rhi);
-        out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
-        out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)bhi);
+        out->lits[out->n_lits++] = _mk_lb(rid, rlo);
+        out->lits[out->n_lits++] = _mk_ub(rid, rhi);
+        out->lits[out->n_lits++] = _mk_lb(bid, blo);
+        out->lits[out->n_lits++] = _mk_ub(bid, bhi);
     } else if (var_id == bid) {
         /* symmetric of rule 5 (not currently fired by band fire) */
         int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
         int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
-        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)rlo);
-        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)rhi);
-        out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
-        out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)ahi);
+        out->lits[out->n_lits++] = _mk_lb(rid, rlo);
+        out->lits[out->n_lits++] = _mk_ub(rid, rhi);
+        out->lits[out->n_lits++] = _mk_lb(aid, alo);
+        out->lits[out->n_lits++] = _mk_ub(aid, ahi);
     } else {
         return -1;
     }
@@ -571,14 +579,14 @@ int explain_bounds_bor(Propagator *self, SolveCtx *ctx,
 
     if (var_id == rid) {
         if (both_singleton) {
-            out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
-            out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)alo);
-            out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
-            out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)blo);
+            out->lits[out->n_lits++] = _mk_lb(aid, alo);
+            out->lits[out->n_lits++] = _mk_ub(aid, alo);
+            out->lits[out->n_lits++] = _mk_lb(bid, blo);
+            out->lits[out->n_lits++] = _mk_ub(bid, blo);
         } else if (is_lb && alo >= 0 && blo >= 0) {
             /* r.lb >= max(alo, blo) — cite both LBs */
-            out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
-            out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
+            out->lits[out->n_lits++] = _mk_lb(aid, alo);
+            out->lits[out->n_lits++] = _mk_lb(bid, blo);
         } else {
             return -1;
         }
@@ -607,20 +615,20 @@ int explain_bounds_bxor(Propagator *self, SolveCtx *ctx,
     (void)is_lb; (void)new_bound;
 
     if (var_id == rid) {
-        out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
-        out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)ahi);
-        out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
-        out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)bhi);
+        out->lits[out->n_lits++] = _mk_lb(aid, alo);
+        out->lits[out->n_lits++] = _mk_ub(aid, ahi);
+        out->lits[out->n_lits++] = _mk_lb(bid, blo);
+        out->lits[out->n_lits++] = _mk_ub(bid, bhi);
     } else if (var_id == aid) {
-        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)rlo);
-        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)rhi);
-        out->lits[out->n_lits++] = _mk_lb(bid, (int32_t)blo);
-        out->lits[out->n_lits++] = _mk_ub(bid, (int32_t)bhi);
+        out->lits[out->n_lits++] = _mk_lb(rid, rlo);
+        out->lits[out->n_lits++] = _mk_ub(rid, rhi);
+        out->lits[out->n_lits++] = _mk_lb(bid, blo);
+        out->lits[out->n_lits++] = _mk_ub(bid, bhi);
     } else if (var_id == bid) {
-        out->lits[out->n_lits++] = _mk_lb(rid, (int32_t)rlo);
-        out->lits[out->n_lits++] = _mk_ub(rid, (int32_t)rhi);
-        out->lits[out->n_lits++] = _mk_lb(aid, (int32_t)alo);
-        out->lits[out->n_lits++] = _mk_ub(aid, (int32_t)ahi);
+        out->lits[out->n_lits++] = _mk_lb(rid, rlo);
+        out->lits[out->n_lits++] = _mk_ub(rid, rhi);
+        out->lits[out->n_lits++] = _mk_lb(aid, alo);
+        out->lits[out->n_lits++] = _mk_ub(aid, ahi);
     } else {
         return -1;
     }
@@ -635,9 +643,9 @@ int explain_bounds_bnot(Propagator *self, SolveCtx *ctx,
     out->n_lits = 0;
     uint32_t src = (var_id == rid) ? aid : rid;
     if (is_lb)
-        out->lits[out->n_lits++] = _mk_ub(src, (int32_t)var_hi64(ctx, &ctx->vars[src]));
+        out->lits[out->n_lits++] = _mk_ub(src, var_hi64(ctx, &ctx->vars[src]));
     else
-        out->lits[out->n_lits++] = _mk_lb(src, (int32_t)var_lo64(ctx, &ctx->vars[src]));
+        out->lits[out->n_lits++] = _mk_lb(src, var_lo64(ctx, &ctx->vars[src]));
     (void)new_bound;
     return 0;
 }
@@ -667,8 +675,8 @@ int explain_countones(Propagator *self, SolveCtx *ctx,
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1];
     out->n_lits = 0;
     uint32_t src = (var_id == rid) ? aid : rid;
-    out->lits[out->n_lits++] = _mk_lb(src, (int32_t)var_lo64(ctx, &ctx->vars[src]));
-    out->lits[out->n_lits++] = _mk_ub(src, (int32_t)var_hi64(ctx, &ctx->vars[src]));
+    out->lits[out->n_lits++] = _mk_lb(src, var_lo64(ctx, &ctx->vars[src]));
+    out->lits[out->n_lits++] = _mk_ub(src, var_hi64(ctx, &ctx->vars[src]));
     (void)is_lb; (void)new_bound;
     return 0;
 }
@@ -680,8 +688,8 @@ int explain_clog2(Propagator *self, SolveCtx *ctx,
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1];
     out->n_lits = 0;
     uint32_t src = (var_id == rid) ? aid : rid;
-    out->lits[out->n_lits++] = _mk_lb(src, (int32_t)var_lo64(ctx, &ctx->vars[src]));
-    out->lits[out->n_lits++] = _mk_ub(src, (int32_t)var_hi64(ctx, &ctx->vars[src]));
+    out->lits[out->n_lits++] = _mk_lb(src, var_lo64(ctx, &ctx->vars[src]));
+    out->lits[out->n_lits++] = _mk_ub(src, var_hi64(ctx, &ctx->vars[src]));
     (void)is_lb; (void)new_bound;
     return 0;
 }

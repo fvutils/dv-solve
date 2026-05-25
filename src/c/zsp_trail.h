@@ -44,6 +44,22 @@ typedef enum {
                                      * exact assignment). Both halves
                                      * carry the flag; analyzer treats
                                      * the pair as one logical event. */
+#define TRAIL_FLAG_FROM_CLAUSE 0x2u /* tightening came from a learnt
+                                     * clause's unit propagation. When
+                                     * set, prop_ref holds the clause
+                                     * index (not a pool offset), and
+                                     * the analyzer must resolve by
+                                     * walking the clause's other
+                                     * literals rather than calling a
+                                     * propagator's explain callback.
+                                     * Without this discriminator,
+                                     * clause-prop entries would look
+                                     * like decisions (prop_ref ==
+                                     * EXPR_NULL) and the analyzer
+                                     * would emit a 1-literal learnt
+                                     * clause forcing a bound at
+                                     * level 0 — over-strong and
+                                     * potentially unsound. */
 
 typedef struct TrailEntry {
     struct TrailEntry *prev;          /* 8: previous entry (or NULL)   */

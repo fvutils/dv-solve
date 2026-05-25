@@ -7,7 +7,7 @@ from .protocol import FormalResult
 from ._subprocess_solver import find_binary, run_smt2_solver
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_BUNDLED = _REPO_ROOT / "packages" / "verilator" / "bin" / "bitwuzla"
+_BUNDLED = _REPO_ROOT / "packages" / "verilator-bin" / "bin" / "bitwuzla"
 
 
 class BitwuzlaSolver:

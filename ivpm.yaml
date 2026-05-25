@@ -19,4 +19,8 @@ package:
     - name: yosys-bin
       url: https://github.com/edapack/yosys-bin
       src: gh-rls
+    - name: verilator-bin
+      url: https://github.com/edapack/verilator-bin
+      src: gh-rls
+
 

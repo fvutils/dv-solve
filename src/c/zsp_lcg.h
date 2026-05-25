@@ -38,10 +38,10 @@ typedef struct Propagator Propagator;
 
 typedef struct {
     uint32_t var_id;    /* integer variable ID */
-    int32_t  bound;     /* bound value         */
     uint8_t  is_lb;     /* 1 = x >= bound, 0 = x <= bound */
     uint8_t  _pad[3];
-} Literal;              /* 12 bytes */
+    int64_t  bound;     /* bound value (Phase 4: widened from int32) */
+} Literal;              /* 16 bytes */
 
 /* A literal is true under the current domains iff:
  *   is_lb && var_lo(x) >= bound, or

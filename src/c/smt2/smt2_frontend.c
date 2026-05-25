@@ -1798,6 +1798,10 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * Keep the larger base so currently-solvable kind_k* cases that take
      * many conflicts don't get cut off mid-search. */
     opts.max_conflicts = 10000;
+    {
+        const char *mc = getenv("DV_MAX_CONFLICTS");
+        if (mc && *mc) opts.max_conflicts = (uint32_t)atoi(mc);
+    }
     opts.max_restarts  = 1000;
     {
         const char *mr = getenv("DV_MAX_RESTARTS");
@@ -1814,14 +1818,16 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         if (ev && *ev == '0') opts.use_lcg = 0;
     }
 
-    /* Phase saving: opt-in. Empirically a wash on the current
-     * cross-check corpus (different fixtures pass with vs without —
-     * cache_direct_1way recovers but regfile_addr_alias regresses).
-     * Default off; enable with DV_USE_PHASE_SAVE=1. */
-    opts.use_phase_save = 0;
+    /* Phase saving: default on. Net +1 fixture on cross-check after
+     * Phase 2 changed clause shapes (98/20 → 99/19): mempartitionknapsack
+     * (tier1, sat) and fsm_onehot_d4/d16 (tier2, unsat) recover;
+     * regfile_addr_alias d1/d4 (tier3) regress. The tier1 + tier2
+     * recovery is the more valuable side of the trade. Disable
+     * with DV_USE_PHASE_SAVE=0 if a specific run regresses. */
+    opts.use_phase_save = 1;
     {
         const char *ev = getenv("DV_USE_PHASE_SAVE");
-        if (ev && *ev && *ev != '0') opts.use_phase_save = 1;
+        if (ev && *ev == '0') opts.use_phase_save = 0;
     }
 
     fe->last_result = solver_solve(fe->ctx, &opts);
@@ -1916,6 +1922,170 @@ static void _emit_array_store_chain(Smt2Frontend *fe, Smt2ArrayVar *av) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Sexpr → value evaluator for get-value on define-fun macros          */
+/*                                                                     */
+/* yosys-smtbmc's cover loop calls (get-value (|UNROLL#N|)) where      */
+/* UNROLL#N is a define-fun body, not a declared variable. We evaluate */
+/* the body directly against the current model. Returns (value, width) */
+/* on success; sets *ok=0 on unsupported/unknown shapes.               */
+/* ------------------------------------------------------------------ */
+
+typedef struct { uint64_t value; uint16_t width; } EvalRet;
+
+static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok);
+
+static uint64_t _trunc(uint64_t v, uint16_t w) {
+    if (w == 0 || w >= 64) return v;
+    return v & (((uint64_t)1 << w) - 1);
+}
+
+static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
+    EvalRet r = { 0, 0 };
+    if (!*ok || !s) { *ok = 0; return r; }
+
+    if (s->kind == SEXPR_BITVEC) {
+        r.value = s->bv.value;
+        r.width = (uint16_t)s->bv.width;
+        return r;
+    }
+    if (s->kind == SEXPR_SYMBOL) {
+        if (sexpr_is_symbol(s, "true"))  { r.value = 1; r.width = 1; return r; }
+        if (sexpr_is_symbol(s, "false")) { r.value = 0; r.width = 1; return r; }
+        Smt2FunDef *fd = _find_fun(fe, s->sym.str, s->sym.len);
+        if (fd && fd->n_params == 0) return _eval_sexpr(fe, fd->body, ok);
+        Smt2Var *v = _find_var(fe, s->sym.str, s->sym.len);
+        if (v) {
+            int64_t val = _fe_get_var_value(fe, v->var_id);
+            r.value = _trunc((uint64_t)val, v->width);
+            r.width = v->width;
+            return r;
+        }
+        *ok = 0;
+        return r;
+    }
+    if (s->kind == SEXPR_NUMERAL) {
+        r.value = s->numval;
+        r.width = 0; /* width-less; caller widens if used in BV context */
+        return r;
+    }
+    if (s->kind != SEXPR_LIST || s->list.count == 0) { *ok = 0; return r; }
+
+    const Sexpr *head = s->list.items[0];
+
+    /* (_ bvN W) literal */
+    if (sexpr_is_symbol(head, "_") && s->list.count == 3 &&
+        s->list.items[1]->kind == SEXPR_SYMBOL &&
+        s->list.items[2]->kind == SEXPR_NUMERAL) {
+        const Sexpr *bv = s->list.items[1];
+        if (bv->sym.len > 2 && bv->sym.str[0] == 'b' && bv->sym.str[1] == 'v') {
+            uint64_t val = 0;
+            for (uint32_t i = 2; i < bv->sym.len; i++) {
+                if (bv->sym.str[i] < '0' || bv->sym.str[i] > '9') { *ok = 0; return r; }
+                val = val * 10 + (uint64_t)(bv->sym.str[i] - '0');
+            }
+            r.width = (uint16_t)s->list.items[2]->numval;
+            r.value = _trunc(val, r.width);
+            return r;
+        }
+    }
+
+    /* ((_ extract hi lo) x) */
+    if (head->kind == SEXPR_LIST && head->list.count == 4 &&
+        sexpr_is_symbol(head->list.items[0], "_") &&
+        sexpr_is_symbol(head->list.items[1], "extract") &&
+        head->list.items[2]->kind == SEXPR_NUMERAL &&
+        head->list.items[3]->kind == SEXPR_NUMERAL &&
+        s->list.count == 2) {
+        uint32_t hi = (uint32_t)head->list.items[2]->numval;
+        uint32_t lo = (uint32_t)head->list.items[3]->numval;
+        EvalRet inner = _eval_sexpr(fe, s->list.items[1], ok);
+        if (!*ok) return r;
+        r.width = (uint16_t)(hi - lo + 1);
+        r.value = _trunc(inner.value >> lo, r.width);
+        return r;
+    }
+
+    if (head->kind != SEXPR_SYMBOL) { *ok = 0; return r; }
+
+    /* Variadic logical: and, or */
+    if (sexpr_is_symbol(head, "and")) {
+        r.value = 1; r.width = 1;
+        for (uint32_t i = 1; i < s->list.count; i++) {
+            EvalRet a = _eval_sexpr(fe, s->list.items[i], ok);
+            if (!*ok) return r;
+            if (a.value == 0) { r.value = 0; return r; }
+        }
+        return r;
+    }
+    if (sexpr_is_symbol(head, "or")) {
+        r.value = 0; r.width = 1;
+        for (uint32_t i = 1; i < s->list.count; i++) {
+            EvalRet a = _eval_sexpr(fe, s->list.items[i], ok);
+            if (!*ok) return r;
+            if (a.value != 0) { r.value = 1; return r; }
+        }
+        return r;
+    }
+    if (sexpr_is_symbol(head, "not") && s->list.count == 2) {
+        EvalRet a = _eval_sexpr(fe, s->list.items[1], ok);
+        if (!*ok) return r;
+        r.value = a.value ? 0 : 1; r.width = 1;
+        return r;
+    }
+    if (sexpr_is_symbol(head, "=") && s->list.count == 3) {
+        EvalRet a = _eval_sexpr(fe, s->list.items[1], ok);
+        EvalRet b = _eval_sexpr(fe, s->list.items[2], ok);
+        if (!*ok) return r;
+        r.value = (a.value == b.value) ? 1 : 0; r.width = 1;
+        return r;
+    }
+    if (sexpr_is_symbol(head, "distinct") && s->list.count == 3) {
+        EvalRet a = _eval_sexpr(fe, s->list.items[1], ok);
+        EvalRet b = _eval_sexpr(fe, s->list.items[2], ok);
+        if (!*ok) return r;
+        r.value = (a.value != b.value) ? 1 : 0; r.width = 1;
+        return r;
+    }
+    if (sexpr_is_symbol(head, "ite") && s->list.count == 4) {
+        EvalRet c = _eval_sexpr(fe, s->list.items[1], ok);
+        if (!*ok) return r;
+        return _eval_sexpr(fe, s->list.items[c.value ? 2 : 3], ok);
+    }
+    if (sexpr_is_symbol(head, "bvnot") && s->list.count == 2) {
+        EvalRet a = _eval_sexpr(fe, s->list.items[1], ok);
+        if (!*ok) return r;
+        r.width = a.width;
+        r.value = _trunc(~a.value, r.width);
+        return r;
+    }
+    if (s->list.count == 3) {
+        EvalRet a = _eval_sexpr(fe, s->list.items[1], ok);
+        EvalRet b = _eval_sexpr(fe, s->list.items[2], ok);
+        if (!*ok) return r;
+        uint16_t w = a.width > b.width ? a.width : b.width;
+        r.width = w;
+        if (sexpr_is_symbol(head, "bvand")) { r.value = _trunc(a.value & b.value, w); return r; }
+        if (sexpr_is_symbol(head, "bvor"))  { r.value = _trunc(a.value | b.value, w); return r; }
+        if (sexpr_is_symbol(head, "bvxor")) { r.value = _trunc(a.value ^ b.value, w); return r; }
+        if (sexpr_is_symbol(head, "bvadd")) { r.value = _trunc(a.value + b.value, w); return r; }
+        if (sexpr_is_symbol(head, "bvsub")) { r.value = _trunc(a.value - b.value, w); return r; }
+        if (sexpr_is_symbol(head, "bvmul")) { r.value = _trunc(a.value * b.value, w); return r; }
+        if (sexpr_is_symbol(head, "bvult")) { r.value = (a.value < b.value) ? 1 : 0; r.width = 1; return r; }
+        if (sexpr_is_symbol(head, "bvule")) { r.value = (a.value <= b.value) ? 1 : 0; r.width = 1; return r; }
+        if (sexpr_is_symbol(head, "bvugt")) { r.value = (a.value > b.value) ? 1 : 0; r.width = 1; return r; }
+        if (sexpr_is_symbol(head, "bvuge")) { r.value = (a.value >= b.value) ? 1 : 0; r.width = 1; return r; }
+        if (sexpr_is_symbol(head, "concat")) {
+            r.width = a.width + b.width;
+            r.value = _trunc((a.value << b.width) | b.value, r.width);
+            return r;
+        }
+    }
+
+    *ok = 0;
+    return r;
+}
+
 static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
     if (!fe->has_result || fe->last_result != SOLVE_OK) {
         fprintf(fe->err, "error: get-value requires a prior sat result\n");
@@ -1931,30 +2101,68 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
     int first = 1;
     for (uint32_t i = 0; i < vars_list->list.count; i++) {
         Sexpr *name_s = vars_list->list.items[i];
-        if (name_s->kind != SEXPR_SYMBOL) continue;
 
         if (!first) fprintf(fe->out, "\n ");
         first = 0;
 
-        /* Array variable? */
-        Smt2ArrayVar *av = _find_array_var(fe, name_s->sym.str, name_s->sym.len);
-        if (av) {
-            fprintf(fe->out, "(%.*s ", (int)name_s->sym.len, name_s->sym.str);
-            _emit_array_store_chain(fe, av);
-            fprintf(fe->out, ")");
+        /* Symbol lookup: declared var, array, or zero-arg define-fun */
+        if (name_s->kind == SEXPR_SYMBOL) {
+            Smt2ArrayVar *av = _find_array_var(fe, name_s->sym.str, name_s->sym.len);
+            if (av) {
+                fprintf(fe->out, "(%.*s ", (int)name_s->sym.len, name_s->sym.str);
+                _emit_array_store_chain(fe, av);
+                fprintf(fe->out, ")");
+                continue;
+            }
+
+            Smt2Var *v = _find_var(fe, name_s->sym.str, name_s->sym.len);
+            if (v) {
+                int64_t val = _fe_get_var_value(fe, v->var_id);
+                fprintf(fe->out, "(%.*s (_ bv%" PRIu64 " %u))",
+                        (int)name_s->sym.len, name_s->sym.str,
+                        (uint64_t)val, (unsigned)v->width);
+                continue;
+            }
+        }
+
+        /* Fallback: evaluate as a sub-expression (define-fun macro,
+         * extract, etc.). yosys-smtbmc's cover loop calls e.g.
+         * (get-value (|UNROLL#28|)) where UNROLL#28 is a define-fun. */
+        int ok = 1;
+        EvalRet ev = _eval_sexpr(fe, name_s, &ok);
+        if (ok) {
+            uint16_t w = ev.width ? ev.width : 1;
+            /* Emit echoing the original expression as the key. For a
+             * plain symbol we emit it bare; for a list we print its
+             * canonical form (limited to what we evaluated). */
+            if (name_s->kind == SEXPR_SYMBOL) {
+                fprintf(fe->out, "(%.*s (_ bv%" PRIu64 " %u))",
+                        (int)name_s->sym.len, name_s->sym.str,
+                        (uint64_t)ev.value, (unsigned)w);
+            } else {
+                /* For a list expression, smtbmc typically only queries
+                 * symbols, so this branch is rarely hit. Print a
+                 * minimal valid response. */
+                fprintf(fe->out, "(? (_ bv%" PRIu64 " %u))",
+                        (uint64_t)ev.value, (unsigned)w);
+            }
             continue;
         }
 
-        Smt2Var *v = _find_var(fe, name_s->sym.str, name_s->sym.len);
-        if (!v) {
+        if (name_s->kind == SEXPR_SYMBOL) {
             fprintf(fe->err, "error: unknown variable in get-value: '%.*s'\n",
                     (int)name_s->sym.len, name_s->sym.str);
-            continue;
+        } else {
+            fprintf(fe->err, "error: unsupported expression in get-value\n");
         }
-        int64_t val = _fe_get_var_value(fe, v->var_id);
-        fprintf(fe->out, "(%.*s (_ bv%" PRIu64 " %u))",
-                (int)name_s->sym.len, name_s->sym.str,
-                (uint64_t)val, (unsigned)v->width);
+        /* Emit a placeholder so smtio's parser sees a well-formed pair
+         * instead of an empty list (which crashes the parser). */
+        if (name_s->kind == SEXPR_SYMBOL) {
+            fprintf(fe->out, "(%.*s (_ bv0 1))",
+                    (int)name_s->sym.len, name_s->sym.str);
+        } else {
+            fprintf(fe->out, "(? (_ bv0 1))");
+        }
     }
     fprintf(fe->out, ")\n");
     fflush(fe->out);

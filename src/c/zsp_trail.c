@@ -212,13 +212,26 @@ void trail_backtrack(SolveCtx *ctx, uint32_t target_level) {
      * Propagators that fired and returned PROP_ENTAILED during the
      * backtracked levels were dequeued, so the queue walk above did not
      * reach them.  Their entailment may no longer hold after domain
-     * restoration, so they must be eligible for re-firing. */
+     * restoration, so they must be eligible for re-firing.
+     *
+     * Exception: stale post-cp propagators left in watcher chains by
+     * solver_restore (marked ENTAILED + their prop_refs[] slot NULL'd
+     * but not detached from the chain) MUST stay ENTAILED. Their
+     * underlying var ids may have been rolled back and re-bound to a
+     * new variable in the post-pop scope; firing them again would
+     * mis-propagate against the unrelated new var. Identify them by
+     * the prop_refs[prop_id] != ref check: live props point back to
+     * themselves through prop_refs; dead post-cp props don't. */
     if (ctx->watcher_heads) {
         for (uint32_t vi = 0; vi < ctx->n_vars; vi++) {
             uint32_t ref = ctx->watcher_heads[vi];
             while (ref != EXPR_NULL) {
                 Propagator *p = (Propagator *)zsp_pool_ptr(&ctx->pool, ref);
-                p->flags &= (uint8_t)~PROP_FLAG_ENTAILED;
+                int is_live = 1;
+                if (ctx->prop_refs && p->prop_id < ctx->n_prop_refs_capacity) {
+                    if (ctx->prop_refs[p->prop_id] != ref) is_live = 0;
+                }
+                if (is_live) p->flags &= (uint8_t)~PROP_FLAG_ENTAILED;
                 uint32_t next = EXPR_NULL;
                 if (p->flags & PROP_FLAG_WIDE_WATCH) {
                     uint32_t *nv_ptr = (uint32_t *)((char *)p + sizeof(Propagator));

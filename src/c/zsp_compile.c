@@ -2423,6 +2423,15 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
     uint32_t pr_base = sp->n_constraints + sp->n_alldiffs;
     uint32_t pr_cap  = pr_base * PROP_SLACK_FACTOR;
     if (pr_cap < pr_base + PROP_SLACK_MIN) pr_cap = pr_base + PROP_SLACK_MIN;
+    /* Incremental mode (yosys-smtbmc) keeps adding propagators per BMC
+     * step. The var-capacity hint already covers fresh aux vars; mirror
+     * it for the propagator side tables so prop_refs/prop_guard_vars/
+     * prop_constraint_id don't get out-grown. solver_restore iterates
+     * prop_refs[0..n_props_at_cp); if n_props_at_cp exceeds capacity,
+     * the iteration reads adjacent pool memory and may treat a 0 value
+     * (not EXPR_NULL) as a valid prop offset, segfaulting in fire(). */
+    if (ctx->incremental_capacity_hint && pr_cap < ctx->incremental_capacity_hint)
+        pr_cap = ctx->incremental_capacity_hint;
     uint32_t pr_ref = zsp_pool_alloc(&ctx->pool,
                                       pr_cap * (uint32_t)sizeof(uint32_t),
                                       (uint32_t)_Alignof(uint32_t));
