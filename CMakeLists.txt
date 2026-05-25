@@ -7,6 +7,17 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ------------------------------------------------------------------ #
+# Vendored SAT solver (kissat) — Phase B.0                            #
+# ------------------------------------------------------------------ #
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/kissat.cmake)
+
+add_executable(test_kissat_smoke tests/c/test_kissat_smoke.c)
+target_link_libraries(test_kissat_smoke PRIVATE kissat)
+target_include_directories(test_kissat_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources/kissat/src)
+# Registered with CTest below, after enable_testing().
+
+# ------------------------------------------------------------------ #
 # Contradiction analysis (optional module)                            #
 # ------------------------------------------------------------------ #
 
@@ -43,6 +54,10 @@ set(ZSP_SOURCES
     src/c/zsp_lcg.c
     src/c/zsp_explain.c
     src/c/zsp_clause_prop.c
+    src/c/zsp_sat.c
+    src/c/zsp_aig.c
+    src/c/zsp_aig_cnf.c
+    src/c/zsp_bitblast.c
 )
 
 # ------------------------------------------------------------------ #
@@ -50,6 +65,7 @@ set(ZSP_SOURCES
 # ------------------------------------------------------------------ #
 
 add_library(dv_solve SHARED ${ZSP_SOURCES})
+target_link_libraries(dv_solve PRIVATE kissat)
 
 if(ZSP_CONTRADICTION_ANALYSIS)
     target_sources(dv_solve PRIVATE ${ZSP_CONTRA_SOURCES})
@@ -78,6 +94,7 @@ install(TARGETS dv_solve
 # ------------------------------------------------------------------ #
 
 add_library(dv_solve_debug SHARED ${ZSP_SOURCES} ${ZSP_CONTRA_SOURCES})
+target_link_libraries(dv_solve_debug PRIVATE kissat)
 
 target_compile_definitions(dv_solve_debug PRIVATE ZSP_CONTRADICTION_ANALYSIS=1)
 
@@ -102,6 +119,7 @@ add_library(dv_solve_dpi SHARED
     src/c/zsp_dpi.c
     ${ZSP_SOURCES}
 )
+target_link_libraries(dv_solve_dpi PRIVATE kissat)
 
 target_include_directories(dv_solve_dpi PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
@@ -127,6 +145,27 @@ target_include_directories(test_smt2_lexer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/c
 )
 add_test(NAME test_smt2_lexer COMMAND test_smt2_lexer)
+add_test(NAME test_kissat_smoke COMMAND test_kissat_smoke)
+
+add_executable(test_zsp_sat tests/c/test_zsp_sat.c)
+target_link_libraries(test_zsp_sat PRIVATE dv_solve kissat)
+target_include_directories(test_zsp_sat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_sat COMMAND test_zsp_sat)
+
+add_executable(test_zsp_aig tests/c/test_zsp_aig.c)
+target_link_libraries(test_zsp_aig PRIVATE dv_solve)
+target_include_directories(test_zsp_aig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_aig COMMAND test_zsp_aig)
+
+add_executable(test_zsp_aig_cnf tests/c/test_zsp_aig_cnf.c)
+target_link_libraries(test_zsp_aig_cnf PRIVATE dv_solve kissat)
+target_include_directories(test_zsp_aig_cnf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_aig_cnf COMMAND test_zsp_aig_cnf)
+
+add_executable(test_zsp_bitblast tests/c/test_zsp_bitblast.c)
+target_link_libraries(test_zsp_bitblast PRIVATE dv_solve kissat)
+target_include_directories(test_zsp_bitblast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_bitblast COMMAND test_zsp_bitblast)
 
 # ------------------------------------------------------------------ #
 # SMT-LIB2 parser test                                                 #
