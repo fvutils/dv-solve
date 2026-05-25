@@ -201,12 +201,11 @@ static int collect_substs_from(zsp_bbsolver_t *S, ExprRef root) {
     if (!kp) return 0;
     if (*kp == EXPR_BINARY) {
         ExprBinary *b = (ExprBinary *)kp;
-        /* Note: descending through nested BIN_AND would catch more
-         * equalities (transitions in BMC fixtures encode 4-8 equalities
-         * inside a big AND), but observed unsoundness on QF_AUFBV
-         * fixtures with arrays and uninterpreted functions —
-         * fifo_8x16_bmc_d2 flips to a false SAT. Disabled until the
-         * frontend's array/UF lowering is better understood. */
+        if (b->op == BIN_AND) {
+            int l = collect_substs_from(S, b->lhs);
+            int r = collect_substs_from(S, b->rhs);
+            return l && r;
+        }
         if (b->op == BIN_EQ) {
             if (try_record_subst(S, b->lhs, b->rhs)) return 1;
             if (try_record_subst(S, b->rhs, b->lhs)) return 1;

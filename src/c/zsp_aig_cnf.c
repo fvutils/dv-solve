@@ -286,12 +286,19 @@ void zsp_aig_cnf_encode(zsp_aig_cnf_t *e, zsp_aig_node_t root, int top_level) {
     int32_t *leaves = NULL;
     uint32_t leaves_cap = 0, leaves_size = 0;
 
+    /* The visited bitmap tracks (id, sign) pairs separately so positive and
+     * negative occurrences of the same AIG id don't dedup each other —
+     * critical for soundness: e.g., if a positive AND tree contains both +3
+     * and -3 as leaves, both must be asserted (and the conjunction is then
+     * unsat). Encoding: bit 2*(id-1) for positive, bit 2*(id-1)+1 for
+     * negative. */
     while (e->stack_size > leaf_start) {
         zsp_aig_node_t cur = e->stack[--e->stack_size];
-        uint32_t idx = (uint32_t)(cur < 0 ? -cur : cur);
-        ensure_bitmap(e, &e->visited, &e->visited_cap, idx);
-        if (bm_get(e->visited, idx - 1)) continue;
-        bm_set(e->visited, idx - 1);
+        uint32_t id = (uint32_t)(cur < 0 ? -cur : cur);
+        uint32_t bit_idx = 2 * (id - 1) + (cur < 0 ? 1 : 0);
+        ensure_bitmap(e, &e->visited, &e->visited_cap, bit_idx + 1);
+        if (bm_get(e->visited, bit_idx)) continue;
+        bm_set(e->visited, bit_idx);
 
         if (cur > 0 && zsp_aig_is_and(e->aig, cur)) {
             zsp_aig_node_t l, r;
