@@ -1,7 +1,7 @@
 # Phase B.1 plan: adapt the forked Kissat
 
 Status: in progress
-Date: 2026-05-25
+Date: 2026-05-25 (last revision)
 
 ## What B.1 is
 
@@ -67,7 +67,48 @@ instance.
 Validation: all 13 ctest suites, 118-fixture cross-check, identical
 results.
 
-## What B.1 step 3 should do — incremental support
+## What B.1 step 3 (minimal observation API) landed
+
+Commit `ab475bd` added public observers on the kissat clause arena
+(`kissat_arena_size_bytes` / `kissat_arena_capacity_bytes` and the
+`zsp_sat_arena_*` wrappers). Full STACK→zsp_arena migration deferred —
+no observable behavior on its own, only load-bearing once step 5 wants
+to roll back the arena to checkpoint levels.
+
+## What B.1 step 3 (incremental API surface) landed
+
+Commit `eee4f9a` added the public incremental-API surface on
+`zsp_sat.{h,c}` with conservative correct-but-non-incremental
+semantics on the existing non-incremental kissat fork:
+
+  - `zsp_sat_push/pop/push_depth/is_tainted` — push/pop track frame
+    depth and snapshot the clause count. A pop after clauses were
+    added in the popped frame marks the solver "tainted"; the next
+    solve returns `ZSP_SAT_UNKNOWN`. Callers poll `is_tainted()` to
+    know when to rebuild.
+  - `zsp_sat_assume(lit)` — queues a literal replayed as a unit
+    clause at the next solve. One-shot (becomes permanent), matching
+    the current rebuild-per-check-sat caller model.
+  - `zsp_sat_failed(lit)` — placeholder; always 0 today.
+
+Test: `test_zsp_sat_incremental` (11 assertions, all pass).
+Validation: 15/15 ctest under ASan, cross-check 105 pass / 13 skip / 0
+fail (no regression).
+
+Rationale for shipping the surface as a stub: `(push)/(pop)` and
+`(check-sat-assuming)` already work end-to-end at the SMT2 frontend
+layer (`_cmd_push`, `_cmd_pop`, `_cmd_check_sat_assuming`) via
+`solver_checkpoint`, which rebuilds the bbsolver on each check-sat —
+correctness is not the gap. Real incremental kissat (trail snapshot,
+learned-clause DB preservation, restart on solve, real assumption
+tracking) is a multi-day refactor that delivers no observable
+behavior until the bbsolver is changed to re-use the kissat instance
+across check-sat calls. Surface ships now so step-5 / bbsolver work
+can code against a stable API; deeper refactor lands later without an
+API change — semantics tighten from "rebuild on taint" to "true
+incremental rollback".
+
+## What B.1 step 3 (deep incremental kissat) would do
 
 Kissat is non-incremental by default — `kissat_solve` consumes the
 problem and the subsequent `kissat_value` queries are valid only for
@@ -138,13 +179,21 @@ are independent and could be done in either order; steps 3 and 5
 depend on having the allocator and arena hooks in place.
 
 Suggested order:
-1. ✅ **Step 1**: fork source. [DONE this commit.]
-2. Step 2: allocator routing.
-3. Step 4: clause arena migration.
-4. Step 3: push/pop incremental.
-5. Step 5: trail / LevelMark integration.
-6. Step 6: zsp_sat.c uses the adapted kissat.
-7. Step 7: cleanup.
+1. ✅ **Step 1**: fork source. (commit `a779eb5`)
+2. ✅ **Step 2**: allocator routing. (commit `e7e7f29`)
+3. ✅ **Step 3 (minimal observation API)**: clause-arena observers.
+   (commit `ab475bd`)
+4. ✅ **Step 3 (incremental API surface — stub)**: push/pop/assume.
+   (commit `eee4f9a`)
+5. ⏭ **Step 4 (full)**: STACK→zsp_arena migration of the clause arena.
+   Bundled with step 5 — only load-bearing once LevelMark needs to
+   roll back the arena.
+6. ⏭ **Step 5**: trail / LevelMark integration. Foundational for the
+   Phase D crossover techniques; tightens step-3 stub semantics from
+   "rebuild on taint" to "true incremental rollback" automatically.
+7. ⏭ **Step 6**: bbsolver / smt2_frontend re-use the kissat instance
+   across check-sat (depends on real incremental — step 5).
+8. ⏭ **Step 7**: cleanup — remove `resources/kissat/`.
 
 Each step gates on no cross-check regression and no ctest failure.
 
