@@ -55,4 +55,30 @@ void zsp_block_alloc_destroy(zsp_block_alloc_t *ba);
  */
 size_t zsp_block_alloc_block_size(const zsp_block_alloc_t *ba);
 
+/**
+ * Bound the size of the internal free-list cache.
+ *
+ * When more than `max_cached` blocks would be retained, zsp_block_alloc_put
+ * releases the surplus immediately to the backing allocator instead of
+ * caching them. The default (0) means unlimited — the existing behavior
+ * prior to this knob being added.
+ *
+ * Setting a lower limit than the current cache size does not trim
+ * immediately; call zsp_block_alloc_trim() if you want to force the
+ * cache down right now.
+ */
+void zsp_block_alloc_set_max_cached(zsp_block_alloc_t *ba, size_t max_cached);
+
+/**
+ * Trim the internal free-list cache to at most `target` blocks, releasing
+ * the rest back to the backing allocator. No-op if the cache is already
+ * at or below `target`.
+ */
+void zsp_block_alloc_trim(zsp_block_alloc_t *ba, size_t target);
+
+/**
+ * Return the current size of the internal free-list cache.
+ */
+size_t zsp_block_alloc_cached_count(const zsp_block_alloc_t *ba);
+
 #endif /* ZSP_BLOCK_ALLOC_H */

@@ -39,6 +39,7 @@ struct zsp_block_alloc_s {
     size_t        block_size;   /* size of every vended block         */
     _free_node_t *free_list;    /* singly-linked list of cached blocks */
     size_t        free_count;   /* number of blocks currently cached  */
+    size_t        max_cached;   /* 0 = unlimited                       */
 };
 
 zsp_block_alloc_t *zsp_block_alloc_create(zsp_alloc_t *alloc, size_t block_size) {
@@ -58,6 +59,7 @@ zsp_block_alloc_t *zsp_block_alloc_create(zsp_alloc_t *alloc, size_t block_size)
     ba->block_size = block_size;
     ba->free_list  = NULL;
     ba->free_count = 0;
+    ba->max_cached = 0;
     return ba;
 }
 
@@ -74,10 +76,32 @@ void *zsp_block_alloc_get(zsp_block_alloc_t *ba) {
 }
 
 void zsp_block_alloc_put(zsp_block_alloc_t *ba, void *block) {
+    if (ba->max_cached && ba->free_count >= ba->max_cached) {
+        /* At capacity — release directly instead of caching. */
+        ZSP_RELEASE(ba->alloc, block, ba->block_size);
+        return;
+    }
     _free_node_t *node = (_free_node_t *)block;
     node->next    = ba->free_list;
     ba->free_list = node;
     ba->free_count++;
+}
+
+void zsp_block_alloc_set_max_cached(zsp_block_alloc_t *ba, size_t max_cached) {
+    ba->max_cached = max_cached;
+}
+
+void zsp_block_alloc_trim(zsp_block_alloc_t *ba, size_t target) {
+    while (ba->free_count > target && ba->free_list) {
+        _free_node_t *node = ba->free_list;
+        ba->free_list = node->next;
+        ba->free_count--;
+        ZSP_RELEASE(ba->alloc, node, ba->block_size);
+    }
+}
+
+size_t zsp_block_alloc_cached_count(const zsp_block_alloc_t *ba) {
+    return ba->free_count;
 }
 
 void zsp_block_alloc_destroy(zsp_block_alloc_t *ba) {

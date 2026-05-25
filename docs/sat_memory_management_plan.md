@@ -167,10 +167,21 @@ they don't have provenance.
 ## Suggested adoption sequence
 
 1. **Pre-Phase-B prep** (does not require SAT yet):
-   - Add `cref_t` arena layer on top of `zsp_pool`/`zsp_stack`.
-   - Add shrink hook to `zsp_stack`.
-   - Extend `LevelMark` with arena top — even before we have a clause
-     arena, this is correctness-free since the field is unused.
+   - **[DONE 2026-05-25]** Add `cref_t` arena layer on top of
+     `zsp_pool`/`zsp_stack`. Landed as `src/c/zsp_arena.{c,h}` —
+     resizable bump allocator returning 32-bit offsets (`zsp_aref_t`),
+     grow-by-doubling, mark/release matching `zsp_stack_push/pop`,
+     `shrink_to_fit` for kissat-style cache compaction. Tested via
+     `test_zsp_arena`.
+   - **[DONE 2026-05-25]** Add shrink hook on the **block allocator**
+     (the `zsp_stack` block-based design doesn't grow a contiguous
+     buffer; the corresponding place to cap RSS is the free-list cache
+     on `zsp_block_alloc`). Added `zsp_block_alloc_set_max_cached()`,
+     `zsp_block_alloc_trim()`, `zsp_block_alloc_cached_count()`. Default
+     unlimited (backward-compatible). Tested via `test_zsp_block_alloc_cache`.
+   - **[TODO]** Extend `LevelMark` with arena top — even before we have
+     a clause arena, this is correctness-free since the field is unused.
+     Deferred: `zsp_trail.h` has interleaved in-flight work.
 2. **Phase B clause DB**: migrate existing `db->clauses[]` to the arena;
    watches still index by clause-id but the underlying storage is now
    compactable.
