@@ -158,8 +158,25 @@ shim — see D1.
    pluggable allocator, checkpoint-keyed arena marks, and unified trail are
    the dv-solve-native advantages we layer on top of the Kissat core.
 
-Exit criterion for Phase B.0: tier-2 and tier-3 formal fixtures match or
-beat yosys-smtbmc-driven bitwuzla using non-incremental Kissat.
+**[DONE 2026-05-25] Exit criterion for Phase B.0**: tier-2 and tier-3
+formal fixtures match or beat yosys-smtbmc-driven bitwuzla using
+non-incremental Kissat. Achieved with margin to spare:
+
+| Tier | Engine    | Result                | Total ms |
+|------|-----------|-----------------------|---------:|
+| 1    | bitblast  | 33 sat / 1 unsat (34/34) |    180 |
+| 1    | z3        | 33 sat / 1 unsat         |    269 |
+| 2    | bitblast  | 1 sat / 59 unsat (60/60) |    256 |
+| 2    | z3        | 1 sat / 59 unsat         |    331 |
+| 3    | bitblast  | 1 sat / 23 unsat (24/24) |    291 |
+| 3    | z3        | 1 sat / 23 unsat         |    123 |
+| 3    | **cdcl**  | 1 sat / 14 unsat / **9 timeouts** | **116958** |
+| all  | bitblast  | 35 sat / 83 unsat (118/118) |   697 |
+| all  | z3        | 35 sat / 83 unsat         |    722 |
+
+**Zero disagreements with z3 across all 118 fixtures**. On tier 3 the
+bit-blast engine retires every fixture in ~400× less wall time than the
+CDCL path (which was hitting the 10s ceiling on 9 fixtures).
 Exit criterion for Phase B.1: incremental BMC across many frames stays
 within bounded RSS and matches Phase B.0 on first-frame latency.
 

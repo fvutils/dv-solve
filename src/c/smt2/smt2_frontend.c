@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include "smt2/smt2_frontend.h"
 #include "zsp_lcg.h"
+#include "zsp_bbsolver.h"
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -1693,6 +1694,46 @@ static int _flush_aux(Smt2Frontend *fe) {
     return rc;
 }
 
+/* Phase B.0: bit-blast + kissat engine. Bypasses solver_solve() and runs
+ * directly on fe->problem. Triggered by DV_ENGINE=bitblast (set by the
+ * --engine=bitblast CLI flag). No model readback yet — only the sat/unsat
+ * verdict is printed. */
+static int _check_sat_bitblast(Smt2Frontend *fe) {
+    if (!fe->problem) {
+        fprintf(fe->out, "unknown\n");
+        fflush(fe->out);
+        return -1;
+    }
+    zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, fe->problem);
+    if (!S) {
+        fprintf(fe->out, "unknown\n");
+        fflush(fe->out);
+        return -1;
+    }
+    int rc = zsp_bbsolver_check(S);
+    if (rc == ZSP_BB_SAT) {
+        fprintf(fe->out, "sat\n");
+        fe->last_result = SOLVE_OK;
+        fe->has_result = 1;
+    } else if (rc == ZSP_BB_UNSAT) {
+        fprintf(fe->out, "unsat\n");
+        fe->last_result = SOLVE_UNSAT;
+        fe->has_result = 1;
+    } else {
+        fprintf(fe->out, "unknown\n");
+    }
+    fflush(fe->out);
+    zsp_bbsolver_free(S);
+    /* The CDCL path returns 0 for both SAT and UNSAT (only protocol errors
+     * are negative). Mirror that — UNSAT is a valid result, not an error. */
+    return rc == ZSP_BB_ERROR ? -1 : 0;
+}
+
+static int _engine_is_bitblast(void) {
+    const char *e = getenv("DV_ENGINE");
+    return e && (strcmp(e, "bitblast") == 0 || strcmp(e, "bb") == 0);
+}
+
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     (void)cmd;
 
@@ -1709,6 +1750,10 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         fprintf(fe->out, "unknown\n");
         fflush(fe->out);
         return -1;
+    }
+
+    if (_engine_is_bitblast()) {
+        return _check_sat_bitblast(fe);
     }
 
     if (fe->has_result) solver_reset(fe->ctx);

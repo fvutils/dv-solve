@@ -1,0 +1,178 @@
+/* Integration test for zsp_bbsolver: build SolveProblems via the builder API
+ * and run them through the bit-blast SAT pipeline. */
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "zsp_bbsolver.h"
+#include "zsp_builder.h"
+#include "zsp_problem.h"
+
+static int failures = 0;
+#define CHECK(c, msg) do { if (!(c)) { fprintf(stderr,"FAIL %s\n",msg); failures++; } else printf("PASS %s\n",msg); } while(0)
+
+/* Trivial: x + y == 10, x < 8, y < 8 — solve and verify. */
+static void test_add_eq(void) {
+    SolveProblemBuilder *b = builder_create(4096, NULL);
+
+    ExprRef x_ref = builder_add_var(b, 0, 8, 0, 0, 255);
+    ExprRef y_ref = builder_add_var(b, 1, 8, 0, 0, 255);
+    (void)x_ref; (void)y_ref;
+
+    ExprRef x  = builder_expr_var(b, 0);
+    ExprRef y  = builder_expr_var(b, 1);
+    ExprRef k10 = builder_expr_const(b, 10, 0);
+    ExprRef k8  = builder_expr_const(b, 8, 0);
+    ExprRef sum = builder_expr_binary(b, BIN_ADD, x, y);
+    ExprRef eq10 = builder_expr_binary(b, BIN_EQ, sum, k10);
+    ExprRef xlt = builder_expr_binary(b, BIN_LT, x, k8);
+    ExprRef ylt = builder_expr_binary(b, BIN_LT, y, k8);
+    builder_add_constraint(b, eq10);
+    builder_add_constraint(b, xlt);
+    builder_add_constraint(b, ylt);
+
+    size_t sz;
+    SolveProblem *p = builder_finalize(b, &sz);
+
+    zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
+    int rc = zsp_bbsolver_check(S);
+    CHECK(rc == ZSP_BB_SAT, "x+y==10, x<8, y<8 SAT");
+    if (rc == ZSP_BB_SAT) {
+        int64_t vx = 0, vy = 0;
+        zsp_bbsolver_value(S, 0, &vx);
+        zsp_bbsolver_value(S, 1, &vy);
+        printf("       model: x=%" PRId64 " y=%" PRId64 "\n", vx, vy);
+        CHECK(vx + vy == 10, "model sum=10");
+        CHECK(vx < 8 && vy < 8, "model x<8 y<8");
+    }
+    printf("       stats: aig_ands=%llu sat_clauses=%llu sat_vars=%llu\n",
+           (unsigned long long)zsp_bbsolver_num_aig_ands(S),
+           (unsigned long long)zsp_bbsolver_num_sat_clauses(S),
+           (unsigned long long)zsp_bbsolver_num_sat_vars(S));
+
+    zsp_bbsolver_free(S);
+    builder_free_problem(b, p, sz);
+    builder_destroy(b);
+}
+
+/* Unsat: x == 5 AND x != 5 */
+static void test_unsat(void) {
+    SolveProblemBuilder *b = builder_create(4096, NULL);
+    builder_add_var(b, 0, 8, 0, 0, 255);
+    ExprRef x = builder_expr_var(b, 0);
+    ExprRef k5 = builder_expr_const(b, 5, 0);
+    ExprRef eq = builder_expr_binary(b, BIN_EQ, x, k5);
+    ExprRef neq = builder_expr_binary(b, BIN_NEQ, x, k5);
+    builder_add_constraint(b, eq);
+    builder_add_constraint(b, neq);
+
+    size_t sz;
+    SolveProblem *p = builder_finalize(b, &sz);
+    zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
+    CHECK(zsp_bbsolver_check(S) == ZSP_BB_UNSAT, "x==5 AND x!=5 UNSAT");
+    zsp_bbsolver_free(S);
+    builder_free_problem(b, p, sz);
+    builder_destroy(b);
+}
+
+/* Variable bounds: declare x with [3, 9], constrain x < 5. Model must be 3 or 4. */
+static void test_var_bounds(void) {
+    SolveProblemBuilder *b = builder_create(4096, NULL);
+    builder_add_var(b, 0, 8, 0, 3, 9);
+    ExprRef x = builder_expr_var(b, 0);
+    ExprRef k5 = builder_expr_const(b, 5, 0);
+    builder_add_constraint(b, builder_expr_binary(b, BIN_LT, x, k5));
+
+    size_t sz;
+    SolveProblem *p = builder_finalize(b, &sz);
+    zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
+    int rc = zsp_bbsolver_check(S);
+    CHECK(rc == ZSP_BB_SAT, "x in [3,9] AND x<5 SAT");
+    if (rc == ZSP_BB_SAT) {
+        int64_t vx = 0;
+        zsp_bbsolver_value(S, 0, &vx);
+        printf("       model: x=%" PRId64 "\n", vx);
+        CHECK(vx >= 3 && vx <= 4, "model x in {3,4}");
+    }
+    zsp_bbsolver_free(S);
+    builder_free_problem(b, p, sz);
+    builder_destroy(b);
+}
+
+/* The minimal tier-1 repro from memory: masked-bound on bvand */
+static void test_bvand_masked_bound(void) {
+    /* (declare-const a (_ BitVec 8))
+     * (declare-const masked (_ BitVec 4))
+     * (assert (bvuge a (_ bv10 8)))   ; a >= 10
+     * (assert (bvule a (_ bv200 8)))  ; a <= 200
+     * (assert (= ((_ zero_extend 4) masked) (bvand a (_ bv15 8))))
+     * (assert (bvule masked (_ bv5 4))) ; masked <= 5
+     * (check-sat)  -- expected SAT */
+    SolveProblemBuilder *b = builder_create(8192, NULL);
+    builder_add_var(b, 0, 8, 0, 0, 255);   /* a      */
+    builder_add_var(b, 1, 4, 0, 0, 15);    /* masked */
+    ExprRef a = builder_expr_var(b, 0);
+    ExprRef masked = builder_expr_var(b, 1);
+    ExprRef c10 = builder_expr_const(b, 10, 0);
+    ExprRef c200 = builder_expr_const(b, 200, 0);
+    ExprRef c15  = builder_expr_const(b, 15, 0);
+    ExprRef c5   = builder_expr_const(b, 5, 0);
+
+    builder_add_constraint(b, builder_expr_binary(b, BIN_GTE, a, c10));
+    builder_add_constraint(b, builder_expr_binary(b, BIN_LTE, a, c200));
+    ExprRef and_ac = builder_expr_binary(b, BIN_BAND, a, c15);
+    ExprRef ext = builder_expr_extend(b, masked, 4, 8, 0);
+    builder_add_constraint(b, builder_expr_binary(b, BIN_EQ, ext, and_ac));
+    builder_add_constraint(b, builder_expr_binary(b, BIN_LTE, masked, c5));
+
+    size_t sz;
+    SolveProblem *p = builder_finalize(b, &sz);
+    zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
+    int rc = zsp_bbsolver_check(S);
+    CHECK(rc == ZSP_BB_SAT, "tier-1 bvand+range+masked-bound SAT");
+    if (rc == ZSP_BB_SAT) {
+        int64_t va = 0, vm = 0;
+        zsp_bbsolver_value(S, 0, &va);
+        zsp_bbsolver_value(S, 1, &vm);
+        printf("       model: a=%" PRId64 " masked=%" PRId64 "\n", va, vm);
+        CHECK(va >= 10 && va <= 200, "10 <= a <= 200");
+        CHECK(vm == (va & 15),       "masked == a & 15");
+        CHECK(vm <= 5,               "masked <= 5");
+    }
+    zsp_bbsolver_free(S);
+    builder_free_problem(b, p, sz);
+    builder_destroy(b);
+}
+
+/* signed comparison: signed x with [-3, 3], x < 0 — model must be -3..-1 */
+static void test_signed(void) {
+    SolveProblemBuilder *b = builder_create(4096, NULL);
+    builder_add_var(b, 0, 8, 1, -3, 3);   /* signed 8-bit, [-3..3] */
+    ExprRef x = builder_expr_var(b, 0);
+    ExprRef c0 = builder_expr_const(b, 0, 1);
+    builder_add_constraint(b, builder_expr_binary(b, BIN_LT, x, c0));
+
+    size_t sz;
+    SolveProblem *p = builder_finalize(b, &sz);
+    zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
+    int rc = zsp_bbsolver_check(S);
+    CHECK(rc == ZSP_BB_SAT, "signed x in [-3,3], x<0 SAT");
+    if (rc == ZSP_BB_SAT) {
+        int64_t vx = 0;
+        zsp_bbsolver_value(S, 0, &vx);
+        printf("       model: x=%" PRId64 "\n", vx);
+        CHECK(vx >= -3 && vx <= -1, "model x in {-3,-2,-1}");
+    }
+    zsp_bbsolver_free(S);
+    builder_free_problem(b, p, sz);
+    builder_destroy(b);
+}
+
+int main(void) {
+    test_add_eq();
+    test_unsat();
+    test_var_bounds();
+    test_bvand_masked_bound();
+    test_signed();
+    return failures ? 1 : 0;
+}

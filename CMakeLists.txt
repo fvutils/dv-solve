@@ -58,6 +58,7 @@ set(ZSP_SOURCES
     src/c/zsp_aig.c
     src/c/zsp_aig_cnf.c
     src/c/zsp_bitblast.c
+    src/c/zsp_bbsolver.c
 )
 
 # ------------------------------------------------------------------ #
@@ -166,6 +167,11 @@ add_executable(test_zsp_bitblast tests/c/test_zsp_bitblast.c)
 target_link_libraries(test_zsp_bitblast PRIVATE dv_solve kissat)
 target_include_directories(test_zsp_bitblast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_zsp_bitblast COMMAND test_zsp_bitblast)
+
+add_executable(test_zsp_bbsolver tests/c/test_zsp_bbsolver.c)
+target_link_libraries(test_zsp_bbsolver PRIVATE dv_solve kissat)
+target_include_directories(test_zsp_bbsolver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_bbsolver COMMAND test_zsp_bbsolver)
 
 # ------------------------------------------------------------------ #
 # SMT-LIB2 parser test                                                 #

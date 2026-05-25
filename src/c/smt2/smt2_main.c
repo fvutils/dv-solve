@@ -269,6 +269,20 @@ int main(int argc, char **argv) {
             (void)no_incremental;  /* reserved for future enforcement */
             continue;
         }
+        /* --engine=cdcl|bitblast|auto — Phase B.0. Sets DV_ENGINE so the
+         * frontend's check-sat handler dispatches to the bit-blast path. */
+        if (strncmp(argv[i], "--engine=", 9) == 0) {
+            const char *eng = argv[i] + 9;
+            if (strcmp(eng, "cdcl") == 0 || strcmp(eng, "auto") == 0) {
+                unsetenv("DV_ENGINE");
+            } else if (strcmp(eng, "bitblast") == 0 || strcmp(eng, "bb") == 0) {
+                setenv("DV_ENGINE", "bitblast", 1);
+            } else {
+                fprintf(stderr, "error: unknown engine '%s' (expected cdcl|bitblast|auto)\n", eng);
+                return 2;
+            }
+            continue;
+        }
         if (argv[i][0] == '-' && argv[i][1] != '\0') {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             _usage(stderr);
