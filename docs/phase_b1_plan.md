@@ -185,15 +185,22 @@ Suggested order:
    (commit `ab475bd`)
 4. ✅ **Step 3 (incremental API surface — stub)**: push/pop/assume.
    (commit `eee4f9a`)
-5. ⏭ **Step 4 (full)**: STACK→zsp_arena migration of the clause arena.
-   Bundled with step 5 — only load-bearing once LevelMark needs to
-   roll back the arena.
-6. ⏭ **Step 5**: trail / LevelMark integration. Foundational for the
-   Phase D crossover techniques; tightens step-3 stub semantics from
-   "rebuild on taint" to "true incremental rollback" automatically.
-7. ⏭ **Step 6**: bbsolver / smt2_frontend re-use the kissat instance
-   across check-sat (depends on real incremental — step 5).
-8. ⏭ **Step 7**: cleanup — remove `resources/kissat/`.
+5. ✅ **Step 5 (plumbing slice)**: LevelMark + CheckpointMark gain a
+   `sat_arena_top` field; kissat exposes `kissat_arena_size_words()`
+   and zsp_sat exposes `zsp_sat_arena_save_mark()`. No behavior
+   change yet — fields populate to 0 until SolveCtx grows a
+   zsp_sat handle. (commit `eb1c7cd`)
+6. ⏭ **Step 4 (full)**: STACK→zsp_arena migration of the clause arena.
+   Bundled with the next step-5 chunk — only load-bearing once
+   LevelMark needs to actually roll back the arena.
+7. ⏭ **Step 5 (deep / arena rewind)**: invalidate kissat watches /
+   occurrences / propagation state on arena rewind. Multi-week
+   refactor; foundational for Phase D crossover techniques and
+   tightens step-3 stub semantics from "rebuild on taint" to "true
+   incremental rollback" automatically.
+8. ⏭ **Step 6**: bbsolver / smt2_frontend re-use the kissat instance
+   across check-sat (depends on real incremental — step 5 deep).
+9. ⏭ **Step 7**: cleanup — remove `resources/kissat/`.
 
 Each step gates on no cross-check regression and no ctest failure.
 
