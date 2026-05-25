@@ -80,11 +80,25 @@ five tier1 false-unsat bugs (see [[false_unsat_tier1]]) are all
 `bvand + range + masked-bound` patterns that fall out under a `normalize` /
 `contradicting_ands` style pass.
 
-1. **Port `BitVectorDomain`** as a C library (`zsp_bvdomain.{c,h}`) backing
-   `zsp_wiremask`. The crucial extension over the current wiremask is the
-   per-op **invertibility / consistency** predicates: given target value `t`
-   and fixed sibling bits, can operand `x` be inverted? This is what lets the
+1. **Port `BitVectorDomain`** as a C library backing `zsp_wiremask`. The
+   crucial extension over the current wiremask is the per-op
+   **invertibility / consistency** predicates: given target value `t` and
+   fixed sibling bits, can operand `x` be inverted? This is what lets the
    domain *prune values*, not just record them.
+   - **[DONE 2026-05-25 — basic predicates and transformations]**
+     `src/c/zsp_bvdom.{c,h}`. 3-valued domain represented as
+     `{ uint64_t lo, uint64_t hi, uint8_t width }`, specialized for
+     dv-solve's width <= 64 ceiling (no multi-precision needed). API:
+     init / value / lo-hi, validity / fixed / has-fixed-bits / per-bit
+     predicates, fix-bit / fix / match / copy_with_fixed_bits,
+     equality / meet, and full domain transformations for not / and / or /
+     xor / shl-const / shr-const / ashr-const / concat / extract /
+     zero-ext / sign-ext / to-string. Tested via `test_zsp_bvdom`
+     (49 assertions, every transformation verified at the bit level).
+   - **[TODO]** Per-op invertibility / consistency predicates for
+     bvadd / bvmul / bvult / bvslt / bvshl / bvshr / bvashr / etc.
+     ~800 lines in bitwuzla's `bitvector_domain.cpp`; deferred until
+     Phase C local search needs them.
 2. **Port `BitVectorBounds`** as `zsp_bvbounds.{c,h}` — signed and unsigned
    intervals per BV term, with the standard meet/widening operators. Hook
    into the trail so each decision/propagation tightens or restores bounds.
