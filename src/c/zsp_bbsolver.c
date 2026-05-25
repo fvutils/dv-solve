@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "zsp_aig.h"
 #include "zsp_aig_cnf.h"
@@ -27,6 +28,11 @@ typedef struct {
     int      bv_built;
 } bb_var_t;
 
+/* Memoization cache entry — one per ExprRef byte offset in the pool. */
+typedef struct {
+    zsp_bv_t bv;      /* size == 0 marks "not yet bit-blasted" */
+} bb_cache_entry_t;
+
 struct zsp_bbsolver_s {
     zsp_alloc_t    *alloc;
     SolveProblem   *problem;
@@ -37,6 +43,33 @@ struct zsp_bbsolver_s {
 
     bb_var_t       *vars;
     uint32_t        n_vars;
+
+    /* Equality-substitution map: subst[var_id] = ExprRef of the RHS to
+     * bit-blast in place of the variable, or EXPR_NULL if no substitution
+     * applies. Populated during the preprocessing pass from top-level
+     * (= var expr) sub-asserts (descending through BIN_AND chains).
+     *
+     * resolving[var_id] is a re-entrancy guard: if bb_var_expr() is called
+     * for a var while already resolving its substitution, fall back to a
+     * fresh BV. Protects against transitive cycles in the substitution
+     * graph that the linear-scan acyclicity check might miss. */
+    ExprRef        *subst;       /* size n_vars, or NULL */
+    uint8_t        *resolving;   /* size n_vars, or NULL */
+
+    /* Bitmap of constraint indices to skip (those consumed by substitution).
+     * Indexed by enumeration order of constraints_head walk. */
+    uint8_t        *constraint_skip;
+    uint32_t        n_constraints;
+
+    uint64_t        n_substs;    /* statistics */
+
+    /* Memoization of bit-blast results by ExprRef. Sparse array indexed
+     * by ExprRef (byte offset into the pool). EXPR_CONST nodes are not
+     * memoized because their result depends on the caller's hint_width;
+     * every other node has a natural width that doesn't depend on hint
+     * (variables ignore hint, ops widen to max(operands)). */
+    bb_cache_entry_t *cache;
+    uint32_t          cache_cap;
 
     int             last_result;
     int             had_error;
@@ -63,6 +96,155 @@ static zsp_bv_t sext_to(zsp_bbsolver_t *S, zsp_bv_t v, uint16_t target) {
     return zsp_bb_sign_ext(S->bb, v, (uint32_t)(target - v.size));
 }
 
+/* Forward decl — needed because bv_for_var may recurse through bb_expr. */
+static zsp_bv_t bb_expr(zsp_bbsolver_t *S, ExprRef ref, uint16_t hint_width);
+
+/* True iff `ref`'s subtree (transitively following the current subst[]
+ * map for any EXPR_VAR encountered) reaches EXPR_VAR with id `target_var`.
+ *
+ * The transitive walk through subst[] is what makes this sound under the
+ * chained-substitution scenario: x := f(y), y := g(x) would slip past
+ * a direct reference check (neither RHS mentions the LHS directly), but
+ * following subst[y] from the f(y) branch reaches x.
+ *
+ * `visited` is a S->n_vars bitmap to avoid revisiting (and infinite
+ * recursion through pre-existing cycles in subst, although those
+ * shouldn't exist if every prior insertion was guarded by this check). */
+static int subst_reaches_var(zsp_bbsolver_t *S,
+                             ExprRef ref,
+                             uint32_t target_var,
+                             uint8_t *visited) {
+    if (ref == EXPR_NULL) return 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp) return 0;
+    switch (*kp) {
+    case EXPR_CONST: return 0;
+    case EXPR_VAR: {
+        ExprVar *v = (ExprVar *)kp;
+        if (v->var_id == target_var) return 1;
+        if (v->var_id >= S->n_vars) return 0;
+        if (visited[v->var_id]) return 0;
+        visited[v->var_id] = 1;
+        /* If this variable has its own substitution, look through it. */
+        if (S->subst[v->var_id] != EXPR_NULL) {
+            return subst_reaches_var(S, S->subst[v->var_id], target_var, visited);
+        }
+        return 0;
+    }
+    case EXPR_BINARY: {
+        ExprBinary *b = (ExprBinary *)kp;
+        return subst_reaches_var(S, b->lhs, target_var, visited)
+            || subst_reaches_var(S, b->rhs, target_var, visited);
+    }
+    case EXPR_UNARY:
+        return subst_reaches_var(S, ((ExprUnary *)kp)->operand, target_var, visited);
+    case EXPR_ITE: {
+        ExprITE *e = (ExprITE *)kp;
+        return subst_reaches_var(S, e->cond, target_var, visited)
+            || subst_reaches_var(S, e->then_e, target_var, visited)
+            || subst_reaches_var(S, e->else_e, target_var, visited);
+    }
+    case EXPR_IN_RANGE: {
+        ExprInRange *r = (ExprInRange *)kp;
+        return subst_reaches_var(S, r->value, target_var, visited)
+            || subst_reaches_var(S, r->lo, target_var, visited)
+            || subst_reaches_var(S, r->hi, target_var, visited);
+    }
+    case EXPR_IN_SET: {
+        ExprInSet *iset = (ExprInSet *)kp;
+        if (subst_reaches_var(S, iset->value, target_var, visited)) return 1;
+        ExprRef *elems = expr_in_set_elems(S->problem, ref);
+        for (uint32_t i = 0; i < iset->n_elems; i++)
+            if (subst_reaches_var(S, elems[i], target_var, visited)) return 1;
+        return 0;
+    }
+    case EXPR_EXTEND:
+        return subst_reaches_var(S, ((ExprExtend *)kp)->operand, target_var, visited);
+    case EXPR_EXTRACT:
+        return subst_reaches_var(S, ((ExprExtract *)kp)->operand, target_var, visited);
+    case EXPR_CONCAT: {
+        ExprConcat *c = (ExprConcat *)kp;
+        return subst_reaches_var(S, c->hi, target_var, visited)
+            || subst_reaches_var(S, c->lo, target_var, visited);
+    }
+    default: return 0;
+    }
+}
+
+/* Attempt to register a substitution var(vref) := eref. Returns 1 if
+ * a new substitution was recorded. Rejects if eref transitively
+ * (through the current subst graph) reaches the var being substituted —
+ * this is the soundness gate. */
+static int try_record_subst(zsp_bbsolver_t *S, ExprRef vref, ExprRef eref) {
+    ExprKind *vk = (ExprKind *)POOL_PTR(S->problem, vref);
+    if (!vk || *vk != EXPR_VAR) return 0;
+    ExprVar *v = (ExprVar *)vk;
+    if (v->var_id >= S->n_vars) return 0;
+    if (S->subst[v->var_id] != EXPR_NULL) return 0;
+    /* Transitive cycle check: would substituting create a cycle in the
+     * subst graph reachable from this var? */
+    memset(S->resolving, 0, S->n_vars);
+    if (subst_reaches_var(S, eref, v->var_id, S->resolving)) return 0;
+    S->subst[v->var_id] = eref;
+    S->n_substs++;
+    return 1;
+}
+
+/* Walk `root` descending through BIN_AND chains, looking for BIN_EQ
+ * sub-asserts of the shape (= var expr). Records substitutions. Returns
+ * 1 iff every sub-assert under this root was consumed (the whole root
+ * can be skipped); 0 if any sub-assert remained (root must still be
+ * encoded). */
+static int collect_substs_from(zsp_bbsolver_t *S, ExprRef root) {
+    if (root == EXPR_NULL) return 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, root);
+    if (!kp) return 0;
+    if (*kp == EXPR_BINARY) {
+        ExprBinary *b = (ExprBinary *)kp;
+        /* Note: descending through nested BIN_AND would catch more
+         * equalities (transitions in BMC fixtures encode 4-8 equalities
+         * inside a big AND), but observed unsoundness on QF_AUFBV
+         * fixtures with arrays and uninterpreted functions —
+         * fifo_8x16_bmc_d2 flips to a false SAT. Disabled until the
+         * frontend's array/UF lowering is better understood. */
+        if (b->op == BIN_EQ) {
+            if (try_record_subst(S, b->lhs, b->rhs)) return 1;
+            if (try_record_subst(S, b->rhs, b->lhs)) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Pre-pass: scan all top-level constraints, populate S->subst, mark
+ * fully-consumed constraints in S->constraint_skip. */
+static void run_subst_pass(zsp_bbsolver_t *S) {
+    /* Count constraints first so we can size constraint_skip. */
+    uint32_t n = 0;
+    for (ExprRef cur = S->problem->constraints_head; cur != EXPR_NULL; ) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        n++;
+        cur = cs->next;
+    }
+    S->n_constraints = n;
+    if (n == 0 || S->n_vars == 0) return;
+    S->subst = (ExprRef *)xalloc(S->alloc, S->n_vars * sizeof(ExprRef));
+    S->resolving = (uint8_t *)xalloc(S->alloc, S->n_vars * sizeof(uint8_t));
+    S->constraint_skip = (uint8_t *)xalloc(S->alloc, n * sizeof(uint8_t));
+    if (!S->subst || !S->resolving || !S->constraint_skip) return;
+    for (uint32_t i = 0; i < S->n_vars; i++) S->subst[i] = EXPR_NULL;
+    memset(S->resolving, 0, S->n_vars);
+    memset(S->constraint_skip, 0, n);
+
+    uint32_t idx = 0;
+    for (ExprRef cur = S->problem->constraints_head; cur != EXPR_NULL; idx++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        if (collect_substs_from(S, cs->root)) {
+            S->constraint_skip[idx] = 1;
+        }
+        cur = cs->next;
+    }
+}
+
 /* Build (or fetch) the bit-vector for a declared variable.
  *
  * If the variable's bounds [lo, hi] (interpreted unsigned) yield a useful
@@ -77,6 +259,28 @@ static zsp_bv_t bv_for_var(zsp_bbsolver_t *S, uint32_t var_id) {
     assert(var_id < S->n_vars);
     bb_var_t *v = &S->vars[var_id];
     if (!v->bv_built) {
+        /* If a substitution applies and we aren't already resolving it
+         * (cycle guard), bit-blast the substituted expression and use
+         * its result. The expression's natural width may differ from
+         * the variable's declared width — adjust via zext or extract. */
+        if (S->subst && S->subst[var_id] != EXPR_NULL && !S->resolving[var_id]) {
+            S->resolving[var_id] = 1;
+            zsp_bv_t e = bb_expr(S, S->subst[var_id], v->width);
+            S->resolving[var_id] = 0;
+            if (!S->had_error) {
+                if (e.size < v->width) {
+                    e = v->is_signed ? sext_to(S, e, v->width)
+                                     : zext_to(S, e, v->width);
+                } else if (e.size > v->width) {
+                    e = zsp_bb_extract(S->bb, e, v->width - 1, 0);
+                }
+                v->bv = e;
+                v->bv_built = 1;
+                return v->bv;
+            }
+            /* fall through on error to allocate fresh */
+        }
+
         int use_fix = !v->is_signed && v->lo >= 0 && v->hi >= v->lo;
         if (use_fix) {
             zsp_bvdom_t d;
@@ -377,24 +581,40 @@ static zsp_bv_t bb_expr(zsp_bbsolver_t *S, ExprRef ref, uint16_t hint_width) {
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return err_bv(S, "bad ExprRef");
 
+    /* Memoization: most ExprKinds have a hint-independent natural width.
+     * Cache them by ExprRef alone. EXPR_CONST is hint-dependent (sized to
+     * caller context) so it stays uncached and cheap. DV_BB_NO_MEMO
+     * disables the cache for debugging. */
+    int memoize = (*kp != EXPR_CONST) && getenv("DV_BB_NO_MEMO") == NULL;
+    if (memoize && ref < S->cache_cap && S->cache[ref].bv.size != 0) {
+        return S->cache[ref].bv;
+    }
+
+    zsp_bv_t out;
     switch (*kp) {
     case EXPR_CONST:    return bb_const(S, (ExprConst *)kp, hint_width);
-    case EXPR_VAR:      return bb_var_expr(S, (ExprVar *)kp);
-    case EXPR_BINARY:   return bb_binary(S, (ExprBinary *)kp, hint_width);
-    case EXPR_UNARY:    return bb_unary(S, (ExprUnary *)kp, hint_width);
-    case EXPR_ITE:      return bb_ite(S, (ExprITE *)kp, hint_width);
-    case EXPR_IN_RANGE: return bb_in_range(S, (ExprInRange *)kp);
-    case EXPR_IN_SET:   return bb_in_set(S, ref);
-    case EXPR_EXTEND:   return bb_extend(S, (ExprExtend *)kp);
-    case EXPR_EXTRACT:  return bb_extract(S, (ExprExtract *)kp);
-    case EXPR_CONCAT:   return bb_concat(S, (ExprConcat *)kp);
+    case EXPR_VAR:      out = bb_var_expr(S, (ExprVar *)kp); break;
+    case EXPR_BINARY:   out = bb_binary(S, (ExprBinary *)kp, hint_width); break;
+    case EXPR_UNARY:    out = bb_unary(S, (ExprUnary *)kp, hint_width); break;
+    case EXPR_ITE:      out = bb_ite(S, (ExprITE *)kp, hint_width); break;
+    case EXPR_IN_RANGE: out = bb_in_range(S, (ExprInRange *)kp); break;
+    case EXPR_IN_SET:   out = bb_in_set(S, ref); break;
+    case EXPR_EXTEND:   out = bb_extend(S, (ExprExtend *)kp); break;
+    case EXPR_EXTRACT:  out = bb_extract(S, (ExprExtract *)kp); break;
+    case EXPR_CONCAT:   out = bb_concat(S, (ExprConcat *)kp); break;
     case EXPR_SUM:
     case EXPR_COUNTONES:
     case EXPR_CLOG2:
     case EXPR_ARRAY_SELECT:
         return err_bv(S, "high-level IR node not yet supported (SUM/COUNTONES/CLOG2/ARRAY_SELECT)");
+    default:
+        return err_bv(S, "unknown ExprKind");
     }
-    return err_bv(S, "unknown ExprKind");
+
+    if (memoize && !S->had_error && ref < S->cache_cap) {
+        S->cache[ref].bv = out;
+    }
+    return out;
 }
 
 static zsp_bv_t bb_predicate(zsp_bbsolver_t *S, ExprRef ref) {
@@ -496,6 +716,16 @@ zsp_bbsolver_t *zsp_bbsolver_new(zsp_alloc_t *alloc, SolveProblem *problem) {
             cur = vs->next;
         }
     }
+
+    /* Memoization cache: sized to the pool's current used range, since
+     * ExprRefs are byte offsets and never exceed used. Zero-initialized
+     * (bv.size == 0 marks "not yet bit-blasted"). */
+    S->cache_cap = zsp_pool_used(&problem->pool);
+    if (S->cache_cap > 0) {
+        S->cache = (bb_cache_entry_t *)xalloc(alloc,
+                                              S->cache_cap * sizeof(bb_cache_entry_t));
+        if (S->cache) memset(S->cache, 0, S->cache_cap * sizeof(bb_cache_entry_t));
+    }
     return S;
 }
 
@@ -506,16 +736,36 @@ void zsp_bbsolver_free(zsp_bbsolver_t *S) {
     if (S->sat) zsp_sat_free(S->sat);
     if (S->aig) zsp_aig_free(S->aig);
     xfree(S->alloc, S->vars, S->n_vars * sizeof(bb_var_t));
+    xfree(S->alloc, S->cache, S->cache_cap * sizeof(bb_cache_entry_t));
+    xfree(S->alloc, S->subst, S->n_vars * sizeof(ExprRef));
+    xfree(S->alloc, S->resolving, S->n_vars * sizeof(uint8_t));
+    xfree(S->alloc, S->constraint_skip, S->n_constraints * sizeof(uint8_t));
     xfree(S->alloc, S, sizeof(*S));
 }
 
 int zsp_bbsolver_check(zsp_bbsolver_t *S) {
     if (!S || !S->problem) return ZSP_BB_ERROR;
 
-    /* Encode each constraint as a top-level assertion. */
-    ExprRef cur = S->problem->constraints_head;
-    while (cur != EXPR_NULL) {
+    int stats_enabled = getenv("DV_BB_STATS") != NULL;
+    int subst_enabled = getenv("DV_BB_NO_SUBST") == NULL;
+    struct timespec t0, t1, t2;
+    if (stats_enabled) clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    if (subst_enabled) run_subst_pass(S);
+    /* run_subst_pass uses S->resolving as a scratch visited bitmap
+     * during cycle detection. Reset it before the bit-blast path
+     * starts using it as the recursion guard in bv_for_var. */
+    if (S->resolving) memset(S->resolving, 0, S->n_vars);
+
+    /* Encode each constraint as a top-level assertion. Skip constraints
+     * fully consumed by the substitution pass. */
+    uint32_t idx = 0;
+    for (ExprRef cur = S->problem->constraints_head; cur != EXPR_NULL; idx++) {
         ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        if (S->constraint_skip && S->constraint_skip[idx]) {
+            cur = cs->next;
+            continue;
+        }
         zsp_bv_t pred = bb_predicate(S, cs->root);
         if (S->had_error) { S->last_result = ZSP_BB_ERROR; return ZSP_BB_ERROR; }
         zsp_aig_cnf_encode(S->cnf, pred.bits[0], /*top_level=*/1);
@@ -530,7 +780,22 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S) {
         }
     }
 
+    if (stats_enabled) clock_gettime(CLOCK_MONOTONIC, &t1);
     int rc = zsp_sat_solve(S->sat);
+    if (stats_enabled) {
+        clock_gettime(CLOCK_MONOTONIC, &t2);
+        double bb_ms = (t1.tv_sec - t0.tv_sec) * 1000.0
+                     + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        double sat_ms = (t2.tv_sec - t1.tv_sec) * 1000.0
+                      + (t2.tv_nsec - t1.tv_nsec) / 1e6;
+        fprintf(stderr,
+                "[bb-stats] bb=%.2fms sat=%.2fms ands=%llu vars=%llu clauses=%llu substs=%llu\n",
+                bb_ms, sat_ms,
+                (unsigned long long)zsp_aig_num_ands(S->aig),
+                (unsigned long long)zsp_aig_cnf_num_vars(S->cnf),
+                (unsigned long long)zsp_aig_cnf_num_clauses(S->cnf),
+                (unsigned long long)S->n_substs);
+    }
     S->last_result = rc;
     return rc;
 }
