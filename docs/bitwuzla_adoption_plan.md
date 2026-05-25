@@ -102,6 +102,19 @@ five tier1 false-unsat bugs (see [[false_unsat_tier1]]) are all
 2. **Port `BitVectorBounds`** as `zsp_bvbounds.{c,h}` — signed and unsigned
    intervals per BV term, with the standard meet/widening operators. Hook
    into the trail so each decision/propagation tightens or restores bounds.
+   - **[DONE 2026-05-25]** Two layers: `zsp_bvrange_t` (a single contiguous
+     `[min, max]` on a uint64_t) and `zsp_bvbounds_t` (pair of ranges —
+     `lo` in `[0, max_signed]` plus `hi` in `[min_signed, ones]`). The
+     signed-split form lets ranges that straddle the midpoint be
+     represented exactly (`[100, 200]` on 8 bits becomes
+     `lo=[100, 127]` + `hi=[128, 200]`). API: range init / init-from-domain /
+     init-empty, validity / containment / intersect, plus the bounds-level
+     init-from-range / init-from-domain / contains / intersect / is-valid /
+     to-str. Tested via `test_zsp_bvbounds` (31 assertions).
+   - **[TODO]** Trail integration so each decision/propagation tightens
+     and restores bounds — deferred until the CDCL path actually consumes
+     bounds (currently bounds are used only at IR walk time in the
+     bbsolver's variable-bound assertion emission).
 3. **Stand up a rewriter** (`zsp_rewrite.c`) with the bitwuzla pattern set
    ported by category:
    - bool: `not(not x) → x`, ITE pushdowns, `and/or` absorption

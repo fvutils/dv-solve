@@ -61,6 +61,7 @@ set(ZSP_SOURCES
     src/c/zsp_bbsolver.c
     src/c/zsp_arena.c
     src/c/zsp_bvdom.c
+    src/c/zsp_bvbounds.c
 )
 
 # ------------------------------------------------------------------ #
@@ -189,6 +190,11 @@ add_executable(test_zsp_bvdom tests/c/test_zsp_bvdom.c)
 target_link_libraries(test_zsp_bvdom PRIVATE dv_solve)
 target_include_directories(test_zsp_bvdom PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_zsp_bvdom COMMAND test_zsp_bvdom)
+
+add_executable(test_zsp_bvbounds tests/c/test_zsp_bvbounds.c)
+target_link_libraries(test_zsp_bvbounds PRIVATE dv_solve)
+target_include_directories(test_zsp_bvbounds PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_bvbounds COMMAND test_zsp_bvbounds)
 
 # ------------------------------------------------------------------ #
 # SMT-LIB2 parser test                                                 #
