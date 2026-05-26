@@ -170,6 +170,22 @@ typedef struct {
     int                  produce_models;
     uint64_t             seed;
 
+    /* Logic set via (set-logic ...). Used by engine auto-routing in
+     * _cmd_check_sat: QF_UFBV / QF_ABV / QF_AUFBV default to the
+     * bitblast engine because the CDCL theory loop is dramatically
+     * slower than bit-blast → AIG → kissat on those shapes (every
+     * yosys-smtbmc-style BMC fixture solves <20ms under bitblast vs
+     * 10s+ CDCL timeout). DV_ENGINE env still overrides ("bitblast"
+     * or "bb" forces bitblast, "cdcl" forces CDCL). */
+    enum {
+        SMT2_LOGIC_UNSET = 0,
+        SMT2_LOGIC_QF_BV,
+        SMT2_LOGIC_QF_UFBV,
+        SMT2_LOGIC_QF_ABV,
+        SMT2_LOGIC_QF_AUFBV,
+        SMT2_LOGIC_ALL,
+    } logic;
+
     /* Result of last check-sat */
     SolveResult          last_result;
     int                  has_result;   /* 1 after check-sat */

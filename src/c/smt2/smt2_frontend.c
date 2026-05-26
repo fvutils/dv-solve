@@ -1199,13 +1199,11 @@ static int _cmd_set_logic(Smt2Frontend *fe, const Sexpr *cmd) {
         return -1;
     }
     const Sexpr *l = cmd->list.items[1];
-    if (sexpr_is_symbol(l, "QF_BV") ||
-        sexpr_is_symbol(l, "QF_UFBV") ||
-        sexpr_is_symbol(l, "QF_ABV") ||
-        sexpr_is_symbol(l, "QF_AUFBV") ||
-        sexpr_is_symbol(l, "ALL")) {
-        return 0;
-    }
+    if (sexpr_is_symbol(l, "QF_BV"))    { fe->logic = SMT2_LOGIC_QF_BV;    return 0; }
+    if (sexpr_is_symbol(l, "QF_UFBV"))  { fe->logic = SMT2_LOGIC_QF_UFBV;  return 0; }
+    if (sexpr_is_symbol(l, "QF_ABV"))   { fe->logic = SMT2_LOGIC_QF_ABV;   return 0; }
+    if (sexpr_is_symbol(l, "QF_AUFBV")) { fe->logic = SMT2_LOGIC_QF_AUFBV; return 0; }
+    if (sexpr_is_symbol(l, "ALL"))      { fe->logic = SMT2_LOGIC_ALL;      return 0; }
     fprintf(fe->err, "error: unsupported logic '%.*s' (supported: QF_BV, QF_UFBV, QF_ABV, QF_AUFBV, ALL)\n",
             (int)l->sym.len, l->sym.str);
     return -1;
@@ -1733,9 +1731,30 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
     return rc == ZSP_BB_ERROR ? -1 : 0;
 }
 
-static int _engine_is_bitblast(void) {
+/* Pick the solve engine for the current problem.
+ *
+ *   DV_ENGINE=bitblast / bb  → force bitblast
+ *   DV_ENGINE=cdcl           → force CDCL
+ *   unset                    → auto: bitblast for QF_UFBV / QF_ABV /
+ *                              QF_AUFBV (yosys-smtbmc dialect, where the
+ *                              CDCL theory loop is dramatically slower
+ *                              than bit-blast → AIG → kissat); CDCL for
+ *                              QF_BV / ALL / unset logic (the dv-solve
+ *                              native workload where CDCL was tuned).
+ *
+ * Rationale: a 2026-05-26 measurement found that every QF_UFBV BMC
+ * fixture in tier2 / tier3 that times out under CDCL solves in <20ms
+ * under bitblast. The auto-route lifts those out of the timeout bucket
+ * without users having to set DV_ENGINE manually. */
+static int _engine_is_bitblast(Smt2Frontend *fe) {
     const char *e = getenv("DV_ENGINE");
-    return e && (strcmp(e, "bitblast") == 0 || strcmp(e, "bb") == 0);
+    if (e) {
+        if (strcmp(e, "bitblast") == 0 || strcmp(e, "bb") == 0) return 1;
+        if (strcmp(e, "cdcl") == 0) return 0;
+    }
+    return fe->logic == SMT2_LOGIC_QF_UFBV
+        || fe->logic == SMT2_LOGIC_QF_ABV
+        || fe->logic == SMT2_LOGIC_QF_AUFBV;
 }
 
 /* Route variable value lookup through the bbsolver when it's the active
@@ -1767,7 +1786,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         return -1;
     }
 
-    if (_engine_is_bitblast()) {
+    if (_engine_is_bitblast(fe)) {
         return _check_sat_bitblast(fe);
     }
 
