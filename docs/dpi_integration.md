@@ -125,3 +125,70 @@ sources directly.
 The base64 problem string is invalid or the buffer doesn't match the
 platform's `SolveProblem` layout.  Regenerate the SV from the same
 build of the solver library.
+
+## Incremental Solving: Pin, Checkpoint, Restore
+
+The three functions `zsp_dpi_pin_var_h`, `zsp_dpi_checkpoint_h`, and
+`zsp_dpi_restore_h` enable **incremental solving** over a single compiled
+handle.  This is used when the same constraint problem must be solved
+multiple times with different input values pinned -- for example, when
+re-solving with different seeds from a common pinned state, or chaining
+solves where each step pins inputs to a previous step's output.
+
+### Key design property
+
+The compiled handle maintains a **persistent `SolveCtx`**.  All three
+operations act directly on this context:
+
+- `pin_var_h(h, var_id, value)` tightens the variable's domain to
+  `[value, value]` and runs constraint propagation.  Returns 0 on success,
+  -2 if the pin makes the problem infeasible.
+- `checkpoint_h(h)` saves the current domain/trail state and returns a
+  checkpoint index (>= 0).
+- `restore_h(h, cp)` unwinds the context back to the saved checkpoint,
+  undoing all domain changes and search assignments that occurred after it.
+
+### Example: Pin → Solve → Restore → Re-solve
+
+```systemverilog
+import zsp_dpi_pkg::*;
+
+module example;
+  initial begin
+    chandle h;
+    int cp, rc;
+    longint x, y;
+
+    // Compile: x in [0,10], y in [0,10], x+y==10
+    h = zsp_dpi_compile_b64(MY_PROBLEM_B64);
+
+    // Take a clean checkpoint before any pins
+    cp = zsp_dpi_checkpoint_h(h);
+
+    // First solve: pin x=3, solve, read y (must be 7)
+    rc = zsp_dpi_pin_var_h(h, 0, 3);    // pin x=3
+    rc = zsp_dpi_solve_h(h, $urandom());
+    y  = zsp_dpi_get_value_h(h, 1);    // y==7
+
+    // Restore to clean checkpoint, then pin x=5
+    zsp_dpi_restore_h(h, cp);
+    rc = zsp_dpi_pin_var_h(h, 0, 5);   // pin x=5
+    rc = zsp_dpi_solve_h(h, $urandom());
+    y  = zsp_dpi_get_value_h(h, 1);    // y==5
+
+    zsp_dpi_release_h(h);
+    $finish;
+  end
+endmodule
+```
+
+### Return codes
+
+| Function | Return | Meaning |
+|---|---|---|
+| `pin_var_h` | 0 | Success |
+| `pin_var_h` | -1 | Invalid handle or var_id out of range |
+| `pin_var_h` | -2 | UNSAT: pin makes the problem infeasible |
+| `checkpoint_h` | >= 0 | Checkpoint index (pass to restore_h) |
+| `checkpoint_h` | -1 | Error (invalid handle or checkpoint limit exceeded) |
+| `restore_h` | void | Always succeeds if cp is a valid index |

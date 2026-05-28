@@ -29,4 +29,29 @@ package zsp_dpi_pkg;
     input chandle ctx
   );
 
+  // ----------------------------------------------------------------
+  // Incremental / chain-solve functions
+  // ----------------------------------------------------------------
+
+  // Pin a variable to a specific value before solving.
+  // Returns 0=OK, -1=ERROR (invalid ctx or var_id), -2=UNSAT (conflict).
+  import "DPI-C" function int zsp_dpi_pin_var_h(
+    input chandle  ctx,
+    input int      var_id,
+    input longint  value
+  );
+
+  // Save a checkpoint of the current solver state.
+  // Returns checkpoint index (>= 0), or -1 on error.
+  import "DPI-C" function int zsp_dpi_checkpoint_h(
+    input chandle ctx
+  );
+
+  // Restore solver state to a previously saved checkpoint.
+  // Undoes all pins/solves that occurred after the checkpoint.
+  import "DPI-C" function void zsp_dpi_restore_h(
+    input chandle ctx,
+    input int     cp
+  );
+
 endpackage
