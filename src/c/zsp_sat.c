@@ -98,6 +98,28 @@ void zsp_sat_set_decision_limit(zsp_sat_t *s, uint32_t limit) {
     kissat_set_decision_limit(s->kissat, (unsigned)limit);
 }
 
+void zsp_sat_set_seed(zsp_sat_t *s, uint64_t seed) {
+    if (!s || !s->kissat) return;
+    /* seed == 0 => leave kissat at its defaults (deterministic, lucky on). A
+     * caller that wants a varied model passes a nonzero seed. */
+    if (seed == 0) return;
+
+    /* Fold the 64-bit seed into kissat's "seed" option ([0, INT_MAX]); this
+     * feeds its random generator and our per-variable initial-phase
+     * randomization in start_search (gated on a nonzero seed there too), so
+     * keep it nonzero. */
+    int ks = (int)((seed ^ (seed >> 32)) & 0x7FFFFFFF);
+    if (ks == 0) ks = 1;
+    kissat_set_option(s->kissat, "seed", ks);
+    kissat_set_option(s->kissat, "phase", (int)(seed & 1u));
+    /* "Lucky" assignments (all-true / all-false / propagation-forward) solve
+     * trivial conflict-free instances before the decision loop, returning a
+     * fixed boundary model that ignores our randomized phases. Disable them on
+     * a seeded (stimulus-diversity) solve so the model comes from the
+     * phase-seeded decisions. (UNSAT is unaffected — lucky never proves UNSAT.) */
+    kissat_set_option(s->kissat, "lucky", 0);
+}
+
 uint64_t zsp_sat_num_clauses(const zsp_sat_t *s) {
     return s->num_clauses;
 }

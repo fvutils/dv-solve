@@ -195,6 +195,28 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.solver_set_value_selector.restype  = None
     lib.solver_set_value_selector.argtypes = [c.c_void_p, c.c_void_p, c.c_void_p]
 
+    # BV-SAT completeness engine (zsp_bbsolver). Takes a SolveProblem buffer
+    # (the same one solver_compile consumes) and answers SAT/UNSAT
+    # authoritatively via bit-blasting + kissat. See bvsat.py.
+    lib.zsp_bbsolver_new.restype  = c.c_void_p
+    lib.zsp_bbsolver_new.argtypes = [c.c_void_p, c.c_void_p]   # alloc, problem
+    lib.zsp_bbsolver_free.restype  = None
+    lib.zsp_bbsolver_free.argtypes = [c.c_void_p]
+    lib.zsp_bbsolver_check.restype  = c.c_int                  # ZSP_BB_SAT/UNSAT/...
+    lib.zsp_bbsolver_check.argtypes = [c.c_void_p, c.c_uint64]  # bb, seed
+    lib.zsp_bbsolver_value.restype  = c.c_int                  # 0 on success
+    lib.zsp_bbsolver_value.argtypes = [c.c_void_p, c.c_uint32,
+                                       c.POINTER(c.c_int64)]
+    lib.zsp_bbsolver_value_wide.restype  = c.c_int             # 0 on success
+    lib.zsp_bbsolver_value_wide.argtypes = [c.c_void_p, c.c_uint32,
+                                            c.POINTER(c.c_uint64), c.c_uint32]
+    lib.zsp_bbsolver_num_aig_ands.restype  = c.c_uint64
+    lib.zsp_bbsolver_num_aig_ands.argtypes = [c.c_void_p]
+    lib.zsp_bbsolver_num_sat_clauses.restype  = c.c_uint64
+    lib.zsp_bbsolver_num_sat_clauses.argtypes = [c.c_void_p]
+    lib.zsp_bbsolver_num_sat_vars.restype  = c.c_uint64
+    lib.zsp_bbsolver_num_sat_vars.argtypes = [c.c_void_p]
+
 
 def _load_lib() -> Optional[ctypes.CDLL]:
     """Return the cached CDLL handle, loading it on first call.

@@ -1715,7 +1715,7 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
         fflush(fe->out);
         return -1;
     }
-    int rc = zsp_bbsolver_check(fe->bb_solver);
+    int rc = zsp_bbsolver_check(fe->bb_solver, /*seed=*/0);
     if (rc == ZSP_BB_SAT) {
         fprintf(fe->out, "sat\n");
         fe->last_result = SOLVE_OK;

@@ -48,9 +48,11 @@ void zsp_bbsolver_free(zsp_bbsolver_t *bb);
 
 /**
  * Bit-blast every constraint, encode CNF, run kissat.
+ * `seed` perturbs the SAT search so repeated checks of the same problem can
+ * return different satisfying models (0 = solver default).
  * Returns ZSP_BB_SAT / ZSP_BB_UNSAT / ZSP_BB_UNKNOWN / ZSP_BB_ERROR.
  */
-int zsp_bbsolver_check(zsp_bbsolver_t *bb);
+int zsp_bbsolver_check(zsp_bbsolver_t *bb, uint64_t seed);
 
 /**
  * After a SAT result, read back the integer value for variable `var_id`.
@@ -59,6 +61,20 @@ int zsp_bbsolver_check(zsp_bbsolver_t *bb);
  * isn't in the problem or the solver isn't in a SAT state.
  */
 int zsp_bbsolver_value(zsp_bbsolver_t *bb, uint32_t var_id, int64_t *out_value);
+
+/**
+ * After a SAT result, read back the full (possibly >64-bit) model value for
+ * variable `var_id` into little-endian 64-bit limbs: `limbs[0]` is bits [0,63],
+ * `limbs[1]` is bits [64,127], etc. Writes `min(n_limbs, ceil(width/64))` limbs
+ * and zero-fills any remaining requested limbs. The value is the raw unsigned
+ * bit pattern (no sign extension across limbs — the caller applies signedness
+ * from the var's declared width). Use this instead of zsp_bbsolver_value() for
+ * width > 64, where the int64 reader cannot represent the value.
+ * Returns 0 on success; non-zero if the variable isn't in the problem or the
+ * solver isn't in a SAT state.
+ */
+int zsp_bbsolver_value_wide(zsp_bbsolver_t *bb, uint32_t var_id,
+                            uint64_t *limbs, uint32_t n_limbs);
 
 /** Diagnostic counters (post-solve). */
 uint64_t zsp_bbsolver_num_aig_ands(const zsp_bbsolver_t *bb);

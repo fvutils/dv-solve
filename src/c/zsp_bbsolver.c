@@ -73,6 +73,11 @@ struct zsp_bbsolver_s {
 
     int             last_result;
     int             had_error;
+    /* Set when a construct is recognized but cannot be soundly bit-blasted
+     * (e.g. signed div/mod — see A-4 soundness guards). Distinct from
+     * had_error: maps to ZSP_BB_UNKNOWN so the caller defers to its fallback
+     * rather than treating the result as a real verdict. */
+    int             had_unsupported;
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -85,6 +90,78 @@ static void xfree(zsp_alloc_t *a, void *p, size_t sz) {
 }
 
 static uint16_t max_w(uint16_t a, uint16_t b) { return a > b ? a : b; }
+
+/* True if `ref`'s value should be interpreted as signed — i.e. its subtree
+ * references a signed variable / constant / sign-extend. Used by the div/mod
+ * guard: the bit-blaster only implements *unsigned* division/modulo, so a
+ * signed operand would silently produce a wrong quotient. We conservatively
+ * treat "contains a signed leaf" as signed and defer (ZSP_BB_UNKNOWN). */
+static int subtree_is_signed(zsp_bbsolver_t *S, ExprRef ref, int depth) {
+    if (ref == EXPR_NULL || depth > 256) return 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp) return 0;
+    switch (*kp) {
+    case EXPR_CONST: return ((ExprConst *)kp)->is_signed != 0;
+    case EXPR_VAR: {
+        uint32_t id = ((ExprVar *)kp)->var_id;
+        return id < S->n_vars && S->vars[id].is_signed;
+    }
+    case EXPR_BINARY: {
+        ExprBinary *b = (ExprBinary *)kp;
+        return subtree_is_signed(S, b->lhs, depth + 1)
+            || subtree_is_signed(S, b->rhs, depth + 1);
+    }
+    case EXPR_UNARY:
+        return subtree_is_signed(S, ((ExprUnary *)kp)->operand, depth + 1);
+    case EXPR_EXTEND:
+        return ((ExprExtend *)kp)->sign_extend != 0;
+    default:
+        return 0;
+    }
+}
+
+/* Whether the *value produced by* `ref` should be interpreted as signed when
+ * width-extending it (e.g. when a `(= var expr)` substitution feeds a narrower
+ * expr into a wider variable). This differs from subtree_is_signed: a
+ * relational / equality / logical-connective op yields a 1-bit unsigned boolean
+ * (0/1) *regardless* of its operands' signedness — sign-extending that boolean
+ * would turn a true result (1) into all-ones (e.g. an int8 `eq` becoming -1).
+ * Value-producing ops inherit signedness from their operands. */
+static int result_is_signed(zsp_bbsolver_t *S, ExprRef ref, int depth) {
+    if (ref == EXPR_NULL || depth > 256) return 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp) return 0;
+    switch (*kp) {
+    case EXPR_CONST: return ((ExprConst *)kp)->is_signed != 0;
+    case EXPR_VAR: {
+        uint32_t id = ((ExprVar *)kp)->var_id;
+        return id < S->n_vars && S->vars[id].is_signed;
+    }
+    case EXPR_BINARY: {
+        ExprBinary *b = (ExprBinary *)kp;
+        switch (b->op) {
+        /* Boolean-producing: comparisons and the logical connectives (the
+         * bitwise forms are BIN_BAND/BIN_BOR/BIN_BXOR, handled below). */
+        case BIN_EQ: case BIN_NEQ:
+        case BIN_LT: case BIN_LTE: case BIN_GT: case BIN_GTE:
+        case BIN_AND: case BIN_OR:
+            return 0;
+        default:
+            return result_is_signed(S, b->lhs, depth + 1)
+                || result_is_signed(S, b->rhs, depth + 1);
+        }
+    }
+    case EXPR_UNARY: {
+        ExprUnary *u = (ExprUnary *)kp;
+        if (u->op == UN_NOT) return 0;   /* logical NOT → boolean */
+        return result_is_signed(S, u->operand, depth + 1);
+    }
+    case EXPR_EXTEND:
+        return ((ExprExtend *)kp)->sign_extend != 0;
+    default:
+        return 0;
+    }
+}
 
 static zsp_bv_t zext_to(zsp_bbsolver_t *S, zsp_bv_t v, uint16_t target) {
     if (v.size >= target) return v;
@@ -268,8 +345,13 @@ static zsp_bv_t bv_for_var(zsp_bbsolver_t *S, uint32_t var_id) {
             S->resolving[var_id] = 0;
             if (!S->had_error) {
                 if (e.size < v->width) {
-                    e = v->is_signed ? sext_to(S, e, v->width)
-                                     : zext_to(S, e, v->width);
+                    /* Extend per the *expression's* result signedness, not the
+                     * variable's: a boolean result (e.g. `var == (a == 5)`) is
+                     * unsigned 0/1 and must zero-extend even into a signed var,
+                     * else true (1) becomes all-ones (-1). */
+                    e = result_is_signed(S, S->subst[var_id], 0)
+                            ? sext_to(S, e, v->width)
+                            : zext_to(S, e, v->width);
                 } else if (e.size > v->width) {
                     e = zsp_bb_extract(S->bb, e, v->width - 1, 0);
                 }
@@ -280,7 +362,14 @@ static zsp_bv_t bv_for_var(zsp_bbsolver_t *S, uint32_t var_id) {
             /* fall through on error to allocate fresh */
         }
 
-        int use_fix = !v->is_signed && v->lo >= 0 && v->hi >= v->lo;
+        /* Bit-fix folding is a 64-bit-domain optimization: the [lo,hi] range and
+         * the fixed/unknown masks are uint64. For width > 64 it cannot represent
+         * the true range and would wrongly fix the bits above 63 to 0 (e.g. a
+         * 128-bit unconstrained var passed [0, INT64_MAX] would have bits 63..127
+         * pinned). Skip it for wide vars — they get all-fresh bits, and any real
+         * sub-range is enforced by assert_var_bounds / explicit constraints. */
+        int use_fix = !v->is_signed && v->lo >= 0 && v->hi >= v->lo
+                      && v->width <= 64;
         if (use_fix) {
             zsp_bvdom_t d;
             zsp_bvdom_init_from_range_u(&d, v->width,
@@ -309,9 +398,21 @@ static zsp_bv_t bb_expr(zsp_bbsolver_t *S, ExprRef ref, uint16_t hint_width);
 /* Same as bb_expr but the result is a 1-bit predicate. */
 static zsp_bv_t bb_predicate(zsp_bbsolver_t *S, ExprRef ref);
 
+/* Build a width-`w` bit-vector for the int64 `value`. For w <= 64 this is the
+ * exact low-w-bit pattern (zsp_bb_value_u64). For w > 64, value_u64 alone would
+ * zero-fill bits 64+, corrupting a negative value; build the 64-bit pattern and
+ * extend — sign-extend when `is_signed` (a negative value must set the high
+ * bits), zero-extend otherwise. */
+static zsp_bv_t bb_value_i64(zsp_bbsolver_t *S, uint16_t w, int64_t value,
+                             int is_signed) {
+    if (w <= 64) return zsp_bb_value_u64(S->bb, w, (uint64_t)value);
+    zsp_bv_t lo64 = zsp_bb_value_u64(S->bb, 64, (uint64_t)value);
+    return is_signed ? sext_to(S, lo64, w) : zext_to(S, lo64, w);
+}
+
 static zsp_bv_t bb_const(zsp_bbsolver_t *S, const ExprConst *c, uint16_t hint) {
     uint16_t w = hint ? hint : 32;
-    return zsp_bb_value_u64(S->bb, w, (uint64_t)c->value);
+    return bb_value_i64(S, w, c->value, c->is_signed);
 }
 
 static zsp_bv_t bb_var_expr(zsp_bbsolver_t *S, const ExprVar *v) {
@@ -424,8 +525,13 @@ static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, uint16_t hint)
     case BIN_DIV:
     case BIN_MOD: {
         /* Unsigned integer division/modulo only. Signed div/mod would need
-         * the SMT-LIB signed-div semantics (round-toward-zero); revisit if
-         * a fixture actually exercises signed BIN_DIV. */
+         * the SMT-LIB signed-div semantics (round-toward-zero), unimplemented.
+         * A-4 guard: if either operand is signed, mark the problem unsupported
+         * so check() returns ZSP_BB_UNKNOWN and the caller defers (the primary
+         * engine / Boolector handle signed div correctly) rather than computing
+         * a wrong unsigned quotient. */
+        if (subtree_is_signed(S, b->lhs, 0) || subtree_is_signed(S, b->rhs, 0))
+            S->had_unsupported = 1;
         zsp_bv_t l = bb_expr(S, b->lhs, hint);
         if (S->had_error) return l;
         zsp_bv_t r = bb_expr(S, b->rhs, l.size > hint ? l.size : hint);
@@ -652,8 +758,10 @@ static int assert_var_bounds(zsp_bbsolver_t *S, uint32_t var_id) {
     if (!need_lo && !need_hi) return 0;
 
     zsp_bv_t bv = bv_for_var(S, var_id);
-    zsp_bv_t lo = zsp_bb_value_u64(S->bb, v->width, (uint64_t)v->lo);
-    zsp_bv_t hi = zsp_bb_value_u64(S->bb, v->width, (uint64_t)v->hi);
+    /* bb_value_i64 sign/zero-extends correctly for width > 64 (value_u64 alone
+     * would zero-fill bits 64+, corrupting a negative bound). */
+    zsp_bv_t lo = bb_value_i64(S, v->width, v->lo, v->is_signed);
+    zsp_bv_t hi = bb_value_i64(S, v->width, v->hi, v->is_signed);
 
     zsp_bv_t pred = zsp_bb_value_u64(S->bb, 1, 1);
     if (need_lo) {
@@ -742,8 +850,22 @@ void zsp_bbsolver_free(zsp_bbsolver_t *S) {
     xfree(S->alloc, S, sizeof(*S));
 }
 
-int zsp_bbsolver_check(zsp_bbsolver_t *S) {
+int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
     if (!S || !S->problem) return ZSP_BB_ERROR;
+
+    /* Seed kissat's randomness so repeated checks can return different models
+     * (the completeness-fallback's only source of stimulus diversity). */
+    zsp_sat_set_seed(S->sat, seed);
+
+    /* A-4 soundness guard: the bit-blaster does not encode AllDifferent or
+     * Source groups. pyvsc never emits these on the dv-solve path (unique
+     * lowers to NEQ pairs; no sources), but if one ever appears we must NOT
+     * silently drop a hard constraint — defer (UNKNOWN) instead. */
+    if (S->problem->allDiff_head != EXPR_NULL ||
+        S->problem->sources_head != EXPR_NULL) {
+        S->last_result = ZSP_BB_UNKNOWN;
+        return ZSP_BB_UNKNOWN;
+    }
 
     int stats_enabled = getenv("DV_BB_STATS") != NULL;
     int subst_enabled = getenv("DV_BB_NO_SUBST") == NULL;
@@ -767,9 +889,47 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S) {
         }
         zsp_bv_t pred = bb_predicate(S, cs->root);
         if (S->had_error) { S->last_result = ZSP_BB_ERROR; return ZSP_BB_ERROR; }
+        if (S->had_unsupported) { S->last_result = ZSP_BB_UNKNOWN; return ZSP_BB_UNKNOWN; }
         zsp_aig_cnf_encode(S->cnf, pred.bits[0], /*top_level=*/1);
         cur = cs->next;
     }
+
+    /* Force-build any substituted variable that no surviving constraint
+     * referenced. The subst pass consumed its defining constraint (e.g. the
+     * sole `x == 42`), so without this its bv is never built and
+     * zsp_bbsolver_value() would default it to 0 instead of the substituted
+     * value. bv_for_var() ties var->bv to the (bit-blasted) RHS, so the model
+     * — and thus readback — reflects the substitution. */
+    if (S->subst) {
+        for (uint32_t i = 0; i < S->n_vars; i++) {
+            if (S->vars[i].defined && S->subst[i] != EXPR_NULL) {
+                /* A substituted var's bv is a *computed* expression (AND/XOR
+                 * gates), unlike a normal var whose bits are AIG inputs (always
+                 * readable). Its gate bits are only recoverable if encoded into
+                 * the CNF, and a constraint may reference only *some* of them
+                 * (e.g. the sampler hashes just a few low bits via extract), or
+                 * none (its defining `==` was consumed by the subst pass). Build
+                 * the bv and encode *every* bit at non-top-level so the SAT model
+                 * assigns all of them consistently with the substituted
+                 * expression's inputs — otherwise zsp_aig_cnf_value() reads each
+                 * unencoded bit as 0, a silent wrong model. Encoding is
+                 * idempotent for already-encoded bits. */
+                zsp_bv_t bv = bv_for_var(S, i);
+                if (S->had_error) {
+                    S->last_result = ZSP_BB_ERROR;
+                    return ZSP_BB_ERROR;
+                }
+                for (uint32_t bit = 0; bit < bv.size; bit++) {
+                    zsp_aig_cnf_encode(S->cnf, bv.bits[bit], /*top_level=*/0);
+                }
+            }
+        }
+    }
+
+    /* A construct may have been bit-blasted only in the force-build pass above
+     * (e.g. a substituted `y == <signed-div>` whose constraint was skipped),
+     * so re-check the A-4 unsupported flag before committing to a verdict. */
+    if (S->had_unsupported) { S->last_result = ZSP_BB_UNKNOWN; return ZSP_BB_UNKNOWN; }
 
     /* Variable bounds — only for variables that were actually referenced
      * (and therefore had a bv built). Vars never referenced are unconstrained. */
@@ -810,10 +970,16 @@ int zsp_bbsolver_value(zsp_bbsolver_t *S, uint32_t var_id, int64_t *out_value) {
         *out_value = 0;
         return 0;
     }
+    /* bits[] are stored MSB-first: bits[0] is the high bit (logical position
+     * size-1), bits[size-1] is the LSB. Read only the low 64 bits here; the
+     * shift stays < 64 so there is no UB even for a wide var (the high bits are
+     * simply dropped — callers needing them use zsp_bbsolver_value_wide). */
     uint64_t val = 0;
-    for (uint32_t i = 0; i < v->bv.size; i++) {
-        int b = zsp_aig_cnf_value(S->cnf, v->bv.bits[i]);
-        if (b == 1) val |= (uint64_t)1 << (v->bv.size - 1 - i);
+    uint32_t n = v->bv.size < 64 ? v->bv.size : 64;
+    for (uint32_t p = 0; p < n; p++) {
+        /* logical bit p (0 = LSB) lives at bits[size-1-p] */
+        int b = zsp_aig_cnf_value(S->cnf, v->bv.bits[v->bv.size - 1 - p]);
+        if (b == 1) val |= (uint64_t)1 << p;
     }
     if (v->is_signed && v->width < 64) {
         /* sign-extend from `width` to 64 */
@@ -823,6 +989,30 @@ int zsp_bbsolver_value(zsp_bbsolver_t *S, uint32_t var_id, int64_t *out_value) {
         }
     }
     *out_value = (int64_t)val;
+    return 0;
+}
+
+int zsp_bbsolver_value_wide(zsp_bbsolver_t *S, uint32_t var_id,
+                            uint64_t *limbs, uint32_t n_limbs) {
+    if (!S || !limbs || n_limbs == 0) return -1;
+    if (S->last_result != ZSP_BB_SAT) return -1;
+    if (var_id >= S->n_vars) return -1;
+    bb_var_t *v = &S->vars[var_id];
+    if (!v->defined) return -1;
+    for (uint32_t i = 0; i < n_limbs; i++) limbs[i] = 0;
+    if (!v->bv_built) {
+        /* Variable never referenced — zero by convention (limbs already 0). */
+        return 0;
+    }
+    /* Little-endian limbs: logical bit p (0 = LSB) → limbs[p/64] bit (p%64).
+     * bits[] is MSB-first, so logical bit p is at bits[size-1-p]. The shift is
+     * always < 64, so no UB regardless of width. */
+    uint32_t cap = n_limbs * 64;
+    uint32_t n = v->bv.size < cap ? v->bv.size : cap;
+    for (uint32_t p = 0; p < n; p++) {
+        int b = zsp_aig_cnf_value(S->cnf, v->bv.bits[v->bv.size - 1 - p]);
+        if (b == 1) limbs[p >> 6] |= (uint64_t)1 << (p & 63);
+    }
     return 0;
 }
 

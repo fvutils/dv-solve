@@ -73,6 +73,13 @@ int zsp_sat_solve(zsp_sat_t *s);
  */
 zsp_sat_lit_t zsp_sat_value(zsp_sat_t *s, zsp_sat_var_t var);
 
+/**
+ * Seed the SAT solver's randomness (random decisions / phase init) so repeated
+ * solves of the same problem can return different satisfying models. Must be
+ * called before zsp_sat_solve(). 0 reproduces the solver's default behavior.
+ */
+void zsp_sat_set_seed(zsp_sat_t *s, uint64_t seed);
+
 /** Bound the search by conflict count. 0 (the default) means unlimited. */
 void zsp_sat_set_conflict_limit(zsp_sat_t *s, uint32_t limit);
 

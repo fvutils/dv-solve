@@ -181,6 +181,12 @@ PropResult ctx_tighten_lb64(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
     int64_t curr = var_lo64(ctx, v);
     if (new_lb <= curr) return PROP_OK;
 
+    /* Edge-crossing guard: a lower bound above the variable's largest
+     * representable value empties the domain (e.g. unsigned `v > max`).
+     * Detect it on the logical value before storage, where truncation
+     * would otherwise hide the conflict. */
+    if (new_lb > var_repr_max(v)) return PROP_CONFLICT;
+
     trail_record_lb(ctx, var_id, new_lb);
 
     /* check conflict */
@@ -200,6 +206,12 @@ PropResult ctx_tighten_ub64(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
     Variable *v = &ctx->vars[var_id];
     int64_t curr = var_hi64(ctx, v);
     if (new_ub >= curr) return PROP_OK;
+
+    /* Edge-crossing guard: an upper bound below the variable's smallest
+     * representable value empties the domain (e.g. unsigned `v < 0`).
+     * Detect it on the logical value before storage, where truncation
+     * would otherwise reinterpret a negative bound as a huge unsigned one. */
+    if (new_ub < var_repr_min(v)) return PROP_CONFLICT;
 
     trail_record_ub(ctx, var_id, new_ub);
 

@@ -35,7 +35,7 @@ static void test_add_eq(void) {
     SolveProblem *p = builder_finalize(b, &sz);
 
     zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
-    int rc = zsp_bbsolver_check(S);
+    int rc = zsp_bbsolver_check(S, 0);
     CHECK(rc == ZSP_BB_SAT, "x+y==10, x<8, y<8 SAT");
     if (rc == ZSP_BB_SAT) {
         int64_t vx = 0, vy = 0;
@@ -69,7 +69,7 @@ static void test_unsat(void) {
     size_t sz;
     SolveProblem *p = builder_finalize(b, &sz);
     zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
-    CHECK(zsp_bbsolver_check(S) == ZSP_BB_UNSAT, "x==5 AND x!=5 UNSAT");
+    CHECK(zsp_bbsolver_check(S, 0) == ZSP_BB_UNSAT, "x==5 AND x!=5 UNSAT");
     zsp_bbsolver_free(S);
     builder_free_problem(b, p, sz);
     builder_destroy(b);
@@ -86,7 +86,7 @@ static void test_var_bounds(void) {
     size_t sz;
     SolveProblem *p = builder_finalize(b, &sz);
     zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
-    int rc = zsp_bbsolver_check(S);
+    int rc = zsp_bbsolver_check(S, 0);
     CHECK(rc == ZSP_BB_SAT, "x in [3,9] AND x<5 SAT");
     if (rc == ZSP_BB_SAT) {
         int64_t vx = 0;
@@ -128,7 +128,7 @@ static void test_bvand_masked_bound(void) {
     size_t sz;
     SolveProblem *p = builder_finalize(b, &sz);
     zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
-    int rc = zsp_bbsolver_check(S);
+    int rc = zsp_bbsolver_check(S, 0);
     CHECK(rc == ZSP_BB_SAT, "tier-1 bvand+range+masked-bound SAT");
     if (rc == ZSP_BB_SAT) {
         int64_t va = 0, vm = 0;
@@ -155,7 +155,7 @@ static void test_signed(void) {
     size_t sz;
     SolveProblem *p = builder_finalize(b, &sz);
     zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
-    int rc = zsp_bbsolver_check(S);
+    int rc = zsp_bbsolver_check(S, 0);
     CHECK(rc == ZSP_BB_SAT, "signed x in [-3,3], x<0 SAT");
     if (rc == ZSP_BB_SAT) {
         int64_t vx = 0;
@@ -187,7 +187,7 @@ static void test_bit_fix(void) {
     SolveProblem *p = builder_finalize(b, &sz);
 
     zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
-    int rc = zsp_bbsolver_check(S);
+    int rc = zsp_bbsolver_check(S, 0);
     CHECK(rc == ZSP_BB_SAT, "32-bit var bounded [0,7] with (x&6)==4 is SAT");
     int64_t v;
     zsp_bbsolver_value(S, 0, &v);
@@ -213,7 +213,7 @@ static void test_bit_fix(void) {
     builder_add_constraint(b, builder_expr_binary(b, BIN_EQ, and_x6, k4));
     p = builder_finalize(b, &sz);
     S = zsp_bbsolver_new(NULL, p);
-    rc = zsp_bbsolver_check(S);
+    rc = zsp_bbsolver_check(S, 0);
     CHECK(rc == ZSP_BB_SAT, "unbounded version also SAT");
     uint64_t ands_full = zsp_bbsolver_num_aig_ands(S);
     uint64_t vars_full = zsp_bbsolver_num_sat_vars(S);
@@ -230,6 +230,45 @@ static void test_bit_fix(void) {
     builder_destroy(b);
 }
 
+/* Wide (>64-bit) readback: force a 128-bit var to have bit 100 and bit 0 set.
+ * zsp_bbsolver_value (int64) can only see the low 64 bits; value_wide must
+ * reconstruct the full value across limbs without UB. */
+static void test_wide_readback(void) {
+    SolveProblemBuilder *b = builder_create(4096, NULL);
+    /* lo/hi are int64; a wide var's true range exceeds it, so pass a
+     * representative-but-not-binding range — the constraints pin the bits. */
+    builder_add_var(b, 0, 128, 0, 0, 0x7fffffffffffffffLL);
+    ExprRef x = builder_expr_var(b, 0);
+    ExprRef one = builder_expr_const(b, 1, 0);
+    builder_add_constraint(b, builder_expr_binary(
+        b, BIN_EQ, builder_expr_extract(b, x, 100, 100), one));
+    builder_add_constraint(b, builder_expr_binary(
+        b, BIN_EQ, builder_expr_extract(b, x, 0, 0), one));
+
+    size_t sz;
+    SolveProblem *p = builder_finalize(b, &sz);
+    zsp_bbsolver_t *S = zsp_bbsolver_new(NULL, p);
+    int rc = zsp_bbsolver_check(S, 1);
+    CHECK(rc == ZSP_BB_SAT, "128-bit var, bit100=1 & bit0=1 is SAT");
+
+    uint64_t limbs[2] = {0, 0};
+    int vrc = zsp_bbsolver_value_wide(S, 0, limbs, 2);
+    CHECK(vrc == 0, "value_wide returns success");
+    /* bit 0 -> limb[0] bit 0; bit 100 -> limb[1] bit 36. */
+    CHECK((limbs[0] & 1ull) == 1ull, "value_wide: bit 0 set in limb[0]");
+    CHECK((limbs[1] & (1ull << 36)) != 0, "value_wide: bit 100 set in limb[1]");
+
+    /* The int64 fast path must still work for the low word (no UB, no crash),
+     * seeing just the low 64 bits (bit 0 set -> value 1). */
+    int64_t low = -1;
+    zsp_bbsolver_value(S, 0, &low);
+    CHECK(low == 1, "value (int64 fast path) returns low-64-bits = 1");
+
+    zsp_bbsolver_free(S);
+    builder_free_problem(b, p, sz);
+    builder_destroy(b);
+}
+
 int main(void) {
     test_add_eq();
     test_unsat();
@@ -237,5 +276,6 @@ int main(void) {
     test_bvand_masked_bound();
     test_signed();
     test_bit_fix();
+    test_wide_readback();
     return failures ? 1 : 0;
 }

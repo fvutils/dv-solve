@@ -180,12 +180,18 @@ static int _compile_var_const_cmp(SolveCtx *ctx, BinOp op,
         if (ctx_tighten_ub64(ctx, vid, cv) == PROP_CONFLICT) return -1;
         return 1;
     case BIN_LT:
+        /* `v < cv`: empty when cv <= var_min.  Guard here (and not just via
+         * cv-1) so the edge is caught even when cv-1 would underflow. */
+        if (cv <= var_repr_min(&ctx->vars[vid])) return -1;  /* UNSAT */
         if (ctx_tighten_ub64(ctx, vid, cv - 1) == PROP_CONFLICT) return -1;
         return 1;
     case BIN_GTE:
         if (ctx_tighten_lb64(ctx, vid, cv) == PROP_CONFLICT) return -1;
         return 1;
     case BIN_GT:
+        /* `v > cv`: empty when cv >= var_max.  Guard here (and not just via
+         * cv+1) so the edge is caught even when cv+1 would overflow. */
+        if (cv >= var_repr_max(&ctx->vars[vid])) return -1;  /* UNSAT */
         if (ctx_tighten_lb64(ctx, vid, cv + 1) == PROP_CONFLICT) return -1;
         return 1;
     default:

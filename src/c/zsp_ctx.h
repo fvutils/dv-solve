@@ -258,6 +258,37 @@ static inline int64_t var_hi64(const SolveCtx *ctx, const Variable *v) {
     return wb->hi;
 }
 
+/* ------------------------------------------------------------------ */
+/* Representable range of a variable, from its width and signedness.    */
+/* Used to guard bound tightening against edge-crossing constants       */
+/* (e.g. `v < 0` on an unsigned var, or `v > INT64_MAX` on a signed     */
+/* 64-bit var where `cv + 1` would overflow).                           */
+/* ------------------------------------------------------------------ */
+
+/** Smallest value representable by `v`.  Always fits in int64_t. */
+static inline int64_t var_repr_min(const Variable *v) {
+    if (v->flags & VAR_SIGNED) {
+        uint16_t w = v->width;
+        if (w >= 64) return INT64_MIN;
+        return -((int64_t)1 << (w - 1));
+    }
+    return 0;  /* unsigned */
+}
+
+/** Largest value representable by `v`, or INT64_MAX when the true max
+ *  exceeds int64_t (unsigned width >= 64).  Since the bounds compared
+ *  against this are themselves int64_t, an int64_t value can never
+ *  exceed such a max, so clamping to INT64_MAX is sound for guards. */
+static inline int64_t var_repr_max(const Variable *v) {
+    uint16_t w = v->width;
+    if (v->flags & VAR_SIGNED) {
+        if (w >= 64) return INT64_MAX;
+        return ((int64_t)1 << (w - 1)) - 1;
+    }
+    if (w >= 64) return INT64_MAX;  /* unsigned 2^w-1 > INT64_MAX: unbounded */
+    return ((int64_t)1 << w) - 1;
+}
+
 static inline const uint64_t *var_lo_wide(const SolveCtx *ctx,
                                            const Variable *v) {
     const WideBoundsN *wn =
