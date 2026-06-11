@@ -40,7 +40,9 @@ class _SolveOpts(ctypes.Structure):
         ("max_conflicts",  ctypes.c_uint32),
         ("max_restarts",   ctypes.c_uint32),
         ("use_phase_save", ctypes.c_uint8),
-        ("_pad",           ctypes.c_uint8 * 3),
+        ("use_lcg",        ctypes.c_uint8),
+        ("fair_pick",      ctypes.c_uint8),
+        ("_pad",           ctypes.c_uint8 * 1),
         ("max_shave_iters", ctypes.c_uint32),
     ]
 
@@ -73,6 +75,13 @@ class SolveCtx:
             raise RuntimeError("libdv_solve.so not found — native solver unavailable")
         self._lib = lib
 
+        # Keep the SolveProblem buffer alive for the lifetime of this context.
+        # solver_compile does not fully copy it, so the compiled context (and
+        # any later reset()+solve()) reads from this buffer. A cached/reused ctx
+        # outlives the call that built it, so without this reference the buffer
+        # would be collected and the ctx would read freed memory.
+        self._problem = problem
+
         # Block allocator owns all dynamic memory used by the context.
         self._ba = lib.zsp_block_alloc_create(None, ctx_buf_size)
         if self._ba is None:
@@ -83,6 +92,7 @@ class SolveCtx:
         ctx = lib.solver_create(self._ctx_buf, ctx_buf_size, self._ba)
         if ctx is None:
             lib.zsp_block_alloc_destroy(self._ba)
+            self._ba = None
             raise RuntimeError("solver_create failed")
         self._ctx = ctx  # c_void_p value
 
@@ -93,14 +103,21 @@ class SolveCtx:
             # Raw ctypes buffer -- cast to void pointer
             sp_ptr = ctypes.cast(problem, ctypes.c_void_p).value
         rc = lib.solver_compile(self._ctx, sp_ptr)
+        # On every error path below, NULL out self._ba after releasing it: the
+        # half-constructed SolveCtx still exists (the exception unwinds out of
+        # __init__) and will be garbage-collected, at which point __del__ ->
+        # destroy() must NOT free the already-freed block allocator again.
         if rc == -2:
             lib.zsp_block_alloc_destroy(self._ba)
+            self._ba = None
             raise CompileUnsatError("Domain became empty during compile-time bound tightening")
         if rc < 0:
             lib.zsp_block_alloc_destroy(self._ba)
+            self._ba = None
             raise RuntimeError(f"solver_compile failed (rc={rc})")
         if rc > 0:
             lib.zsp_block_alloc_destroy(self._ba)
+            self._ba = None
             raise CompileIncompleteError(
                 f"{rc} constraint(s) could not be compiled natively"
             )
@@ -114,6 +131,15 @@ class SolveCtx:
 
     def __exit__(self, *_) -> None:
         self.destroy()
+
+    def __del__(self) -> None:
+        # Free native resources if the ctx is dropped without an explicit
+        # destroy()/context-manager exit (e.g. a long-lived cached ctx whose
+        # owner is garbage-collected).
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def destroy(self) -> None:
         """Release all native resources."""
@@ -132,13 +158,22 @@ class SolveCtx:
         max_restarts: int = 0,
         use_phase_save: bool = False,
         max_shave_iters: int = 0,
+        fair_pick: bool = False,
     ) -> int:
-        """Run the search loop; returns SOLVE_OK, SOLVE_UNSAT, or SOLVE_TIMEOUT."""
+        """Run the search loop; returns SOLVE_OK, SOLVE_UNSAT, or SOLVE_TIMEOUT.
+
+        ``fair_pick`` selects the decision-variable tie-break: ``False`` (fast)
+        uses deterministic MRV and finds *a* solution quickly; ``True``
+        (uniform) breaks ties randomly so the solution distribution has uniform
+        marginals / full coverage — the right mode for constrained-random
+        stimulus generation.
+        """
         opts = _SolveOpts(
             seed=seed,
             max_conflicts=max_conflicts,
             max_restarts=max_restarts,
             use_phase_save=1 if use_phase_save else 0,
+            fair_pick=1 if fair_pick else 0,
             max_shave_iters=max_shave_iters,
         )
         return self._lib.solver_solve(self._ctx, ctypes.byref(opts))

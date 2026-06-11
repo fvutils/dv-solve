@@ -88,10 +88,19 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
 
     uint32_t best         = EXPR_NULL;
     int64_t  best_dom     = INT64_MAX;
+    uint32_t n_best       = 0;       /* # real vars tied at best_dom (reservoir) */
     uint32_t best_aux     = EXPR_NULL;
     int64_t  best_aux_dom = INT64_MAX;
 
-    /* Use bitmask for fast scan when <= 64 vars */
+    /* MRV (minimum remaining values) with a *randomized* tie-break: among the
+     * unassigned real variables that share the smallest domain, pick one
+     * uniformly at random (reservoir sampling). A fixed (lowest-index)
+     * tie-break makes the same variable the first decision every solve, so its
+     * marginal is uniform but every other variable is sampled over a
+     * conditional (skewed) domain — e.g. under `a < b`, `a` (var 0) is always
+     * decided first, starving `b`'s low values. Random tie-breaking gives every
+     * variable a fair turn at being decided first, so all marginals become
+     * uniform-ish and coverage follows the n·log(n) coupon-collector bound. */
     if (ctx->n_vars <= 64 && ctx->unassigned_mask != 0) {
         uint64_t m = ctx->unassigned_mask;
         while (m) {
@@ -103,20 +112,18 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
             if (lo == hi) continue;  /* singleton -- already assigned */
             int64_t dom = hi - lo;
             if (v->flags & VAR_AUX) {
-                /* Aux is a low-priority decision: prefer real vars first.
-                 * Only fall back to aux when propagation has been unable
-                 * to pin every aux on its own. */
-                if (dom < best_aux_dom) {
-                    best_aux_dom = dom;
-                    best_aux     = i;
-                }
+                /* Aux is a low-priority decision: prefer real vars first. */
+                if (dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
             }
             if (dom < best_dom) {
-                best_dom = dom;
-                best     = i;
-                if (dom == 1) break;
+                best_dom = dom; best = i; n_best = 1;
+            } else if (ctx->fair_pick && dom == best_dom) {
+                /* uniform mode: reservoir-sample among smallest-domain vars */
+                n_best++;
+                if ((_rand64(ctx) % n_best) == 0) best = i;
             }
+            /* fast mode: keep the first (lowest-index) smallest-domain var */
         }
     } else {
         for (uint32_t i = 0; i < ctx->n_vars; i++) {
@@ -126,17 +133,17 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
             if (lo == hi) continue;
             int64_t dom = hi - lo;
             if (v->flags & VAR_AUX) {
-                if (dom < best_aux_dom) {
-                    best_aux_dom = dom;
-                    best_aux     = i;
-                }
+                if (dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
             }
             if (dom < best_dom) {
-                best_dom = dom;
-                best     = i;
-                if (dom == 1) break;
+                best_dom = dom; best = i; n_best = 1;
+            } else if (ctx->fair_pick && dom == best_dom) {
+                /* uniform mode: reservoir-sample among smallest-domain vars */
+                n_best++;
+                if ((_rand64(ctx) % n_best) == 0) best = i;
             }
+            /* fast mode: keep the first (lowest-index) smallest-domain var */
         }
     }
     if (best != EXPR_NULL) return best;
@@ -232,13 +239,30 @@ static int64_t _pick_avoiding_holes(SolveCtx *ctx, uint32_t var_id,
         if (!_is_hole(ctx, var_id, v)) return v;
     }
 
-    /* Fallback: walk the domain linearly to find a valid value */
-    for (int64_t v = lo; v <= hi; v++) {
-        if (!_is_hole(ctx, var_id, v)) return v;
+    /* Fallback: rejection sampling failed (the feasible set is a small fraction
+     * of [lo,hi], e.g. a domain of {0,255} with 254 holes). Pick a
+     * *uniformly-random* non-hole value rather than the first one. The old code
+     * walked from lo and returned the first valid value, which biased selection
+     * hard toward lo (a {0,255} domain returned 0 ~99% of the time). Count the
+     * valid values and select the k-th, advancing through the sorted hole list
+     * in O(#holes). */
+    uint64_t n_total = (uint64_t)(hi - lo) + 1;
+    uint32_t n_holes = _count_holes_in_range(ctx, var_id, lo, hi);
+    if ((uint64_t)n_holes >= n_total) return lo;  /* all holes (shouldn't happen) */
+    uint64_t k = _rand64(ctx) % (n_total - (uint64_t)n_holes);  /* k-th valid */
+    int64_t cur = lo;
+    uint32_t hoff = ctx->var_holes_head[var_id];
+    while (hoff != 0) {
+        const HoleEntry *he = (const HoleEntry *)zsp_pool_ptr(&ctx->pool, hoff);
+        if (he->value < lo) { hoff = he->next; continue; }
+        if (he->value > hi) break;
+        uint64_t gap = (uint64_t)(he->value - cur);  /* valid count in [cur, hole) */
+        if (k < gap) return cur + (int64_t)k;
+        k -= gap;
+        cur = he->value + 1;
+        hoff = he->next;
     }
-
-    /* All values are holes (shouldn't happen if exclude checked domain) */
-    return lo;
+    return cur + (int64_t)k;
 }
 
 static int64_t _pick_value(SolveCtx *ctx, uint32_t var_id,
@@ -272,6 +296,9 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     /* Seed or preserve RNG. */
     if (opts && opts->seed != 0) ctx->rng_state = opts->seed;
     if (ctx->rng_state == 0)     ctx->rng_state = 0xDEADBEEF12345678ULL;
+
+    /* Decision-variable tie-break mode for this solve (default fast). */
+    ctx->fair_pick = (opts && opts->fair_pick) ? 1 : 0;
 
     /* Lazy LCG initialization on first solve when use_lcg is requested. */
     if (opts && opts->use_lcg && !ctx->lcg && ctx->n_vars > 0) {
@@ -602,33 +629,32 @@ void solver_reset(SolveCtx *ctx) {
 
     uint32_t n = ctx->initial_n_vars;
 
-    /* Restore variable domains */
-    memcpy(ctx->vars, ctx->initial_vars, n * sizeof(Variable));
-
-    /* Also restore tier-1 wide bounds from the saved copy.
-     * The initial_vars have holes_offset pointing to WideBounds64 structs
-     * in the pool. We need to restore those too. For tier-1 vars, the
-     * WideBounds64 is allocated after initial_vars in the pool. We saved
-     * WideBounds64 values inside initial_vars[].holes_offset locations. */
-    /* Since we saved the Variable array which contains the holes_offset
-     * pointers, and the WideBounds64 data lives at those offsets in the
-     * same pool, we need to restore the WideBounds64 contents too. */
-    /* We saved initial WideBounds64 values in a separate region. */
-    /* Actually, let me take a simpler approach: save the entire relevant
-     * pool region. For now, just restore the Variable array and re-init
-     * the wide bounds from the initial_vars' lo/hi data. */
-    /* Correction: initial_vars[] was saved with correct holes_offset values.
-     * The WideBounds64 data at those offsets has been modified by solving.
-     * We need to also save/restore the WideBounds64 data. */
-    /* For simplicity: iterate vars and restore wide bounds from initial_vars. */
+    /* Restore variable domains.
+     *
+     * For tier-0 vars the bounds (lo/hi) live in the Variable struct, so a plain
+     * copy restores them. For tier-1 vars (33–64 bit, incl. unsigned-32) the
+     * bounds live in a pooled WideBounds64 referenced by `holes_offset`, and
+     * compile saved a *separate* pristine copy (initial_vars[i].holes_offset
+     * points at that copy). The correct restore is: copy the pristine bounds
+     * back into the var's *live* WideBounds64 and keep the var pointing at the
+     * live struct.
+     *
+     * The previous implementation memcpy'd the whole Variable array, which
+     * repointed each tier-1 var's holes_offset at the *saved* copy. That made
+     * the wide-bounds "restore" a self-copy no-op, and—worse—the next solve then
+     * mutated the saved copy, so reset only worked once: tier-1 vars stayed
+     * pinned to their first solved value on every subsequent reset. */
     for (uint32_t i = 0; i < n; i++) {
-        Variable *v = &ctx->vars[i];
+        Variable *v  = &ctx->vars[i];
         Variable *iv = &ctx->initial_vars[i];
-        if (VAR_IS_TIER1(v->flags) && v->holes_offset != 0) {
-            WideBounds64 *wb = (WideBounds64 *)zsp_pool_ptr(&ctx->pool, v->holes_offset);
-            WideBounds64 *iwb = (WideBounds64 *)zsp_pool_ptr(&ctx->pool, iv->holes_offset);
-            wb->lo = iwb->lo;
-            wb->hi = iwb->hi;
+        uint32_t live_off = v->holes_offset;
+        int tier1 = VAR_IS_TIER1(v->flags) && live_off != 0 && iv->holes_offset != 0;
+        *v = *iv;   /* restore lo/hi/flags/width (and holes_offset := saved copy) */
+        if (tier1) {
+            WideBounds64 *saved = (WideBounds64 *)zsp_pool_ptr(&ctx->pool, iv->holes_offset);
+            WideBounds64 *live  = (WideBounds64 *)zsp_pool_ptr(&ctx->pool, live_off);
+            *live = *saved;              /* live wide bounds back to pristine */
+            v->holes_offset = live_off;  /* keep the var on its live struct */
         }
     }
 
@@ -727,7 +753,8 @@ int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
     opts.max_restarts   = 10000;
     opts.use_phase_save = 0;
     opts.use_lcg = 0;
-    opts._pad[0] = opts._pad[1] = 0;
+    opts.fair_pick = 1;   /* batch solve_n is for diverse solutions → uniform */
+    opts._pad[0] = 0;
     opts.max_shave_iters = max_shave_iters;
 
     int n_ok = 0;

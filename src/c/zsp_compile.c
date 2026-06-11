@@ -623,13 +623,38 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
     if (r_w >= 1 && r_w <= 63 &&
         (has_var_const || has_const_var) &&
         binop->op == BIN_ADD) {
-        uint64_t M = (uint64_t)1 << r_w;
-        uint64_t cmask = M - 1;
-        uint64_t c_red = (uint64_t)cv & cmask;
         /* r = (x + c) mod M; commutative so const-var is the same */
         uint32_t x_id = has_var_const ? a_id : b_id;
-        prop_add_bvadd_const_64(ctx, r_id, x_id, c_red, (uint8_t)r_w, 0);
-        return 1;
+        /* bvadd_const's modular arithmetic assumes UNSIGNED storage (the stored
+         * bound equals the residue). For a SIGNED var the stored bound is the
+         * signed value, so the residue math produces out-of-range bounds; at
+         * width 32 those overflow the int32 tier-0 storage and the propagator
+         * oscillates forever (a search/propagation runaway). Use it only when
+         * both the result and the variable operand are unsigned; otherwise fall
+         * through to the general path, where the constant is promoted to a
+         * singleton var and the signed-correct var-var modular add applies. */
+        if (!(ctx->vars[r_id].flags & VAR_SIGNED) &&
+            !(ctx->vars[x_id].flags & VAR_SIGNED)) {
+            uint64_t M = (uint64_t)1 << r_w;
+            uint64_t c_red = (uint64_t)cv & (M - 1);
+            prop_add_bvadd_const_64(ctx, r_id, x_id, c_red, (uint8_t)r_w, 0);
+            return 1;
+        }
+    }
+
+    /* Modular fixed-width var-var ADD/SUB/MUL/LSHIFT (widths 1..63):
+     * route through the wrap-aware bit-vector propagators so that results
+     * that exceed the result width wrap mod 2^width (sound 2's-complement
+     * semantics) for both signed and unsigned result variables. Width 64
+     * and the bitwise/div/mod cases keep the legacy bounds propagators. */
+    if (r_w >= 1 && r_w <= 63) {
+        switch (binop->op) {
+        case BIN_ADD:    prop_add_bvadd_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case BIN_SUB:    prop_add_bvsub_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case BIN_MUL:    prop_add_bvmul_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case BIN_LSHIFT: prop_add_bvshl_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        default: break;
+        }
     }
 
     int wide = _var_needs_wide(ctx, r_id) ||

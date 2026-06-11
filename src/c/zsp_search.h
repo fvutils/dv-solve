@@ -43,7 +43,14 @@ typedef struct {
     uint32_t max_restarts;      /* max total restarts (0=unlimited)       */
     uint8_t  use_phase_save;    /* 1 = remember last assigned value       */
     uint8_t  use_lcg;           /* 1 = enable lazy clause generation (CDCL) */
-    uint8_t  _pad[2];
+    uint8_t  fair_pick;         /* decision-variable tie-break:
+                                 *   0 = fast    — deterministic MRV (lowest
+                                 *       index); finds *a* solution quickly.
+                                 *   1 = uniform — random tie-break among
+                                 *       smallest-domain vars; gives uniform
+                                 *       marginals / full coverage (the right
+                                 *       mode for constrained-random stimulus). */
+    uint8_t  _pad[1];
     uint32_t max_shave_iters;   /* pre-search bounds shaving budget (0=use default 1000) */
 } SolveOpts;
 

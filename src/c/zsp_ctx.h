@@ -60,6 +60,7 @@ typedef struct SolveCtx {
     uint64_t           trail_count;
     uint64_t           conflict_count;
     uint64_t           rng_state;
+    uint8_t            fair_pick;     /* SolveOpts.fair_pick for this solve */
     zsp_block_alloc_t *block_alloc;   /* source of dynamic blocks      */
     zsp_stack_t       *dynamic;       /* dynamic stack (trail etc.)    */
     TrailEntry        *trail_top;     /* newest trail entry, or NULL   */
