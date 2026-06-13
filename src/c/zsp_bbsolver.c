@@ -391,7 +391,7 @@ static zsp_bv_t bv_for_var(zsp_bbsolver_t *S, uint32_t var_id) {
 
 /* Returns the bit-blasted value of expression `ref`. `hint_width` may be
  * passed to size EXPR_CONST values to context; pass 0 to use the natural
- * width (32 for unconstrained constants).
+ * width (64 — the engine's int64 value domain — for unconstrained constants).
  * On error, sets S->had_error = 1 and returns {NULL, 0}. */
 static zsp_bv_t bb_expr(zsp_bbsolver_t *S, ExprRef ref, uint16_t hint_width);
 
@@ -411,7 +411,14 @@ static zsp_bv_t bb_value_i64(zsp_bbsolver_t *S, uint16_t w, int64_t value,
 }
 
 static zsp_bv_t bb_const(zsp_bbsolver_t *S, const ExprConst *c, uint16_t hint) {
-    uint16_t w = hint ? hint : 32;
+    /* A width-less constant defaults to 64 bits — the engine's int64 value
+     * domain — NOT 32: a constant carrying a full 64-bit pattern (e.g. a limb of
+     * a wide >64-bit literal, requested by bb_concat with hint=0) must not be
+     * truncated to 32 bits. Where a constant has real context (a comparison /
+     * arithmetic operand) the caller passes a non-zero hint, and width
+     * reconciliation (max_w + zext/sext) sizes it to the other operand anyway,
+     * so a wider default never changes a value outcome. */
+    uint16_t w = hint ? hint : 64;
     return bb_value_i64(S, w, c->value, c->is_signed);
 }
 
