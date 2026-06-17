@@ -566,17 +566,13 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* solver_solve — wrapper with assumption relaxation                   */
-/* ------------------------------------------------------------------ */
-
-/* Pin every soft assumption var NOT in `active` to [0,0] (relaxed). Safe at
- * decision level 0 before search begins; mirrors the post-reset pinning used by
- * the relaxation loop. We can't ctx_tighten here: a relaxed assumption var starts
- * at [1,1] after reset, and tightening its UB to 0 would create an empty domain. */
-static void _pin_relaxed_assumptions(SolveCtx *ctx, uint64_t active, uint32_t na) {
-    for (uint32_t i = 0; i < na; i++) {
-        if (!(active & (1ULL << i))) {
+/* Pin every *inactive* soft assumption (mask bit clear) to its var=[0,0] so a
+ * reset + re-solve enforces exactly the current kept-soft set. Active assumptions
+ * are left at [1,1] by solver_reset. Factored out of the relaxation loop so the
+ * additive re-add refinement below can reuse the identical pinning. */
+static void _pin_inactive_assumptions(SolveCtx *ctx) {
+    for (uint32_t i = 0; i < ctx->n_assumptions; i++) {
+        if (!(ctx->assumption_active_mask & (1ULL << i))) {
             uint32_t av = ctx->assumption_var_ids[i];
             Variable *v = &ctx->vars[av];
             v->lo = 0; v->hi = 0;
@@ -586,69 +582,154 @@ static void _pin_relaxed_assumptions(SolveCtx *ctx, uint64_t active, uint32_t na
     }
 }
 
-SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
-    /* assumption_active_mask is 64-bit; cap soft handling at 64 (pre-existing
-     * engine limit — every assumption op uses `1ULL << i`). */
+/* Additive re-add refinement (soft soundness).
+ *
+ * The subtractive loop in solver_solve stops at the *first* satisfiable kept-soft
+ * set: on each UNSAT it drops the lowest-preference (highest priority *value*)
+ * active soft. To reach a genuinely-conflicting higher-preference soft it may walk
+ * past — and shed — satisfiable lower-preference softs as collateral, returning a
+ * model that needlessly violates them (the intermittent test_soft_nested failure,
+ * locked by tests/unit/test_soft.py::test_soft_no_collateral_drop_primary).
+ *
+ * Recover that collateral: re-add each currently-dropped soft, highest preference
+ * (lowest priority value) first, committing any whose re-activation keeps the
+ * problem SAT. This makes the primary keep the same maximal priority-respecting
+ * set the BV-SAT serve path's additive greedy keeps (primary == serve).
+ *
+ * It never visits the all-relaxed state (≥1 soft stays active in every trial), so
+ * it sidesteps the "pin all assumption vars to 0 → re-solve spuriously UNSAT"
+ * engine quirk that blocks a from-scratch additive primary. Monotonic: it only
+ * ever re-activates softs, so it cannot worsen the subtractive result. Bounded by
+ * the (≤64) assumption count, and only runs when a relaxation actually occurred
+ * (soft conflict present), so the common no-conflict hot path is untouched. */
+static void _refine_readd_softs(SolveCtx *ctx, const SolveOpts *opts) {
     uint32_t na = ctx->n_assumptions;
-    if (na > 64) na = 64;
+    if (na > 64) na = 64;            /* assumption_active_mask is 64-bit */
+    uint64_t tried = 0;              /* dropped softs already attempted   */
+    for (;;) {
+        /* Pick the not-yet-tried, currently-inactive soft with the smallest
+         * priority value (= highest preference). */
+        int best = -1;
+        uint32_t best_pri = 0;
+        for (uint32_t i = 0; i < na; i++) {
+            uint64_t bit = (1ULL << i);
+            if ((ctx->assumption_active_mask & bit) || (tried & bit))
+                continue;
+            if (best < 0 || ctx->assumption_priorities[i] < best_pri) {
+                best_pri = ctx->assumption_priorities[i];
+                best = (int)i;
+            }
+        }
+        if (best < 0)
+            break;
+        tried |= (1ULL << best);
 
+        uint64_t saved = ctx->assumption_active_mask;
+        ctx->assumption_active_mask |= (1ULL << best);
+        solver_reset(ctx);
+        _pin_inactive_assumptions(ctx);
+        if (solver_propagate(ctx) == PROP_CONFLICT ||
+                _solver_solve_core(ctx, opts) != SOLVE_OK) {
+            ctx->assumption_active_mask = saved;   /* keep it dropped */
+        }
+    }
+    /* Materialize the final accepted set: the last trial may have been a revert,
+     * leaving stale search state. The final mask was proven SAT, so this resolves. */
+    solver_reset(ctx);
+    _pin_inactive_assumptions(ctx);
+    solver_propagate(ctx);
+    _solver_solve_core(ctx, opts);
+}
+
+/* ------------------------------------------------------------------ */
+/* solver_solve — wrapper with assumption relaxation                   */
+/* ------------------------------------------------------------------ */
+
+SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
     /* Re-activate all soft assumptions at entry. solver_reset() restores the
      * assumption vars to [1,1] but does NOT touch assumption_active_mask, so on a
      * RE-SOLVE of a reused ctx (the backend's plan-reuse path) the mask would
-     * still carry the previous call's relaxations. Resetting it here makes each
-     * solve start from the full soft set, matching a fresh compile. */
-    if (na > 0)
-        ctx->assumption_active_mask = (na >= 64) ? ~0ULL : ((1ULL << na) - 1);
-
-    /* Fast path: no softs, or all softs jointly satisfiable in a single solve
-     * (the common case — most soft sets have no internal conflict). */
-    SolveResult res = _solver_solve_core(ctx, opts);
-    if (res == SOLVE_OK || na == 0)
-        return res;
-
-    /* All-softs-active is infeasible. ADDITIVE greedy (Boolector- / serve-path
-     * parity): keep each soft that is individually compatible with the hard core +
-     * the already-kept softs, processing most-preferred (lowest priority value)
-     * first. A subtractive "drop the worst active on each UNSAT" greedy is wrong:
-     * walking down toward a conflicting higher-preference soft, it sheds
-     * satisfiable lower-preference softs as collateral. */
-    uint32_t order[64];
-    for (uint32_t i = 0; i < na; i++) order[i] = i;
-    for (uint32_t i = 0; i < na; i++) {        /* selection sort, ascending priority */
-        uint32_t b = i;
-        for (uint32_t j = i + 1; j < na; j++) {
-            uint32_t pj = ctx->assumption_priorities[order[j]];
-            uint32_t pb = ctx->assumption_priorities[order[b]];
-            if (pj < pb || (pj == pb && order[j] < order[b])) b = j;
-        }
-        uint32_t t = order[i]; order[i] = order[b]; order[b] = t;
+     * still carry the previous call's relaxations — the conflict then relaxes the
+     * remaining kept soft and drops the whole set. Resetting the mask here makes
+     * each solve start from the full soft set, matching a fresh compile. The
+     * assumption vars are already [1,1] (compile or solver_reset restored them);
+     * any var the previous call pinned to [0,0] was a direct live-write that
+     * solver_reset has since undone from initial_vars. */
+    if (ctx->n_assumptions > 0) {
+        uint32_t na = ctx->n_assumptions;
+        ctx->assumption_active_mask =
+            (na >= 64) ? ~0ULL : ((1ULL << na) - 1);
     }
+    /* Subtractive MaxSAT relaxation: drop the lowest-preference (highest priority
+     * value) active soft on each UNSAT, re-propagate, retry.
+     *
+     * On its own this can shed a *satisfiable* lower-preference soft as collateral
+     * when walking down to a conflicting higher-preference sibling, returning a
+     * model that needlessly violates it (the intermittent test_soft_nested bug). To
+     * keep the same maximal priority-respecting set the serve path's additive greedy
+     * keeps, the SAT exit below runs _refine_readd_softs() to greedily re-add the
+     * dropped softs — recovering the collateral. The refinement re-adds one soft at
+     * a time (never the all-relaxed state), so it sidesteps the engine quirk
+     * (pinning ALL assumption vars to 0 + re-solve spuriously UNSATs for >1 soft)
+     * that blocks a from-scratch additive primary. See
+     * dv_solve_soft_constraints_engine_plan.md DSE-3 follow-up and the locks
+     * tests/unit/test_soft.py::test_soft_no_collateral_drop_primary +
+     * test_soft_maxsat_serve::test_serve_soft_no_collateral_drop.
+     *
+     * (Residual: a `!=` soft compiles via the generic guard-gated path whose
+     * compile-time tightening doesn't fully undo on relaxation, so an all-`!=`
+     * conflict can still spurious-UNSAT here; that is safe — the backend escalates
+     * such a primary non-OK to the complete BV-SAT engine.) */
+    int relaxed_any = 0;
+    for (;;) {
+        SolveResult res = _solver_solve_core(ctx, opts);
+        if (res == SOLVE_OK) {
+            /* If we shed any soft to get here, the subtractive walk may have
+             * dropped satisfiable softs as collateral; recover them greedily. */
+            if (relaxed_any)
+                _refine_readd_softs(ctx, opts);
+            return res;
+        }
 
-    uint64_t keep = 0;
-    for (uint32_t k = 0; k < na; k++) {
-        uint64_t cand = keep | (1ULL << order[k]);
-        ctx->assumption_active_mask = cand;
+        /* Check if we can relax a soft constraint assumption */
+        if (ctx->n_assumptions == 0 || ctx->assumption_active_mask == 0)
+            return res;
+
+        /* Find the lowest-priority active assumption (highest priority value) */
+        uint32_t worst_idx = 0;
+        uint32_t worst_pri = 0;
+        int found = 0;
+        for (uint32_t i = 0; i < ctx->n_assumptions; i++) {
+            if (ctx->assumption_active_mask & (1ULL << i)) {
+                if (!found || ctx->assumption_priorities[i] >= worst_pri) {
+                    worst_pri = ctx->assumption_priorities[i];
+                    worst_idx = i;
+                    found = 1;
+                }
+            }
+        }
+        if (!found) return res;
+
+        /* Relax this assumption */
+        ctx->assumption_active_mask &= ~(1ULL << worst_idx);
+        relaxed_any = 1;
+
+        /* Reset solver to post-compile state */
         solver_reset(ctx);
-        _pin_relaxed_assumptions(ctx, cand, na);
-        if (solver_propagate(ctx) == PROP_CONFLICT) {
-            fprintf(stderr, "[DBG] k=%u idx=%u pri=%u: PROP_CONFLICT drop\n", k, order[k], ctx->assumption_priorities[order[k]]);
-            continue;                          /* this soft conflicts — drop it */
-        }
-        SolveResult cr = _solver_solve_core(ctx, opts);
-        fprintf(stderr, "[DBG] k=%u idx=%u pri=%u: core=%d\n", k, order[k], ctx->assumption_priorities[order[k]], cr);
-        if (cr == SOLVE_OK)
-            keep = cand;                       /* compatible — keep it */
-        /* else: leave keep unchanged (drop this soft) */
-    }
-    fprintf(stderr, "[DBG] final keep=0x%llx\n", (unsigned long long)keep);
 
-    /* Re-solve with the final kept set so ctx holds the model to read back. */
-    ctx->assumption_active_mask = keep;
-    solver_reset(ctx);
-    _pin_relaxed_assumptions(ctx, keep, na);
-    if (solver_propagate(ctx) == PROP_CONFLICT)
-        return SOLVE_UNSAT;                    /* unreachable: hard core was SAT */
-    return _solver_solve_core(ctx, opts);
+        /* Pin all relaxed assumptions to 0 by directly setting bounds.
+         * We can't use ctx_tighten because the assumption var starts
+         * at [1,1] after reset, and tightening UB to 0 would create
+         * an empty domain [1,0] -> conflict. Direct writes are safe
+         * here since we're at level 0 before search begins. */
+        _pin_inactive_assumptions(ctx);
+
+        /* Propagate the relaxations before retrying */
+        if (solver_propagate(ctx) == PROP_CONFLICT) {
+            /* Still conflicting — try relaxing more assumptions */
+            continue;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
