@@ -181,8 +181,10 @@ static int _compile_var_const_cmp(SolveCtx *ctx, BinOp op,
         return 1;
     case BIN_LT:
         /* `v < cv`: empty when cv <= var_min.  Guard here (and not just via
-         * cv-1) so the edge is caught even when cv-1 would underflow. */
-        if (cv <= var_repr_min(&ctx->vars[vid])) return -1;  /* UNSAT */
+         * cv-1) so the edge is caught even when cv-1 would underflow.
+         * Sign-aware so an unsigned upper-half constant is not misread. */
+        if (!var_b_gt(&ctx->vars[vid], cv, var_repr_min(&ctx->vars[vid])))
+            return -1;  /* cv <= var_min: UNSAT */
         if (ctx_tighten_ub64(ctx, vid, cv - 1) == PROP_CONFLICT) return -1;
         return 1;
     case BIN_GTE:
@@ -190,8 +192,10 @@ static int _compile_var_const_cmp(SolveCtx *ctx, BinOp op,
         return 1;
     case BIN_GT:
         /* `v > cv`: empty when cv >= var_max.  Guard here (and not just via
-         * cv+1) so the edge is caught even when cv+1 would overflow. */
-        if (cv >= var_repr_max(&ctx->vars[vid])) return -1;  /* UNSAT */
+         * cv+1) so the edge is caught even when cv+1 would overflow.
+         * Sign-aware so an unsigned upper-half constant is not misread. */
+        if (!var_b_lt(&ctx->vars[vid], cv, var_repr_max(&ctx->vars[vid])))
+            return -1;  /* cv >= var_max: UNSAT */
         if (ctx_tighten_lb64(ctx, vid, cv + 1) == PROP_CONFLICT) return -1;
         return 1;
     default:
@@ -2181,6 +2185,35 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
         }
 
         uint32_t ref = prop_add_in_set_32(ctx, vid, ne, vals, 0);
+        return (ref != EXPR_NULL) ? 1 : 0;
+    }
+
+    /* ---- EXPR_IN_RANGES: value in [lo0,hi0] U ... U [lo{n-1},hi{n-1}] ---- */
+    if (k == EXPR_IN_RANGES) {
+        ExprInRanges *eir = (ExprInRanges *)zsp_pool_ptr(&sp->pool, root);
+        uint32_t vid;
+        if (!_is_var(sp, eir->value, &vid)) return 0;
+        vid = _resolve(ctx, vid);
+        uint32_t nr = eir->n_ranges;
+        if (nr == 0) return -1;  /* empty union -> UNSAT */
+
+        ExprRef *lo_refs = (ExprRef *)(eir + 1);
+        ExprRef *hi_refs = lo_refs + nr;
+        int64_t *los = (int64_t *)__builtin_alloca(nr * sizeof(int64_t));
+        int64_t *his = (int64_t *)__builtin_alloca(nr * sizeof(int64_t));
+        for (uint32_t i = 0; i < nr; i++) {
+            if (!_is_const(sp, lo_refs[i], &los[i])) return 0;
+            if (!_is_const(sp, hi_refs[i], &his[i])) return 0;
+        }
+
+        /* A single range degenerates to plain bound tightening (and lets the
+         * value picker use the contiguous interval directly). */
+        if (nr == 1) {
+            if (ctx_tighten_lb64(ctx, vid, los[0]) == PROP_CONFLICT) return -1;
+            if (ctx_tighten_ub64(ctx, vid, his[0]) == PROP_CONFLICT) return -1;
+            return 1;
+        }
+        uint32_t ref = prop_add_in_ranges_64(ctx, vid, nr, los, his, 0);
         return (ref != EXPR_NULL) ? 1 : 0;
     }
 

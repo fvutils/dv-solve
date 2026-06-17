@@ -207,6 +207,13 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.zsp_bbsolver_free.argtypes = [c.c_void_p]
     lib.zsp_bbsolver_check.restype  = c.c_int                  # ZSP_BB_SAT/UNSAT/...
     lib.zsp_bbsolver_check.argtypes = [c.c_void_p, c.c_uint64]  # bb, seed
+    # DSE-2 soft-aware serve.
+    lib.zsp_bbsolver_check_maxsat.restype  = c.c_int
+    lib.zsp_bbsolver_check_maxsat.argtypes = [
+        c.c_void_p, c.c_void_p, c.c_uint64,                    # alloc, problem, seed
+        c.POINTER(c.c_void_p), c.c_void_p, c.c_uint32]         # out_bb, out_keep, keep_cap
+    lib.zsp_bbsolver_set_soft_keep.restype  = None
+    lib.zsp_bbsolver_set_soft_keep.argtypes = [c.c_void_p, c.c_void_p, c.c_uint32]
     lib.zsp_bbsolver_value.restype  = c.c_int                  # 0 on success
     lib.zsp_bbsolver_value.argtypes = [c.c_void_p, c.c_uint32,
                                        c.POINTER(c.c_int64)]
@@ -293,6 +300,10 @@ def _wire_builder_argtypes(lib: ctypes.CDLL) -> None:
     lib.builder_expr_in_set.restype  = c.c_uint32
     lib.builder_expr_in_set.argtypes = [c.c_void_p, c.c_uint32,
                                         c.c_uint32, c.c_void_p]
+
+    lib.builder_expr_in_ranges.restype  = c.c_uint32
+    lib.builder_expr_in_ranges.argtypes = [c.c_void_p, c.c_uint32,
+                                           c.c_uint32, c.c_void_p, c.c_void_p]
 
     lib.builder_expr_extend.restype  = c.c_uint32
     lib.builder_expr_extend.argtypes = [c.c_void_p, c.c_uint32,

@@ -109,16 +109,25 @@ class BVSatCtx:
     # Check / readback                                                    #
     # ------------------------------------------------------------------ #
 
-    def check(self, seed: int = 0) -> int:
+    def check(self, seed: int = 0, soft_keep=None) -> int:
         """Bit-blast, encode CNF, and run the SAT solver.
 
         ``seed`` perturbs the search so repeated checks of the same problem can
         return different satisfying models (the completeness-fallback's only
         source of stimulus diversity). Returns ``BVSAT_SAT`` / ``BVSAT_UNSAT`` /
         ``BVSAT_UNKNOWN`` / ``BVSAT_ERROR``.
+
+        ``soft_keep`` (DSE-2): an optional ``ctypes`` ``c_uint8`` array (in
+        ``softs_head`` walk order; 1 = keep) selecting which soft constraints to
+        enforce as *hard* for this check. Used by the sampler to enforce the
+        MaxSAT-chosen kept set during distribution draws. The caller must keep
+        the array alive across the call. ``None`` honors no soft (legacy).
         """
         if self._bb is None:
             raise RuntimeError("BVSatCtx used after destroy()")
+        if soft_keep is not None:
+            self._lib.zsp_bbsolver_set_soft_keep(
+                self._bb, soft_keep, ctypes.c_uint32(len(soft_keep)))
         rc = self._lib.zsp_bbsolver_check(self._bb, ctypes.c_uint64(seed & ((1 << 64) - 1)))
         self._checked = (rc == BVSAT_SAT)
         return rc
@@ -190,3 +199,37 @@ class BVSatCtx:
             "sat_clauses": self._lib.zsp_bbsolver_num_sat_clauses(self._bb),
             "sat_vars":   self._lib.zsp_bbsolver_num_sat_vars(self._bb),
         }
+
+
+def maxsat_keepset(problem, seed: int, n_softs: int):
+    """Run the soft-aware MaxSAT serve on ``problem`` and return
+    ``(rc, keep_array)``.
+
+    ``rc`` is ``BVSAT_SAT`` / ``BVSAT_UNSAT`` / ``BVSAT_UNKNOWN`` / ``BVSAT_ERROR``.
+    On SAT, ``keep_array`` is a ``ctypes`` ``c_uint8`` array of length ``n_softs``
+    holding the maximal priority-respecting kept-soft set (``softs_head`` walk
+    order). Pass it as ``soft_keep`` to :meth:`BVSatCtx.check` on each sampler
+    draw so the distribution enforces exactly the kept softs — the model order is
+    fixed by a deterministic rebuild, so one mask is valid across all rebuilds.
+    Otherwise ``keep_array`` is ``None``.
+
+    The internally-solved bbsolver is freed here; the caller re-solves through the
+    sampler to draw a well-distributed model under the kept set.
+    """
+    lib = _load_lib()
+    if lib is None:
+        raise RuntimeError("libdv_solve.so not found — native solver unavailable")
+    sp_ptr = getattr(problem, "_sp", None)
+    if sp_ptr is None:
+        sp_ptr = ctypes.cast(problem, ctypes.c_void_p).value
+
+    keep = (ctypes.c_uint8 * max(1, n_softs))()
+    out_bb = ctypes.c_void_p()
+    rc = lib.zsp_bbsolver_check_maxsat(
+        None, sp_ptr, ctypes.c_uint64(seed & ((1 << 64) - 1)),
+        ctypes.byref(out_bb), keep, ctypes.c_uint32(n_softs))
+    if out_bb:
+        lib.zsp_bbsolver_free(out_bb)
+    if rc != BVSAT_SAT:
+        return rc, None
+    return rc, keep

@@ -33,6 +33,7 @@ typedef enum {
     EXPR_COUNTONES = 11, /* popcount: r == countones(x)  */
     EXPR_CLOG2    = 12, /* r == ceil(log2(x))           */
     EXPR_ARRAY_SELECT = 13, /* r = base[index]              */
+    EXPR_IN_RANGES = 14, /* value in [lo0,hi0] U [lo1,hi1] U ... */
 } ExprKind;
 
 /* ------------------------------------------------------------------ */
@@ -119,6 +120,19 @@ typedef struct {
     ExprRef  value;
     uint32_t n_elems;
 } ExprInSet;
+
+/**
+ * Multi-range membership: value in [lo0,hi0] U [lo1,hi1] U ... U [lo{n-1},hi{n-1}].
+ *
+ * 2*n_ranges ExprRef values follow this struct in pool memory: the lo refs
+ * (n_ranges of them) then the hi refs (n_ranges of them). Use
+ * expr_in_ranges_los()/expr_in_ranges_his() to obtain the pointers.
+ */
+typedef struct {
+    ExprKind kind;     /* EXPR_IN_RANGES */
+    ExprRef  value;
+    uint32_t n_ranges;
+} ExprInRanges;
 
 /** Zero / sign extend operand from `from_bits` to `to_bits` bits */
 typedef struct {
@@ -446,6 +460,10 @@ DistEntry *dist_spec_entries(SolveProblem *sp, ExprRef dist_ref);
  * The returned pointer is valid until the problem is reset or destroyed.
  */
 ExprRef *expr_in_set_elems(SolveProblem *sp, ExprRef set_ref);
+
+/** Lo / hi ExprRef arrays of an EXPR_IN_RANGES node (n_ranges each). */
+ExprRef *expr_in_ranges_los(SolveProblem *sp, ExprRef ref);
+ExprRef *expr_in_ranges_his(SolveProblem *sp, ExprRef ref);
 
 /**
  * Return a pointer to the variable-ID array of a SourceSpec node.

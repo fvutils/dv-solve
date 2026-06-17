@@ -901,9 +901,12 @@ static PropResult _fire_bounds_eq_64(Propagator *self, SolveCtx *ctx) {
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
 
-    int64_t lo = i64_max(var_lo64(ctx, &ctx->vars[xid]), var_lo64(ctx, &ctx->vars[yid]));
-    int64_t hi = i64_min(var_hi64(ctx, &ctx->vars[xid]), var_hi64(ctx, &ctx->vars[yid]));
-    if (lo > hi) return PROP_CONFLICT;
+    /* Sign-aware intersection: unsigned upper-half bounds must order as
+     * unsigned (x and y share the field's signedness). */
+    const Variable *vx = &ctx->vars[xid];
+    int64_t lo = var_b_max(vx, var_lo64(ctx, &ctx->vars[xid]), var_lo64(ctx, &ctx->vars[yid]));
+    int64_t hi = var_b_min(vx, var_hi64(ctx, &ctx->vars[xid]), var_hi64(ctx, &ctx->vars[yid]));
+    if (var_b_gt(vx, lo, hi)) return PROP_CONFLICT;
 
     PropResult r;
     if ((r = ctx_tighten_lb64(ctx, xid, lo)) != PROP_OK) return r;
@@ -2081,6 +2084,57 @@ uint32_t prop_add_in_set_64(SolveCtx *ctx, uint32_t x_id,
     return ref;
 }
 
+/* x in [los[0],his[0]] U ... U [los[n-1],his[n-1]].  Interval propagator:
+ * narrow x's [lo,hi] to the hull of ranges overlapping it; conflict when none
+ * overlaps (a gap-only domain, including a singleton that fell in a gap). The
+ * gap *between* surviving ranges stays in the hull — membership of in-between
+ * values is rejected only once they pin to a singleton, while the paired
+ * add_dist keeps draws inside the ranges. Sign-aware (unsigned width-64 safe)
+ * via the var_b_* comparators. */
+static PropResult _fire_in_ranges_64(Propagator *self, SolveCtx *ctx) {
+    PropWatchSect  *ws    = PROP_WS(self);
+    uint32_t        xid   = ws->var_ids[0];
+    InRanges_64_t  *iself = (InRanges_64_t *)self;
+    int64_t        *los   = (int64_t *)((char *)self + sizeof(InRanges_64_t));
+    int64_t        *his   = los + iself->n_ranges;
+    uint32_t        n     = iself->n_ranges;
+    const Variable *v     = &ctx->vars[xid];
+    int64_t xlo = var_lo64(ctx, v), xhi = var_hi64(ctx, v);
+
+    int     have   = 0;
+    int64_t new_lo = 0, new_hi = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        int64_t lo = var_b_max(v, los[i], xlo);   /* overlap of range i with */
+        int64_t hi = var_b_min(v, his[i], xhi);   /* the current domain      */
+        if (var_b_gt(v, lo, hi)) continue;        /* range i doesn't overlap */
+        if (!have || var_b_lt(v, lo, new_lo)) new_lo = lo;
+        if (!have || var_b_gt(v, hi, new_hi)) new_hi = hi;
+        have = 1;
+    }
+    if (!have) return PROP_CONFLICT;              /* no feasible range left   */
+
+    PropResult r;
+    if ((r = ctx_tighten_lb64(ctx, xid, new_lo)) != PROP_OK) return r;
+    if ((r = ctx_tighten_ub64(ctx, xid, new_hi)) != PROP_OK) return r;
+    return PROP_OK;
+}
+uint32_t prop_add_in_ranges_64(SolveCtx *ctx, uint32_t x_id,
+                                uint32_t n_ranges, const int64_t *los,
+                                const int64_t *his, uint8_t priority) {
+    uint32_t ids[1] = { x_id };
+    uint32_t sz  = (uint32_t)(sizeof(InRanges_64_t) +
+                              2u * n_ranges * sizeof(int64_t));
+    uint32_t ref = _alloc_prop(ctx, _fire_in_ranges_64, priority, 1, ids, sz);
+    if (ref == EXPR_NULL) return EXPR_NULL;
+    InRanges_64_t *p = (InRanges_64_t *)zsp_pool_ptr(&ctx->pool, ref);
+    p->n_ranges = n_ranges;
+    int64_t *lo_dst = (int64_t *)((char *)p + sizeof(InRanges_64_t));
+    int64_t *hi_dst = lo_dst + n_ranges;
+    memcpy(lo_dst, los, n_ranges * sizeof(int64_t));
+    memcpy(hi_dst, his, n_ranges * sizeof(int64_t));
+    return ref;
+}
+
 uint32_t prop_add_reification_64(SolveCtx *ctx, uint32_t guard_id,
                                    uint32_t x_id, uint32_t y_id,
                                    uint8_t priority) {
@@ -3207,6 +3261,7 @@ const char *prop_fire_name(PropResult (*fire)(Propagator *, SolveCtx *)) {
     FN_NAME(_fire_unary_neg_64);
     FN_NAME(_fire_ite_value_64);
     FN_NAME(_fire_in_set_64);
+    FN_NAME(_fire_in_ranges_64);
     FN_NAME(_fire_bit_slice_64);
     FN_NAME(_fire_bounds_band_64);
     FN_NAME(_fire_bounds_bor_64);

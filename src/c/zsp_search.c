@@ -46,7 +46,11 @@ static uint64_t _rand64(SolveCtx *ctx) {
 
 /* Return a random integer in [lo, hi] (inclusive), 64-bit range. */
 static int64_t _rand_range64(SolveCtx *ctx, int64_t lo, int64_t hi) {
+    /* `hi - lo` is correct modulo 2^64 for both signed and unsigned bound
+     * patterns. When the domain is the full 64-bit range, span wraps to 0
+     * (2^64 mod 2^64): pick any 64-bit value (and avoid a div-by-zero). */
     uint64_t span = (uint64_t)(hi - lo) + 1u;
+    if (span == 0u) return (int64_t)_rand64(ctx);
     return lo + (int64_t)(_rand64(ctx) % span);
 }
 
@@ -270,10 +274,14 @@ static int64_t _pick_value(SolveCtx *ctx, uint32_t var_id,
     int64_t lo = var_lo64(ctx, &ctx->vars[var_id]);
     int64_t hi = var_hi64(ctx, &ctx->vars[var_id]);
 
-    /* Phase saving: try the last saved value if still in domain. */
+    /* Phase saving: try the last saved value if still in domain. Sign-aware
+     * so an unsigned upper-half saved value is range-checked correctly (a
+     * signed compare could return an out-of-domain value). */
     if (opts && opts->use_phase_save && ctx->phase_save) {
+        const Variable *v = &ctx->vars[var_id];
         int64_t ps = ctx->phase_save[var_id];
-        if (ps >= lo && ps <= hi && !_is_hole(ctx, var_id, ps))
+        if (!var_b_lt(v, ps, lo) && !var_b_gt(v, ps, hi)
+                && !_is_hole(ctx, var_id, ps))
             return ps;
     }
 
@@ -353,9 +361,13 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     if (solver_propagate(ctx) == PROP_CONFLICT) return SOLVE_UNSAT;
 
     /* Check for domains that became empty before search (e.g. from
-     * conflicting bounds imposed externally before solver_solve). */
+     * conflicting bounds imposed externally before solver_solve).
+     * Sign-aware: an unsigned domain straddling 2^63 (lo < 2^63 <= hi)
+     * has lo "positive" and hi "negative" as int64, so a bare `lo > hi`
+     * would wrongly call it empty. */
     for (uint32_t i = 0; i < ctx->n_vars; i++) {
-        if (var_lo64(ctx, &ctx->vars[i]) > var_hi64(ctx, &ctx->vars[i]))
+        const Variable *vi = &ctx->vars[i];
+        if (var_b_gt(vi, var_lo64(ctx, vi), var_hi64(ctx, vi)))
             return SOLVE_UNSAT;
     }
 
@@ -510,23 +522,30 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
             /* Backtrack to the previous level */
             trail_backtrack(ctx, cur - 1);
 
-            /* Exclude `val` from dv's domain at the previous level */
-            int64_t dlo = var_lo64(ctx, &ctx->vars[dv]);
-            int64_t dhi = var_hi64(ctx, &ctx->vars[dv]);
-            if (dlo > dhi) {
+            /* Exclude `val` from dv's domain at the previous level.
+             * Sign-aware ordering so an unsigned domain in/across the upper
+             * half is split correctly (a signed compare/midpoint would mis-
+             * order it and either declare it empty or bisect the wrong way). */
+            const Variable *dvv = &ctx->vars[dv];
+            int64_t dlo = var_lo64(ctx, dvv);
+            int64_t dhi = var_hi64(ctx, dvv);
+            if (var_b_gt(dvv, dlo, dhi)) {
                 /* Domain already empty after backtrack — propagate conflict up */
                 pr = PROP_CONFLICT;
-            } else if (val <= dlo) {
+            } else if (!var_b_gt(dvv, val, dlo)) {  /* val <= dlo */
                 pr = ctx_tighten_lb64(ctx, dv, dlo + 1);
-            } else if (val >= dhi) {
+            } else if (!var_b_lt(dvv, val, dhi)) {  /* val >= dhi */
                 pr = ctx_tighten_ub64(ctx, dv, dhi - 1);
             } else {
                 /* Middle value: two-phase domain bisection.
                  * Split at the midpoint of [dlo, dhi] (not at val)
                  * for systematic, logarithmic-depth exploration.
                  * Phase 1: explore lower half [dlo, mid].
-                 * Phase 2: explore upper half [mid+1, dhi]. */
-                int64_t mid = dlo + (dhi - dlo) / 2;
+                 * Phase 2: explore upper half [mid+1, dhi].
+                 * Unsigned-safe midpoint (avoids signed overflow and a
+                 * negative half-width when the span exceeds 2^63). */
+                int64_t mid = (int64_t)((uint64_t)dlo +
+                                        (((uint64_t)dhi - (uint64_t)dlo) >> 1));
                 if (!d->tried_lower) {
                     d->tried_lower = 1;
                     pr = ctx_tighten_ub64(ctx, dv, mid);
@@ -551,57 +570,85 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
 /* solver_solve — wrapper with assumption relaxation                   */
 /* ------------------------------------------------------------------ */
 
-SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
-    for (;;) {
-        SolveResult res = _solver_solve_core(ctx, opts);
-        if (res == SOLVE_OK) return res;
-
-        /* Check if we can relax a soft constraint assumption */
-        if (ctx->n_assumptions == 0 || ctx->assumption_active_mask == 0)
-            return res;
-
-        /* Find the lowest-priority active assumption (highest priority value) */
-        uint32_t worst_idx = 0;
-        uint32_t worst_pri = 0;
-        int found = 0;
-        for (uint32_t i = 0; i < ctx->n_assumptions; i++) {
-            if (ctx->assumption_active_mask & (1ULL << i)) {
-                if (!found || ctx->assumption_priorities[i] >= worst_pri) {
-                    worst_pri = ctx->assumption_priorities[i];
-                    worst_idx = i;
-                    found = 1;
-                }
-            }
-        }
-        if (!found) return res;
-
-        /* Relax this assumption */
-        ctx->assumption_active_mask &= ~(1ULL << worst_idx);
-
-        /* Reset solver to post-compile state */
-        solver_reset(ctx);
-
-        /* Pin all relaxed assumptions to 0 by directly setting bounds.
-         * We can't use ctx_tighten because the assumption var starts
-         * at [1,1] after reset, and tightening UB to 0 would create
-         * an empty domain [1,0] -> conflict. Direct writes are safe
-         * here since we're at level 0 before search begins. */
-        for (uint32_t i = 0; i < ctx->n_assumptions; i++) {
-            if (!(ctx->assumption_active_mask & (1ULL << i))) {
-                uint32_t av = ctx->assumption_var_ids[i];
-                Variable *v = &ctx->vars[av];
-                v->lo = 0; v->hi = 0;
-                if (av < 64)
-                    ctx->unassigned_mask &= ~(1ULL << av);
-            }
-        }
-
-        /* Propagate the relaxations before retrying */
-        if (solver_propagate(ctx) == PROP_CONFLICT) {
-            /* Still conflicting — try relaxing more assumptions */
-            continue;
+/* Pin every soft assumption var NOT in `active` to [0,0] (relaxed). Safe at
+ * decision level 0 before search begins; mirrors the post-reset pinning used by
+ * the relaxation loop. We can't ctx_tighten here: a relaxed assumption var starts
+ * at [1,1] after reset, and tightening its UB to 0 would create an empty domain. */
+static void _pin_relaxed_assumptions(SolveCtx *ctx, uint64_t active, uint32_t na) {
+    for (uint32_t i = 0; i < na; i++) {
+        if (!(active & (1ULL << i))) {
+            uint32_t av = ctx->assumption_var_ids[i];
+            Variable *v = &ctx->vars[av];
+            v->lo = 0; v->hi = 0;
+            if (av < 64)
+                ctx->unassigned_mask &= ~(1ULL << av);
         }
     }
+}
+
+SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
+    /* assumption_active_mask is 64-bit; cap soft handling at 64 (pre-existing
+     * engine limit — every assumption op uses `1ULL << i`). */
+    uint32_t na = ctx->n_assumptions;
+    if (na > 64) na = 64;
+
+    /* Re-activate all soft assumptions at entry. solver_reset() restores the
+     * assumption vars to [1,1] but does NOT touch assumption_active_mask, so on a
+     * RE-SOLVE of a reused ctx (the backend's plan-reuse path) the mask would
+     * still carry the previous call's relaxations. Resetting it here makes each
+     * solve start from the full soft set, matching a fresh compile. */
+    if (na > 0)
+        ctx->assumption_active_mask = (na >= 64) ? ~0ULL : ((1ULL << na) - 1);
+
+    /* Fast path: no softs, or all softs jointly satisfiable in a single solve
+     * (the common case — most soft sets have no internal conflict). */
+    SolveResult res = _solver_solve_core(ctx, opts);
+    if (res == SOLVE_OK || na == 0)
+        return res;
+
+    /* All-softs-active is infeasible. ADDITIVE greedy (Boolector- / serve-path
+     * parity): keep each soft that is individually compatible with the hard core +
+     * the already-kept softs, processing most-preferred (lowest priority value)
+     * first. A subtractive "drop the worst active on each UNSAT" greedy is wrong:
+     * walking down toward a conflicting higher-preference soft, it sheds
+     * satisfiable lower-preference softs as collateral. */
+    uint32_t order[64];
+    for (uint32_t i = 0; i < na; i++) order[i] = i;
+    for (uint32_t i = 0; i < na; i++) {        /* selection sort, ascending priority */
+        uint32_t b = i;
+        for (uint32_t j = i + 1; j < na; j++) {
+            uint32_t pj = ctx->assumption_priorities[order[j]];
+            uint32_t pb = ctx->assumption_priorities[order[b]];
+            if (pj < pb || (pj == pb && order[j] < order[b])) b = j;
+        }
+        uint32_t t = order[i]; order[i] = order[b]; order[b] = t;
+    }
+
+    uint64_t keep = 0;
+    for (uint32_t k = 0; k < na; k++) {
+        uint64_t cand = keep | (1ULL << order[k]);
+        ctx->assumption_active_mask = cand;
+        solver_reset(ctx);
+        _pin_relaxed_assumptions(ctx, cand, na);
+        if (solver_propagate(ctx) == PROP_CONFLICT) {
+            fprintf(stderr, "[DBG] k=%u idx=%u pri=%u: PROP_CONFLICT drop\n", k, order[k], ctx->assumption_priorities[order[k]]);
+            continue;                          /* this soft conflicts — drop it */
+        }
+        SolveResult cr = _solver_solve_core(ctx, opts);
+        fprintf(stderr, "[DBG] k=%u idx=%u pri=%u: core=%d\n", k, order[k], ctx->assumption_priorities[order[k]], cr);
+        if (cr == SOLVE_OK)
+            keep = cand;                       /* compatible — keep it */
+        /* else: leave keep unchanged (drop this soft) */
+    }
+    fprintf(stderr, "[DBG] final keep=0x%llx\n", (unsigned long long)keep);
+
+    /* Re-solve with the final kept set so ctx holds the model to read back. */
+    ctx->assumption_active_mask = keep;
+    solver_reset(ctx);
+    _pin_relaxed_assumptions(ctx, keep, na);
+    if (solver_propagate(ctx) == PROP_CONFLICT)
+        return SOLVE_UNSAT;                    /* unreachable: hard core was SAT */
+    return _solver_solve_core(ctx, opts);
 }
 
 /* ------------------------------------------------------------------ */

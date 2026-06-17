@@ -78,6 +78,14 @@ struct zsp_bbsolver_s {
      * had_error: maps to ZSP_BB_UNKNOWN so the caller defers to its fallback
      * rather than treating the result as a real verdict. */
     int             had_unsupported;
+
+    /* DSE-2 soft-aware serve. soft_keep[i] (indexed by softs_head walk order)
+     * selects which soft constraints to encode as *hard* top-level assertions
+     * for this check. NULL (the default) honors no soft — the legacy soft-less
+     * behavior. The MaxSAT wrapper (zsp_bbsolver_solve_maxsat) sets it to the
+     * maximal priority-respecting kept set. */
+    const uint8_t  *soft_keep;
+    uint32_t        n_softs;
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -233,6 +241,16 @@ static int subst_reaches_var(zsp_bbsolver_t *S,
         ExprRef *elems = expr_in_set_elems(S->problem, ref);
         for (uint32_t i = 0; i < iset->n_elems; i++)
             if (subst_reaches_var(S, elems[i], target_var, visited)) return 1;
+        return 0;
+    }
+    case EXPR_IN_RANGES: {
+        ExprInRanges *irs = (ExprInRanges *)kp;
+        if (subst_reaches_var(S, irs->value, target_var, visited)) return 1;
+        ExprRef *los = expr_in_ranges_los(S->problem, ref);
+        ExprRef *his = expr_in_ranges_his(S->problem, ref);
+        for (uint32_t i = 0; i < irs->n_ranges; i++)
+            if (subst_reaches_var(S, los[i], target_var, visited) ||
+                subst_reaches_var(S, his[i], target_var, visited)) return 1;
         return 0;
     }
     case EXPR_EXTEND:
@@ -647,6 +665,46 @@ static zsp_bv_t bb_in_set(zsp_bbsolver_t *S, ExprRef ref) {
     return acc;
 }
 
+static zsp_bv_t bb_in_ranges(zsp_bbsolver_t *S, ExprRef ref) {
+    /* OR over ranges of (value >= lo_i AND value <= hi_i). */
+    ExprInRanges *node = (ExprInRanges *)POOL_PTR(S->problem, ref);
+    ExprRef *los = expr_in_ranges_los(S->problem, ref);
+    ExprRef *his = expr_in_ranges_his(S->problem, ref);
+    zsp_bv_t v = bb_expr(S, node->value, 0);
+    if (S->had_error) return v;
+    int is_signed = 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, node->value);
+    if (kp && *kp == EXPR_VAR) {
+        ExprVar *vv = (ExprVar *)kp;
+        if (vv->var_id < S->n_vars) is_signed = S->vars[vv->var_id].is_signed;
+    }
+    zsp_bv_t acc = { NULL, 0 };
+    for (uint32_t i = 0; i < node->n_ranges; i++) {
+        zsp_bv_t lo = bb_expr(S, los[i], v.size);
+        if (S->had_error) return lo;
+        zsp_bv_t hi = bb_expr(S, his[i], v.size);
+        if (S->had_error) return hi;
+        uint16_t w = max_w(max_w(v.size, lo.size), hi.size);
+        zsp_bv_t vw = v, lw = lo, hw = hi;
+        if (is_signed) {
+            if (vw.size < w) vw = sext_to(S, vw, w);
+            if (lw.size < w) lw = sext_to(S, lw, w);
+            if (hw.size < w) hw = sext_to(S, hw, w);
+        } else {
+            if (vw.size < w) vw = zext_to(S, vw, w);
+            if (lw.size < w) lw = zext_to(S, lw, w);
+            if (hw.size < w) hw = zext_to(S, hw, w);
+        }
+        zsp_bv_t v_lt_lo = is_signed ? zsp_bb_slt(S->bb, vw, lw) : zsp_bb_ult(S->bb, vw, lw);
+        zsp_bv_t hi_lt_v = is_signed ? zsp_bb_slt(S->bb, hw, vw) : zsp_bb_ult(S->bb, hw, vw);
+        zsp_bv_t in_i = zsp_bb_and(S->bb, zsp_bb_not(S->bb, v_lt_lo),
+                                          zsp_bb_not(S->bb, hi_lt_v));
+        acc = (i == 0) ? in_i : zsp_bb_or(S->bb, acc, in_i);
+    }
+    if (acc.size == 0) acc = zsp_bb_value_u64(S->bb, 1, 0);  /* empty -> false */
+    return acc;
+}
+
 static zsp_bv_t bb_extend(zsp_bbsolver_t *S, const ExprExtend *e) {
     zsp_bv_t op = bb_expr(S, e->operand, e->from_bits);
     if (S->had_error) return op;
@@ -711,6 +769,7 @@ static zsp_bv_t bb_expr(zsp_bbsolver_t *S, ExprRef ref, uint16_t hint_width) {
     case EXPR_ITE:      out = bb_ite(S, (ExprITE *)kp, hint_width); break;
     case EXPR_IN_RANGE: out = bb_in_range(S, (ExprInRange *)kp); break;
     case EXPR_IN_SET:   out = bb_in_set(S, ref); break;
+    case EXPR_IN_RANGES: out = bb_in_ranges(S, ref); break;
     case EXPR_EXTEND:   out = bb_extend(S, (ExprExtend *)kp); break;
     case EXPR_EXTRACT:  out = bb_extract(S, (ExprExtract *)kp); break;
     case EXPR_CONCAT:   out = bb_concat(S, (ExprConcat *)kp); break;
@@ -901,6 +960,24 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
         cur = cs->next;
     }
 
+    /* DSE-2: encode the kept soft constraints as hard top-level assertions.
+     * soft_keep[i] selects which softs (in softs_head walk order) to enforce;
+     * the MaxSAT wrapper has already chosen the maximal priority-respecting set,
+     * so here they are simply additional hard assertions. NULL → honor none. */
+    if (S->soft_keep) {
+        uint32_t si = 0;
+        for (ExprRef scur = S->problem->softs_head; scur != EXPR_NULL; si++) {
+            SoftSpec *ss = (SoftSpec *)POOL_PTR(S->problem, scur);
+            if (S->soft_keep[si]) {
+                zsp_bv_t pred = bb_predicate(S, ss->root);
+                if (S->had_error) { S->last_result = ZSP_BB_ERROR; return ZSP_BB_ERROR; }
+                if (S->had_unsupported) { S->last_result = ZSP_BB_UNKNOWN; return ZSP_BB_UNKNOWN; }
+                zsp_aig_cnf_encode(S->cnf, pred.bits[0], /*top_level=*/1);
+            }
+            scur = ss->next;
+        }
+    }
+
     /* Force-build any substituted variable that no surviving constraint
      * referenced. The subst pass consumed its defining constraint (e.g. the
      * sole `x == 42`), so without this its bv is never built and
@@ -964,6 +1041,159 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
     }
     S->last_result = rc;
     return rc;
+}
+
+/* ------------------------------------------------------------------------- *
+ * DSE-2: soft-aware MaxSAT serve.
+ *
+ * The BV-SAT serve path is otherwise soft-less.  This wrapper keeps the
+ * maximal priority-respecting set of soft constraints, mirroring the primary
+ * engine's relaxation policy (solver_solve in zsp_search.c): start with all
+ * softs kept; on UNSAT, drop the single kept soft with the highest priority
+ * *value* (= lowest preference; ties broken toward the last in walk order, as
+ * solver_solve does with `>=`) and retry.  Each attempt is a fresh bbsolver
+ * because the SAT layer is non-incremental — cheap in the common case (all
+ * softs satisfiable → one solve), and bounded by the number that must be
+ * dropped otherwise.
+ *
+ * On ZSP_BB_SAT, *out_bb receives the solved bbsolver (caller frees it and
+ * reads the model via zsp_bbsolver_value); the kept-set is reflected in its
+ * model.  On UNSAT/UNKNOWN/ERROR, *out_bb is NULL.  A hard-UNSAT problem
+ * (UNSAT even with every soft dropped) returns ZSP_BB_UNSAT.
+ * ------------------------------------------------------------------------- */
+int zsp_bbsolver_check_maxsat(zsp_alloc_t *alloc, SolveProblem *problem,
+                              uint64_t seed, zsp_bbsolver_t **out_bb,
+                              uint8_t *out_keep, uint32_t keep_cap) {
+    if (!problem || !out_bb) return ZSP_BB_ERROR;
+    *out_bb = NULL;
+
+    uint32_t n = problem->n_softs;
+    if (n == 0) {
+        /* No softs — a plain check. */
+        zsp_bbsolver_t *bb = zsp_bbsolver_new(alloc, problem);
+        if (!bb) return ZSP_BB_ERROR;
+        int rc = zsp_bbsolver_check(bb, seed);
+        if (rc == ZSP_BB_SAT) { *out_bb = bb; return rc; }
+        zsp_bbsolver_free(bb);
+        return rc;
+    }
+
+    /* Gather soft priorities in softs_head walk order (the soft_keep index). */
+    uint32_t *pri = (uint32_t *)xalloc(alloc, n * sizeof(uint32_t));
+    uint8_t  *keep = (uint8_t *)xalloc(alloc, n * sizeof(uint8_t));
+    if (!pri || !keep) {
+        if (pri) xfree(alloc, pri, n * sizeof(uint32_t));
+        if (keep) xfree(alloc, keep, n * sizeof(uint8_t));
+        return ZSP_BB_ERROR;
+    }
+    {
+        uint32_t i = 0;
+        for (ExprRef cur = problem->softs_head; cur != EXPR_NULL && i < n; i++) {
+            SoftSpec *ss = (SoftSpec *)POOL_PTR(problem, cur);
+            pri[i] = ss->priority;
+            keep[i] = 1;
+            cur = ss->next;
+        }
+    }
+
+    /* Fast path: try ALL softs kept. The common case is no conflicting softs, so
+     * one solve settles it. */
+    int rc;
+    {
+        zsp_bbsolver_t *bb = zsp_bbsolver_new(alloc, problem);
+        if (!bb) { rc = ZSP_BB_ERROR; goto done; }
+        bb->soft_keep = keep;   /* keep[] is all-1 from the init above */
+        bb->n_softs   = n;
+        rc = zsp_bbsolver_check(bb, seed);
+        if (rc == ZSP_BB_SAT) {
+            *out_bb = bb;
+            if (out_keep) {
+                uint32_t m = (keep_cap < n) ? keep_cap : n;
+                for (uint32_t i = 0; i < m; i++) out_keep[i] = keep[i];
+            }
+            goto done;
+        }
+        zsp_bbsolver_free(bb);
+        if (rc != ZSP_BB_UNSAT) goto done;   /* UNKNOWN / ERROR — defer */
+    }
+
+    /* Some soft conflicts. Use ADDITIVE greedy (Boolector-parity): start from the
+     * hard core only and add softs one at a time in DESCENDING preference
+     * (ascending priority value; ties by declaration / walk order), keeping each
+     * soft that is still SAT with the hard core + the already-kept softs. This
+     * keeps EVERY individually-compatible soft. A subtractive "drop the worst on
+     * UNSAT" greedy is wrong here: working down to a conflicting higher-preference
+     * soft, it sheds satisfiable lower-preference softs as collateral (e.g. it
+     * dropped a satisfiable `d==40` while a conflicting sibling forced relaxation).
+     * Cost is one solve per soft only on the (rare) conflicting path; the all-kept
+     * fast path above covers the common no-conflict case in a single solve. */
+
+    /* Preference order: indices sorted by priority value ascending (0 = keep
+     * hardest), ties broken by walk-order index. n is small (<= a few dozen). */
+    uint32_t *order = (uint32_t *)xalloc(alloc, n * sizeof(uint32_t));
+    if (!order) { rc = ZSP_BB_ERROR; goto done; }
+    for (uint32_t i = 0; i < n; i++) order[i] = i;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t best_j = i;
+        for (uint32_t j = i + 1; j < n; j++) {
+            if (pri[order[j]] < pri[order[best_j]] ||
+                (pri[order[j]] == pri[order[best_j]] && order[j] < order[best_j]))
+                best_j = j;
+        }
+        uint32_t tmp = order[i]; order[i] = order[best_j]; order[best_j] = tmp;
+    }
+
+    /* Base model: hard core only (all softs relaxed). */
+    for (uint32_t i = 0; i < n; i++) keep[i] = 0;
+    zsp_bbsolver_t *best = zsp_bbsolver_new(alloc, problem);
+    if (!best) { xfree(alloc, order, n * sizeof(uint32_t)); rc = ZSP_BB_ERROR; goto done; }
+    best->soft_keep = keep;
+    best->n_softs   = n;
+    rc = zsp_bbsolver_check(best, seed);
+    if (rc != ZSP_BB_SAT) {
+        /* Hard core itself UNSAT (or undecided) — softs can't help. */
+        zsp_bbsolver_free(best);
+        xfree(alloc, order, n * sizeof(uint32_t));
+        goto done;
+    }
+
+    /* Additively try each soft, most-preferred first. */
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t idx = order[k];
+        keep[idx] = 1;                                  /* tentatively add */
+        zsp_bbsolver_t *cand = zsp_bbsolver_new(alloc, problem);
+        if (!cand) { keep[idx] = 0; continue; }         /* OOM: skip this soft */
+        cand->soft_keep = keep;
+        cand->n_softs   = n;
+        int crc = zsp_bbsolver_check(cand, seed);
+        if (crc == ZSP_BB_SAT) {
+            zsp_bbsolver_free(best);                    /* this soft fits — keep it */
+            best = cand;
+        } else {
+            zsp_bbsolver_free(cand);                    /* UNSAT/undecided — drop it */
+            keep[idx] = 0;
+        }
+    }
+
+    *out_bb = best;
+    rc = ZSP_BB_SAT;
+    if (out_keep) {
+        uint32_t m = (keep_cap < n) ? keep_cap : n;
+        for (uint32_t i = 0; i < m; i++) out_keep[i] = keep[i];
+    }
+    xfree(alloc, order, n * sizeof(uint32_t));
+
+done:
+    xfree(alloc, pri, n * sizeof(uint32_t));
+    xfree(alloc, keep, n * sizeof(uint8_t));
+    return rc;
+}
+
+void zsp_bbsolver_set_soft_keep(zsp_bbsolver_t *S, const uint8_t *keep,
+                                uint32_t n) {
+    if (!S) return;
+    S->soft_keep = keep;   /* caller owns the array; must outlive the check */
+    S->n_softs   = n;
 }
 
 int zsp_bbsolver_value(zsp_bbsolver_t *S, uint32_t var_id, int64_t *out_value) {

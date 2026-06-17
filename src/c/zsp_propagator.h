@@ -163,6 +163,15 @@ typedef struct {
     /* int64_t elems[n_elems] follow immediately */
 } InSet_64_t;
 
+/* InRanges_64: x in [lo0,hi0] U ... U [lo{n-1},hi{n-1}] */
+typedef struct {
+    Propagator  hdr;
+    PropWatchSect ws;
+    uint32_t    n_ranges;
+    uint32_t    _pad;
+    /* int64_t los[n_ranges] then int64_t his[n_ranges] follow immediately */
+} InRanges_64_t;
+
 /* Implication_32: guard → (var ≤/≥ bound)
    var_ids[0]=guard, var_ids[1]=var
    is_ub=1 → enforce UB (var ≤ bound); is_ub=0 → enforce LB (var ≥ bound) */
@@ -351,6 +360,16 @@ uint32_t prop_add_in_set_32(SolveCtx *ctx, uint32_t x_id,
 uint32_t prop_add_in_set_64(SolveCtx *ctx, uint32_t x_id,
                              uint32_t n_elems, const int64_t *elems,
                              uint8_t priority);
+/**
+ * Multi-range membership: x in [los[0],his[0]] U ... U [los[n-1],his[n-1]].
+ * Sound interval propagator: narrows x's [lo,hi] to the hull of the feasible
+ * ranges and conflicts when no range overlaps x's domain (which also rejects a
+ * singleton that lands in a gap). Distribution over the ranges is supplied
+ * separately by add_dist; this propagator only enforces membership.
+ */
+uint32_t prop_add_in_ranges_64(SolveCtx *ctx, uint32_t x_id,
+                                uint32_t n_ranges, const int64_t *los,
+                                const int64_t *his, uint8_t priority);
 
 /**
  * Implication: guard=true → (var ≤ bound) if is_ub, or (var ≥ bound) otherwise.

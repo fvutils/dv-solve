@@ -259,6 +259,7 @@ static EvalVal _eval(const SolveCtx *ctx, const SolveProblem *sp,
     /* Constructs we don't (yet) evaluate: skip rather than misreport. */
     case EXPR_IN_RANGE:
     case EXPR_IN_SET:
+    case EXPR_IN_RANGES:
     case EXPR_SUM:
     case EXPR_COUNTONES:
     case EXPR_CLOG2:

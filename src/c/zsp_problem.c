@@ -375,6 +375,18 @@ ExprRef *expr_in_set_elems(SolveProblem *sp, ExprRef set_ref) {
     return (ExprRef *)(n + 1);
 }
 
+ExprRef *expr_in_ranges_los(SolveProblem *sp, ExprRef ref) {
+    if (ref == EXPR_NULL) return NULL;
+    ExprInRanges *n = (ExprInRanges *)POOL_PTR(sp, ref);
+    return (ExprRef *)(n + 1);
+}
+
+ExprRef *expr_in_ranges_his(SolveProblem *sp, ExprRef ref) {
+    if (ref == EXPR_NULL) return NULL;
+    ExprInRanges *n = (ExprInRanges *)POOL_PTR(sp, ref);
+    return (ExprRef *)(n + 1) + n->n_ranges;
+}
+
 uint32_t *source_spec_vars(SolveProblem *sp, ExprRef src_ref) {
     if (src_ref == EXPR_NULL) return NULL;
     SourceSpec *s = (SourceSpec *)POOL_PTR(sp, src_ref);

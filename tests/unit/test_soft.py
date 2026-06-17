@@ -71,6 +71,8 @@ def _setup(lib: ctypes.CDLL):
     lib._SolveOpts = SolveOpts
     lib.solver_solve.restype  = ctypes.c_int
     lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.solver_reset.restype  = None
+    lib.solver_reset.argtypes = [ctypes.c_void_p]
     lib.solver_get_value.restype  = ctypes.c_int64
     lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
@@ -279,6 +281,143 @@ def test_soft_multiple_relaxed(libzsp):
     assert lib.solver_soft_active(ctx, 0) == 1   # y==7, active
     assert lib.solver_soft_active(ctx, 1) == 0   # x==5, relaxed
     assert lib.solver_soft_active(ctx, 2) == 0   # x==3, relaxed
+
+    lib.zsp_block_alloc_destroy(ba)
+
+
+def test_soft_no_collateral_drop_primary(libzsp):
+    """Satisfiable softs must NOT be dropped as collateral when a *conflicting*
+    sibling soft forces relaxation. Hard x==20, y==30. Softs: a==11 (free),
+    x!=20 (conflicts), d==40 (free), y!=30 (conflicts), e==50 (free). A correct
+    relaxation keeps a/d/e and drops only x!=20,y!=30. A naive subtractive 'drop
+    the worst on UNSAT' greedy that walks down to the conflicting softs would shed
+    the satisfiable a/d/e en route — the serve-path bug (zsp_bbsolver, now additive)
+    and the shape this locks on the primary path."""
+    lib = libzsp
+    _setup(lib)
+
+    sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
+    ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
+    sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
+    assert sp
+
+    # vars: 0=a 1=x 2=d 3=y 4=e, all u8 [0,100]
+    for vid in range(5):
+        lib.problem_add_var(sp, vid, 8, 0, 0, 100)
+
+    # Hard: x==20, y==30
+    lib.problem_add_constraint(sp, lib.expr_binary(
+        sp, BIN_EQ, lib.expr_var(sp, 1), lib.expr_const(sp, 20, 0)))
+    lib.problem_add_constraint(sp, lib.expr_binary(
+        sp, BIN_EQ, lib.expr_var(sp, 3), lib.expr_const(sp, 30, 0)))
+
+    BIN_NE = 11
+    # Softs in declaration order; priority value increasing = relax-first first
+    # (matches the pyvsc backend's declaration-order mapping).
+    specs = [
+        (0, BIN_EQ, 11, 0),    # a==11  free   keep
+        (1, BIN_NE, 20, 1),    # x!=20  conflict drop
+        (2, BIN_EQ, 40, 2),    # d==40  free   keep
+        (3, BIN_NE, 30, 3),    # y!=30  conflict drop
+        (4, BIN_EQ, 50, 4),    # e==50  free   keep
+    ]
+    for vid, op, k, pri in specs:
+        e = lib.expr_binary(sp, op, lib.expr_var(sp, vid), lib.expr_const(sp, k, 0))
+        lib.problem_add_soft_constraint(sp, e, pri)
+
+    ba = lib.zsp_block_alloc_create(None, 0)
+    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.solver_compile(ctx, sp)
+    assert rc >= 0
+    opts = lib._SolveOpts(seed=0xBEEF)
+    assert lib.solver_solve(ctx, ctypes.byref(opts)) == SOLVE_OK
+
+    assert lib.solver_get_value(ctx, 0) == 11, "satisfiable soft a==11 dropped (collateral)"
+    assert lib.solver_get_value(ctx, 2) == 40, "satisfiable soft d==40 dropped (collateral)"
+    assert lib.solver_get_value(ctx, 4) == 50, "satisfiable soft e==50 dropped (collateral)"
+    assert lib.solver_get_value(ctx, 1) == 20, "hard x==20 must hold"
+    assert lib.solver_get_value(ctx, 3) == 30, "hard y==30 must hold"
+
+    lib.zsp_block_alloc_destroy(ba)
+
+
+def test_soft_priority_ladder_three_primary(libzsp):
+    """DSE-3 ladder (primary path). Three mutually-exclusive softs at distinct
+    priorities; all conflict pairwise so only one survives. C priority is
+    `lower value = keep-harder` (0 = highest preference), so x==10 @ pri0 is kept
+    and the pri5/pri10 softs relax. The matched serve-path test
+    (`test_soft_maxsat_serve.test_serve_soft_priority_ladder_three`) asserts the
+    SAME kept value — locking primary order == serve order."""
+    lib = libzsp
+    _setup(lib)
+
+    sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
+    ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
+    sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
+    assert sp
+
+    lib.problem_add_var(sp, 0, 8, 0, 0, 100)   # x in [0,100]
+
+    # Soft 0: x == 10, priority 0 (keep-hardest)
+    s0 = lib.expr_binary(sp, BIN_EQ, lib.expr_var(sp, 0), lib.expr_const(sp, 10, 0))
+    lib.problem_add_soft_constraint(sp, s0, 0)
+    # Soft 1: x == 20, priority 5
+    s1 = lib.expr_binary(sp, BIN_EQ, lib.expr_var(sp, 0), lib.expr_const(sp, 20, 0))
+    lib.problem_add_soft_constraint(sp, s1, 5)
+    # Soft 2: x == 30, priority 10 (relax-first)
+    s2 = lib.expr_binary(sp, BIN_EQ, lib.expr_var(sp, 0), lib.expr_const(sp, 30, 0))
+    lib.problem_add_soft_constraint(sp, s2, 10)
+
+    ba = lib.zsp_block_alloc_create(None, 0)
+    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.solver_compile(ctx, sp)
+    assert rc >= 0
+
+    opts = lib._SolveOpts(seed=0xC0DE)
+    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    assert result == SOLVE_OK
+
+    x = lib.solver_get_value(ctx, 0)
+    assert x == 10, f"x={x}, expected 10 (highest-preference soft kept)"
+
+    lib.zsp_block_alloc_destroy(ba)
+
+
+def test_soft_resolve_reuse_keeps_set(libzsp):
+    """Regression: solving the SAME ctx twice (the backend's plan-reuse path:
+    solver_reset + solver_solve) must keep the same maximal soft set both times.
+    Previously solver_solve did not re-activate assumption_active_mask at entry,
+    so the second solve inherited the first solve's relaxations, then relaxed the
+    remaining kept soft on the conflict and dropped the WHOLE set (the var came
+    back unconstrained). Here a 3-soft conflicting ladder must keep x==10 on every
+    solve of the reused ctx."""
+    lib = libzsp
+    _setup(lib)
+
+    sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
+    ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
+    sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
+    assert sp
+
+    lib.problem_add_var(sp, 0, 8, 0, 0, 100)   # x in [0,100]
+    for val, pri in ((10, 0), (20, 5), (30, 10)):   # all conflict; pri 0 kept
+        e = lib.expr_binary(sp, BIN_EQ, lib.expr_var(sp, 0),
+                            lib.expr_const(sp, val, 0))
+        lib.problem_add_soft_constraint(sp, e, pri)
+
+    ba = lib.zsp_block_alloc_create(None, 0)
+    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.solver_compile(ctx, sp)
+    assert rc >= 0
+
+    for attempt in range(4):
+        if attempt > 0:
+            lib.solver_reset(ctx)
+        opts = lib._SolveOpts(seed=0x1000 + attempt)
+        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        assert result == SOLVE_OK, f"attempt {attempt}: solve failed"
+        x = lib.solver_get_value(ctx, 0)
+        assert x == 10, f"attempt {attempt}: x={x}, expected 10 (kept soft)"
 
     lib.zsp_block_alloc_destroy(ba)
 
