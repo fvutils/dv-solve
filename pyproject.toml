@@ -1,12 +1,12 @@
 [build-system]
 # ivpm-build's PEP 517 backend drives the CMake build, bundles the native
 # libraries into the wheel, and tags it platform-specific (py3-none-<plat>).
-# Pinned to git main until a PyPI release carrying the platform-tagging fix is
-# cut; switch to a version specifier (e.g. "ivpm-build>=0.2.1") afterwards.
+# 0.2.0.27908268978 is the first published build carrying the platform-tagging
+# fix; a >= floor stays compatible with later (e.g. 0.2.1/0.3.0) releases.
 requires = [
     "setuptools>=64",
     "wheel",
-    "ivpm-build @ git+https://github.com/fvutils/ivpm-build@main",
+    "ivpm-build>=0.2.0.27908268978",
 ]
 build-backend = "ivpm_build.backend"
 
