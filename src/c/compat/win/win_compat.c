@@ -63,4 +63,25 @@ long sysconf(int name) {
     }
 }
 
+int clock_gettime(int clk_id, struct timespec *ts) {
+    if (clk_id == CLOCK_MONOTONIC) {
+        LARGE_INTEGER freq, ctr;
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&ctr);
+        ts->tv_sec = (time_t)(ctr.QuadPart / freq.QuadPart);
+        long long rem = ctr.QuadPart % freq.QuadPart;
+        ts->tv_nsec = (long)((rem * 1000000000LL) / freq.QuadPart);
+    } else {  /* CLOCK_REALTIME */
+        FILETIME ft;
+        ULARGE_INTEGER li;
+        GetSystemTimePreciseAsFileTime(&ft);
+        li.LowPart = ft.dwLowDateTime;
+        li.HighPart = ft.dwHighDateTime;
+        unsigned __int64 t = li.QuadPart - 116444736000000000ULL;  /* 1601->1970, 100ns */
+        ts->tv_sec = (time_t)(t / 10000000ULL);
+        ts->tv_nsec = (long)((t % 10000000ULL) * 100);
+    }
+    return 0;
+}
+
 #endif /* _MSC_VER */

@@ -15,6 +15,15 @@
 #include <malloc.h>
 #include <stdint.h>
 #include <sys/stat.h>   /* _S_IFMT/_S_IFDIR before we define S_IS* */
+#include <time.h>       /* struct timespec (C11) for clock_gettime shim */
+
+/* POSIX monotonic clock used by the dv-solve timing helpers (zsp_placement.c,
+ * zsp_costguided.c, ...). Implemented in win_compat.c. */
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+int clock_gettime(int clk_id, struct timespec *ts);
+#endif
 
 /* kissat decorates some declarations with GCC __attribute__((format(...))) and
  * ((always_inline)). MSVC has no such syntax; drop the decorations entirely.
