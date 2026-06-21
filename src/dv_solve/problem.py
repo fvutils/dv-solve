@@ -14,7 +14,7 @@ from __future__ import annotations
 import ctypes
 from typing import Sequence
 
-from .lib import _load_lib
+from .lib import _load_lib, _library_not_found_error
 
 # ------------------------------------------------------------------ #
 # BinOp / UnaryOp constants (must match zsp_problem.h)               #
@@ -75,7 +75,7 @@ class SolveProblem:
     def __init__(self, buf_size: int = _SP_BUF_SIZE) -> None:
         lib = _load_lib()
         if lib is None:
-            raise RuntimeError("libdv_solve.so not found — native solver unavailable")
+            raise _library_not_found_error()
         self._lib = lib
         self._buf = (ctypes.c_uint8 * buf_size)()
         sp = lib.solve_problem_init(self._buf, buf_size)

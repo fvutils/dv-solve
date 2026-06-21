@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import platform
 from pathlib import Path
 from typing import Optional
 
@@ -19,8 +20,19 @@ _LIB_CACHE: Optional[ctypes.CDLL] = None
 _LOAD_ATTEMPTED = False
 
 
+def _lib_patterns() -> list[str]:
+    """Glob patterns for the dv_solve shared library on the current platform."""
+    system = platform.system()
+    if system == "Windows":
+        return ["dv_solve.dll", "libdv_solve.dll"]
+    if system == "Darwin":
+        return ["libdv_solve.dylib"]
+    # Linux / other ELF platforms: bare name plus any soname suffix.
+    return ["libdv_solve.so", "libdv_solve.so.*"]
+
+
 def _candidate_paths() -> list[Path]:
-    """Return ordered list of directories to search for libdv_solve.so."""
+    """Return ordered list of directories to search for the solver library."""
     candidates: list[Path] = []
 
     # 1. Explicit override
@@ -34,17 +46,29 @@ def _candidate_paths() -> list[Path]:
         if d:
             candidates.append(Path(d))
 
-    # 3. Common build directories relative to this file:
+    # 3. The installed-package directory itself (binary wheel layout): the
+    #    native lib is bundled next to __init__.py (and optionally in a lib/
+    #    subdir). This is what makes a binary wheel work with no source tree.
+    pkg_dir = Path(__file__).parent
+    candidates.append(pkg_dir)
+    candidates.append(pkg_dir / "lib")
+
+    # 4. Common build directories relative to this file:
     #    packages/dv-solve/src/dv_solve/lib.py
     #    → packages/dv-solve/  (up 3 levels from lib.py: dv_solve/ -> src/ ->
     #    dv-solve/). Was up 4 levels, which landed at packages/ and never found
     #    packages/dv-solve/build, so the lib only loaded via ZSP_SOLVER_PATH /
     #    LD_LIBRARY_PATH (Phase E / E4-2).
+    #    Includes the CMake install layout (build/lib, build/lib64) produced by
+    #    the ivpm-build backend's `ninja install`, as well as the bare build dir
+    #    produced by a plain `cmake -B build`.
     pkg_root = Path(__file__).parent.parent.parent
     for build_name in ("build", "_build", "build_release", "cmake-build-release"):
         candidates.append(pkg_root / build_name)
+        candidates.append(pkg_root / build_name / "lib")
+        candidates.append(pkg_root / build_name / "lib64")
 
-    # 4. pytest build dir pattern used by conftest.py
+    # 5. pytest build dir pattern used by conftest.py
     tmp_prefix = Path("/tmp")
     for d in tmp_prefix.glob("pytest-*/zsp_build*"):
         candidates.append(d)
@@ -53,14 +77,33 @@ def _candidate_paths() -> list[Path]:
 
 
 def _find_library() -> Optional[Path]:
-    """Search candidate directories and return the first .so found."""
+    """Search candidate directories and return the first matching library."""
+    patterns = _lib_patterns()
     for d in _candidate_paths():
         if not d.is_dir():
             continue
-        hits = sorted(d.glob("libdv_solve.so*"), key=lambda p: len(p.name))
-        if hits:
-            return hits[0]
+        for pattern in patterns:
+            hits = sorted(d.glob(pattern), key=lambda p: len(p.name))
+            if hits:
+                return hits[0]
     return None
+
+
+def _library_not_found_error() -> RuntimeError:
+    """Build an actionable error for when the native library is unavailable."""
+    patterns = " / ".join(_lib_patterns())
+    searched = "\n".join("  - %s" % d for d in _candidate_paths())
+    return RuntimeError(
+        "dv-solve native library (%s) not found — the solver is unavailable.\n"
+        "Searched:\n%s\n"
+        "Fixes:\n"
+        "  - Install a binary wheel:  pip install dv-solve\n"
+        "  - Build from source (needs CMake + a C compiler):\n"
+        "        cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=build\n"
+        "        ninja -C build install\n"
+        "  - Or point ZSP_SOLVER_PATH at the directory containing the library."
+        % (patterns, searched)
+    )
 
 
 def _wire_argtypes(lib: ctypes.CDLL) -> None:

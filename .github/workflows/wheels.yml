@@ -1,0 +1,98 @@
+name: Build wheels
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "src/c/**"
+      - "pyproject.toml"
+      - ".github/workflows/wheels.yml"
+
+jobs:
+  build_wheels:
+    name: ${{ matrix.os }} / ${{ matrix.archs }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: cibuildwheel builds inside a manylinux container. We build
+          # the two most-recent manylinux baselines per arch (manylinux_2_34 on
+          # AlmaLinux 9 and manylinux_2_28 on AlmaLinux 8); the image is passed
+          # via CIBW_MANYLINUX_*_IMAGE below. aarch64 builds under QEMU.
+          - os: ubuntu-latest
+            archs: x86_64
+            manylinux: manylinux_2_34
+          - os: ubuntu-latest
+            archs: x86_64
+            manylinux: manylinux_2_28
+          - os: ubuntu-latest
+            archs: aarch64
+            manylinux: manylinux_2_34
+          - os: ubuntu-latest
+            archs: aarch64
+            manylinux: manylinux_2_28
+          # macOS: cmake/ninja come from the host (Homebrew). macos-13 is the
+          # Intel runner, macos-14 the Apple-silicon runner.
+          - os: macos-13
+            archs: x86_64
+          - os: macos-14
+            archs: arm64
+          # Windows: native build using Ninja + the MSVC toolchain.
+          - os: windows-latest
+            archs: AMD64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (Linux emulated arches)
+        if: runner.os == 'Linux' && matrix.archs != 'x86_64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: Install cmake/ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+
+      # Windows: cmake is preinstalled on the runner; add ninja, and activate
+      # the MSVC environment so `cmake -G Ninja` finds cl.exe.
+      - name: Install ninja (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja --no-progress
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Pin to a recent cibuildwheel release; bump as new versions land.
+      # (manylinux_2_34 image alias requires cibuildwheel >= 2.20.)
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          CIBW_ARCHS: ${{ matrix.archs }}
+          # Overrides the pyproject default per matrix entry on Linux; ignored
+          # on macOS/Windows (empty for those entries).
+          CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.manylinux }}
+          CIBW_MANYLINUX_AARCH64_IMAGE: ${{ matrix.manylinux }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.archs }}-${{ matrix.manylinux || 'native' }}
+          path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: ./dist/*.tar.gz

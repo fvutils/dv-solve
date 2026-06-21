@@ -93,6 +93,16 @@ install(TARGETS dv_solve
     LIBRARY DESTINATION lib
 )
 
+# Public C headers → include/dv_solve (consumed by ivpm-build extra-data and by
+# in-tree C consumers). Install all dv-solve headers but exclude the vendored
+# kissat fork, whose headers are an internal implementation detail.
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/c/
+    DESTINATION include/dv_solve
+    FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "sat/kissat" EXCLUDE
+)
+
 # ------------------------------------------------------------------ #
 # Debug library (always includes contradiction analysis)              #
 # ------------------------------------------------------------------ #
