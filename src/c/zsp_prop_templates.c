@@ -11,6 +11,20 @@
 
 #define PROP_WS(p) ((PropWatchSect *)((char *)(p) + sizeof(Propagator)))
 
+/* (a * b) mod m for a, b < m, computed via a 128-bit intermediate. MSVC lacks
+ * __int128, so use the x64 _umul128/_udiv128 intrinsics there (the a,b < m
+ * precondition guarantees the 128/64 division does not overflow). */
+static inline uint64_t zsp_mulmod_u64(uint64_t a, uint64_t b, uint64_t m) {
+#if defined(_MSC_VER)
+    unsigned __int64 hi, rem;
+    unsigned __int64 lo = _umul128(a, b, &hi);
+    _udiv128(hi, lo, m, &rem);
+    return rem;
+#else
+    return (uint64_t)((unsigned __int128)a * (unsigned __int128)b % m);
+#endif
+}
+
 static int32_t i32_min(int32_t a, int32_t b) { return a < b ? a : b; }
 static int32_t i32_max(int32_t a, int32_t b) { return a > b ? a : b; }
 static int64_t i64_min(int64_t a, int64_t b) { return a < b ? a : b; }
@@ -1415,7 +1429,7 @@ static PropResult _bv_mul_back_singleton(SolveCtx *ctx, uint32_t aid,
     (void)_egcd(kg, Mg, &ix, &iy);        /* gcd is 1 by construction */
     int64_t inv = ix % (int64_t)Mg;
     if (inv < 0) inv += (int64_t)Mg;
-    uint64_t a0 = (uint64_t)(((unsigned __int128)(rr / g) * (uint64_t)inv) % Mg);
+    uint64_t a0 = zsp_mulmod_u64(rr / g, (uint64_t)inv, Mg);
 
     if (g == 1) {                         /* unique solution */
         ModIv Aiv; Aiv.start = a0 % M; Aiv.len = 1;
