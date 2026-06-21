@@ -100,10 +100,12 @@ test-command = "python {project}/tests/wheel_smoke.py"
 # AppStream; ninja is provided automatically as a build dependency (the backend
 # appends the `ninja` wheel to get_requires_for_build_wheel on non-Windows).
 #
-# Default to the newest manylinux baseline. CI (.github/workflows/wheels.yml)
+# Default to the newest manylinux baseline. Use the full quay.io image path
+# rather than the short "manylinux_2_34" alias, which older cibuildwheel
+# releases (e.g. 2.21.x) do not recognize. CI (.github/workflows/wheels.yml)
 # overrides CIBW_MANYLINUX_*_IMAGE per matrix entry to also build the previous
 # baseline (manylinux_2_28), so releases ship the two most-recent manylinux
 # versions: a build on glibc 2.28 (broad reach) and one on glibc 2.34.
-manylinux-x86_64-image = "manylinux_2_34"
-manylinux-aarch64-image = "manylinux_2_34"
+manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64"
+manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
 before-all = "dnf -y install cmake"
