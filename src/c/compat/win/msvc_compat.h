@@ -16,6 +16,13 @@
 #include <stdint.h>
 #include <sys/stat.h>   /* _S_IFMT/_S_IFDIR before we define S_IS* */
 
+/* kissat decorates some declarations with GCC __attribute__((format(...))) and
+ * ((always_inline)). MSVC has no such syntax; drop the decorations entirely.
+ * (Force-included before any header, and MSVC's own headers never use it.) */
+#ifndef __attribute__
+#define __attribute__(x)
+#endif
+
 /* ---- count-leading/trailing-zeros & friends -------------------------- */
 static __forceinline int zsp__clz32(unsigned x) {
     unsigned long i;
