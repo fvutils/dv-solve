@@ -26,9 +26,19 @@ if(MSVC)
     include_directories(${ZSP_WIN_COMPAT})
 endif()
 
+# The CLI (dv-solve-smt2) and the C unit-test executables are developer tools,
+# not part of any wheel. They also pull in POSIX-only APIs (setenv) and internal
+# data symbols that aren't exported from the DLLs, so skip them on MSVC.
+option(DV_SOLVE_BUILD_TOOLS "Build the dv-solve CLI and C test executables" ON)
+if(MSVC)
+    set(DV_SOLVE_BUILD_TOOLS OFF)
+endif()
+
+if(DV_SOLVE_BUILD_TOOLS)
 add_executable(test_kissat_smoke tests/c/test_kissat_smoke.c)
 target_link_libraries(test_kissat_smoke PRIVATE kissat)
 target_include_directories(test_kissat_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources/kissat/src)
+endif()
 # Registered with CTest below, after enable_testing().
 
 # ------------------------------------------------------------------ #
@@ -169,6 +179,8 @@ install(TARGETS dv_solve_dpi
 # SMT-LIB2 lexer test                                                 #
 # ------------------------------------------------------------------ #
 
+if(DV_SOLVE_BUILD_TOOLS)
+
 enable_testing()
 
 add_executable(test_smt2_lexer
@@ -286,3 +298,5 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_link_options(test_smt2_frontend PRIVATE -fsanitize=address)
 endif()
 add_test(NAME test_smt2_frontend COMMAND test_smt2_frontend)
+
+endif()  # DV_SOLVE_BUILD_TOOLS
