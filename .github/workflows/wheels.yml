@@ -12,6 +12,12 @@ on:
       - "pyproject.toml"
       - ".github/workflows/wheels.yml"
 
+# Cancel an in-progress run when a newer commit is pushed to the same ref,
+# so superseded (slow, emulated) builds don't keep burning CI minutes.
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build_wheels:
     name: linux ${{ matrix.archs }} / ${{ matrix.mltag }}
@@ -51,9 +57,10 @@ jobs:
         with:
           platforms: all
 
-      # Pin to a recent cibuildwheel release; bump as new versions land.
+      # cibuildwheel >= 3.0 dropped EOL CPython 3.8, which the manylinux_2_34
+      # image no longer ships; older releases crash probing it. Bump as needed.
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21.3
+        uses: pypa/cibuildwheel@v4.1.0
         env:
           CIBW_ARCHS: ${{ matrix.archs }}
           CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.image }}
