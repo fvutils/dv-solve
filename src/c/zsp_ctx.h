@@ -189,6 +189,15 @@ int solver_checkpoint(SolveCtx *ctx);
  */
 void solver_restore(SolveCtx *ctx, uint32_t cp);
 
+/**
+ * Install a custom value-selection callback (e.g. the cost-guided selector).
+ * Passing fn=NULL restores the default selection order. (Defined in zsp_ctx.c;
+ * called from zsp_costguided.c.)
+ */
+void solver_set_value_selector(SolveCtx *ctx,
+                               int64_t (*fn)(SolveCtx *, uint32_t, void *),
+                               void *data);
+
 /* ------------------------------------------------------------------ */
 /* Accessor wrappers (thin C functions for ctypes compatibility)       */
 /*                                                                     */

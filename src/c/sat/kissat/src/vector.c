@@ -8,6 +8,7 @@
 
 #include <inttypes.h>
 #include <stddef.h>
+#include <string.h>  /* memcpy/memset/memmove */
 
 #ifndef COMPACT
 
