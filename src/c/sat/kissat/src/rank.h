@@ -33,7 +33,9 @@
     const size_t WIDTH_RADIX = (1 << LENGTH_RADIX); \
     const RTYPE MASK_RADIX = WIDTH_RADIX - 1; \
 \
-    size_t COUNT_RADIX[WIDTH_RADIX]; \
+    /* Literal bound (== WIDTH_RADIX) so this is a constant expression, not a \
+     * C VLA — MSVC's C compiler rejects VLAs. */ \
+    size_t COUNT_RADIX[1 << 8]; \
 \
     VTYPE *TMP_RADIX = 0; \
     const size_t BYTES_TMP_RADIX = N_RADIX * sizeof (VTYPE); \
