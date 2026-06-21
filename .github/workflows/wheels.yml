@@ -19,30 +19,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # TEMP: macOS validation run. The Linux + sdist jobs are disabled below
-  # (if: false) for fast turnaround; re-enable them once macOS is confirmed.
-  build_macos:
-    name: macos ${{ matrix.archs }}
-    runs-on: ${{ matrix.runner }}
+  # TEMP: Windows validation run. The Linux + sdist jobs are disabled below
+  # (if: false) for fast turnaround; re-enable them once Windows is confirmed.
+  build_windows:
+    name: windows ${{ matrix.archs }}
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13   # Intel
-            archs: x86_64
-          - runner: macos-14   # Apple silicon
-            archs: arm64
+          - archs: AMD64
     steps:
       - uses: actions/checkout@v4
-      - name: Install cmake/ninja
-        run: brew install cmake ninja
+      - name: Install ninja
+        run: choco install ninja --no-progress
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.0
         env:
           CIBW_ARCHS: ${{ matrix.archs }}
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.archs }}
+          name: wheels-windows-${{ matrix.archs }}
           path: ./wheelhouse/*.whl
 
   build_wheels:

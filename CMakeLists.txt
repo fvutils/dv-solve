@@ -6,11 +6,25 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Export all symbols from the shared libraries on Windows so the ctypes loader
+# can resolve them (MSVC exports nothing by default). No effect on ELF/Mach-O.
+set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+
 # ------------------------------------------------------------------ #
 # Vendored SAT solver (kissat) — Phase B.0                            #
 # ------------------------------------------------------------------ #
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/kissat.cmake)
+
+# MSVC portability for the dv-solve C sources (applies to every target defined
+# below — libraries, the CLI and the C tests). ZSP_WIN_COMPAT is set in
+# kissat.cmake. Force-includes the builtins/stat shim and puts the POSIX shim
+# headers on the include path; kissat handles its own flags above.
+if(MSVC)
+    add_compile_options(/FI${ZSP_WIN_COMPAT}/msvc_compat.h /wd4244 /wd4267 /wd4146)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS WIN32_LEAN_AND_MEAN)
+    include_directories(${ZSP_WIN_COMPAT})
+endif()
 
 add_executable(test_kissat_smoke tests/c/test_kissat_smoke.c)
 target_link_libraries(test_kissat_smoke PRIVATE kissat)
@@ -90,7 +104,9 @@ endif()
 # ------------------------------------------------------------------ #
 
 install(TARGETS dv_solve
-    LIBRARY DESTINATION lib
+    LIBRARY DESTINATION lib        # .so/.dylib (Unix)
+    RUNTIME DESTINATION lib        # .dll (Windows)
+    ARCHIVE DESTINATION lib        # import .lib (Windows)
 )
 
 # Public C headers → include/dv_solve (consumed by ivpm-build extra-data and by
@@ -123,6 +139,8 @@ endif()
 
 install(TARGETS dv_solve_debug
     LIBRARY DESTINATION lib
+    RUNTIME DESTINATION lib
+    ARCHIVE DESTINATION lib
 )
 
 # ------------------------------------------------------------------ #
@@ -143,6 +161,8 @@ target_compile_definitions(dv_solve_dpi PRIVATE)
 
 install(TARGETS dv_solve_dpi
     LIBRARY DESTINATION lib
+    RUNTIME DESTINATION lib
+    ARCHIVE DESTINATION lib
 )
 
 # ------------------------------------------------------------------ #
