@@ -46,7 +46,11 @@ static uint64_t _rand64(SolveCtx *ctx) {
 
 /* Return a random integer in [lo, hi] (inclusive), 64-bit range. */
 static int64_t _rand_range64(SolveCtx *ctx, int64_t lo, int64_t hi) {
+    /* `hi - lo` is correct modulo 2^64 for both signed and unsigned bound
+     * patterns. When the domain is the full 64-bit range, span wraps to 0
+     * (2^64 mod 2^64): pick any 64-bit value (and avoid a div-by-zero). */
     uint64_t span = (uint64_t)(hi - lo) + 1u;
+    if (span == 0u) return (int64_t)_rand64(ctx);
     return lo + (int64_t)(_rand64(ctx) % span);
 }
 
@@ -88,10 +92,19 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
 
     uint32_t best         = EXPR_NULL;
     int64_t  best_dom     = INT64_MAX;
+    uint32_t n_best       = 0;       /* # real vars tied at best_dom (reservoir) */
     uint32_t best_aux     = EXPR_NULL;
     int64_t  best_aux_dom = INT64_MAX;
 
-    /* Use bitmask for fast scan when <= 64 vars */
+    /* MRV (minimum remaining values) with a *randomized* tie-break: among the
+     * unassigned real variables that share the smallest domain, pick one
+     * uniformly at random (reservoir sampling). A fixed (lowest-index)
+     * tie-break makes the same variable the first decision every solve, so its
+     * marginal is uniform but every other variable is sampled over a
+     * conditional (skewed) domain — e.g. under `a < b`, `a` (var 0) is always
+     * decided first, starving `b`'s low values. Random tie-breaking gives every
+     * variable a fair turn at being decided first, so all marginals become
+     * uniform-ish and coverage follows the n·log(n) coupon-collector bound. */
     if (ctx->n_vars <= 64 && ctx->unassigned_mask != 0) {
         uint64_t m = ctx->unassigned_mask;
         while (m) {
@@ -103,20 +116,18 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
             if (lo == hi) continue;  /* singleton -- already assigned */
             int64_t dom = hi - lo;
             if (v->flags & VAR_AUX) {
-                /* Aux is a low-priority decision: prefer real vars first.
-                 * Only fall back to aux when propagation has been unable
-                 * to pin every aux on its own. */
-                if (dom < best_aux_dom) {
-                    best_aux_dom = dom;
-                    best_aux     = i;
-                }
+                /* Aux is a low-priority decision: prefer real vars first. */
+                if (dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
             }
             if (dom < best_dom) {
-                best_dom = dom;
-                best     = i;
-                if (dom == 1) break;
+                best_dom = dom; best = i; n_best = 1;
+            } else if (ctx->fair_pick && dom == best_dom) {
+                /* uniform mode: reservoir-sample among smallest-domain vars */
+                n_best++;
+                if ((_rand64(ctx) % n_best) == 0) best = i;
             }
+            /* fast mode: keep the first (lowest-index) smallest-domain var */
         }
     } else {
         for (uint32_t i = 0; i < ctx->n_vars; i++) {
@@ -126,17 +137,17 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
             if (lo == hi) continue;
             int64_t dom = hi - lo;
             if (v->flags & VAR_AUX) {
-                if (dom < best_aux_dom) {
-                    best_aux_dom = dom;
-                    best_aux     = i;
-                }
+                if (dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
             }
             if (dom < best_dom) {
-                best_dom = dom;
-                best     = i;
-                if (dom == 1) break;
+                best_dom = dom; best = i; n_best = 1;
+            } else if (ctx->fair_pick && dom == best_dom) {
+                /* uniform mode: reservoir-sample among smallest-domain vars */
+                n_best++;
+                if ((_rand64(ctx) % n_best) == 0) best = i;
             }
+            /* fast mode: keep the first (lowest-index) smallest-domain var */
         }
     }
     if (best != EXPR_NULL) return best;
@@ -232,13 +243,30 @@ static int64_t _pick_avoiding_holes(SolveCtx *ctx, uint32_t var_id,
         if (!_is_hole(ctx, var_id, v)) return v;
     }
 
-    /* Fallback: walk the domain linearly to find a valid value */
-    for (int64_t v = lo; v <= hi; v++) {
-        if (!_is_hole(ctx, var_id, v)) return v;
+    /* Fallback: rejection sampling failed (the feasible set is a small fraction
+     * of [lo,hi], e.g. a domain of {0,255} with 254 holes). Pick a
+     * *uniformly-random* non-hole value rather than the first one. The old code
+     * walked from lo and returned the first valid value, which biased selection
+     * hard toward lo (a {0,255} domain returned 0 ~99% of the time). Count the
+     * valid values and select the k-th, advancing through the sorted hole list
+     * in O(#holes). */
+    uint64_t n_total = (uint64_t)(hi - lo) + 1;
+    uint32_t n_holes = _count_holes_in_range(ctx, var_id, lo, hi);
+    if ((uint64_t)n_holes >= n_total) return lo;  /* all holes (shouldn't happen) */
+    uint64_t k = _rand64(ctx) % (n_total - (uint64_t)n_holes);  /* k-th valid */
+    int64_t cur = lo;
+    uint32_t hoff = ctx->var_holes_head[var_id];
+    while (hoff != 0) {
+        const HoleEntry *he = (const HoleEntry *)zsp_pool_ptr(&ctx->pool, hoff);
+        if (he->value < lo) { hoff = he->next; continue; }
+        if (he->value > hi) break;
+        uint64_t gap = (uint64_t)(he->value - cur);  /* valid count in [cur, hole) */
+        if (k < gap) return cur + (int64_t)k;
+        k -= gap;
+        cur = he->value + 1;
+        hoff = he->next;
     }
-
-    /* All values are holes (shouldn't happen if exclude checked domain) */
-    return lo;
+    return cur + (int64_t)k;
 }
 
 static int64_t _pick_value(SolveCtx *ctx, uint32_t var_id,
@@ -246,10 +274,14 @@ static int64_t _pick_value(SolveCtx *ctx, uint32_t var_id,
     int64_t lo = var_lo64(ctx, &ctx->vars[var_id]);
     int64_t hi = var_hi64(ctx, &ctx->vars[var_id]);
 
-    /* Phase saving: try the last saved value if still in domain. */
+    /* Phase saving: try the last saved value if still in domain. Sign-aware
+     * so an unsigned upper-half saved value is range-checked correctly (a
+     * signed compare could return an out-of-domain value). */
     if (opts && opts->use_phase_save && ctx->phase_save) {
+        const Variable *v = &ctx->vars[var_id];
         int64_t ps = ctx->phase_save[var_id];
-        if (ps >= lo && ps <= hi && !_is_hole(ctx, var_id, ps))
+        if (!var_b_lt(v, ps, lo) && !var_b_gt(v, ps, hi)
+                && !_is_hole(ctx, var_id, ps))
             return ps;
     }
 
@@ -272,6 +304,9 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     /* Seed or preserve RNG. */
     if (opts && opts->seed != 0) ctx->rng_state = opts->seed;
     if (ctx->rng_state == 0)     ctx->rng_state = 0xDEADBEEF12345678ULL;
+
+    /* Decision-variable tie-break mode for this solve (default fast). */
+    ctx->fair_pick = (opts && opts->fair_pick) ? 1 : 0;
 
     /* Lazy LCG initialization on first solve when use_lcg is requested. */
     if (opts && opts->use_lcg && !ctx->lcg && ctx->n_vars > 0) {
@@ -326,9 +361,13 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     if (solver_propagate(ctx) == PROP_CONFLICT) return SOLVE_UNSAT;
 
     /* Check for domains that became empty before search (e.g. from
-     * conflicting bounds imposed externally before solver_solve). */
+     * conflicting bounds imposed externally before solver_solve).
+     * Sign-aware: an unsigned domain straddling 2^63 (lo < 2^63 <= hi)
+     * has lo "positive" and hi "negative" as int64, so a bare `lo > hi`
+     * would wrongly call it empty. */
     for (uint32_t i = 0; i < ctx->n_vars; i++) {
-        if (var_lo64(ctx, &ctx->vars[i]) > var_hi64(ctx, &ctx->vars[i]))
+        const Variable *vi = &ctx->vars[i];
+        if (var_b_gt(vi, var_lo64(ctx, vi), var_hi64(ctx, vi)))
             return SOLVE_UNSAT;
     }
 
@@ -483,23 +522,30 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
             /* Backtrack to the previous level */
             trail_backtrack(ctx, cur - 1);
 
-            /* Exclude `val` from dv's domain at the previous level */
-            int64_t dlo = var_lo64(ctx, &ctx->vars[dv]);
-            int64_t dhi = var_hi64(ctx, &ctx->vars[dv]);
-            if (dlo > dhi) {
+            /* Exclude `val` from dv's domain at the previous level.
+             * Sign-aware ordering so an unsigned domain in/across the upper
+             * half is split correctly (a signed compare/midpoint would mis-
+             * order it and either declare it empty or bisect the wrong way). */
+            const Variable *dvv = &ctx->vars[dv];
+            int64_t dlo = var_lo64(ctx, dvv);
+            int64_t dhi = var_hi64(ctx, dvv);
+            if (var_b_gt(dvv, dlo, dhi)) {
                 /* Domain already empty after backtrack — propagate conflict up */
                 pr = PROP_CONFLICT;
-            } else if (val <= dlo) {
+            } else if (!var_b_gt(dvv, val, dlo)) {  /* val <= dlo */
                 pr = ctx_tighten_lb64(ctx, dv, dlo + 1);
-            } else if (val >= dhi) {
+            } else if (!var_b_lt(dvv, val, dhi)) {  /* val >= dhi */
                 pr = ctx_tighten_ub64(ctx, dv, dhi - 1);
             } else {
                 /* Middle value: two-phase domain bisection.
                  * Split at the midpoint of [dlo, dhi] (not at val)
                  * for systematic, logarithmic-depth exploration.
                  * Phase 1: explore lower half [dlo, mid].
-                 * Phase 2: explore upper half [mid+1, dhi]. */
-                int64_t mid = dlo + (dhi - dlo) / 2;
+                 * Phase 2: explore upper half [mid+1, dhi].
+                 * Unsigned-safe midpoint (avoids signed overflow and a
+                 * negative half-width when the span exceeds 2^63). */
+                int64_t mid = (int64_t)((uint64_t)dlo +
+                                        (((uint64_t)dhi - (uint64_t)dlo) >> 1));
                 if (!d->tried_lower) {
                     d->tried_lower = 1;
                     pr = ctx_tighten_ub64(ctx, dv, mid);
@@ -520,14 +566,130 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     }
 }
 
+/* Pin every *inactive* soft assumption (mask bit clear) to its var=[0,0] so a
+ * reset + re-solve enforces exactly the current kept-soft set. Active assumptions
+ * are left at [1,1] by solver_reset. Factored out of the relaxation loop so the
+ * additive re-add refinement below can reuse the identical pinning. */
+static void _pin_inactive_assumptions(SolveCtx *ctx) {
+    for (uint32_t i = 0; i < ctx->n_assumptions; i++) {
+        if (!(ctx->assumption_active_mask & (1ULL << i))) {
+            uint32_t av = ctx->assumption_var_ids[i];
+            Variable *v = &ctx->vars[av];
+            v->lo = 0; v->hi = 0;
+            if (av < 64)
+                ctx->unassigned_mask &= ~(1ULL << av);
+        }
+    }
+}
+
+/* Additive re-add refinement (soft soundness).
+ *
+ * The subtractive loop in solver_solve stops at the *first* satisfiable kept-soft
+ * set: on each UNSAT it drops the lowest-preference (highest priority *value*)
+ * active soft. To reach a genuinely-conflicting higher-preference soft it may walk
+ * past — and shed — satisfiable lower-preference softs as collateral, returning a
+ * model that needlessly violates them (the intermittent test_soft_nested failure,
+ * locked by tests/unit/test_soft.py::test_soft_no_collateral_drop_primary).
+ *
+ * Recover that collateral: re-add each currently-dropped soft, highest preference
+ * (lowest priority value) first, committing any whose re-activation keeps the
+ * problem SAT. This makes the primary keep the same maximal priority-respecting
+ * set the BV-SAT serve path's additive greedy keeps (primary == serve).
+ *
+ * It never visits the all-relaxed state (≥1 soft stays active in every trial), so
+ * it sidesteps the "pin all assumption vars to 0 → re-solve spuriously UNSAT"
+ * engine quirk that blocks a from-scratch additive primary. Monotonic: it only
+ * ever re-activates softs, so it cannot worsen the subtractive result. Bounded by
+ * the (≤64) assumption count, and only runs when a relaxation actually occurred
+ * (soft conflict present), so the common no-conflict hot path is untouched. */
+static void _refine_readd_softs(SolveCtx *ctx, const SolveOpts *opts) {
+    uint32_t na = ctx->n_assumptions;
+    if (na > 64) na = 64;            /* assumption_active_mask is 64-bit */
+    uint64_t tried = 0;              /* dropped softs already attempted   */
+    for (;;) {
+        /* Pick the not-yet-tried, currently-inactive soft with the smallest
+         * priority value (= highest preference). */
+        int best = -1;
+        uint32_t best_pri = 0;
+        for (uint32_t i = 0; i < na; i++) {
+            uint64_t bit = (1ULL << i);
+            if ((ctx->assumption_active_mask & bit) || (tried & bit))
+                continue;
+            if (best < 0 || ctx->assumption_priorities[i] < best_pri) {
+                best_pri = ctx->assumption_priorities[i];
+                best = (int)i;
+            }
+        }
+        if (best < 0)
+            break;
+        tried |= (1ULL << best);
+
+        uint64_t saved = ctx->assumption_active_mask;
+        ctx->assumption_active_mask |= (1ULL << best);
+        solver_reset(ctx);
+        _pin_inactive_assumptions(ctx);
+        if (solver_propagate(ctx) == PROP_CONFLICT ||
+                _solver_solve_core(ctx, opts) != SOLVE_OK) {
+            ctx->assumption_active_mask = saved;   /* keep it dropped */
+        }
+    }
+    /* Materialize the final accepted set: the last trial may have been a revert,
+     * leaving stale search state. The final mask was proven SAT, so this resolves. */
+    solver_reset(ctx);
+    _pin_inactive_assumptions(ctx);
+    solver_propagate(ctx);
+    _solver_solve_core(ctx, opts);
+}
+
 /* ------------------------------------------------------------------ */
 /* solver_solve — wrapper with assumption relaxation                   */
 /* ------------------------------------------------------------------ */
 
 SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
+    /* Re-activate all soft assumptions at entry. solver_reset() restores the
+     * assumption vars to [1,1] but does NOT touch assumption_active_mask, so on a
+     * RE-SOLVE of a reused ctx (the backend's plan-reuse path) the mask would
+     * still carry the previous call's relaxations — the conflict then relaxes the
+     * remaining kept soft and drops the whole set. Resetting the mask here makes
+     * each solve start from the full soft set, matching a fresh compile. The
+     * assumption vars are already [1,1] (compile or solver_reset restored them);
+     * any var the previous call pinned to [0,0] was a direct live-write that
+     * solver_reset has since undone from initial_vars. */
+    if (ctx->n_assumptions > 0) {
+        uint32_t na = ctx->n_assumptions;
+        ctx->assumption_active_mask =
+            (na >= 64) ? ~0ULL : ((1ULL << na) - 1);
+    }
+    /* Subtractive MaxSAT relaxation: drop the lowest-preference (highest priority
+     * value) active soft on each UNSAT, re-propagate, retry.
+     *
+     * On its own this can shed a *satisfiable* lower-preference soft as collateral
+     * when walking down to a conflicting higher-preference sibling, returning a
+     * model that needlessly violates it (the intermittent test_soft_nested bug). To
+     * keep the same maximal priority-respecting set the serve path's additive greedy
+     * keeps, the SAT exit below runs _refine_readd_softs() to greedily re-add the
+     * dropped softs — recovering the collateral. The refinement re-adds one soft at
+     * a time (never the all-relaxed state), so it sidesteps the engine quirk
+     * (pinning ALL assumption vars to 0 + re-solve spuriously UNSATs for >1 soft)
+     * that blocks a from-scratch additive primary. See
+     * dv_solve_soft_constraints_engine_plan.md DSE-3 follow-up and the locks
+     * tests/unit/test_soft.py::test_soft_no_collateral_drop_primary +
+     * test_soft_maxsat_serve::test_serve_soft_no_collateral_drop.
+     *
+     * (Residual: a `!=` soft compiles via the generic guard-gated path whose
+     * compile-time tightening doesn't fully undo on relaxation, so an all-`!=`
+     * conflict can still spurious-UNSAT here; that is safe — the backend escalates
+     * such a primary non-OK to the complete BV-SAT engine.) */
+    int relaxed_any = 0;
     for (;;) {
         SolveResult res = _solver_solve_core(ctx, opts);
-        if (res == SOLVE_OK) return res;
+        if (res == SOLVE_OK) {
+            /* If we shed any soft to get here, the subtractive walk may have
+             * dropped satisfiable softs as collateral; recover them greedily. */
+            if (relaxed_any)
+                _refine_readd_softs(ctx, opts);
+            return res;
+        }
 
         /* Check if we can relax a soft constraint assumption */
         if (ctx->n_assumptions == 0 || ctx->assumption_active_mask == 0)
@@ -550,6 +712,7 @@ SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
 
         /* Relax this assumption */
         ctx->assumption_active_mask &= ~(1ULL << worst_idx);
+        relaxed_any = 1;
 
         /* Reset solver to post-compile state */
         solver_reset(ctx);
@@ -559,15 +722,7 @@ SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
          * at [1,1] after reset, and tightening UB to 0 would create
          * an empty domain [1,0] -> conflict. Direct writes are safe
          * here since we're at level 0 before search begins. */
-        for (uint32_t i = 0; i < ctx->n_assumptions; i++) {
-            if (!(ctx->assumption_active_mask & (1ULL << i))) {
-                uint32_t av = ctx->assumption_var_ids[i];
-                Variable *v = &ctx->vars[av];
-                v->lo = 0; v->hi = 0;
-                if (av < 64)
-                    ctx->unassigned_mask &= ~(1ULL << av);
-            }
-        }
+        _pin_inactive_assumptions(ctx);
 
         /* Propagate the relaxations before retrying */
         if (solver_propagate(ctx) == PROP_CONFLICT) {
@@ -602,33 +757,32 @@ void solver_reset(SolveCtx *ctx) {
 
     uint32_t n = ctx->initial_n_vars;
 
-    /* Restore variable domains */
-    memcpy(ctx->vars, ctx->initial_vars, n * sizeof(Variable));
-
-    /* Also restore tier-1 wide bounds from the saved copy.
-     * The initial_vars have holes_offset pointing to WideBounds64 structs
-     * in the pool. We need to restore those too. For tier-1 vars, the
-     * WideBounds64 is allocated after initial_vars in the pool. We saved
-     * WideBounds64 values inside initial_vars[].holes_offset locations. */
-    /* Since we saved the Variable array which contains the holes_offset
-     * pointers, and the WideBounds64 data lives at those offsets in the
-     * same pool, we need to restore the WideBounds64 contents too. */
-    /* We saved initial WideBounds64 values in a separate region. */
-    /* Actually, let me take a simpler approach: save the entire relevant
-     * pool region. For now, just restore the Variable array and re-init
-     * the wide bounds from the initial_vars' lo/hi data. */
-    /* Correction: initial_vars[] was saved with correct holes_offset values.
-     * The WideBounds64 data at those offsets has been modified by solving.
-     * We need to also save/restore the WideBounds64 data. */
-    /* For simplicity: iterate vars and restore wide bounds from initial_vars. */
+    /* Restore variable domains.
+     *
+     * For tier-0 vars the bounds (lo/hi) live in the Variable struct, so a plain
+     * copy restores them. For tier-1 vars (33–64 bit, incl. unsigned-32) the
+     * bounds live in a pooled WideBounds64 referenced by `holes_offset`, and
+     * compile saved a *separate* pristine copy (initial_vars[i].holes_offset
+     * points at that copy). The correct restore is: copy the pristine bounds
+     * back into the var's *live* WideBounds64 and keep the var pointing at the
+     * live struct.
+     *
+     * The previous implementation memcpy'd the whole Variable array, which
+     * repointed each tier-1 var's holes_offset at the *saved* copy. That made
+     * the wide-bounds "restore" a self-copy no-op, and—worse—the next solve then
+     * mutated the saved copy, so reset only worked once: tier-1 vars stayed
+     * pinned to their first solved value on every subsequent reset. */
     for (uint32_t i = 0; i < n; i++) {
-        Variable *v = &ctx->vars[i];
+        Variable *v  = &ctx->vars[i];
         Variable *iv = &ctx->initial_vars[i];
-        if (VAR_IS_TIER1(v->flags) && v->holes_offset != 0) {
-            WideBounds64 *wb = (WideBounds64 *)zsp_pool_ptr(&ctx->pool, v->holes_offset);
-            WideBounds64 *iwb = (WideBounds64 *)zsp_pool_ptr(&ctx->pool, iv->holes_offset);
-            wb->lo = iwb->lo;
-            wb->hi = iwb->hi;
+        uint32_t live_off = v->holes_offset;
+        int tier1 = VAR_IS_TIER1(v->flags) && live_off != 0 && iv->holes_offset != 0;
+        *v = *iv;   /* restore lo/hi/flags/width (and holes_offset := saved copy) */
+        if (tier1) {
+            WideBounds64 *saved = (WideBounds64 *)zsp_pool_ptr(&ctx->pool, iv->holes_offset);
+            WideBounds64 *live  = (WideBounds64 *)zsp_pool_ptr(&ctx->pool, live_off);
+            *live = *saved;              /* live wide bounds back to pristine */
+            v->holes_offset = live_off;  /* keep the var on its live struct */
         }
     }
 
@@ -727,7 +881,8 @@ int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
     opts.max_restarts   = 10000;
     opts.use_phase_save = 0;
     opts.use_lcg = 0;
-    opts._pad[0] = opts._pad[1] = 0;
+    opts.fair_pick = 1;   /* batch solve_n is for diverse solutions → uniform */
+    opts._pad[0] = 0;
     opts.max_shave_iters = max_shave_iters;
 
     int n_ok = 0;

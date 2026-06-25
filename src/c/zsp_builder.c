@@ -367,6 +367,29 @@ ExprRef builder_expr_in_set(SolveProblemBuilder *b, ExprRef value,
     return ref;
 }
 
+ExprRef builder_expr_in_ranges(SolveProblemBuilder *b, ExprRef value,
+                               uint32_t n_ranges, const ExprRef *los,
+                               const ExprRef *his) {
+    uint32_t total = (uint32_t)sizeof(ExprInRanges) +
+                     2u * n_ranges * (uint32_t)sizeof(ExprRef);
+    ExprRef ref = builder_alloc(b, total, (uint32_t)_Alignof(ExprInRanges));
+    if (ref == EXPR_NULL) return EXPR_NULL;
+
+    uint32_t voff = ref - POOL_HEADER_SZ;
+    uint32_t local = voff - b->current->base_offset;
+    ExprInRanges *n = (ExprInRanges *)_block_ptr_at(b->current, local);
+    n->kind     = EXPR_IN_RANGES;
+    n->value    = value;
+    n->n_ranges = n_ranges;
+    ExprRef *lo_dst = (ExprRef *)(n + 1);
+    ExprRef *hi_dst = lo_dst + n_ranges;
+    for (uint32_t i = 0; i < n_ranges; i++) {
+        lo_dst[i] = los[i];
+        hi_dst[i] = his[i];
+    }
+    return ref;
+}
+
 ExprRef builder_expr_extend(SolveProblemBuilder *b, ExprRef operand,
                             uint8_t from_bits, uint8_t to_bits,
                             uint8_t sign_extend) {

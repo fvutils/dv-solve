@@ -180,12 +180,22 @@ static int _compile_var_const_cmp(SolveCtx *ctx, BinOp op,
         if (ctx_tighten_ub64(ctx, vid, cv) == PROP_CONFLICT) return -1;
         return 1;
     case BIN_LT:
+        /* `v < cv`: empty when cv <= var_min.  Guard here (and not just via
+         * cv-1) so the edge is caught even when cv-1 would underflow.
+         * Sign-aware so an unsigned upper-half constant is not misread. */
+        if (!var_b_gt(&ctx->vars[vid], cv, var_repr_min(&ctx->vars[vid])))
+            return -1;  /* cv <= var_min: UNSAT */
         if (ctx_tighten_ub64(ctx, vid, cv - 1) == PROP_CONFLICT) return -1;
         return 1;
     case BIN_GTE:
         if (ctx_tighten_lb64(ctx, vid, cv) == PROP_CONFLICT) return -1;
         return 1;
     case BIN_GT:
+        /* `v > cv`: empty when cv >= var_max.  Guard here (and not just via
+         * cv+1) so the edge is caught even when cv+1 would overflow.
+         * Sign-aware so an unsigned upper-half constant is not misread. */
+        if (!var_b_lt(&ctx->vars[vid], cv, var_repr_max(&ctx->vars[vid])))
+            return -1;  /* cv >= var_max: UNSAT */
         if (ctx_tighten_lb64(ctx, vid, cv + 1) == PROP_CONFLICT) return -1;
         return 1;
     default:
@@ -623,13 +633,38 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
     if (r_w >= 1 && r_w <= 63 &&
         (has_var_const || has_const_var) &&
         binop->op == BIN_ADD) {
-        uint64_t M = (uint64_t)1 << r_w;
-        uint64_t cmask = M - 1;
-        uint64_t c_red = (uint64_t)cv & cmask;
         /* r = (x + c) mod M; commutative so const-var is the same */
         uint32_t x_id = has_var_const ? a_id : b_id;
-        prop_add_bvadd_const_64(ctx, r_id, x_id, c_red, (uint8_t)r_w, 0);
-        return 1;
+        /* bvadd_const's modular arithmetic assumes UNSIGNED storage (the stored
+         * bound equals the residue). For a SIGNED var the stored bound is the
+         * signed value, so the residue math produces out-of-range bounds; at
+         * width 32 those overflow the int32 tier-0 storage and the propagator
+         * oscillates forever (a search/propagation runaway). Use it only when
+         * both the result and the variable operand are unsigned; otherwise fall
+         * through to the general path, where the constant is promoted to a
+         * singleton var and the signed-correct var-var modular add applies. */
+        if (!(ctx->vars[r_id].flags & VAR_SIGNED) &&
+            !(ctx->vars[x_id].flags & VAR_SIGNED)) {
+            uint64_t M = (uint64_t)1 << r_w;
+            uint64_t c_red = (uint64_t)cv & (M - 1);
+            prop_add_bvadd_const_64(ctx, r_id, x_id, c_red, (uint8_t)r_w, 0);
+            return 1;
+        }
+    }
+
+    /* Modular fixed-width var-var ADD/SUB/MUL/LSHIFT (widths 1..63):
+     * route through the wrap-aware bit-vector propagators so that results
+     * that exceed the result width wrap mod 2^width (sound 2's-complement
+     * semantics) for both signed and unsigned result variables. Width 64
+     * and the bitwise/div/mod cases keep the legacy bounds propagators. */
+    if (r_w >= 1 && r_w <= 63) {
+        switch (binop->op) {
+        case BIN_ADD:    prop_add_bvadd_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case BIN_SUB:    prop_add_bvsub_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case BIN_MUL:    prop_add_bvmul_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case BIN_LSHIFT: prop_add_bvshl_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        default: break;
+        }
     }
 
     int wide = _var_needs_wide(ctx, r_id) ||
@@ -2150,6 +2185,35 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
         }
 
         uint32_t ref = prop_add_in_set_32(ctx, vid, ne, vals, 0);
+        return (ref != EXPR_NULL) ? 1 : 0;
+    }
+
+    /* ---- EXPR_IN_RANGES: value in [lo0,hi0] U ... U [lo{n-1},hi{n-1}] ---- */
+    if (k == EXPR_IN_RANGES) {
+        ExprInRanges *eir = (ExprInRanges *)zsp_pool_ptr(&sp->pool, root);
+        uint32_t vid;
+        if (!_is_var(sp, eir->value, &vid)) return 0;
+        vid = _resolve(ctx, vid);
+        uint32_t nr = eir->n_ranges;
+        if (nr == 0) return -1;  /* empty union -> UNSAT */
+
+        ExprRef *lo_refs = (ExprRef *)(eir + 1);
+        ExprRef *hi_refs = lo_refs + nr;
+        int64_t *los = (int64_t *)__builtin_alloca(nr * sizeof(int64_t));
+        int64_t *his = (int64_t *)__builtin_alloca(nr * sizeof(int64_t));
+        for (uint32_t i = 0; i < nr; i++) {
+            if (!_is_const(sp, lo_refs[i], &los[i])) return 0;
+            if (!_is_const(sp, hi_refs[i], &his[i])) return 0;
+        }
+
+        /* A single range degenerates to plain bound tightening (and lets the
+         * value picker use the contiguous interval directly). */
+        if (nr == 1) {
+            if (ctx_tighten_lb64(ctx, vid, los[0]) == PROP_CONFLICT) return -1;
+            if (ctx_tighten_ub64(ctx, vid, his[0]) == PROP_CONFLICT) return -1;
+            return 1;
+        }
+        uint32_t ref = prop_add_in_ranges_64(ctx, vid, nr, los, his, 0);
         return (ref != EXPR_NULL) ? 1 : 0;
     }
 

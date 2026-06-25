@@ -25,7 +25,18 @@
 typedef struct {
     int64_t  value;
     uint16_t width;
+    uint8_t  is_signed;   /* operand should be interpreted as signed */
 } EvalVal;
+
+/* Interpret the low `w` bits of `u` as a 2's-complement signed value. */
+static int64_t _sext(uint64_t u, uint16_t w) {
+    if (w == 0 || w >= 64) return (int64_t)u;
+    uint64_t m = ((uint64_t)1 << w) - 1;
+    u &= m;
+    if (u & ((uint64_t)1 << (w - 1)))
+        u |= ~m;
+    return (int64_t)u;
+}
 
 /* Walk an expression tree and check whether it references any aux var
  * whose current domain is wider than a singleton. Such a constraint may
@@ -99,7 +110,7 @@ static int _eval_ok(const SolveCtx *ctx, const SolveProblem *sp,
 
 static EvalVal _eval(const SolveCtx *ctx, const SolveProblem *sp,
                       ExprRef ref, int *skip) {
-    EvalVal r = { 0, 0 };
+    EvalVal r = { 0, 0, 0 };
     if (*skip) return r;
     if (ref == EXPR_NULL) { *skip = 1; return r; }
 
@@ -124,6 +135,7 @@ static EvalVal _eval(const SolveCtx *ctx, const SolveProblem *sp,
         const Variable *v = &ctx->vars[resolved];
         r.value = var_lo64(ctx, v);
         r.width = ctx->vars[ev->var_id].width;  /* width from declared var */
+        r.is_signed = (v->flags & VAR_SIGNED) != 0;
         return r;
     }
     case EXPR_BINARY: {
@@ -135,14 +147,31 @@ static EvalVal _eval(const SolveCtx *ctx, const SolveProblem *sp,
         uint64_t mask = _mask_for(w);
         uint64_t ua = (uint64_t)a.value & mask;
         uint64_t ub = (uint64_t)b.value & mask;
+        int sgn = a.is_signed || b.is_signed;
         switch (eb->op) {
-        case BIN_ADD: r.value = (int64_t)((ua + ub) & mask); r.width = w; return r;
-        case BIN_SUB: r.value = (int64_t)((ua - ub) & mask); r.width = w; return r;
-        case BIN_MUL: r.value = (int64_t)((ua * ub) & mask); r.width = w; return r;
+        case BIN_ADD: r.value = (int64_t)((ua + ub) & mask); r.width = w; r.is_signed = sgn; return r;
+        case BIN_SUB: r.value = (int64_t)((ua - ub) & mask); r.width = w; r.is_signed = sgn; return r;
+        case BIN_MUL: r.value = (int64_t)((ua * ub) & mask); r.width = w; r.is_signed = sgn; return r;
         case BIN_DIV:
+            /* Signed: SV-truncated division (toward zero). C99 '/' truncates
+             * toward zero, so operate on the sign-extended values directly. */
+            if (sgn) {
+                int64_t sb = _sext(ub, w);
+                if (sb == 0) { *skip = 1; return r; }
+                int64_t q = _sext(ua, w) / sb;
+                r.value = (int64_t)((uint64_t)q & mask); r.width = w; r.is_signed = 1; return r;
+            }
             if (ub == 0) { *skip = 1; return r; }
             r.value = (int64_t)(ua / ub); r.width = w; return r;
         case BIN_MOD:
+            /* Signed: SV remainder, sign of dividend. C99 '%' gives the
+             * sign of the dividend, matching SV semantics. */
+            if (sgn) {
+                int64_t sb = _sext(ub, w);
+                if (sb == 0) { *skip = 1; return r; }
+                int64_t rem = _sext(ua, w) % sb;
+                r.value = (int64_t)((uint64_t)rem & mask); r.width = w; r.is_signed = 1; return r;
+            }
             if (ub == 0) { *skip = 1; return r; }
             r.value = (int64_t)(ua % ub); r.width = w; return r;
         case BIN_BAND: r.value = (int64_t)(ua & ub); r.width = w; return r;
@@ -230,6 +259,7 @@ static EvalVal _eval(const SolveCtx *ctx, const SolveProblem *sp,
     /* Constructs we don't (yet) evaluate: skip rather than misreport. */
     case EXPR_IN_RANGE:
     case EXPR_IN_SET:
+    case EXPR_IN_RANGES:
     case EXPR_SUM:
     case EXPR_COUNTONES:
     case EXPR_CLOG2:

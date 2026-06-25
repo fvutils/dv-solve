@@ -197,6 +197,21 @@ class SolveProblemBuilder:
             arr,
         )
 
+    def expr_in_ranges(self, value: int, ranges) -> int:
+        """Membership over a union of inclusive ranges. ``value`` and each
+        range bound are ExprRefs; ``ranges`` is a sequence of ``(lo_ref,
+        hi_ref)`` pairs."""
+        n = len(ranges)
+        los = (ctypes.c_uint32 * n)(*[r[0] for r in ranges])
+        his = (ctypes.c_uint32 * n)(*[r[1] for r in ranges])
+        return self._lib.builder_expr_in_ranges(
+            self._b,
+            ctypes.c_uint32(value),
+            ctypes.c_uint32(n),
+            los,
+            his,
+        )
+
     def expr_extend(
         self,
         operand: int,

@@ -1,0 +1,12 @@
+# The native build inputs live outside the Python package, so they are not
+# picked up automatically. Ship them in the sdist so it can build from source
+# (this is also what cibuildwheel consumes when building from an sdist).
+include CMakeLists.txt
+include ivpm.yaml
+include pytest.ini
+recursive-include cmake *
+recursive-include src/c *
+recursive-include src/sv *
+# CMakeLists builds C test executables from tests/c, so the sdist must carry
+# the full tests tree to remain buildable from source.
+recursive-include tests *

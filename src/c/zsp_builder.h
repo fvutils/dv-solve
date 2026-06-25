@@ -147,6 +147,9 @@ ExprRef builder_expr_in_range(SolveProblemBuilder *b,
                               ExprRef value, ExprRef lo, ExprRef hi);
 ExprRef builder_expr_in_set(SolveProblemBuilder *b, ExprRef value,
                             uint32_t n_elems, const ExprRef *elems);
+ExprRef builder_expr_in_ranges(SolveProblemBuilder *b, ExprRef value,
+                               uint32_t n_ranges, const ExprRef *los,
+                               const ExprRef *his);
 ExprRef builder_expr_extend(SolveProblemBuilder *b, ExprRef operand,
                             uint8_t from_bits, uint8_t to_bits,
                             uint8_t sign_extend);

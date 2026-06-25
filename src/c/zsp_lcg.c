@@ -7,6 +7,23 @@
 #include "zsp_propagator.h"
 #include "zsp_trail.h"
 
+/* Is literal `a` already implied by an earlier learnt-buffer literal on the
+ * same variable (within [0, learnt_idx), skipping skip_idx)? Extracted from a
+ * GCC statement-expression macro so it also compiles under MSVC. */
+static inline int zsp__implied_by_learnt(const LCGCtx *lcg, uint32_t learnt_idx,
+                                         Literal a, uint32_t skip_idx) {
+    for (uint32_t _li = 0; _li < learnt_idx; _li++) {
+        if (_li == skip_idx) continue;
+        Literal _L = lcg->learnt_buf[_li];
+        if (_L.var_id != a.var_id) continue;
+        if (a.is_lb && !_L.is_lb && (int64_t)_L.bound >= (int64_t)a.bound - 1)
+            return 1;
+        if (!a.is_lb && _L.is_lb && (int64_t)_L.bound <= (int64_t)a.bound + 1)
+            return 1;
+    }
+    return 0;
+}
+
 /* DV_LCG_TRACE: emit per-conflict trace to stderr. Resolved once per
  * process. Off (0) by default. */
 static int _trace_check(void) {
@@ -753,23 +770,8 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
          */
         /* Skip _li == read so L_i can't be used to subsume its own
          * antecedent (circular). */
-        #define IMPLIED_BY_LEARNT(a, skip_idx) ({                     \
-            int _imp = 0;                                              \
-            for (uint32_t _li = 0; _li < learnt_idx; _li++) {         \
-                if (_li == (skip_idx)) continue;                       \
-                Literal _L = lcg->learnt_buf[_li];                    \
-                if (_L.var_id != (a).var_id) continue;                \
-                if ((a).is_lb && !_L.is_lb &&                         \
-                    (int64_t)_L.bound >= (int64_t)(a).bound - 1) {    \
-                    _imp = 1; break;                                   \
-                }                                                      \
-                if (!(a).is_lb && _L.is_lb &&                         \
-                    (int64_t)_L.bound <= (int64_t)(a).bound + 1) {    \
-                    _imp = 1; break;                                   \
-                }                                                      \
-            }                                                          \
-            _imp;                                                      \
-        })
+        #define IMPLIED_BY_LEARNT(a, skip_idx) \
+            zsp__implied_by_learnt(lcg, learnt_idx, (a), (skip_idx))
 
         uint32_t write = 1; /* UIP at [0], always keep */
         for (uint32_t read = 1; read < learnt_idx; read++) {

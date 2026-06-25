@@ -179,14 +179,21 @@ PropResult ctx_tighten_ub32(SolveCtx *ctx, uint32_t var_id, int32_t new_ub) {
 PropResult ctx_tighten_lb64(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
     Variable *v = &ctx->vars[var_id];
     int64_t curr = var_lo64(ctx, v);
-    if (new_lb <= curr) return PROP_OK;
+    if (!var_b_gt(v, new_lb, curr)) return PROP_OK;  /* new_lb <= curr */
+
+    /* Edge-crossing guard: a lower bound above the variable's largest
+     * representable value empties the domain (e.g. unsigned `v > max`).
+     * Detect it on the logical value before storage, where truncation
+     * would otherwise hide the conflict. Sign-aware so an unsigned bound
+     * in the upper half (> INT64_MAX) is not misread as negative. */
+    if (var_b_gt(v, new_lb, var_repr_max(v))) return PROP_CONFLICT;
 
     trail_record_lb(ctx, var_id, new_lb);
 
     /* check conflict */
     int64_t lo = var_lo64(ctx, v);
     int64_t hi = var_hi64(ctx, v);
-    if (lo > hi) return PROP_CONFLICT;
+    if (var_b_gt(v, lo, hi)) return PROP_CONFLICT;
     if (lo == hi) {
         if (var_id < 64)
             ctx->unassigned_mask &= ~(1ULL << var_id);
@@ -199,13 +206,19 @@ PropResult ctx_tighten_lb64(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
 PropResult ctx_tighten_ub64(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
     Variable *v = &ctx->vars[var_id];
     int64_t curr = var_hi64(ctx, v);
-    if (new_ub >= curr) return PROP_OK;
+    if (!var_b_lt(v, new_ub, curr)) return PROP_OK;  /* new_ub >= curr */
+
+    /* Edge-crossing guard: an upper bound below the variable's smallest
+     * representable value empties the domain (e.g. unsigned `v < 0`).
+     * Detect it on the logical value before storage, where truncation
+     * would otherwise reinterpret a negative bound as a huge unsigned one. */
+    if (var_b_lt(v, new_ub, var_repr_min(v))) return PROP_CONFLICT;
 
     trail_record_ub(ctx, var_id, new_ub);
 
     int64_t lo = var_lo64(ctx, v);
     int64_t hi = var_hi64(ctx, v);
-    if (lo > hi) return PROP_CONFLICT;
+    if (var_b_gt(v, lo, hi)) return PROP_CONFLICT;
     if (lo == hi) {
         if (var_id < 64)
             ctx->unassigned_mask &= ~(1ULL << var_id);

@@ -70,6 +70,21 @@ static void start_search (kissat *solver) {
   solver->random = seed;
   LOG ("initialized random number generator with seed %u", seed);
 
+  /* dv-solve: when a nonzero seed is supplied, randomize the initial saved
+   * decision phase of every variable. Without this, conflict-free problems
+   * (the common case for the bit-blast completeness fallback) always return
+   * the same model regardless of seed — every decision falls through to the
+   * single global INITIAL_PHASE. Seeded per-variable phases give the stimulus
+   * diversity the fallback needs while remaining fully deterministic per seed.
+   * Consuming solver->random here just advances the same generator search
+   * uses, so per-seed reproducibility is preserved. */
+  if (seed && GET_OPTION (phasesaving) && solver->phases.saved) {
+    value *saved = solver->phases.saved;
+    const unsigned vars = solver->vars;
+    for (unsigned idx = 0; idx < vars; idx++)
+      saved[idx] = (kissat_next_random32 (&solver->random) & 1u) ? 1 : -1;
+  }
+
 #ifndef QUIET
   limits *limits = &solver->limits;
   limited *limited = &solver->limited;

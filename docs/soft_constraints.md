@@ -59,3 +59,31 @@ solver_solve(ctx, NULL);
 // solver_soft_active(ctx, 0) == 0  (x==5 relaxed)
 // solver_soft_active(ctx, 1) == 1  (y==7 kept)
 ```
+
+## Re-solve / reuse contract
+
+`solver_solve` re-activates **all** soft assumptions at entry, so re-solving a
+reused `SolveCtx` (the common pattern: `solver_reset(ctx)` then `solver_solve(ctx, ...)`
+on each randomization) always starts from the full soft set and recomputes the kept
+set from scratch. `solver_reset` restores the assumption variables to `[1,1]` but does
+**not** itself reset `assumption_active_mask`; `solver_solve` owns that. Without this
+re-activation a second solve would inherit the first solve's relaxations and then drop
+the remaining kept soft on the next conflict — i.e. silently lose the whole soft set
+from the second solve onward. Locked by `tests/unit/test_soft.py::
+test_soft_resolve_reuse_keeps_set`.
+
+## Serve-path (BV-SAT) equivalence
+
+The bit-blast / SAT serve path honors softs with the **same** priority-respecting
+greedy relaxation via `zsp_bbsolver_check_maxsat` (`zsp_bbsolver.c`): start with all
+softs kept; on UNSAT drop the lowest-preference (highest priority value, last on ties)
+and re-solve, until SAT. The kept set is exported as a `soft_keep[]` mask (in
+`softs_head` walk order) and enforced as hard on every sampler draw, so the served
+model *and* its value distribution honor exactly the kept softs. Primary and serve
+paths therefore produce the same kept set for the same problem (locked by the matched
+pair `test_soft.py::test_soft_priority_ladder_three_primary` /
+`test_soft_maxsat_serve.py::test_serve_soft_priority_ladder_three`).
+
+Greedy relaxation matches Boolector, including the shared limitation: when several
+equally-preferred softs participate in one conflict, greedy may drop more than the
+theoretical optimum.

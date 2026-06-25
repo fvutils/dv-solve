@@ -163,6 +163,15 @@ typedef struct {
     /* int64_t elems[n_elems] follow immediately */
 } InSet_64_t;
 
+/* InRanges_64: x in [lo0,hi0] U ... U [lo{n-1},hi{n-1}] */
+typedef struct {
+    Propagator  hdr;
+    PropWatchSect ws;
+    uint32_t    n_ranges;
+    uint32_t    _pad;
+    /* int64_t los[n_ranges] then int64_t his[n_ranges] follow immediately */
+} InRanges_64_t;
+
 /* Implication_32: guard → (var ≤/≥ bound)
    var_ids[0]=guard, var_ids[1]=var
    is_ub=1 → enforce UB (var ≤ bound); is_ub=0 → enforce LB (var ≥ bound) */
@@ -191,6 +200,17 @@ typedef struct {
     uint8_t       width;    /* 1..64 */
     uint8_t       _cpad[7];
 } BvAddConst_64_t;
+
+/* BvBin_64: modular fixed-width 2's-complement var-var arithmetic.
+   r = (a op b) mod 2^width  for op in {ADD, SUB, MUL, SHL}.
+   var_ids[0]=r, var_ids[1]=a, var_ids[2]=b.  Width is 1..63.
+   Operand and result signedness is read from the Variable flags. */
+typedef struct {
+    Propagator    hdr;
+    PropWatchSect ws;
+    uint8_t       width;    /* 1..63 */
+    uint8_t       _bpad[7];
+} BvBin_64_t;
 
 /* BitSlice_32: r = a[hi_bit:lo_bit]  var_ids[0]=r, var_ids[1]=a */
 typedef struct {
@@ -281,6 +301,12 @@ uint32_t prop_add_bounds_add_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uin
 /** Modular BV add with constant: r = (x + c) mod 2^width. width is 1..64. */
 uint32_t prop_add_bvadd_const_64(SolveCtx *ctx, uint32_t r_id, uint32_t x_id,
                                   uint64_t c, uint8_t width, uint8_t priority);
+/** Modular fixed-width 2's-complement var-var arithmetic (width 1..63):
+ *  r = (a + b) mod 2^width / (a - b) / (a * b) / (a << b). */
+uint32_t prop_add_bvadd_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
+uint32_t prop_add_bvsub_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
+uint32_t prop_add_bvmul_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
+uint32_t prop_add_bvshl_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
 uint32_t prop_add_bounds_mul_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
 uint32_t prop_add_bounds_div_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
 uint32_t prop_add_bounds_mod_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
@@ -334,6 +360,16 @@ uint32_t prop_add_in_set_32(SolveCtx *ctx, uint32_t x_id,
 uint32_t prop_add_in_set_64(SolveCtx *ctx, uint32_t x_id,
                              uint32_t n_elems, const int64_t *elems,
                              uint8_t priority);
+/**
+ * Multi-range membership: x in [los[0],his[0]] U ... U [los[n-1],his[n-1]].
+ * Sound interval propagator: narrows x's [lo,hi] to the hull of the feasible
+ * ranges and conflicts when no range overlaps x's domain (which also rejects a
+ * singleton that lands in a gap). Distribution over the ranges is supplied
+ * separately by add_dist; this propagator only enforces membership.
+ */
+uint32_t prop_add_in_ranges_64(SolveCtx *ctx, uint32_t x_id,
+                                uint32_t n_ranges, const int64_t *los,
+                                const int64_t *his, uint8_t priority);
 
 /**
  * Implication: guard=true → (var ≤ bound) if is_ub, or (var ≥ bound) otherwise.
@@ -388,9 +424,6 @@ typedef struct {
  */
 uint32_t prop_add_all_different(SolveCtx *ctx, uint32_t n_vars,
                                  const uint32_t *var_ids, uint8_t priority);
-#ifdef __cplusplus
-}
-#endif
 
 
 /* ------------------------------------------------------------------ */

@@ -25,12 +25,11 @@ static const uint8_t _b64_table[256] = {
     /* 0x7B-0xFF: all 64 (invalid) -- zero-initialized below */
 };
 
-/* Decode base64 string into malloc'd buffer.  Returns NULL on error.
+/* Decode base64 string into malloc'd buffer. Returns NULL on error.
    *out_len receives the decoded byte count. */
 static uint8_t *_b64_decode(const char *src, size_t *out_len) {
     if (!src) return NULL;
     size_t slen = strlen(src);
-    /* Strip trailing '=' padding for length calc */
     size_t pad = 0;
     if (slen >= 1 && src[slen - 1] == '=') pad++;
     if (slen >= 2 && src[slen - 2] == '=') pad++;
@@ -57,68 +56,24 @@ static uint8_t *_b64_decode(const char *src, size_t *out_len) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Chandle context: holds problem buffer + last-solve results          */
+/* DpiHandle -- persistent context for the compiled problem            */
+/*                                                                     */
+/* The SolveCtx is compiled once and reused across solve calls.       */
+/* pin_var, checkpoint, and restore operate directly on this context,  */
+/* so their effects persist across solve calls until restored.         */
 /* ------------------------------------------------------------------ */
 
-#define INTERNAL_CTX_SIZE (1 << 20)  /* 1 MiB */
+#define INTERNAL_CTX_SIZE (2 << 20)  /* 2 MiB for persistent ctx */
 
 typedef struct {
-    void     *problem_buf;   /* malloc'd SolveProblem buffer */
-    size_t    problem_size;
-    uint32_t  n_vars;
-    int64_t  *values;        /* malloc'd array [n_vars], filled by solve */
-    int       solved;        /* 1 if values[] is valid */
+    void              *problem_buf;  /* malloc'd decoded SolveProblem buffer */
+    size_t             problem_size;
+    void              *ctx_buf;      /* malloc'd SolveCtx static pool */
+    zsp_block_alloc_t *block_alloc;  /* dynamic stack allocator */
+    SolveCtx          *ctx;          /* persistent solver context */
+    uint32_t           n_vars;
+    int                solved;       /* 1 if last solve returned SOLVE_OK */
 } DpiHandle;
-
-static int _do_solve(
-    SolveProblem *sp,
-    uint32_t      n_vars,
-    uint64_t      seed,
-    int64_t      *result_vals
-) {
-    void *ctx_buf = malloc(INTERNAL_CTX_SIZE);
-    if (!ctx_buf) return -1;
-
-    zsp_block_alloc_t *ba = zsp_block_alloc_create(NULL, 0);
-    if (!ba) { free(ctx_buf); return -1; }
-
-    SolveCtx *ctx = solver_create(ctx_buf, INTERNAL_CTX_SIZE, ba);
-    if (!ctx) {
-        zsp_block_alloc_destroy(ba);
-        free(ctx_buf);
-        return -1;
-    }
-
-    int rc = solver_compile(ctx, sp);
-    if (rc < 0) {
-        solver_destroy(ctx);
-        zsp_block_alloc_destroy(ba);
-        free(ctx_buf);
-        return (rc == -2) ? 1 : -1;
-    }
-
-    SolveOpts opts;
-    memset(&opts, 0, sizeof(opts));
-    opts.seed = seed;
-
-    SolveResult sr = solver_solve(ctx, &opts);
-
-    int ret;
-    if (sr == SOLVE_OK) {
-        for (uint32_t i = 0; i < n_vars; i++)
-            result_vals[i] = solver_get_value(ctx, i);
-        ret = 0;
-    } else if (sr == SOLVE_UNSAT) {
-        ret = 1;
-    } else {
-        ret = 2;
-    }
-
-    solver_destroy(ctx);
-    zsp_block_alloc_destroy(ba);
-    free(ctx_buf);
-    return ret;
-}
 
 /* ------------------------------------------------------------------ */
 /* Chandle API implementation                                          */
@@ -127,50 +82,53 @@ static int _do_solve(
 void *zsp_dpi_compile_b64(const char *b64_data) {
     if (!b64_data) return NULL;
 
+    /* 1. Decode the base64 problem buffer */
     size_t buf_len = 0;
     uint8_t *buf = _b64_decode(b64_data, &buf_len);
     if (!buf) return NULL;
 
-    SolveProblem *sp = (SolveProblem *)buf;
-    uint32_t n_vars = sp->n_vars;
-
-    /* Probe-compile to verify the buffer is valid */
-    void *probe_buf = malloc(INTERNAL_CTX_SIZE);
-    if (!probe_buf) { free(buf); return NULL; }
+    /* 2. Allocate the persistent SolveCtx */
+    void *ctx_buf = malloc(INTERNAL_CTX_SIZE);
+    if (!ctx_buf) { free(buf); return NULL; }
 
     zsp_block_alloc_t *ba = zsp_block_alloc_create(NULL, 0);
-    if (!ba) { free(probe_buf); free(buf); return NULL; }
+    if (!ba) { free(ctx_buf); free(buf); return NULL; }
 
-    SolveCtx *probe = solver_create(probe_buf, INTERNAL_CTX_SIZE, ba);
-    if (!probe) {
+    SolveCtx *ctx = solver_create(ctx_buf, INTERNAL_CTX_SIZE, ba);
+    if (!ctx) {
         zsp_block_alloc_destroy(ba);
-        free(probe_buf);
+        free(ctx_buf);
         free(buf);
         return NULL;
     }
 
-    int rc = solver_compile(probe, sp);
-    solver_destroy(probe);
-    zsp_block_alloc_destroy(ba);
-    free(probe_buf);
+    /* 3. Compile the problem into the persistent context */
+    int rc = solver_compile(ctx, (SolveProblem *)buf);
+    if (rc < 0) {
+        solver_destroy(ctx);
+        zsp_block_alloc_destroy(ba);
+        free(ctx_buf);
+        free(buf);
+        return NULL;
+    }
 
-    if (rc < 0) { free(buf); return NULL; }
-
-    /* Build the handle */
+    /* 4. Build the handle */
     DpiHandle *h = (DpiHandle *)calloc(1, sizeof(DpiHandle));
-    if (!h) { free(buf); return NULL; }
+    if (!h) {
+        solver_destroy(ctx);
+        zsp_block_alloc_destroy(ba);
+        free(ctx_buf);
+        free(buf);
+        return NULL;
+    }
 
     h->problem_buf  = buf;
     h->problem_size = buf_len;
-    h->n_vars       = n_vars;
-    h->values       = (int64_t *)calloc(n_vars, sizeof(int64_t));
+    h->ctx_buf      = ctx_buf;
+    h->block_alloc  = ba;
+    h->ctx          = ctx;
+    h->n_vars       = ((SolveProblem *)buf)->n_vars;
     h->solved       = 0;
-
-    if (n_vars > 0 && !h->values) {
-        free(buf);
-        free(h);
-        return NULL;
-    }
 
     return (void *)h;
 }
@@ -180,14 +138,44 @@ int zsp_dpi_solve_h(void *ctx, long long seed) {
     DpiHandle *h = (DpiHandle *)ctx;
 
     h->solved = 0;
-    int rc = _do_solve(
-        (SolveProblem *)h->problem_buf,
-        h->n_vars,
-        (uint64_t)seed,
-        h->values
-    );
-    if (rc == 0) h->solved = 1;
-    return rc;
+
+    SolveOpts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.seed = (uint64_t)seed;
+
+    SolveResult sr = solver_solve(h->ctx, &opts);
+
+    if (sr == SOLVE_OK) {
+        h->solved = 1;
+        return 0;
+    } else if (sr == SOLVE_UNSAT) {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+int zsp_dpi_pin_var_h(void *ctx, int var_id, long long value) {
+    if (!ctx) return -1;
+    DpiHandle *h = (DpiHandle *)ctx;
+    if (var_id < 0 || (uint32_t)var_id >= h->n_vars) return -1;
+
+    int rc = solver_pin_var(h->ctx, (uint32_t)var_id, (int64_t)value);
+    /* solver_pin_var returns 0 on success, -1 on conflict */
+    return (rc == 0) ? 0 : -2;
+}
+
+int zsp_dpi_checkpoint_h(void *ctx) {
+    if (!ctx) return -1;
+    DpiHandle *h = (DpiHandle *)ctx;
+    return solver_checkpoint(h->ctx);
+}
+
+void zsp_dpi_restore_h(void *ctx, int cp) {
+    if (!ctx || cp < 0) return;
+    DpiHandle *h = (DpiHandle *)ctx;
+    solver_restore(h->ctx, (uint32_t)cp);
+    h->solved = 0;  /* restored state has no guaranteed solved values */
 }
 
 long long zsp_dpi_get_value_h(void *ctx, int var_id) {
@@ -195,13 +183,15 @@ long long zsp_dpi_get_value_h(void *ctx, int var_id) {
     DpiHandle *h = (DpiHandle *)ctx;
     if (!h->solved) return 0;
     if (var_id < 0 || (uint32_t)var_id >= h->n_vars) return 0;
-    return (long long)h->values[var_id];
+    return (long long)solver_get_value(h->ctx, (uint32_t)var_id);
 }
 
 void zsp_dpi_release_h(void *ctx) {
     if (!ctx) return;
     DpiHandle *h = (DpiHandle *)ctx;
+    solver_destroy(h->ctx);
+    zsp_block_alloc_destroy(h->block_alloc);
+    free(h->ctx_buf);
     free(h->problem_buf);
-    free(h->values);
     free(h);
 }

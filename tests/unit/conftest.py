@@ -106,6 +106,34 @@ def libzsp(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
+def libzsp_dpi(tmp_path_factory):
+    """Session-scoped fixture that builds and loads libdv_solve_dpi.so.
+
+    The DPI library includes all core solver functions plus the DPI-C
+    interface functions (zsp_dpi_compile_b64, zsp_dpi_solve_h, etc.).
+    Skips if cmake/gcc is not available or the build fails.
+    """
+    if not shutil.which("cmake"):
+        pytest.skip("cmake not found -- skipping DPI unit tests")
+    if not shutil.which("gcc") and not shutil.which("cc"):
+        pytest.skip("C compiler not found -- skipping DPI unit tests")
+
+    build_dir = tmp_path_factory.mktemp("zsp_dpi_unit_build")
+    try:
+        _build_library(build_dir)  # builds all targets including dv_solve_dpi
+    except Exception as exc:
+        pytest.skip(f"libdv_solve_dpi build failed: {exc}")
+
+    candidates = list(build_dir.glob("libdv_solve_dpi.so*"))
+    if not candidates:
+        pytest.skip("libdv_solve_dpi.so not found after build")
+
+    candidates.sort(key=lambda p: len(p.name))
+    lib = ctypes.CDLL(str(candidates[0]))
+    yield lib
+
+
+@pytest.fixture(scope="session")
 def libzsp_debug(tmp_path_factory):
     """Session-scoped fixture that builds and loads libdv_solve_debug.so.
 

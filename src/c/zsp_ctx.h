@@ -65,6 +65,7 @@ typedef struct SolveCtx {
     uint64_t           trail_count;
     uint64_t           conflict_count;
     uint64_t           rng_state;
+    uint8_t            fair_pick;     /* SolveOpts.fair_pick for this solve */
     zsp_block_alloc_t *block_alloc;   /* source of dynamic blocks      */
     zsp_stack_t       *dynamic;       /* dynamic stack (trail etc.)    */
     TrailEntry        *trail_top;     /* newest trail entry, or NULL   */
@@ -193,6 +194,15 @@ int solver_checkpoint(SolveCtx *ctx);
  */
 void solver_restore(SolveCtx *ctx, uint32_t cp);
 
+/**
+ * Install a custom value-selection callback (e.g. the cost-guided selector).
+ * Passing fn=NULL restores the default selection order. (Defined in zsp_ctx.c;
+ * called from zsp_costguided.c.)
+ */
+void solver_set_value_selector(SolveCtx *ctx,
+                               int64_t (*fn)(SolveCtx *, uint32_t, void *),
+                               void *data);
+
 /* ------------------------------------------------------------------ */
 /* Accessor wrappers (thin C functions for ctypes compatibility)       */
 /*                                                                     */
@@ -260,6 +270,76 @@ static inline int64_t var_hi64(const SolveCtx *ctx, const Variable *v) {
     const WideBounds64 *wb =
         (const WideBounds64 *)zsp_pool_ptr(&ctx->pool, v->holes_offset);
     return wb->hi;
+}
+
+/* ------------------------------------------------------------------ */
+/* Sign-aware ordering on raw 64-bit bound patterns.                    */
+/*                                                                      */
+/* A bound (lo/hi/literal) is stored as int64_t but, for an *unsigned*  */
+/* variable, that int64_t is the bit pattern of a uint64_t value: a     */
+/* full-width unsigned-64 value > INT64_MAX appears negative. So every  */
+/* ORDER-sensitive operation on bound values must interpret them per    */
+/* the variable's signedness. Arithmetic on the patterns (+1/-1, the    */
+/* span `hi-lo`) is already correct modulo 2^64; only the comparisons   */
+/* below were signed-only, which capped unsigned vars at INT64_MAX      */
+/* (the "2^63 cliff" — see dv_solve_phaseG_primary_completeness_plan).  */
+/* ------------------------------------------------------------------ */
+static inline int var_b_lt(const Variable *v, int64_t a, int64_t b) {
+    /* Unsigned ordering is needed ONLY when the domain can exceed INT64_MAX,
+     * i.e. an unsigned variable of width >= 64. For narrower unsigned vars the
+     * domain is [0, 2^w-1] with 2^w-1 <= INT64_MAX, so a signed compare orders
+     * them identically AND — crucially — correctly treats a *negative
+     * intermediate* bound (e.g. a sum propagator's `r_lo - others_hi`, which is
+     * computed in signed int64 and can go below 0) as "below the domain". An
+     * unconditional unsigned compare would misread that -4 as 2^64-4 and
+     * fabricate a conflict. (Wide unsigned *arithmetic* on width-64 vars, where
+     * a genuine 2^64-4 and an intermediate -4 are indistinguishable bit
+     * patterns, stays out of scope — see Phase G §3.1 G-1d.) */
+    if (!(v->flags & VAR_SIGNED) && v->width >= 64)
+        return (uint64_t)a < (uint64_t)b;
+    return a < b;
+}
+static inline int var_b_gt(const Variable *v, int64_t a, int64_t b) {
+    return var_b_lt(v, b, a);
+}
+static inline int64_t var_b_min(const Variable *v, int64_t a, int64_t b) {
+    return var_b_lt(v, a, b) ? a : b;
+}
+static inline int64_t var_b_max(const Variable *v, int64_t a, int64_t b) {
+    return var_b_lt(v, a, b) ? b : a;
+}
+
+/* ------------------------------------------------------------------ */
+/* Representable range of a variable, from its width and signedness.    */
+/* Used to guard bound tightening against edge-crossing constants       */
+/* (e.g. `v < 0` on an unsigned var, or `v > INT64_MAX` on a signed     */
+/* 64-bit var where `cv + 1` would overflow).                           */
+/* ------------------------------------------------------------------ */
+
+/** Smallest value representable by `v`.  Always fits in int64_t. */
+static inline int64_t var_repr_min(const Variable *v) {
+    if (v->flags & VAR_SIGNED) {
+        uint16_t w = v->width;
+        if (w >= 64) return INT64_MIN;
+        return -((int64_t)1 << (w - 1));
+    }
+    return 0;  /* unsigned */
+}
+
+/** Largest value representable by `v`, returned as a 64-bit pattern (compare
+ *  it with the sign-aware `var_b_*` helpers, never a bare signed `<`/`>`).
+ *  For unsigned width 64 this is 2^64-1 (bit pattern -1); for unsigned
+ *  width > 64 (tier-2) the true max exceeds 64 bits and is handled by the
+ *  wide path, so INT64_MAX is kept as the int64-domain ceiling for guards. */
+static inline int64_t var_repr_max(const Variable *v) {
+    uint16_t w = v->width;
+    if (v->flags & VAR_SIGNED) {
+        if (w >= 64) return INT64_MAX;
+        return ((int64_t)1 << (w - 1)) - 1;
+    }
+    if (w == 64) return (int64_t)UINT64_MAX;  /* 2^64-1 as a uint64 bit pattern */
+    if (w > 64)  return INT64_MAX;            /* tier-2: wide path owns the bound */
+    return ((int64_t)1 << w) - 1;
 }
 
 static inline const uint64_t *var_lo_wide(const SolveCtx *ctx,
