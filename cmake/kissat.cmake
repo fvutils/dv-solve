@@ -55,19 +55,41 @@ target_include_directories(kissat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 # We deliberately do NOT define COMPACT yet; that's a future tuning knob.
 target_compile_definitions(kissat PRIVATE NDEBUG QUIET NPROOFS)
 
-# Kissat is C99 with GNU extensions in places; -std=c99 matches their default.
-target_compile_options(kissat PRIVATE
-    -std=c99
-    -W -Wall
-    -O3
-    -fPIC
-    -Wno-unused-parameter
-    -Wno-unused-function
-    -Wno-unused-variable
-    -Wno-unused-but-set-variable
-)
+# Public C headers the dv-solve / kissat sources expect on Windows live here.
+set(ZSP_WIN_COMPAT ${CMAKE_CURRENT_SOURCE_DIR}/src/c/compat/win)
+
+if(MSVC)
+    # MSVC rejects the GCC/Clang flags above. Force-include the builtins/stat
+    # shim into every kissat TU, put the POSIX shim headers on the include
+    # path, and compile the Win32 backings for getrusage/gettimeofday/sysconf.
+    target_sources(kissat PRIVATE ${ZSP_WIN_COMPAT}/win_compat.c)
+    target_include_directories(kissat PRIVATE ${ZSP_WIN_COMPAT})
+    target_compile_options(kissat PRIVATE
+        /O2
+        /FI${ZSP_WIN_COMPAT}/msvc_compat.h
+        /wd4244 /wd4267 /wd4146   # narrowing/sign-conversion noise from kissat
+    )
+    target_compile_definitions(kissat PRIVATE
+        _CRT_SECURE_NO_WARNINGS
+        _CRT_NONSTDC_NO_WARNINGS
+        WIN32_LEAN_AND_MEAN)
+    # GetProcessMemoryInfo lives in psapi.
+    target_link_libraries(kissat PRIVATE psapi)
+else()
+    # Kissat is C99 with GNU extensions in places; -std=c99 matches their default.
+    target_compile_options(kissat PRIVATE
+        -std=c99
+        -W -Wall
+        -O3
+        -fPIC
+        -Wno-unused-parameter
+        -Wno-unused-function
+        -Wno-unused-variable
+        -Wno-unused-but-set-variable
+    )
+    # Kissat uses sqrt/log10 — link libm publicly so consumers pick it up too.
+    # (Windows folds the math routines into the CRT; there is no separate -lm.)
+    target_link_libraries(kissat PUBLIC m)
+endif()
 
 set_target_properties(kissat PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-# Kissat uses sqrt/log10 — link libm publicly so consumers pick it up too.
-target_link_libraries(kissat PUBLIC m)

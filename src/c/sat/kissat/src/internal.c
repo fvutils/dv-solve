@@ -16,6 +16,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>  /* dv-solve fork: memset() in the custom-allocator init path */
 
 void kissat_reset_last_learned (kissat *solver) {
   for (really_all_last_learned (p))

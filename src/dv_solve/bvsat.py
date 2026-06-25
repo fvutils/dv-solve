@@ -39,7 +39,7 @@ from __future__ import annotations
 import ctypes
 from typing import Optional
 
-from .lib import _load_lib
+from .lib import _load_lib, _library_not_found_error
 
 # ------------------------------------------------------------------ #
 # Result codes (must match zsp_bbsolver.h)                            #
@@ -62,7 +62,7 @@ class BVSatCtx:
     def __init__(self, problem) -> None:
         lib = _load_lib()
         if lib is None:
-            raise RuntimeError("libdv_solve.so not found — native solver unavailable")
+            raise _library_not_found_error()
         self._lib = lib
 
         # Keep the SolveProblem buffer alive for the lifetime of this context:
@@ -218,7 +218,7 @@ def maxsat_keepset(problem, seed: int, n_softs: int):
     """
     lib = _load_lib()
     if lib is None:
-        raise RuntimeError("libdv_solve.so not found — native solver unavailable")
+        raise _library_not_found_error()
     sp_ptr = getattr(problem, "_sp", None)
     if sp_ptr is None:
         sp_ptr = ctypes.cast(problem, ctypes.c_void_p).value

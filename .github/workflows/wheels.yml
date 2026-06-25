@@ -1,0 +1,104 @@
+name: Build wheels
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "src/c/**"
+      - "pyproject.toml"
+      - ".github/workflows/wheels.yml"
+
+# Cancel an in-progress run when a newer commit is pushed to the same ref,
+# so superseded (slow, emulated) builds don't keep burning CI minutes.
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_wheels:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: cibuildwheel builds inside a manylinux container. Build the
+          # two most-recent baselines per arch — manylinux_2_34 (AlmaLinux 9)
+          # and manylinux_2_28 (AlmaLinux 8); full quay.io image paths because
+          # cibuildwheel doesn't alias 2_34. aarch64 runs under QEMU emulation.
+          - { name: linux-x86_64-2_34,  os: ubuntu-latest, archs: x86_64,  image: quay.io/pypa/manylinux_2_34_x86_64 }
+          - { name: linux-x86_64-2_28,  os: ubuntu-latest, archs: x86_64,  image: quay.io/pypa/manylinux_2_28_x86_64 }
+          - { name: linux-aarch64-2_34, os: ubuntu-latest, archs: aarch64, image: quay.io/pypa/manylinux_2_34_aarch64 }
+          - { name: linux-aarch64-2_28, os: ubuntu-latest, archs: aarch64, image: quay.io/pypa/manylinux_2_28_aarch64 }
+          # macOS Apple-silicon (native) and Windows x64 (MSVC).
+          - { name: macos-arm64,        os: macos-14,      archs: arm64 }
+          - { name: windows-AMD64,      os: windows-latest, archs: AMD64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (Linux emulated arches)
+        if: runner.os == 'Linux' && matrix.archs != 'x86_64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: Install cmake/ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+
+      - name: Install ninja (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja --no-progress
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.1.0
+        env:
+          CIBW_ARCHS: ${{ matrix.archs }}
+          # Empty (and ignored) on macOS/Windows.
+          CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.image }}
+          CIBW_MANYLINUX_AARCH64_IMAGE: ${{ matrix.image }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: ./wheelhouse/*.whl
+
+  # macOS Intel: legacy and slow to schedule, so only on release tags / manual
+  # runs, not on every PR.
+  build_wheels_macos_intel:
+    name: macos-x86_64
+    if: github.event_name != 'pull_request'
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cmake/ninja
+        run: brew install cmake ninja
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.1.0
+        env:
+          CIBW_ARCHS: x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-x86_64
+          path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: ./dist/*.tar.gz

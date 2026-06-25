@@ -1,13 +1,21 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
-build-backend = "setuptools.build_meta"
+# ivpm-build's PEP 517 backend drives the CMake build, bundles the native
+# libraries into the wheel, and tags it platform-specific (py3-none-<plat>).
+# 0.2.0.27908268978 is the first published build carrying the platform-tagging
+# fix; a >= floor stays compatible with later (e.g. 0.2.1/0.3.0) releases.
+requires = [
+    "setuptools>=64",
+    "wheel",
+    "ivpm-build>=0.2.0.27908268978",
+]
+build-backend = "ivpm_build.backend"
 
 [project]
 name = "dv-solve"
 version = "0.0.1"
 description = "Domain-agnostic CLP(FD) constraint solver"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [{name = "Matthew Ballance", email = "matt.ballance@gmail.com"}]
 dependencies = []
@@ -28,3 +36,76 @@ dev = [
 [tool.setuptools]
 packages = ["dv_solve"]
 package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+# Native libs + headers + SV package, staged into the package by the build.
+dv_solve = ["*.so", "*.so.*", "*.dll", "*.dylib", "*.lib",
+            "share/include/**/*.h", "share/sv/*.sv"]
+
+[tool.ivpm-build]
+cmake = true
+
+# Native shared libraries → bundled at the package root (next to __init__.py),
+# so the ctypes loader finds them via Path(__file__).parent.
+# Template vars: {libpref}=lib|"" , {dllext}=.so|.dll|.dylib , {libdir}=lib|lib64
+[[tool.ivpm-build.extra-data]]
+pkg = "dv_solve"
+src = "build/{libdir}/{libpref}dv_solve{dllext}"
+dst = ""
+
+[[tool.ivpm-build.extra-data]]
+pkg = "dv_solve"
+src = "build/{libdir}/{libpref}dv_solve_dpi{dllext}"
+dst = ""
+
+[[tool.ivpm-build.extra-data]]
+pkg = "dv_solve"
+src = "build/{libdir}/{libpref}dv_solve_debug{dllext}"
+dst = ""
+
+# Public C headers → share/include/dv_solve (for C consumers; get_incdirs()).
+[[tool.ivpm-build.extra-data]]
+pkg = "dv_solve"
+src = "build/include/dv_solve"
+dst = "share/include"
+
+# SystemVerilog package (DPI + randomizer) → share/sv (for SV consumers;
+# get_svdirs()). Checked-in source, so this src is repo-relative, not build/.
+# The directory basename ("sv") is appended to dst, so dst="share" yields
+# share/sv/*.sv (matching the share/sv/*.sv package-data glob).
+[[tool.ivpm-build.extra-data]]
+pkg = "dv_solve"
+src = "src/sv"
+dst = "share"
+
+# ---------------------------------------------------------------------------
+# cibuildwheel — binary wheels in CI
+#
+# The native library is loaded via ctypes (no Python C-extension), so each
+# wheel is py3-none-<platform>: platform-specific but interpreter/ABI agnostic.
+# One CPython per platform is therefore sufficient (build = "cp311-*").
+# ---------------------------------------------------------------------------
+[tool.cibuildwheel]
+build = "cp311-*"
+# musllinux (Alpine) is niche; drop "*-musllinux*" from skip to enable it (and
+# add `apk add cmake` to the linux before-all).
+skip = "*-musllinux*"
+# Verify the bundled native lib actually loads from the installed wheel.
+test-command = "python {project}/tests/wheel_smoke.py"
+
+[tool.cibuildwheel.linux]
+# cibuildwheel always builds Linux wheels inside a manylinux container, so the
+# toolchain must be installed *in the container* (host-installed tools are not
+# visible). The AlmaLinux-based manylinux images ship a modern cmake in
+# AppStream; ninja is provided automatically as a build dependency (the backend
+# appends the `ninja` wheel to get_requires_for_build_wheel on non-Windows).
+#
+# Default to the newest manylinux baseline. Use the full quay.io image path
+# rather than the short "manylinux_2_34" alias, which older cibuildwheel
+# releases (e.g. 2.21.x) do not recognize. CI (.github/workflows/wheels.yml)
+# overrides CIBW_MANYLINUX_*_IMAGE per matrix entry to also build the previous
+# baseline (manylinux_2_28), so releases ship the two most-recent manylinux
+# versions: a build on glibc 2.28 (broad reach) and one on glibc 2.34.
+manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64"
+manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
+before-all = "dnf -y install cmake"

@@ -14,7 +14,7 @@ from __future__ import annotations
 import ctypes
 from typing import Optional
 
-from .lib import _load_lib
+from .lib import _load_lib, _library_not_found_error
 
 # ------------------------------------------------------------------ #
 # SolveResult constants (must match zsp_search.h)                     #
@@ -72,7 +72,7 @@ class SolveCtx:
     def __init__(self, problem: "SolveProblem", ctx_buf_size: int = _CTX_BUF_SIZE) -> None:  # noqa: F821
         lib = _load_lib()
         if lib is None:
-            raise RuntimeError("libdv_solve.so not found — native solver unavailable")
+            raise _library_not_found_error()
         self._lib = lib
 
         # Keep the SolveProblem buffer alive for the lifetime of this context.
