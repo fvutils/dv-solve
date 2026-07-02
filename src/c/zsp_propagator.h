@@ -183,12 +183,22 @@ typedef struct {
     uint8_t     _pad[3];
 } Implication_32_t;
 
+/* Implication over a tier-1 (int64) var: guard → (var ≤/≥ bound). */
+typedef struct {
+    Propagator  hdr;
+    PropWatchSect ws;
+    int64_t     bound;
+    uint8_t     is_ub;
+    uint8_t     _pad[7];
+} Implication_64_t;
+
 /* Reification_32: guard ↔ (x ≤ y) */
 typedef struct { Propagator hdr; PropWatchSect ws; } Reification_32_t;
 typedef struct { Propagator hdr; PropWatchSect ws; } Reification_64_t;
 
 /* ReificationEq: guard ↔ (x == y), var_ids[0]=guard, [1]=x, [2]=y */
 typedef struct { Propagator hdr; PropWatchSect ws; } ReificationEq_32_t;
+typedef struct { Propagator hdr; PropWatchSect ws; } ReificationEq_64_t;
 
 
 /* BvAddConst_64: r = (x + c) mod 2^width  (BV modular add with constant).
@@ -379,6 +389,10 @@ uint32_t prop_add_implication_32(SolveCtx *ctx,
                                   uint32_t guard_id, uint32_t var_id,
                                   int32_t bound, uint8_t is_ub,
                                   uint8_t priority);
+uint32_t prop_add_implication_64(SolveCtx *ctx,
+                                  uint32_t guard_id, uint32_t var_id,
+                                  int64_t bound, uint8_t is_ub,
+                                  uint8_t priority);
 
 uint32_t prop_add_reification_32(SolveCtx *ctx, uint32_t guard_id,
                                    uint32_t x_id, uint32_t y_id,
@@ -388,6 +402,9 @@ uint32_t prop_add_reification_64(SolveCtx *ctx, uint32_t guard_id,
                                    uint8_t priority);
 
 uint32_t prop_add_reification_eq_32(SolveCtx *ctx, uint32_t guard_id,
+                                     uint32_t x_id, uint32_t y_id,
+                                     uint8_t priority);
+uint32_t prop_add_reification_eq_64(SolveCtx *ctx, uint32_t guard_id,
                                      uint32_t x_id, uint32_t y_id,
                                      uint8_t priority);
 

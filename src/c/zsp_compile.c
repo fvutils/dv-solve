@@ -495,6 +495,13 @@ static int _compile_gated_constraint(SolveCtx *ctx, SolveProblem *sp,
         int is_cv = !is_vc && _is_const(sp, e->lhs, &cv) && _is_var(sp, e->rhs, &vid);
 
         if (is_vc || is_cv) {
+            /* The Implication propagator stores an int32 bound; for a tier-1 var
+             * a constant near/beyond the int32 range (the switch also uses cv±1)
+             * would truncate. Defer such a guarded comparison to the complete
+             * BV-SAT engine rather than compile it unsoundly. */
+            if (_var_needs_wide(ctx, vid) &&
+                (cv <= (int64_t)INT32_MIN || cv >= (int64_t)INT32_MAX))
+                return 0;
             BinOp op = e->op;
             if (is_cv) {
                 switch (op) {
@@ -557,6 +564,12 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
     if (has_const_var) { b_id = _resolve(ctx, b_id); }
     if (has_var_const) { a_id = _resolve(ctx, a_id); }
 
+    /* A reified const operand is materialised as a tier-0 (int32) singleton; a
+     * value outside int32 range cannot be stored there, so defer such a reified
+     * comparison to the complete BV-SAT engine rather than compile it unsoundly. */
+    if ((has_var_const || has_const_var) && (cv < INT32_MIN || cv > INT32_MAX))
+        return 0;
+
     /* Promote constants to const-variables */
     if (has_var_const && !has_var_var) {
         if (ctx->n_vars < ctx->n_vars_capacity) {
@@ -581,8 +594,10 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
 
     if (!has_var_var) return 0;
 
-    /* Reified comparison: r ↔ (a op b) — wire to reification propagators
-     * before falling through to arithmetic patterns. */
+    /* Reified comparison: r ↔ (a op b) — wire to reification propagators before
+     * falling through to arithmetic patterns. The prop_add_reification_* helpers
+     * auto-promote to their 64-bit variant when either operand is tier-1, so
+     * wide fields are handled here without a per-op width switch. */
     switch (binop->op) {
     case BIN_EQ:
         prop_add_reification_eq_32(ctx, r_id, a_id, b_id, 0);
@@ -594,11 +609,12 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
         prop_add_reification_32(ctx, r_id, b_id, a_id, 0);
         return 1;
     case BIN_LT: {
-        /* r ↔ (a < b)  ≡  r ↔ (a ≤ b-1).  Need a const-var for b-1 when
-         * b is a constant; otherwise fall back to materialising b-1 by
-         * tying a fresh aux through an add propagator (not done here). */
+        /* r ↔ (a < b)  ≡  r ↔ (a ≤ b-1).  Need a const-var for b-1 when b is a
+         * constant (and b-1 fits the int32 singleton storage); otherwise defer. */
         int64_t b_cv;
-        if (_is_const(sp, binop->rhs, &b_cv) && ctx->n_vars < ctx->n_vars_capacity) {
+        if (_is_const(sp, binop->rhs, &b_cv) &&
+            b_cv - 1 >= INT32_MIN && b_cv - 1 <= INT32_MAX &&
+            ctx->n_vars < ctx->n_vars_capacity) {
             uint32_t bm1 = ctx->n_vars;
             _init_tier0(&ctx->vars[bm1], 32, 0, b_cv - 1, b_cv - 1);
             ctx->n_vars = bm1 + 1;
@@ -610,7 +626,9 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
     }
     case BIN_GT: {
         int64_t a_cv;
-        if (_is_const(sp, binop->lhs, &a_cv) && ctx->n_vars < ctx->n_vars_capacity) {
+        if (_is_const(sp, binop->lhs, &a_cv) &&
+            a_cv - 1 >= INT32_MIN && a_cv - 1 <= INT32_MAX &&
+            ctx->n_vars < ctx->n_vars_capacity) {
             uint32_t am1 = ctx->n_vars;
             _init_tier0(&ctx->vars[am1], 32, 0, a_cv - 1, a_cv - 1);
             ctx->n_vars = am1 + 1;

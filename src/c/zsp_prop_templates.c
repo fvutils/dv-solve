@@ -631,10 +631,48 @@ static PropResult _fire_implication_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
+/* Tier-1 (int64) sibling of _fire_implication_32: guard → (var ≤/≥ bound), using
+ * the edge-guarded 64-bit tighten so it is sound on fields whose representable max
+ * exceeds INT32_MAX (unsigned width 32). */
+static PropResult _fire_implication_64(Propagator *self, SolveCtx *ctx) {
+    PropWatchSect    *ws    = PROP_WS(self);
+    Implication_64_t *iself = (Implication_64_t *)self;
+    uint32_t          gid   = ws->var_ids[0];
+    uint32_t          vid   = ws->var_ids[1];
+    Variable         *g     = &ctx->vars[gid];
+
+    if (g->hi == 0) return PROP_ENTAILED;          /* guard false → entailed */
+    if (g->lo == 1) {                              /* guard true → enforce   */
+        return iself->is_ub ? ctx_tighten_ub64(ctx, vid, iself->bound)
+                            : ctx_tighten_lb64(ctx, vid, iself->bound);
+    }
+    return PROP_OK;
+}
+
+uint32_t prop_add_implication_64(SolveCtx *ctx,
+                                   uint32_t guard_id, uint32_t var_id,
+                                   int64_t bound, uint8_t is_ub,
+                                   uint8_t priority) {
+    uint32_t ids[2] = { guard_id, var_id };
+    uint32_t ref = _alloc_prop(ctx, _fire_implication_64, priority, 2, ids,
+                                sizeof(Implication_64_t));
+    if (ref == EXPR_NULL) return EXPR_NULL;
+
+    Implication_64_t *p = (Implication_64_t *)zsp_pool_ptr(&ctx->pool, ref);
+    p->bound = bound;
+    p->is_ub = is_ub;
+    return ref;
+}
+
 uint32_t prop_add_implication_32(SolveCtx *ctx,
                                    uint32_t guard_id, uint32_t var_id,
                                    int32_t bound, uint8_t is_ub,
                                    uint8_t priority) {
+    /* Auto-promote to the 64-bit propagator when the constrained var is tier-1;
+     * the 32-bit fire reads int32 bounds and re-queues forever on such fields. */
+    if (!VAR_IS_TIER0(ctx->vars[var_id].flags))
+        return prop_add_implication_64(ctx, guard_id, var_id,
+                                       (int64_t)bound, is_ub, priority);
     uint32_t ids[2] = { guard_id, var_id };
     uint32_t ref = _alloc_prop(ctx, _fire_implication_32, priority, 2, ids,
                                 sizeof(Implication_32_t));
@@ -687,6 +725,13 @@ static PropResult _fire_reification_32(Propagator *self, SolveCtx *ctx) {
 uint32_t prop_add_reification_32(SolveCtx *ctx, uint32_t guard_id,
                                    uint32_t x_id, uint32_t y_id,
                                    uint8_t priority) {
+    /* Auto-promote to the 64-bit propagator when either compared operand is
+     * tier-1 (representable max > INT32_MAX). The 32-bit fire reads int32 bounds
+     * and is unsound / non-terminating on such fields; delegating here covers
+     * every reification call site through one choke point. */
+    if (!VAR_IS_TIER0(ctx->vars[x_id].flags) ||
+        !VAR_IS_TIER0(ctx->vars[y_id].flags))
+        return prop_add_reification_64(ctx, guard_id, x_id, y_id, priority);
     uint32_t ids[3] = { guard_id, x_id, y_id };
     return _alloc_prop(ctx, _fire_reification_32, priority, 3, ids,
                        sizeof(Reification_32_t));
@@ -761,6 +806,11 @@ static PropResult _fire_reification_eq_32(Propagator *self, SolveCtx *ctx) {
 uint32_t prop_add_reification_eq_32(SolveCtx *ctx, uint32_t guard_id,
                                      uint32_t x_id, uint32_t y_id,
                                      uint8_t priority) {
+    /* Auto-promote to the 64-bit propagator when either compared operand is
+     * tier-1 (see prop_add_reification_32). */
+    if (!VAR_IS_TIER0(ctx->vars[x_id].flags) ||
+        !VAR_IS_TIER0(ctx->vars[y_id].flags))
+        return prop_add_reification_eq_64(ctx, guard_id, x_id, y_id, priority);
     uint32_t ids[3] = { guard_id, x_id, y_id };
     return _alloc_prop(ctx, _fire_reification_eq_32, priority, 3, ids,
                        sizeof(ReificationEq_32_t));
@@ -2149,11 +2199,118 @@ uint32_t prop_add_in_ranges_64(SolveCtx *ctx, uint32_t x_id,
     return ref;
 }
 
+/* 64-bit (tier-1) reification of `guard <-> (x <= y)`. Sign-aware sibling of
+ * _fire_reification_32: reads bounds via var_lo64/var_hi64 (which resolve tier-1
+ * WideBounds64) and tightens via the edge-guarded ctx_tighten_*64, so it is sound
+ * for fields whose representable max exceeds INT32_MAX (e.g. unsigned width 32). */
+static PropResult _fire_reification_64(Propagator *self, SolveCtx *ctx) {
+    PropWatchSect *ws  = PROP_WS(self);
+    uint32_t       gid = ws->var_ids[0];
+    uint32_t       xid = ws->var_ids[1];
+    uint32_t       yid = ws->var_ids[2];
+    Variable      *g   = &ctx->vars[gid];
+    Variable      *x   = &ctx->vars[xid];
+    Variable      *y   = &ctx->vars[yid];
+    int64_t xlo = var_lo64(ctx, x), xhi = var_hi64(ctx, x);
+    int64_t ylo = var_lo64(ctx, y), yhi = var_hi64(ctx, y);
+
+    /* guard=1 -> enforce x <= y */
+    if (g->lo == 1) {
+        PropResult r;
+        if ((r = ctx_tighten_ub64(ctx, xid, yhi)) != PROP_OK) return r;
+        if ((r = ctx_tighten_lb64(ctx, yid, xlo)) != PROP_OK) return r;
+    }
+    /* guard=0 -> x > y: tighten lb of x above y.hi (only when y.hi < x's max, so
+     * y.hi+1 cannot overflow the representable range — at the max there is no
+     * information to add and the search/model-validation stays authoritative). */
+    if (g->hi == 0) {
+        if (var_b_lt(x, yhi, var_repr_max(x))) {
+            PropResult r;
+            if ((r = ctx_tighten_lb64(ctx, xid, yhi + 1)) != PROP_OK) return r;
+        }
+    }
+    /* Backward: if the domains prove x <= y (or x > y) unconditionally, pin g. */
+    if (g->lo != g->hi) {
+        if (!var_b_gt(x, xhi, ylo)) {            /* x.hi <= y.lo */
+            PropResult r;
+            if ((r = ctx_tighten_lb64(ctx, gid, 1)) != PROP_OK) return r;
+        } else if (var_b_gt(x, xlo, yhi)) {      /* x.lo >  y.hi */
+            PropResult r;
+            if ((r = ctx_tighten_ub64(ctx, gid, 0)) != PROP_OK) return r;
+        }
+    }
+    return PROP_OK;
+}
+
 uint32_t prop_add_reification_64(SolveCtx *ctx, uint32_t guard_id,
                                    uint32_t x_id, uint32_t y_id,
                                    uint8_t priority) {
     uint32_t ids[3] = { guard_id, x_id, y_id };
-    return _alloc_prop(ctx, _fire_noop, priority, 3, ids, sizeof(Reification_64_t));
+    return _alloc_prop(ctx, _fire_reification_64, priority, 3, ids,
+                       sizeof(Reification_64_t));
+}
+
+/* 64-bit (tier-1) reification of `guard <-> (x == y)`. Sign-aware sibling of
+ * _fire_reification_eq_32; the guard=1 intersection mirrors _fire_bounds_eq_64 and
+ * the guard=0 exclusion mirrors _fire_bounds_ne_64. */
+static PropResult _fire_reification_eq_64(Propagator *self, SolveCtx *ctx) {
+    PropWatchSect *ws  = PROP_WS(self);
+    uint32_t       gid = ws->var_ids[0];
+    uint32_t       xid = ws->var_ids[1];
+    uint32_t       yid = ws->var_ids[2];
+    Variable      *g   = &ctx->vars[gid];
+    Variable      *x   = &ctx->vars[xid];
+    Variable      *y   = &ctx->vars[yid];
+    int64_t xlo = var_lo64(ctx, x), xhi = var_hi64(ctx, x);
+    int64_t ylo = var_lo64(ctx, y), yhi = var_hi64(ctx, y);
+
+    /* Forward: guard=1 -> enforce x == y (intersect bounds). */
+    if (g->lo == 1) {
+        int64_t lo = var_b_max(x, xlo, ylo);
+        int64_t hi = var_b_min(x, xhi, yhi);
+        if (var_b_gt(x, lo, hi)) return PROP_CONFLICT;
+        PropResult r;
+        if ((r = ctx_tighten_lb64(ctx, xid, lo)) != PROP_OK) return r;
+        if ((r = ctx_tighten_ub64(ctx, xid, hi)) != PROP_OK) return r;
+        if ((r = ctx_tighten_lb64(ctx, yid, lo)) != PROP_OK) return r;
+        if ((r = ctx_tighten_ub64(ctx, yid, hi)) != PROP_OK) return r;
+    }
+    /* Forward: guard=0 -> x != y. Only propagates when one side is singleton. */
+    if (g->hi == 0) {
+        if (xlo == xhi && ylo == xlo && yhi == xhi) return PROP_CONFLICT;
+        if (xlo == xhi) {
+            int64_t v = xlo; PropResult r;
+            if (ylo == v) { if ((r = ctx_tighten_lb64(ctx, yid, v + 1)) != PROP_OK) return r; }
+            else if (yhi == v) { if ((r = ctx_tighten_ub64(ctx, yid, v - 1)) != PROP_OK) return r; }
+        }
+        if (ylo == yhi) {
+            int64_t v = ylo; PropResult r;
+            if (xlo == v) { if ((r = ctx_tighten_lb64(ctx, xid, v + 1)) != PROP_OK) return r; }
+            else if (xhi == v) { if ((r = ctx_tighten_ub64(ctx, xid, v - 1)) != PROP_OK) return r; }
+        }
+    }
+    /* Reload: the forward branch may have tightened x/y before the backward pins. */
+    xlo = var_lo64(ctx, x); xhi = var_hi64(ctx, x);
+    ylo = var_lo64(ctx, y); yhi = var_hi64(ctx, y);
+    /* Backward: both singleton at the same value -> guard=1. */
+    if (xlo == xhi && ylo == yhi && xlo == ylo) {
+        PropResult r;
+        if ((r = ctx_tighten_lb64(ctx, gid, 1)) != PROP_OK) return r;
+    }
+    /* Backward: disjoint domains -> guard=0. */
+    if (var_b_gt(x, xlo, yhi) || var_b_gt(x, ylo, xhi)) {
+        PropResult r;
+        if ((r = ctx_tighten_ub64(ctx, gid, 0)) != PROP_OK) return r;
+    }
+    return PROP_OK;
+}
+
+uint32_t prop_add_reification_eq_64(SolveCtx *ctx, uint32_t guard_id,
+                                     uint32_t x_id, uint32_t y_id,
+                                     uint8_t priority) {
+    uint32_t ids[3] = { guard_id, x_id, y_id };
+    return _alloc_prop(ctx, _fire_reification_eq_64, priority, 3, ids,
+                       sizeof(ReificationEq_64_t));
 }
 
 static PropResult _fire_bit_slice_64(Propagator *self, SolveCtx *ctx) {
@@ -3261,8 +3418,11 @@ const char *prop_fire_name(PropResult (*fire)(Propagator *, SolveCtx *)) {
     FN_NAME(_fire_unary_neg_32);
     FN_NAME(_fire_in_set_32);
     FN_NAME(_fire_implication_32);
+    FN_NAME(_fire_implication_64);
     FN_NAME(_fire_reification_32);
     FN_NAME(_fire_reification_eq_32);
+    FN_NAME(_fire_reification_64);
+    FN_NAME(_fire_reification_eq_64);
     FN_NAME(_fire_bit_slice_32);
     FN_NAME(_fire_bounds_le_64);
     FN_NAME(_fire_bounds_lt_64);
@@ -3306,8 +3466,11 @@ void contra_register_explanations(SolveCtx *ctx) {
         { _fire_unary_neg_32,       explain_unary_neg },
         { _fire_in_set_32,          explain_in_set },
         { _fire_implication_32,     explain_implication },
+        { _fire_implication_64,     explain_implication },
         { _fire_reification_32,     explain_reification },
         { _fire_reification_eq_32,  explain_reification_eq },
+        { _fire_reification_64,     explain_reification },
+        { _fire_reification_eq_64,  explain_reification_eq },
         { _fire_bit_slice_32,       explain_bit_slice },
         { _fire_bounds_le_64,       explain_bounds_le },
         { _fire_bounds_lt_64,       explain_bounds_lt },
