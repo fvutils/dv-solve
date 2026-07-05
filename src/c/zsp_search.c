@@ -413,6 +413,14 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
         }
         int64_t v = _pick_value(ctx, x_id, opts);
 
+        /* Decision-depth guard. decisions/level_marks are fixed-size
+         * (MAX_DECISION_DEPTH); the search pushes one level per decided
+         * variable, so a problem with more decision variables than that depth
+         * would overflow both arrays (out-of-bounds heap write -> crash).
+         * Bail with TIMEOUT so the caller defers/escalates cleanly instead. */
+        if (ctx->decision_level >= ctx->max_depth)
+            return SOLVE_TIMEOUT;
+
         /* ── Record decision ── */
         uint32_t dec_idx = ctx->decision_level;   /* index before push */
         ctx->decisions[dec_idx].var_id      = x_id;

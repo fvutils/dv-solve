@@ -13,7 +13,13 @@
 #include "zsp_propagator.h"  /* PropQueue */
 #include "zsp_search.h"      /* DecisionRecord */
 
-/** Maximum decision depth for the embedded solver profile. */
+/** Maximum decision depth for the embedded solver profile. The search pushes
+ *  one level per decided variable, so this also caps the number of decision
+ *  variables a single solve can carry natively — e.g. a symbolic array select
+ *  frees every array element as a decision var, so a very large indexed array
+ *  can exceed this. `_solver_solve_core` bails with SOLVE_TIMEOUT (clean defer)
+ *  rather than overflowing the fixed decisions/level_marks arrays beyond this,
+ *  so exceeding it degrades gracefully instead of an out-of-bounds write. */
 #define MAX_DECISION_DEPTH  256u
 
 #ifdef __cplusplus

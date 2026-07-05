@@ -2092,7 +2092,11 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
         uint32_t n = as->n_elems;
 
         if (n == 0) return 1;  /* empty array: vacuously true */
-        if (n > 64) return 0;  /* too large for ITE chain */
+        /* Flat guard-reified select is O(n) propagators. Benchmarking showed it
+         * wins over the vsc-layer ITE chain only up to ~64 elements and degrades
+         * past ~96 (2n guard propagators fire poorly at scale), so the vsc layer
+         * only routes n<=64 here; keep the cap aligned. */
+        if (n > 64) return 0;
 
         /* Tighten index to [0, n-1] */
         if (ctx_tighten_lb64(ctx, idx_id, 0) == PROP_CONFLICT) return -1;
@@ -2505,6 +2509,7 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
     uint32_t pr_base = sp->n_constraints + sp->n_alldiffs;
     uint32_t pr_cap  = pr_base * PROP_SLACK_FACTOR;
     if (pr_cap < pr_base + PROP_SLACK_MIN) pr_cap = pr_base + PROP_SLACK_MIN;
+    if (pr_cap < 2u * capacity) pr_cap = 2u * capacity;
     /* Incremental mode (yosys-smtbmc) keeps adding propagators per BMC
      * step. The var-capacity hint already covers fresh aux vars; mirror
      * it for the propagator side tables so prop_refs/prop_guard_vars/
