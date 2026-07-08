@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "unique16",
   "result": "sat",
-  "solve_time_ms": 8.763514008023776,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 8.17398598883301,
+  "peak_memory_kb": 42496,
   "returncode": 1,
   "stdout": "(error \"line 1 column 19: unknown parameter 'seed'\nLegal parameters are:\n  auto_config (bool) (default: true)\n  ctrl_c (bool) (default: true)\n  debug_ref_count (bool) (default: false)\n  dot_proof_file (string) (default: proof.dot)\n  dump_models (bool) (default: false)\n  encoding (string) (default: unicode)\n  memory_high_watermark (unsigned int) (default: 0)\n  memory_high_watermark_mb (unsigned int) (default: 0)\n  memory_max_alloc_count (unsigned int) (default: 0)\n  memory_max_size (unsigned int) (default: 0)\n  model (bool) (default: true)\n  model_validate (bool) (default: false)\n  proof (bool) (default: false)\n  rlimit (unsigned int) (default: 0)\n  smtlib2_compliant (bool) (default: false)\n  stats (bool) (default: false)\n  timeout (unsigned int) (default: 4294967295)\n  trace (bool) (default: false)\n  trace_file_name (string) (default: z3.log)\n  type_check (bool) (default: true)\n  unsat_core (bool) (default: false)\n  verbose (unsigned int) (default: 0)\n  warning (bool) (default: true)\n  well_sorted_check (bool) (default: false)\")\nsat\n((v0 #b10110)\n (v1 #b01111)\n (v2 #b01010)\n (v3 #b01100)\n (v4 #b01000)\n (v5 #b11010)\n (v6 #b00101)\n (v7 #b00100)\n (v8 #b10101)\n (v9 #b10000)\n (v10 #b11101)\n (v11 #b10010)\n (v12 #b10011)\n (v13 #b00010)\n (v14 #b00110)\n (v15 #b11001))\n",
   "stderr": ""

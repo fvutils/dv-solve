@@ -1,10 +1,10 @@
 {
   "solver": "dv-solve-smt2",
   "benchmark": "regfile_rdwr_kind_k1",
-  "result": "unknown",
-  "solve_time_ms": 5.717545005609281,
-  "peak_memory_kb": 42240,
-  "returncode": 2,
-  "stdout": "unknown\n",
+  "result": "unsat",
+  "solve_time_ms": 2.69883603323251,
+  "peak_memory_kb": 42496,
+  "returncode": 1,
+  "stdout": "unsat\n",
   "stderr": ""
 }

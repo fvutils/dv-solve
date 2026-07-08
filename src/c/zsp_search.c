@@ -339,8 +339,19 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                                           (uint32_t)_Alignof(int64_t));
         if (ps_ref != EXPR_NULL) {
             ctx->phase_save = (int64_t *)zsp_pool_ptr(&ctx->pool, ps_ref);
-            for (uint32_t i = 0; i < ctx->n_vars; i++)
-                ctx->phase_save[i] = var_lo64(ctx, &ctx->vars[i]);
+            /* For a diversity solve (nonzero seed) seed each var's initial phase
+             * to a RANDOM in-domain value rather than its lower bound. Otherwise
+             * _pick_value keeps returning the saved lower bound and an otherwise-
+             * unconstrained (or loosely bounded) rand var never varies across
+             * seeds. The value is still assigned through _pick_value ->
+             * propagation, so coupled constraints stay respected. Seed 0
+             * (BMC/decision) keeps the deterministic lower-bound phase. */
+            int diversify = (opts->seed != 0);
+            for (uint32_t i = 0; i < ctx->n_vars; i++) {
+                int64_t lo = var_lo64(ctx, &ctx->vars[i]);
+                int64_t hi = var_hi64(ctx, &ctx->vars[i]);
+                ctx->phase_save[i] = diversify ? _rand_range64(ctx, lo, hi) : lo;
+            }
         }
     }
 

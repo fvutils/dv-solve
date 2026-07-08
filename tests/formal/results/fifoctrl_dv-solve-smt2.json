@@ -2,9 +2,9 @@
   "solver": "dv-solve-smt2",
   "benchmark": "fifoctrl",
   "result": "sat",
-  "solve_time_ms": 2.7359679952496663,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 2.405446022748947,
+  "peak_memory_kb": 42496,
   "returncode": 0,
-  "stdout": "sat\n((wr_ptr (_ bv116 8))\n (rd_ptr (_ bv100 8))\n (watermark_lo (_ bv20 6))\n (watermark_hi (_ bv213 8)))\n",
+  "stdout": "sat\n((wr_ptr #b00000000)\n (rd_ptr #b10101000)\n (watermark_lo #b000000)\n (watermark_hi #b11000000))\n",
   "stderr": ""
 }

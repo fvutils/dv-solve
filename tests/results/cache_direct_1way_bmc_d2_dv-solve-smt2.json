@@ -1,10 +1,10 @@
 {
   "solver": "dv-solve-smt2",
   "benchmark": "cache_direct_1way_bmc_d2",
-  "result": "sat",
-  "solve_time_ms": 3.9506390021415427,
-  "peak_memory_kb": 256,
-  "returncode": 0,
-  "stdout": "sat\n",
+  "result": "unsat",
+  "solve_time_ms": 16.576917027123272,
+  "peak_memory_kb": 42496,
+  "returncode": 1,
+  "stdout": "unsat\n",
   "stderr": ""
 }

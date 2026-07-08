@@ -2,9 +2,9 @@
   "solver": "dv-solve-smt2",
   "benchmark": "nqueens8",
   "result": "sat",
-  "solve_time_ms": 3.8826950039947405,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 2.913205069489777,
+  "peak_memory_kb": 42496,
   "returncode": 0,
-  "stdout": "sat\n((q0 (_ bv4 3))\n (q1 (_ bv0 3))\n (q2 (_ bv7 3))\n (q3 (_ bv3 3))\n (q4 (_ bv1 3))\n (q5 (_ bv6 3))\n (q6 (_ bv2 3))\n (q7 (_ bv5 3))\n (dp0 (_ bv4 4))\n (dp1 (_ bv1 4))\n (dp2 (_ bv9 4))\n (dp3 (_ bv6 4))\n (dp4 (_ bv5 4))\n (dp5 (_ bv11 4))\n (dp6 (_ bv8 4))\n (dp7 (_ bv12 4))\n (dm0 (_ bv11 4))\n (dm1 (_ bv6 4))\n (dm2 (_ bv12 4))\n (dm3 (_ bv7 4))\n (dm4 (_ bv4 4))\n (dm5 (_ bv8 4))\n (dm6 (_ bv3 4))\n (dm7 (_ bv5 4)))\n",
+  "stdout": "sat\n((q0 #b101)\n (q1 #b010)\n (q2 #b110)\n (q3 #b011)\n (q4 #b000)\n (q5 #b111)\n (q6 #b001)\n (q7 #b100)\n (dp0 #b0101)\n (dp1 #b0011)\n (dp2 #b1000)\n (dp3 #b0110)\n (dp4 #b0100)\n (dp5 #b1100)\n (dp6 #b0111)\n (dp7 #b1011)\n (dm0 #b1100)\n (dm1 #b1000)\n (dm2 #b1011)\n (dm3 #b0111)\n (dm4 #b0011)\n (dm5 #b1001)\n (dm6 #b0010)\n (dm7 #b0100))\n",
   "stderr": ""
 }

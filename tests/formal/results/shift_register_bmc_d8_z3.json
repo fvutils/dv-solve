@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "shift_register_bmc_d8",
   "result": "unsat",
-  "solve_time_ms": 4.217970999889076,
-  "peak_memory_kb": 35840,
+  "solve_time_ms": 4.29613096639514,
+  "peak_memory_kb": 42496,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

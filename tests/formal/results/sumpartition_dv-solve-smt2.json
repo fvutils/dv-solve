@@ -2,9 +2,9 @@
   "solver": "dv-solve-smt2",
   "benchmark": "sumpartition",
   "result": "sat",
-  "solve_time_ms": 3.9192550029838458,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 2.4628760293126106,
+  "peak_memory_kb": 42496,
   "returncode": 0,
-  "stdout": "sat\n((p0 (_ bv27 7))\n (p1 (_ bv28 7))\n (p2 (_ bv28 7))\n (p3 (_ bv29 7))\n (p4 (_ bv29 7))\n (p5 (_ bv29 7))\n (p6 (_ bv30 7))\n (s01 (_ bv55 8))\n (s012 (_ bv83 8))\n (s0123 (_ bv112 9))\n (s01234 (_ bv141 9))\n (s012345 (_ bv170 9)))\n",
+  "stdout": "sat\n((p0 #b0001010)\n (p1 #b0001010)\n (p2 #b0001010)\n (p3 #b0001010)\n (p4 #b0001010)\n (p5 #b1001010)\n (p6 #b1001100)\n (s01 #b00010100)\n (s012 #b00011110)\n (s0123 #b000101000)\n (s01234 #b000110010)\n (s012345 #b001111100))\n",
   "stderr": ""
 }

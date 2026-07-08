@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <time.h>
 #include "smt2/smt2_frontend.h"
 #include "zsp_lcg.h"
 #include "zsp_bbsolver.h"
@@ -122,6 +123,7 @@ static Smt2ArrayVar *_find_array_var(Smt2Frontend *fe, const char *name, uint32_
  * names (e.g. let-binding names that point into the parser's arena). */
 static const Sexpr *_subst_lookup(Smt2Frontend *fe, const char *name, uint32_t len) {
     for (int i = (int)fe->subst_depth - 1; i >= 0; i--) {
+        if (fe->subst_stack[i].expanding) continue;   /* skip in-progress binding */
         if (fe->subst_stack[i].len == len &&
             memcmp(name, fe->subst_stack[i].name, len) == 0) {
             return fe->subst_stack[i].value;
@@ -133,6 +135,7 @@ static const Sexpr *_subst_lookup(Smt2Frontend *fe, const char *name, uint32_t l
 /* Like _subst_lookup but returns the entry pointer so callers can cache. */
 static Smt2Subst *_subst_lookup_entry(Smt2Frontend *fe, const char *name, uint32_t len) {
     for (int i = (int)fe->subst_depth - 1; i >= 0; i--) {
+        if (fe->subst_stack[i].expanding) continue;   /* skip in-progress binding */
         if (fe->subst_stack[i].len == len &&
             memcmp(name, fe->subst_stack[i].name, len) == 0) {
             return &fe->subst_stack[i];
@@ -254,8 +257,12 @@ static uint32_t _fresh_aux(Smt2Frontend *fe, uint16_t width) {
 /* Array value helpers                                                 */
 /* ------------------------------------------------------------------ */
 
-/* Allocate a transient Smt2ArrayValue (freed at end of command). */
+/* Allocate a transient dense Smt2ArrayValue (freed at end of command). Returns
+ * NULL for a too-large address space -- intermediate array values (store/ite/
+ * as-const results) over a sparse sort aren't materialized densely; the caller
+ * turns NULL into an `unknown` result. */
 static Smt2ArrayValue *_make_array_value(Smt2Frontend *fe, Smt2ArraySort sort) {
+    if (sort.addr_width > SMT2_MAX_ARRAY_ADDR_BITS) return NULL;
     uint32_t n = 1u << sort.addr_width;
     Smt2ArrayValue *av = (Smt2ArrayValue *)_cmd_alloc(fe, sizeof(Smt2ArrayValue));
     if (!av) return NULL;
@@ -266,6 +273,11 @@ static Smt2ArrayValue *_make_array_value(Smt2Frontend *fe, Smt2ArraySort sort) {
     av->elems            = elems;
     av->store_idx_varid  = UINT32_MAX;
     av->store_val        = EXPR_NULL;
+    av->is_sparse        = 0;
+    av->n_sparse         = 0;
+    av->sparse_cap       = 0;
+    av->sparse_idx       = NULL;
+    av->sparse_varid     = NULL;
     return av;
 }
 
@@ -279,6 +291,23 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
         return NULL;
     }
 
+    /* Sparse array: address space too large to expand densely. Element vars are
+     * created lazily on first select/store of each concrete index. */
+    if (sort.addr_width > SMT2_MAX_ARRAY_ADDR_BITS) {
+        Smt2ArrayVar *av = &fe->array_vars[fe->n_array_vars++];
+        uint32_t copy_len = nlen < SMT2_MAX_NAME - 1 ? nlen : SMT2_MAX_NAME - 1;
+        memcpy(av->name, name, copy_len);
+        av->name[copy_len] = '\0';
+        av->sort = sort;
+        av->value = (Smt2ArrayValue *)calloc(1, sizeof(Smt2ArrayValue));
+        if (!av->value) { fe->n_array_vars--; return NULL; }
+        av->value->sort            = sort;
+        av->value->store_idx_varid = UINT32_MAX;
+        av->value->store_val       = EXPR_NULL;
+        av->value->is_sparse       = 1;
+        return av;
+    }
+
     uint32_t n_elems = 1u << sort.addr_width;
     Smt2ArrayVar *av = &fe->array_vars[fe->n_array_vars++];
 
@@ -287,7 +316,7 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
     av->name[copy_len] = '\0';
     av->sort = sort;
 
-    av->value = (Smt2ArrayValue *)malloc(sizeof(Smt2ArrayValue));
+    av->value = (Smt2ArrayValue *)calloc(1, sizeof(Smt2ArrayValue));
     if (!av->value) { fe->n_array_vars--; return NULL; }
     av->value->sort   = sort;
     av->value->n_elems = n_elems;
@@ -313,6 +342,57 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
 
     if (fe->compiled) fe->has_aux = 1;
     return av;
+}
+
+/* Look up (or lazily materialize) the element ExprRef for concrete index `k`
+ * in a sparse array. Each index maps to a real solver var, so all accesses to
+ * that index -- across constraints and get-value -- observe the same variable.
+ * Returns EXPR_NULL if the sparse table is full (which the caller turns into an
+ * `unknown` result rather than a wrong answer). */
+/* Returns 1 and sets *out_varid if concrete index `k` already has an element
+ * var; else returns 0. */
+static int _sparse_find(Smt2ArrayValue *arr, uint64_t k, uint32_t *out_varid) {
+    for (uint32_t i = 0; i < arr->n_sparse; i++)
+        if (arr->sparse_idx[i] == k) { *out_varid = arr->sparse_varid[i]; return 1; }
+    return 0;
+}
+
+static ExprRef _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
+                            uint64_t k, int create) {
+    uint32_t existing;
+    if (_sparse_find(arr, k, &existing))
+        return builder_expr_var(fe->builder, existing);
+    if (!create) return EXPR_NULL;
+
+    if (arr->n_sparse >= SMT2_MAX_SPARSE_ELEMS) {
+        fprintf(fe->err, "error: sparse array exceeded %u distinct indices\n",
+                (unsigned)SMT2_MAX_SPARSE_ELEMS);
+        return EXPR_NULL;
+    }
+    if (arr->n_sparse == arr->sparse_cap) {
+        uint32_t nc = arr->sparse_cap ? arr->sparse_cap * 2 : 8;
+        uint64_t *ni = (uint64_t *)realloc(arr->sparse_idx, nc * sizeof(uint64_t));
+        if (!ni) return EXPR_NULL;
+        arr->sparse_idx = ni;
+        uint32_t *nv = (uint32_t *)realloc(arr->sparse_varid, nc * sizeof(uint32_t));
+        if (!nv) return EXPR_NULL;
+        arr->sparse_varid = nv;
+        arr->sparse_cap = nc;
+    }
+
+    uint32_t var_id = _next_var_id(fe);
+    uint64_t max_val = (arr->sort.data_width >= 64) ? UINT64_MAX
+                       : ((1ULL << arr->sort.data_width) - 1);
+    builder_add_var(fe->builder, var_id, arr->sort.data_width, 0, 0, (int64_t)max_val);
+    char nm[SMT2_MAX_NAME];
+    snprintf(nm, sizeof(nm), "__arr%u_%llu", var_id, (unsigned long long)k);
+    _add_var(fe, nm, (uint32_t)strlen(nm), var_id, arr->sort.data_width);
+    if (var_id + 1 > fe->n_vars) fe->n_vars = var_id + 1;
+    arr->sparse_idx[arr->n_sparse] = k;
+    arr->sparse_varid[arr->n_sparse] = var_id;
+    arr->n_sparse++;
+    if (fe->compiled) fe->has_aux = 1;
+    return builder_expr_var(fe->builder, var_id);
 }
 
 /* ------------------------------------------------------------------ */
@@ -428,7 +508,13 @@ static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
         return TAGGED_NULL;
     }
 
-    /* Push bindings */
+    /* Push bindings. Arguments are translated lazily (call-by-name), which is
+     * required so that sort/record-typed arguments -- e.g. a yosys state
+     * instance passed to `(define-fun pred ((s S)) ...)` and used inside the
+     * body only as `(accessor s)` -- are substituted textually rather than
+     * translated bare (a bare record has no expression form). Hygiene against
+     * self-referential arguments is handled by the `expanding` guard set in
+     * _translate_symbol_tagged (see Smt2Subst.expanding). */
     uint32_t saved_depth = fe->subst_depth;
     for (uint32_t i = 0; i < fd->n_params; i++) {
         Smt2Subst *s = &fe->subst_stack[fe->subst_depth++];
@@ -436,6 +522,7 @@ static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
         s->len       = (uint32_t)strlen(fd->param_names[i]);
         s->value     = call->list.items[i + 1];
         s->has_cache = 0;
+        s->expanding = 0;
     }
 
     /* Translate body */
@@ -495,8 +582,14 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return (TaggedExpr){ { sub_entry->cached_ref, sub_entry->cached_width },
                                  sub_entry->cached_leaf_kind, sub_entry->cached_array };
         }
-        /* define-fun parameter: lazily translate the argument expression */
-        return _translate_tagged(fe, sub_entry->value);
+        /* define-fun parameter: lazily translate the argument expression.
+         * Mark this entry as expanding so a self-referential argument (an
+         * inner symbol with the same name as this parameter) resolves past it
+         * to the outer/global binding instead of recursing infinitely. */
+        sub_entry->expanding = 1;
+        TaggedExpr r = _translate_tagged(fe, sub_entry->value);
+        sub_entry->expanding = 0;
+        return r;
     }
 
     if (sexpr_is_symbol(s, "true")) {
@@ -637,6 +730,13 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         return (TaggedExpr){ { EXPR_NULL, 0 }, 0, arr };
     }
 
+    /* (! <term> :attr val ...) — annotated term. The attributes (e.g. :named
+     * for unsat cores, :pattern) are metadata; the value is just <term>. */
+    if (head->kind == SEXPR_SYMBOL && sexpr_is_symbol(head, "!") &&
+        s->list.count >= 2) {
+        return _translate_tagged(fe, s->list.items[1]);
+    }
+
     /* (let ((x1 e1) (x2 e2) ...) body) — parallel binding.
      * SMT-LIB2 parallel semantics: all ei are evaluated in the CURRENT scope
      * before any xi binding takes effect.  We pre-translate eagerly. */
@@ -747,12 +847,26 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                     k = bv_val; is_const = 1;
                 }
             }
-            if (is_const && k < arr->n_elems) {
-                return (TaggedExpr){ { arr->elems[k], arr->sort.data_width }, 2, NULL };
+            if (is_const) {
+                if (arr->is_sparse) {
+                    ExprRef e = _sparse_elem(fe, arr, k, /*create=*/1);
+                    if (e == EXPR_NULL) { fe->incomplete = 1; return TAGGED_NULL; }
+                    return (TaggedExpr){ { e, arr->sort.data_width }, 2, NULL };
+                }
+                if (k < arr->n_elems)
+                    return (TaggedExpr){ { arr->elems[k], arr->sort.data_width }, 2, NULL };
             }
         }
 
-        /* Symbolic index: ITE tree */
+        /* Symbolic index. A sparse (large-address) array cannot resolve one
+         * without enumerating 2^M entries -> honest unknown rather than a wrong
+         * answer. Dense arrays lower to an ITE tree over their elements. */
+        if (arr->is_sparse) {
+            fprintf(fe->err, "error: symbolic index into a large (sparse) array "
+                             "is unsupported -> result will be unknown\n");
+            fe->incomplete = 1;
+            return TAGGED_NULL;
+        }
         idx_te = _flatten_to_var(fe, idx_te);
         return _array_select(fe, arr, idx_te.te.ref);
     }
@@ -766,6 +880,15 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return TAGGED_NULL;
         }
         Smt2ArrayValue *arr = arr_te.array;
+
+        /* store on a sparse (large-address) array needs a lazy read-over-write
+         * copy; not yet implemented, so report unknown rather than guess. */
+        if (arr->is_sparse) {
+            fprintf(fe->err, "error: store on a large (sparse) array is "
+                             "unsupported -> result will be unknown\n");
+            fe->incomplete = 1;
+            return TAGGED_NULL;
+        }
 
         TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
         if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
@@ -826,15 +949,20 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     }
 
     /* ---- Binary BV arithmetic (result has same width as operands) ---- */
+    /* These ops are :left-assoc in SMT-LIB, and Verilator emits them variadically
+     * (e.g. (bvor a b c)). Left-fold over all operands so both the binary and
+     * n-ary forms translate: (op a b c) == (op (op a b) c). */
 #define BINOP_CASE(name, binop) \
     if (oplen == sizeof(name)-1 && memcmp(op, name, oplen) == 0) { \
-        if (s->list.count != 3) return TAGGED_NULL; \
+        if (s->list.count < 3) return TAGGED_NULL; \
         TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1])); \
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL; \
-        TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2])); \
-        if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
-        ExprRef r = builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
-        return (TaggedExpr){ { r, a.te.width }, 0, NULL }; \
+        for (uint32_t _i = 2; _i < s->list.count; _i++) { \
+            TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[_i])); \
+            if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
+            a.te.ref = builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
+        } \
+        return (TaggedExpr){ { a.te.ref, a.te.width }, 0, NULL }; \
     }
 
 #define CMPOP_CASE(name, binop) \
@@ -864,8 +992,38 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     CMPOP_CASE("bvugt", BIN_GT)
     CMPOP_CASE("bvuge", BIN_GTE)
 
+    /* Signed comparisons via the MSB-flip identity:
+     *   a <s b  <=>  (a ^ 2^(w-1)) <u (b ^ 2^(w-1))
+     * Flipping the sign bit maps signed order onto unsigned (offset-binary)
+     * order, so this lowers to already-supported unsigned compare + xor and
+     * needs no engine changes. Verilator emits these for signed rand vars. */
+#define SCMPOP_CASE(name, binop) \
+    if (oplen == sizeof(name)-1 && memcmp(op, name, oplen) == 0) { \
+        if (s->list.count != 3) return TAGGED_NULL; \
+        TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1])); \
+        if (a.te.ref == EXPR_NULL) return TAGGED_NULL; \
+        TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2])); \
+        if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
+        uint16_t sw = a.te.width ? a.te.width : b.te.width; \
+        if (sw == 0 || sw > 64) { \
+            fprintf(fe->err, "error: signed compare of width %u unsupported\n", (unsigned)sw); \
+            return TAGGED_NULL; \
+        } \
+        ExprRef bias = builder_expr_const(fe->builder, (int64_t)(1ULL << (sw - 1)), 0); \
+        ExprRef af = builder_expr_binary(fe->builder, BIN_BXOR, a.te.ref, bias); \
+        ExprRef bf = builder_expr_binary(fe->builder, BIN_BXOR, b.te.ref, bias); \
+        ExprRef r = builder_expr_binary(fe->builder, binop, af, bf); \
+        return (TaggedExpr){ { r, 1 }, 0, NULL }; \
+    }
+
+    SCMPOP_CASE("bvslt", BIN_LT)
+    SCMPOP_CASE("bvsle", BIN_LTE)
+    SCMPOP_CASE("bvsgt", BIN_GT)
+    SCMPOP_CASE("bvsge", BIN_GTE)
+
 #undef BINOP_CASE
 #undef CMPOP_CASE
+#undef SCMPOP_CASE
 
     /* = (equality) -- handles both BV and array operands */
     if (oplen == 1 && op[0] == '=') {
@@ -1101,13 +1259,10 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         return (TaggedExpr){ { r, (uint16_t)(hi.te.width + lo.te.width) }, 0, NULL };
     }
 
-    /* ---- Signed ops: deferred ---- */
-    if ((oplen == 5 && memcmp(op, "bvslt", 5) == 0) ||
-        (oplen == 5 && memcmp(op, "bvsle", 5) == 0) ||
-        (oplen == 5 && memcmp(op, "bvsgt", 5) == 0) ||
-        (oplen == 5 && memcmp(op, "bvsge", 5) == 0) ||
-        (oplen == 6 && memcmp(op, "bvsdiv", 6) == 0) ||
+    /* ---- Signed arithmetic ops: still deferred (comparisons handled above) ---- */
+    if ((oplen == 6 && memcmp(op, "bvsdiv", 6) == 0) ||
         (oplen == 6 && memcmp(op, "bvsrem", 6) == 0) ||
+        (oplen == 6 && memcmp(op, "bvsmod", 6) == 0) ||
         (oplen == 6 && memcmp(op, "bvashr", 6) == 0)) {
         fprintf(fe->err, "error: signed operation '%.*s' not yet supported\n",
                 (int)oplen, op);
@@ -1488,13 +1643,9 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
     Smt2ArraySort array_sort;
     int is_arr = _parse_array_sort(fe, sort_s, &array_sort);
     if (is_arr == 1) {
-        /* Reject oversized address space (continue session, don't create var) */
-        if (array_sort.addr_width > SMT2_MAX_ARRAY_ADDR_BITS) {
-            fprintf(fe->err,
-                    "(error \"array address width %u exceeds limit %u\")\n",
-                    (unsigned)array_sort.addr_width, SMT2_MAX_ARRAY_ADDR_BITS);
-            return 0;
-        }
+        /* Large address spaces are declared sparse inside _declare_array_const
+         * (elements materialized lazily at the concrete indices used), so no
+         * hard address-width cap here. */
         Smt2ArrayVar *av = _declare_array_const(fe, name_s->sym.str,
                                                  name_s->sym.len, array_sort);
         return av ? 0 : -1;
@@ -1508,8 +1659,13 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
     /* Case 4: standard BV (or Bool) declaration */
     uint8_t width = _parse_bitvec_sort(fe, sort_s);
     if (width == 0) {
-        fprintf(fe->err, "error: unsupported sort (only BitVec 1-64, Bool, or Array)\n");
-        return -1;
+        /* Loud but in-sync: an unsupported sort taints the context so the next
+         * (check-sat) is `unknown`, rather than exiting and hanging the driver.
+         * The var is not created; asserts referencing it also taint. */
+        fprintf(fe->err, "error: unsupported sort (only BitVec 1-64, Bool, or "
+                         "Array) -> result will be unknown\n");
+        fe->incomplete = 1;
+        return 0;
     }
 
     uint32_t var_id = _next_var_id(fe);
@@ -1619,8 +1775,15 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     }
     TypedExpr te = _translate_expr(fe, cmd->list.items[1]);
     if (te.ref == EXPR_NULL) {
-        fprintf(fe->err, "error: failed to translate assert expression\n");
-        return -1;
+        /* Loud but in-sync: the assert used a construct we can't translate
+         * (unsupported operator/sort). Taint the context so the next
+         * (check-sat) answers `unknown` rather than an unsound result, and keep
+         * the REPL running so the driver's protocol stream stays synchronized
+         * (exiting here would close the pipe and hang a driver blocked on read). */
+        fprintf(fe->err, "error: failed to translate assert expression "
+                         "(unsupported construct) -> result will be unknown\n");
+        fe->incomplete = 1;
+        return 0;
     }
     /* Tag user-level asserts with constraint_id=1 so the model-validation
      * pass can distinguish them from internal aux constraints (which are
@@ -1636,29 +1799,81 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     return 0;
 }
 
+/* Initial static-pool size estimate for a problem. The pool holds per-variable
+ * (Variable + watcher head + prop ref) and per-constraint (propagator) state,
+ * all linear in the problem, atop the 8192-var incremental_capacity_hint floor.
+ * The estimate only needs to be right for the common case: grow-and-retry in
+ * _ensure_compiled reallocates a larger buffer if this under-provisions. */
+static size_t _ctx_buf_size_for(const SolveProblem *p) {
+    size_t nv = p ? p->n_vars : 0;
+    size_t nc = p ? ((size_t)p->n_constraints + p->n_softs + p->n_dists
+                     + p->n_alldiffs) : 0;
+    size_t est = (size_t)2 * 1024 * 1024   /* base: 8192-var hint + headroom */
+               + nv * 256                  /* per variable */
+               + nc * 512;                 /* per constraint (propagator) */
+    if (est > (size_t)CTX_BUF_SIZE) est = (size_t)CTX_BUF_SIZE;
+    return est;
+}
+
+/* Finalize the builder into fe->problem WITHOUT building the CDCL context. The
+ * bit-blast engine reads fe->problem directly and never touches fe->ctx, so in
+ * Verilator mode (always bit-blast) we skip solver_create + solver_compile here
+ * and, symmetrically, the solver_destroy/ctx_buf-free the (reset) would pay --
+ * both were pure waste on every randomize(). */
+static int _ensure_problem(Smt2Frontend *fe) {
+    if (fe->problem) return 0;
+    fe->problem = builder_finalize(fe->builder, &fe->problem_size);
+    if (!fe->problem) return -1;
+    builder_reset(fe->builder);
+    fe->has_aux = 0;
+    return 0;
+}
+
 static int _ensure_compiled(Smt2Frontend *fe) {
     if (fe->ctx) return 0;
     fe->problem = builder_finalize(fe->builder, &fe->problem_size);
     if (!fe->problem) return -1;
-    fe->ctx_buf_size = CTX_BUF_SIZE;
-    fe->ctx_buf = malloc(fe->ctx_buf_size);
-    if (!fe->ctx_buf) return -1;
-    fe->block_alloc = zsp_block_alloc_create(NULL, BA_BLOCK_SIZE);
-    if (!fe->block_alloc) return -1;
-    fe->ctx = solver_create(fe->ctx_buf, fe->ctx_buf_size, fe->block_alloc);
-    if (!fe->ctx) return -1;
-    /* Request a large vars[] capacity since yosys-smtbmc-style use
-     * adds dozens of aux vars per BMC step incrementally. Cheap:
-     * Variable is 16 B, watcher_heads is 4 B; 8192 caps cost ~196 KiB
-     * of pool memory, well under CTX_BUF_SIZE. */
-    fe->ctx->incremental_capacity_hint = 8192;
-    int rc = solver_compile(fe->ctx, fe->problem);
-    if (rc == 0) {
-        fe->compiled = 1;
-        builder_reset(fe->builder);
-        fe->has_aux = 0;
+
+    /* The static ctx pool is a fixed-capacity, relocatable bump allocator by
+     * design (32-bit offsets, snapshot wholesale for push/pop checkpoints), so
+     * it cannot grow in place. Rather than always allocate the 64 MB maximum --
+     * a large per-solve cost the frontend pays on every Verilator randomize() --
+     * start from a problem-sized estimate and, if solver_compile overflows the
+     * pool, reallocate a larger contiguous buffer and recompile. This gives
+     * dynamic sizing with no risk of under-provisioning (capped at the old max). */
+    size_t sz = _ctx_buf_size_for(fe->problem);
+    for (;;) {
+        fe->ctx_buf = malloc(sz);
+        if (!fe->ctx_buf) return -1;
+        fe->ctx_buf_size = sz;
+        fe->block_alloc = zsp_block_alloc_create(NULL, BA_BLOCK_SIZE);
+        if (!fe->block_alloc) { free(fe->ctx_buf); fe->ctx_buf = NULL; return -1; }
+        fe->ctx = solver_create(fe->ctx_buf, sz, fe->block_alloc);
+        if (!fe->ctx) {
+            zsp_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
+            free(fe->ctx_buf); fe->ctx_buf = NULL;
+            return -1;
+        }
+        /* Vars[] capacity headroom for yosys-smtbmc-style incremental aux vars. */
+        fe->ctx->incremental_capacity_hint = 8192;
+        int rc = solver_compile(fe->ctx, fe->problem);
+        if (rc == 0) {
+            fe->compiled = 1;
+            builder_reset(fe->builder);
+            fe->has_aux = 0;
+            return 0;
+        }
+        /* Grow-and-retry only on a genuine pool overflow (not a compile-time
+         * UNSAT, rc == -2, or other error), and only until the cap. */
+        if (fe->ctx->pool.overflow && sz < (size_t)CTX_BUF_SIZE) {
+            solver_destroy(fe->ctx); fe->ctx = NULL;
+            zsp_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
+            free(fe->ctx_buf); fe->ctx_buf = NULL;
+            sz = (sz * 4 < (size_t)CTX_BUF_SIZE) ? sz * 4 : (size_t)CTX_BUF_SIZE;
+            continue;
+        }
+        return rc;
     }
-    return rc;
 }
 
 static int _flush_aux(Smt2Frontend *fe) {
@@ -1692,6 +1907,25 @@ static int _flush_aux(Smt2Frontend *fe) {
     return rc;
 }
 
+/* FNV-1a fingerprint of a finalized SolveProblem. builder_finalize() zeroes the
+ * whole buffer then fills it deterministically from the builder's blocks, and
+ * every ExprRef is a pool-relative offset, so identical problems produce
+ * byte-identical content and thus the same fingerprint. We hash the leading
+ * scalar/head fields plus the pool DATA region, skipping the embedded zsp_pool_t
+ * header (which may hold non-deterministic bookkeeping). Used only as a cache
+ * key in Verilator mode; a collision would at worst reuse a wrong-but-still-
+ * sound model, and the space (64-bit) makes that astronomically unlikely. */
+static uint64_t _problem_fingerprint(const SolveProblem *p) {
+    uint64_t h = 1469598103934665603ULL;              /* FNV-1a offset basis */
+    const uint8_t *lead = (const uint8_t *)p;
+    size_t lead_len = (size_t)((const uint8_t *)&p->pool - (const uint8_t *)p);
+    for (size_t i = 0; i < lead_len; i++) { h ^= lead[i]; h *= 1099511628211ULL; }
+    const uint8_t *data = (const uint8_t *)&p->pool + sizeof(zsp_pool_t);
+    size_t used = p->pool.used;
+    for (size_t i = 0; i < used; i++) { h ^= data[i]; h *= 1099511628211ULL; }
+    return h ? h : 1;                                  /* never return 0 */
+}
+
 /* Phase B.0: bit-blast + kissat engine. Bypasses solver_solve() and runs
  * directly on fe->problem. Triggered by DV_ENGINE=bitblast (set by the
  * --engine=bitblast CLI flag). The bbsolver is kept alive on fe->bb_solver
@@ -1702,7 +1936,39 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
         fflush(fe->out);
         return -1;
     }
-    /* Drop any prior bbsolver so we don't leak across check-sat calls. */
+
+    /* Verilator-mode identity cache: Verilator re-sends a byte-identical problem
+     * after every (reset), differing only in the desired per-bit assignment
+     * (which this mode drives via the seeded flip-check, not the SAT search). If
+     * the fingerprint matches the cached solved instance we skip the bit-blast +
+     * SAT re-solve entirely and just re-diversify the cached model with the new
+     * seed -- the dominant per-randomize cost is kissat, so this is the big win.
+     * A periodic full re-solve (reseed_period) refreshes the base model so
+     * tightly-coupled fields aren't anchored to a single solution forever. */
+    uint64_t fp = fe->verilator_mode ? _problem_fingerprint(fe->problem) : 0;
+    if (fe->verilator_mode && fe->cache_valid && fp == fe->cached_fp) {
+        int force_resolve = fe->reseed_period &&
+                            (fe->div_counter % fe->reseed_period == 0);
+        if (!force_resolve) {
+            if (fe->cached_result == 0) {              /* cached UNSAT */
+                fprintf(fe->out, "unsat\n");
+                fflush(fe->out);
+                fe->last_result = SOLVE_UNSAT;
+                fe->has_result = 1;
+                return 0;
+            }
+            if (fe->bb_solver &&
+                zsp_bbsolver_rediversify(fe->bb_solver, fe->seed) == 0) {
+                fprintf(fe->out, "sat\n");
+                fflush(fe->out);
+                fe->last_result = SOLVE_OK;
+                fe->has_result = 1;
+                return 0;
+            }
+        }
+    }
+
+    /* Cache miss (or forced re-solve): drop any prior bbsolver and solve fresh. */
     if (fe->bb_solver) {
         zsp_bbsolver_free(fe->bb_solver);
         fe->bb_solver = NULL;
@@ -1711,9 +1977,17 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
     if (!fe->bb_solver) {
         fprintf(fe->out, "unknown\n");
         fflush(fe->out);
+        fe->cache_valid = 0;
         return -1;
     }
-    int rc = zsp_bbsolver_check(fe->bb_solver, /*seed=*/0);
+    int rc = zsp_bbsolver_check(fe->bb_solver, fe->seed);
+    if (fe->verilator_mode && (rc == ZSP_BB_SAT || rc == ZSP_BB_UNSAT)) {
+        fe->cached_fp = fp;
+        fe->cache_valid = 1;
+        fe->cached_result = (rc == ZSP_BB_SAT) ? 1 : 0;
+    } else {
+        fe->cache_valid = 0;                           /* unknown/error: never reuse */
+    }
     if (rc == ZSP_BB_SAT) {
         fprintf(fe->out, "sat\n");
         fe->last_result = SOLVE_OK;
@@ -1770,6 +2044,34 @@ static int64_t _fe_get_var_value(Smt2Frontend *fe, uint32_t var_id) {
 
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     (void)cmd;
+
+    /* Tainted context (an assert used an unsupported construct): answer honestly
+     * with `unknown` rather than solve a problem that is missing constraints. */
+    if (fe->incomplete) {
+        fprintf(fe->out, "unknown\n");
+        fflush(fe->out);
+        fe->last_result = SOLVE_TIMEOUT;
+        fe->has_result = 1;
+        return 0;
+    }
+
+    /* In Verilator mode every solve draws a fresh seed so the returned model
+     * varies run-to-run (that is where randomization diversity comes from --
+     * the following check-sat-assuming reuses this model rather than re-solving,
+     * so each randomize() costs a single solve). */
+    if (fe->verilator_mode)
+        fe->seed = ++fe->div_counter;
+
+    /* Verilator fast path: bit-blast only, so finalize the problem but skip the
+     * unused CDCL context build (and the reset that would free it). */
+    if (fe->verilator_mode && _engine_is_bitblast(fe)) {
+        if (_ensure_problem(fe) < 0) {
+            fprintf(fe->out, "unknown\n");
+            fflush(fe->out);
+            return -1;
+        }
+        return _check_sat_bitblast(fe);
+    }
 
     int crc = _ensure_compiled(fe);
     if (crc == -2) {
@@ -1895,6 +2197,18 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
                 if (mode >= 2) fe->last_result = SOLVE_TIMEOUT;
             }
         }
+    }
+
+    /* Escalate to the complete bit-blast engine when CDCL couldn't return a
+     * definitive answer -- its interval propagation is imprecise on some
+     * bitwise/signed shapes (the model-validation net downgrades those to
+     * unknown) and it can also hit its conflict budget. Bitblast is
+     * decision-complete for bit-vectors, so this recovers a sound sat/unsat.
+     * Guarded on no incremental aux constraints: _check_sat_bitblast solves
+     * fe->problem only, so with pending aux it would miss constraints -- there
+     * we keep the honest unknown. */
+    if (fe->last_result == SOLVE_TIMEOUT && fe->n_aux_problems == 0) {
+        return _check_sat_bitblast(fe);
     }
 
     switch (fe->last_result) {
@@ -2105,6 +2419,25 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
     return r;
 }
 
+/* Emit a bit-vector value as a flat SMT-LIB binary literal `#b<bits>`.
+ *
+ * We deliberately use `#b...` rather than the indexed `(_ bvN W)` form: the
+ * binary literal is a single flat token with no interior parentheses, which
+ * every SMT get-value consumer accepts (z3, yosys smtio) AND which Verilator's
+ * paren-counting response parser requires -- it does getline(value, ')') and
+ * would mis-balance on the nested `)` of `(_ bvN W)`, truncating the model and
+ * desyncing the interactive stream. `#b` also sidesteps SMT-LIB's rule that
+ * `#x` is only legal when the width is a multiple of 4. Values are limited to
+ * 64 bits (the width of the model value); wider bits are emitted as 0. */
+static void _emit_bv_bin_literal(FILE *out, uint64_t val, unsigned width) {
+    if (width == 0) width = 1;
+    fputs("#b", out);
+    for (int i = (int)width - 1; i >= 0; i--) {
+        unsigned bit = (i < 64) ? (unsigned)((val >> i) & 1u) : 0u;
+        fputc(bit ? '1' : '0', out);
+    }
+}
+
 static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
     if (!fe->has_result || fe->last_result != SOLVE_OK) {
         fprintf(fe->err, "error: get-value requires a prior sat result\n");
@@ -2137,9 +2470,66 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
             Smt2Var *v = _find_var(fe, name_s->sym.str, name_s->sym.len);
             if (v) {
                 int64_t val = _fe_get_var_value(fe, v->var_id);
-                fprintf(fe->out, "(%.*s (_ bv%" PRIu64 " %u))",
-                        (int)name_s->sym.len, name_s->sym.str,
-                        (uint64_t)val, (unsigned)v->width);
+                fprintf(fe->out, "(%.*s ", (int)name_s->sym.len, name_s->sym.str);
+                _emit_bv_bin_literal(fe->out, (uint64_t)val, (unsigned)v->width);
+                fprintf(fe->out, ")");
+                continue;
+            }
+        }
+
+        /* (select <arrayvar> <const-index>): a driver reads array elements
+         * this way (Verilator get-values each rand array element). Echo the
+         * select as the key and emit the element's model value. */
+        if (name_s->kind == SEXPR_LIST && name_s->list.count == 3 &&
+            sexpr_is_symbol(name_s->list.items[0], "select") &&
+            name_s->list.items[1]->kind == SEXPR_SYMBOL) {
+            const Sexpr *arr_s = name_s->list.items[1];
+            Smt2ArrayVar *av = _find_array_var(fe, arr_s->sym.str, arr_s->sym.len);
+            const Sexpr *idx_s = _resolve_sym(fe, name_s->list.items[2]);
+            uint64_t k = 0; int is_const = 0;
+            if (idx_s && idx_s->kind == SEXPR_BITVEC) { k = idx_s->bv.value; is_const = 1; }
+            else if (idx_s && idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
+                     sexpr_is_symbol(idx_s->list.items[0], "_")) {
+                uint64_t bv; if (_parse_bv_sym(idx_s->list.items[1], &bv)) { k = bv; is_const = 1; }
+            }
+            if (av && is_const) {
+                uint8_t dw = av->sort.data_width, aw = av->sort.addr_width;
+                int64_t val = 0;
+                if (av->value->is_sparse) {
+                    uint32_t vid;
+                    if (_sparse_find(av->value, k, &vid)) {
+                        val = _fe_get_var_value(fe, vid);
+                    } else if (fe->seed) {
+                        /* Element never referenced by a constraint: fully free,
+                         * so give it a seeded-random value (a DV solver should
+                         * randomize unconstrained elements, not return 0). */
+                        uint64_t x = fe->seed
+                            + 0x9E3779B97F4A7C15ULL * (k + 1)
+                            + 0xD1B54A32D192ED03ULL * (arr_s->sym.len + 1);
+                        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+                        x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+                        val = (int64_t)(x ^ (x >> 31));
+                    }
+                } else if (k < av->value->n_elems) {
+                    /* Look the element var up by name ("arr[k]") rather than via
+                     * value->elems[k]: that ExprRef points into the builder
+                     * arena, which is reset after compilation, so it is stale
+                     * here (dereferencing it segfaults). */
+                    char en[SMT2_MAX_NAME + 16];
+                    snprintf(en, sizeof(en), "%.*s[%llu]",
+                             (int)arr_s->sym.len, arr_s->sym.str,
+                             (unsigned long long)k);
+                    Smt2Var *ev = _find_var(fe, en, (uint32_t)strlen(en));
+                    if (ev) val = _fe_get_var_value(fe, ev->var_id);
+                }
+                /* Emit ((select name #x<idx>) #b<value>): the key echoes the
+                 * select (hex index padded to the address width -- the form
+                 * drivers parse), the value is the element's model. */
+                fprintf(fe->out, "((select %.*s #x%0*llx) ",
+                        (int)arr_s->sym.len, arr_s->sym.str,
+                        (int)((aw + 3) / 4), (unsigned long long)k);
+                _emit_bv_bin_literal(fe->out, (uint64_t)val, (unsigned)dw);
+                fprintf(fe->out, ")");
                 continue;
             }
         }
@@ -2155,15 +2545,16 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
              * plain symbol we emit it bare; for a list we print its
              * canonical form (limited to what we evaluated). */
             if (name_s->kind == SEXPR_SYMBOL) {
-                fprintf(fe->out, "(%.*s (_ bv%" PRIu64 " %u))",
-                        (int)name_s->sym.len, name_s->sym.str,
-                        (uint64_t)ev.value, (unsigned)w);
+                fprintf(fe->out, "(%.*s ", (int)name_s->sym.len, name_s->sym.str);
+                _emit_bv_bin_literal(fe->out, (uint64_t)ev.value, (unsigned)w);
+                fprintf(fe->out, ")");
             } else {
                 /* For a list expression, smtbmc typically only queries
                  * symbols, so this branch is rarely hit. Print a
                  * minimal valid response. */
-                fprintf(fe->out, "(? (_ bv%" PRIu64 " %u))",
-                        (uint64_t)ev.value, (unsigned)w);
+                fprintf(fe->out, "(? ");
+                _emit_bv_bin_literal(fe->out, (uint64_t)ev.value, (unsigned)w);
+                fprintf(fe->out, ")");
             }
             continue;
         }
@@ -2177,10 +2568,9 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
         /* Emit a placeholder so smtio's parser sees a well-formed pair
          * instead of an empty list (which crashes the parser). */
         if (name_s->kind == SEXPR_SYMBOL) {
-            fprintf(fe->out, "(%.*s (_ bv0 1))",
-                    (int)name_s->sym.len, name_s->sym.str);
+            fprintf(fe->out, "(%.*s #b0)", (int)name_s->sym.len, name_s->sym.str);
         } else {
-            fprintf(fe->out, "(? (_ bv0 1))");
+            fprintf(fe->out, "(? #b0)");
         }
     }
     fprintf(fe->out, ")\n");
@@ -2274,6 +2664,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->push_n_vars[fe->push_depth] = fe->n_vars;
             fe->push_n_array_vars[fe->push_depth] = fe->n_array_vars;
             fe->push_n_aux_problems[fe->push_depth] = fe->n_aux_problems;
+            fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
             fe->push_depth++;
         }
         return 0;
@@ -2300,6 +2691,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->push_n_vars[fe->push_depth - 1] = fe->n_vars;
         fe->push_n_array_vars[fe->push_depth - 1] = fe->n_array_vars;
         fe->push_n_aux_problems[fe->push_depth - 1] = fe->n_aux_problems;
+        fe->push_incomplete[fe->push_depth - 1] = (uint8_t)fe->incomplete;
     }
     return 0;
 }
@@ -2315,6 +2707,8 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             return -1;
         }
         fe->push_depth--;
+        /* Un-taint if the untranslatable assert lived in the popped scope. */
+        fe->incomplete = fe->push_incomplete[fe->push_depth];
         if (fe->ctx && fe->push_stack[fe->push_depth] != (uint32_t)-1) {
             /* solver_restore handles trail backtrack itself; calling
              * solver_reset first would zero ctx->trail_top while leaving
@@ -2333,6 +2727,8 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             Smt2ArrayVar *av = &fe->array_vars[i];
             if (av->value) {
                 free(av->value->elems);
+                free(av->value->sparse_idx);
+                free(av->value->sparse_varid);
                 free(av->value);
                 av->value = NULL;
             }
@@ -2362,6 +2758,50 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
         fprintf(fe->err, "error: check-sat-assuming requires a literal list\n");
         return -1;
     }
+
+    /* Tainted context -> honest `unknown` (see _cmd_check_sat). */
+    if (fe->incomplete) {
+        fprintf(fe->out, "unknown\n");
+        fflush(fe->out);
+        fe->last_result = SOLVE_TIMEOUT;
+        fe->has_result = 1;
+        return 0;
+    }
+
+    /* Verilator drop-in mode: a check-sat-assuming here is Verilator's
+     * randomization-diversity mechanism -- each assumption literal ties one
+     * free bit to a random target purely to coax variety out of a deterministic
+     * solver. We don't need that: we ignore the assumption pins and return a
+     * natively well-distributed model of the base problem, drawn with a fresh
+     * seed. This collapses Verilator's up-to-(rand-width) relaxation round-trips
+     * to a single solve AND sidesteps the bounds-vs-bits unsoundness of the CDCL
+     * pin path (spurious UNSAT at >=7 bit-pins on one variable). Delegating to
+     * _cmd_check_sat reuses the sound, auto-routed engine (bitblast for QF_ABV),
+     * whose freshly-seeded model is what the following (get-value) reads back.
+     * NOTE: only enabled by --mode=verilator; the default path below preserves
+     * standard check-sat-assuming semantics for the yosys/sby BMC flow. */
+    if (fe->verilator_mode) {
+        fe->n_last_assump = 0;
+        fe->last_assump_unsat = 0;      /* so a stray get-unsat-assumptions -> () */
+        /* Verilator always issues (check-sat) immediately before its diversity
+         * (check-sat-assuming), and both solve the same base problem. That prior
+         * solve already produced a freshly-seeded model still held in the engine
+         * (bb_solver / CDCL ctx), which the following (get-value) will read. So
+         * reuse it: just re-emit the cached result -- one solve per randomize().
+         * Only re-solve if there is no valid prior result (a check-sat-assuming
+         * arriving without a preceding check-sat). */
+        if (fe->has_result) {
+            switch (fe->last_result) {
+            case SOLVE_OK:      fprintf(fe->out, "sat\n");     break;
+            case SOLVE_UNSAT:   fprintf(fe->out, "unsat\n");   break;
+            default:            fprintf(fe->out, "unknown\n"); break;
+            }
+            fflush(fe->out);
+            return 0;
+        }
+        return _cmd_check_sat(fe, cmd);
+    }
+
     if (_ensure_compiled(fe) < 0) {
         fprintf(fe->out, "unknown\n");
         fflush(fe->out);
@@ -2381,6 +2821,8 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
     }
     Sexpr *lits = cmd->list.items[1];
     int forced_unsat = 0;
+    fe->n_last_assump = 0;
+    fe->last_assump_unsat = 0;
     for (uint32_t i = 0; i < lits->list.count; i++) {
         Sexpr *lit = lits->list.items[i];
         const char *name = NULL;
@@ -2405,6 +2847,14 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
             solver_restore(fe->ctx, (uint32_t)cp);
             return -1;
         }
+        /* Record the literal so (get-unsat-assumptions) can answer. */
+        if (fe->n_last_assump < SMT2_MAX_ASSUMPS) {
+            uint32_t k = fe->n_last_assump++;
+            uint32_t cpy = nlen < SMT2_MAX_NAME - 1 ? nlen : SMT2_MAX_NAME - 1;
+            memcpy(fe->last_assump_names[k], name, cpy);
+            fe->last_assump_names[k][cpy] = '\0';
+            fe->last_assump_positive[k] = (uint8_t)positive;
+        }
         int rc = solver_pin_var(fe->ctx, v->var_id, positive ? 1 : 0);
         if (rc != 0) { forced_unsat = 1; break; }
     }
@@ -2423,9 +2873,32 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
         case SOLVE_TIMEOUT: fprintf(fe->out, "unknown\n"); break;
         }
     }
+    fe->last_assump_unsat = (fe->last_result == SOLVE_UNSAT);
     fe->has_result = 1;
     fflush(fe->out);
     (void)cp;
+    return 0;
+}
+
+/* (get-unsat-assumptions): return a subset of the last check-sat-assuming
+ * assumptions that is unsatisfiable together with the assertions. We return the
+ * full recorded set -- a valid (non-minimal) answer. Verilator uses this to
+ * relax its per-bit randomization targets one at a time until SAT, so a
+ * non-minimal core still yields a legal (if less diverse) solution. */
+static int _cmd_get_unsat_assumptions(Smt2Frontend *fe, const Sexpr *cmd) {
+    (void)cmd;
+    fprintf(fe->out, "(");
+    if (fe->last_assump_unsat) {
+        for (uint32_t i = 0; i < fe->n_last_assump; i++) {
+            if (i) fprintf(fe->out, " ");
+            if (fe->last_assump_positive[i])
+                fprintf(fe->out, "%s", fe->last_assump_names[i]);
+            else
+                fprintf(fe->out, "(not %s)", fe->last_assump_names[i]);
+        }
+    }
+    fprintf(fe->out, ")\n");
+    fflush(fe->out);
     return 0;
 }
 
@@ -2439,6 +2912,12 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
     fe->err = err;
     fe->builder = builder_create(0, NULL);
     sexpr_arena_init(&fe->persistent_arena, 16384);
+    /* Verilator-mode cache reseed cadence: force a full re-solve every Nth
+     * randomize so coupled fields periodically get a fresh base model.
+     * DV_VERILATOR_RESEED=0 (default) = pure cache (max throughput). */
+    fe->reseed_period = 0;
+    const char *rs = getenv("DV_VERILATOR_RESEED");
+    if (rs) { long v = strtol(rs, NULL, 10); if (v > 0) fe->reseed_period = (uint32_t)v; }
 }
 
 void smt2_frontend_destroy(Smt2Frontend *fe) {
@@ -2454,16 +2933,77 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     free(fe->ctx_buf);
     free(fe->vars);
     sexpr_arena_destroy(&fe->persistent_arena);
-    /* Free persistent array var allocations */
+    /* Free persistent array var allocations (dense elems[] or sparse map) */
     for (uint32_t i = 0; i < fe->n_array_vars; i++) {
         if (fe->array_vars[i].value) {
             free(fe->array_vars[i].value->elems);
+            free(fe->array_vars[i].value->sparse_idx);
+            free(fe->array_vars[i].value->sparse_varid);
             free(fe->array_vars[i].value);
         }
     }
     /* Free any remaining per-command transient allocations */
     _cmd_alloc_reset(fe);
     memset(fe, 0, sizeof(*fe));
+}
+
+/* Fast (reset): produce the same clean, post-startup state as
+ * smt2_frontend_destroy() + smt2_frontend_init(), but REUSE the two largest
+ * allocations -- the builder and the persistent s-expr arena -- via their
+ * in-place reset primitives instead of free + re-malloc. Verilator issues
+ * (reset) after every randomize(), where that allocation churn dominated
+ * per-randomize time. Everything else is freed and the struct re-zeroed exactly
+ * as destroy()+init() would (so the resulting session state is identical), and
+ * the Verilator model cache + session config are carried across. */
+static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
+    /* Session config + Verilator model cache to carry across the reset. */
+    FILE    *out = fe->out, *err = fe->err;
+    int      print_stats = fe->print_stats, verilator_mode = fe->verilator_mode;
+    uint64_t div_counter = fe->div_counter;
+    uint32_t reseed_period = fe->reseed_period;
+    zsp_bbsolver_t *bb = fe->bb_solver;
+    uint64_t cached_fp = fe->cached_fp;
+    int      cache_valid = fe->cache_valid, cached_result = fe->cached_result;
+    /* Reused allocations (reset in place below rather than freed). */
+    SolveProblemBuilder *builder = fe->builder;
+    SexprArena           parena  = fe->persistent_arena;
+
+    /* Free exactly what destroy() frees, EXCEPT builder + persistent_arena. */
+    if (fe->problem) free(fe->problem);
+    for (uint32_t i = 0; i < fe->n_aux_problems; i++) free(fe->aux_problems[i]);
+    free(fe->aux_problems);
+    if (fe->ctx)         solver_destroy(fe->ctx);
+    if (fe->block_alloc) zsp_block_alloc_destroy(fe->block_alloc);
+    free(fe->ctx_buf);
+    free(fe->vars);
+    for (uint32_t i = 0; i < fe->n_array_vars; i++) {
+        if (fe->array_vars[i].value) {
+            free(fe->array_vars[i].value->elems);
+            free(fe->array_vars[i].value->sparse_idx);
+            free(fe->array_vars[i].value->sparse_varid);
+            free(fe->array_vars[i].value);
+        }
+    }
+    _cmd_alloc_reset(fe);
+
+    /* Reset the reused allocations to empty (equivalent to a fresh create). */
+    builder_reset(builder);
+    sexpr_arena_reset(&parena);
+
+    /* Re-zero all state (mirrors init's memset), then restore carried fields. */
+    memset(fe, 0, sizeof(*fe));
+    fe->out = out;
+    fe->err = err;
+    fe->print_stats = print_stats;
+    fe->verilator_mode = verilator_mode;
+    fe->div_counter = div_counter;
+    fe->reseed_period = reseed_period;
+    fe->bb_solver = bb;
+    fe->cached_fp = cached_fp;
+    fe->cache_valid = cache_valid;
+    fe->cached_result = cached_result;
+    fe->builder = builder;
+    fe->persistent_arena = parena;
 }
 
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
@@ -2499,6 +3039,8 @@ int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
         return _cmd_check_sat(fe, cmd);
     if (sexpr_is_symbol(head, "check-sat-assuming"))
         return _cmd_check_sat_assuming(fe, cmd);
+    if (sexpr_is_symbol(head, "get-unsat-assumptions"))
+        return _cmd_get_unsat_assumptions(fe, cmd);
     if (sexpr_is_symbol(head, "get-value"))
         return _cmd_get_value(fe, cmd);
     if (sexpr_is_symbol(head, "get-model"))
@@ -2530,10 +3072,18 @@ int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
             solver_reset(fe->ctx);
             fe->has_result = 0;
         }
+        fe->incomplete = 0;
         return 0;
     }
     if (sexpr_is_symbol(head, "reset")) {
-        fprintf(fe->err, "warning: reset not fully implemented\n");
+        /* SMT-LIB2 (reset): restore the solver to its immediately-post-startup
+         * state -- clear all declarations, asserts, define-funs, the logic, and
+         * option settings. Verilator issues (reset) after every randomize(), so
+         * this must be both sound and fast: smt2_frontend_soft_reset() produces
+         * the exact destroy()+init() state but reuses the builder and s-expr
+         * arena allocations, and carries the Verilator model cache + session
+         * config across. */
+        smt2_frontend_soft_reset(fe);
         return 0;
     }
     if (sexpr_is_symbol(head, "exit"))

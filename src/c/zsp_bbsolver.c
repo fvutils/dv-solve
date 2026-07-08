@@ -41,6 +41,8 @@ struct zsp_bbsolver_s {
     zsp_aig_cnf_t  *cnf;
     zsp_bitblast_t *bb;
 
+    uint64_t        seed;    /* from zsp_bbsolver_check; 0 = deterministic */
+
     bb_var_t       *vars;
     uint32_t        n_vars;
 
@@ -86,6 +88,16 @@ struct zsp_bbsolver_s {
      * maximal priority-respecting kept set. */
     const uint8_t  *soft_keep;
     uint32_t        n_softs;
+
+    /* Diversity flip-check (post-solve). assert_nodes collects every top-level
+     * asserted AIG node (hard constraints, kept softs, var bounds) so the
+     * flip-check can re-verify them after tentatively flipping a bit. node_val
+     * is the AIG node valuation after the flip-check pass (NULL if it did not
+     * run, i.e. seed 0); the readback reads variable bits from it. */
+    zsp_aig_node_t *assert_nodes;
+    uint32_t        n_asserts;
+    uint32_t        asserts_cap;
+    int8_t         *node_val;
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -95,6 +107,25 @@ static void *xalloc(zsp_alloc_t *a, size_t sz) {
 }
 static void xfree(zsp_alloc_t *a, void *p, size_t sz) {
     if (a) ZSP_RELEASE(a, p, sz); else free(p);
+}
+
+/* Encode `node` as a hard top-level assertion AND remember it, so the diversity
+ * flip-check can re-verify every assertion after a tentative bit flip. */
+static void assert_top(zsp_bbsolver_t *S, zsp_aig_node_t node) {
+    zsp_aig_cnf_encode(S->cnf, node, /*top_level=*/1);
+    if (S->n_asserts == S->asserts_cap) {
+        uint32_t nc = S->asserts_cap ? S->asserts_cap * 2 : 64;
+        zsp_aig_node_t *na = (zsp_aig_node_t *)xalloc(S->alloc,
+                                                      nc * sizeof(zsp_aig_node_t));
+        if (!na) return;   /* out of memory: skip recording (flip-check no-ops) */
+        if (S->assert_nodes) {
+            memcpy(na, S->assert_nodes, S->n_asserts * sizeof(zsp_aig_node_t));
+            xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(zsp_aig_node_t));
+        }
+        S->assert_nodes = na;
+        S->asserts_cap = nc;
+    }
+    S->assert_nodes[S->n_asserts++] = node;
 }
 
 static uint16_t max_w(uint16_t a, uint16_t b) { return a > b ? a : b; }
@@ -842,7 +873,7 @@ static int assert_var_bounds(zsp_bbsolver_t *S, uint32_t var_id) {
         zsp_bv_t le_hi = zsp_bb_not(S->bb, hi_lt_v);
         pred = zsp_bb_and(S->bb, pred, le_hi);
     }
-    zsp_aig_cnf_encode(S->cnf, pred.bits[0], /*top_level=*/1);
+    assert_top(S, pred.bits[0]);
     return 0;
 }
 
@@ -913,12 +944,162 @@ void zsp_bbsolver_free(zsp_bbsolver_t *S) {
     xfree(S->alloc, S->subst, S->n_vars * sizeof(ExprRef));
     xfree(S->alloc, S->resolving, S->n_vars * sizeof(uint8_t));
     xfree(S->alloc, S->constraint_skip, S->n_constraints * sizeof(uint8_t));
+    xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(zsp_aig_node_t));
+    free(S->node_val);
     xfree(S->alloc, S, sizeof(*S));
+}
+
+static uint64_t _free_var_fill(uint64_t seed, uint32_t var_id, uint32_t limb);
+
+/* Value of AIG literal `lit` under node valuation nv[] (nv indexed by |id|). */
+static inline int _lit_val(const int8_t *nv, zsp_aig_node_t lit) {
+    if (lit == ZSP_AIG_TRUE)  return 1;
+    if (lit == ZSP_AIG_FALSE) return 0;
+    uint32_t i = (uint32_t)(lit < 0 ? -lit : lit);
+    int v = nv[i];
+    return lit < 0 ? !v : v;
+}
+
+/* Propagate a just-changed node value through its fanout cone. nv[start] has
+ * already been set to its new value; recompute every AND node reachable upward
+ * (via the fo_off/fo_adj CSR fanout index) with a worklist until the valuation
+ * reaches its fixed point. Only nodes in the changed cone are touched -- cost is
+ * proportional to the affected region, not the whole AIG. `inq` guards against a
+ * node sitting in the worklist twice and is left all-zero on return (every
+ * pushed node is popped). Node ids are topological but the worklist may pop out
+ * of order; that only causes a few redundant recomputes -- a DAG converges to
+ * the same fixed point regardless of visit order. */
+static void _prop_cone(int8_t *nv, const zsp_aig_node_t *L, const zsp_aig_node_t *R,
+                       const uint32_t *fo_off, const uint32_t *fo_adj,
+                       uint32_t *wl, uint8_t *inq, uint32_t start) {
+    uint32_t top = 0;
+    wl[top++] = start; inq[start] = 1;
+    while (top) {
+        uint32_t u = wl[--top]; inq[u] = 0;
+        for (uint32_t e = fo_off[u]; e < fo_off[u + 1]; e++) {
+            uint32_t pn = fo_adj[e];
+            int np = _lit_val(nv, L[pn]) & _lit_val(nv, R[pn]);
+            if (np != nv[pn]) {
+                nv[pn] = (int8_t)np;
+                if (!inq[pn]) { inq[pn] = 1; wl[top++] = pn; }
+            }
+        }
+    }
+}
+
+/* Diversity flip-check: after a SAT solve, randomize the don't-care variable
+ * bits. Each rand bit is set toward a seeded-random target; the flip is kept
+ * only if EVERY top-level assertion still holds under the updated model. Flips
+ * are applied sequentially, so each is verified against the running model and
+ * coupled constraints (e.g. a sum bound) are never violated -- the result stays
+ * a valid solution, just a more diverse one. node_val[] holds that model for the
+ * readback.
+ *
+ * Cost per candidate bit is one *incremental* re-evaluation: only the flipped
+ * bit's fanout cone is repropagated (built once as the fo_off/fo_adj CSR index),
+ * not the entire AIG. For the localized cones typical of constraint bits this is
+ * far cheaper than the old full O(nodes) re-simulation. Skipped on very large
+ * problems (where BMC-style seed 0 is used anyway). */
+#define ZSP_DIVERSIFY_MAX_NODES 200000u
+static void _diversify(zsp_bbsolver_t *S) {
+    if (S->seed == 0 || !S->aig) return;
+    uint32_t N = (uint32_t)zsp_aig_num_nodes(S->aig);
+    if (N == 0 || N > ZSP_DIVERSIFY_MAX_NODES) return;
+
+    zsp_aig_t *m = S->aig;
+    /* Plain malloc for these transient per-solve buffers: node_val (nv) is freed
+     * in zsp_bbsolver_free, the rest here -- all independent of the arena. */
+    int8_t *nv        = (int8_t *)malloc((size_t)(N + 1));
+    zsp_aig_node_t *L = (zsp_aig_node_t *)malloc((size_t)(N + 1) * sizeof(zsp_aig_node_t));
+    zsp_aig_node_t *R = (zsp_aig_node_t *)malloc((size_t)(N + 1) * sizeof(zsp_aig_node_t));
+    if (!nv || !L || !R) { free(nv); free(L); free(R); return; }
+
+    /* Cache AND children (0 = input/const) and build the initial valuation in
+     * topological (ascending id) order -- children always have a smaller id. */
+    nv[0] = 0; L[0] = 0; R[0] = 0;
+    for (uint32_t id = 1; id <= N; id++) {
+        if (zsp_aig_is_and(m, (zsp_aig_node_t)id)) {
+            zsp_aig_get_children(m, (zsp_aig_node_t)id, &L[id], &R[id]);
+            nv[id] = (int8_t)(_lit_val(nv, L[id]) & _lit_val(nv, R[id]));
+        } else {
+            L[id] = 0; R[id] = 0;
+            nv[id] = (int8_t)(zsp_aig_cnf_value(S->cnf, (zsp_aig_node_t)id) == 1);
+        }
+    }
+
+    /* Build the fanout index (CSR): fo_adj[fo_off[c]..fo_off[c+1]) lists the AND
+     * nodes that reference node c as a child. Constants (|child| <= 1, i.e.
+     * TRUE=id1 / FALSE) get no edge -- their value never changes. */
+    uint32_t *cnt    = (uint32_t *)calloc((size_t)N + 2, sizeof(uint32_t));
+    uint32_t *fo_off = (uint32_t *)malloc(((size_t)N + 2) * sizeof(uint32_t));
+    uint8_t  *inq    = (uint8_t  *)calloc((size_t)N + 1, 1);
+    uint32_t *wl     = (uint32_t *)malloc(((size_t)N + 1) * sizeof(uint32_t));
+    if (!cnt || !fo_off || !inq || !wl) {
+        free(cnt); free(fo_off); free(inq); free(wl);
+        free(L); free(R); S->node_val = nv; return;   /* keep the valid (undiversified) model */
+    }
+    for (uint32_t id = 1; id <= N; id++) {
+        if (!L[id]) continue;
+        uint32_t cl = (uint32_t)(L[id] < 0 ? -L[id] : L[id]);
+        uint32_t cr = (uint32_t)(R[id] < 0 ? -R[id] : R[id]);
+        if (cl > 1) cnt[cl]++;
+        if (cr > 1) cnt[cr]++;
+    }
+    uint32_t acc = 0;
+    for (uint32_t i = 0; i <= N; i++) { fo_off[i] = acc; acc += cnt[i]; }
+    fo_off[N + 1] = acc;
+    uint32_t *fo_adj = (uint32_t *)malloc((acc ? (size_t)acc : 1) * sizeof(uint32_t));
+    if (!fo_adj) {
+        free(cnt); free(fo_off); free(inq); free(wl);
+        free(L); free(R); S->node_val = nv; return;
+    }
+    for (uint32_t i = 0; i <= N; i++) cnt[i] = fo_off[i];   /* reuse cnt as fill cursor */
+    for (uint32_t id = 1; id <= N; id++) {
+        if (!L[id]) continue;
+        uint32_t cl = (uint32_t)(L[id] < 0 ? -L[id] : L[id]);
+        uint32_t cr = (uint32_t)(R[id] < 0 ? -R[id] : R[id]);
+        if (cl > 1) fo_adj[cnt[cl]++] = id;
+        if (cr > 1) fo_adj[cnt[cr]++] = id;
+    }
+
+    for (uint32_t vi = 0; vi < S->n_vars; vi++) {
+        bb_var_t *v = &S->vars[vi];
+        if (!v->defined || !v->bv_built) continue;
+        for (uint32_t p = 0; p < v->bv.size; p++) {
+            zsp_aig_node_t lit = v->bv.bits[p];
+            uint32_t base = (uint32_t)(lit < 0 ? -lit : lit);
+            if (base == 0 || base > N) continue;
+            if (L[base] != 0) continue;                 /* not a primary input */
+            int tgt = (int)(_free_var_fill(S->seed, vi, p) & 1);
+            int desired = (lit < 0) ? !tgt : tgt;       /* input-node polarity */
+            if (nv[base] == desired) continue;
+            int old = nv[base];
+            nv[base] = (int8_t)desired;
+            _prop_cone(nv, L, R, fo_off, fo_adj, wl, inq, base);
+            int ok = 1;
+            for (uint32_t a = 0; a < S->n_asserts; a++)
+                if (_lit_val(nv, S->assert_nodes[a]) != 1) { ok = 0; break; }
+            if (!ok) {                                  /* revert: repropagate old value */
+                nv[base] = (int8_t)old;
+                _prop_cone(nv, L, R, fo_off, fo_adj, wl, inq, base);
+            }
+        }
+    }
+
+    free(cnt);
+    free(fo_off);
+    free(fo_adj);
+    free(inq);
+    free(wl);
+    free(L);
+    free(R);
+    S->node_val = nv;
 }
 
 int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
     if (!S || !S->problem) return ZSP_BB_ERROR;
 
+    S->seed = seed;
     /* Seed kissat's randomness so repeated checks can return different models
      * (the completeness-fallback's only source of stimulus diversity). */
     zsp_sat_set_seed(S->sat, seed);
@@ -956,7 +1137,7 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
         zsp_bv_t pred = bb_predicate(S, cs->root);
         if (S->had_error) { S->last_result = ZSP_BB_ERROR; return ZSP_BB_ERROR; }
         if (S->had_unsupported) { S->last_result = ZSP_BB_UNKNOWN; return ZSP_BB_UNKNOWN; }
-        zsp_aig_cnf_encode(S->cnf, pred.bits[0], /*top_level=*/1);
+        assert_top(S, pred.bits[0]);
         cur = cs->next;
     }
 
@@ -972,7 +1153,7 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
                 zsp_bv_t pred = bb_predicate(S, ss->root);
                 if (S->had_error) { S->last_result = ZSP_BB_ERROR; return ZSP_BB_ERROR; }
                 if (S->had_unsupported) { S->last_result = ZSP_BB_UNKNOWN; return ZSP_BB_UNKNOWN; }
-                zsp_aig_cnf_encode(S->cnf, pred.bits[0], /*top_level=*/1);
+                assert_top(S, pred.bits[0]);
             }
             scur = ss->next;
         }
@@ -1040,7 +1221,24 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
                 (unsigned long long)S->n_substs);
     }
     S->last_result = rc;
+    /* On SAT, diversify the don't-care bits toward seeded-random targets (no-op
+     * for seed 0). Sound: only flips that keep every assertion true are kept. */
+    if (rc == ZSP_BB_SAT) _diversify(S);
     return rc;
+}
+
+int zsp_bbsolver_rediversify(zsp_bbsolver_t *S, uint64_t seed) {
+    if (!S || S->last_result != ZSP_BB_SAT) return -1;
+    /* Drop the prior flip-check result and re-run the diversity pass over the
+     * still-valid SAT model with the new seed. _diversify re-reads the base
+     * model via zsp_aig_cnf_value() (kissat's assignment persists until
+     * zsp_bbsolver_free) and only depends on S->seed for the flip targets, so a
+     * new seed yields a different sound model with no re-solve. */
+    free(S->node_val);
+    S->node_val = NULL;
+    S->seed = seed;
+    _diversify(S);
+    return 0;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -1196,6 +1394,21 @@ void zsp_bbsolver_set_soft_keep(zsp_bbsolver_t *S, const uint8_t *keep,
     S->n_softs   = n;
 }
 
+/* A variable that appears in no constraint is never bit-blasted, so the SAT
+ * model says nothing about it. For a design-verification (randomization) solve
+ * every rand variable should still get a value, and an unconstrained one should
+ * be uniformly random rather than a fixed 0. Derive a value from (seed, var_id,
+ * limb): deterministic per seed (reproducible), varying across vars/seeds.
+ * Only used when a nonzero (diversity) seed was supplied; seed 0 keeps the
+ * legacy deterministic 0 so BMC/decision flows are unchanged. */
+static uint64_t _free_var_fill(uint64_t seed, uint32_t var_id, uint32_t limb) {
+    uint64_t x = seed + 0x9E3779B97F4A7C15ULL * ((uint64_t)var_id + 1)
+                      + 0xD1B54A32D192ED03ULL * ((uint64_t)limb + 1);
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
 int zsp_bbsolver_value(zsp_bbsolver_t *S, uint32_t var_id, int64_t *out_value) {
     if (!S || !out_value) return -1;
     if (S->last_result != ZSP_BB_SAT) return -1;
@@ -1203,8 +1416,10 @@ int zsp_bbsolver_value(zsp_bbsolver_t *S, uint32_t var_id, int64_t *out_value) {
     bb_var_t *v = &S->vars[var_id];
     if (!v->defined) return -1;
     if (!v->bv_built) {
-        /* Variable never referenced — pick zero by convention. */
-        *out_value = 0;
+        /* Unreferenced variable: seeded-random for a diversity solve, else 0. */
+        uint64_t r = S->seed ? _free_var_fill(S->seed, var_id, 0) : 0;
+        if (v->width < 64) r &= ((uint64_t)1 << v->width) - 1;
+        *out_value = (int64_t)r;
         return 0;
     }
     /* bits[] are stored MSB-first: bits[0] is the high bit (logical position
@@ -1213,10 +1428,20 @@ int zsp_bbsolver_value(zsp_bbsolver_t *S, uint32_t var_id, int64_t *out_value) {
      * simply dropped — callers needing them use zsp_bbsolver_value_wide). */
     uint64_t val = 0;
     uint32_t n = v->bv.size < 64 ? v->bv.size : 64;
+    /* Fallback seeded fill for don't-care bits when the flip-check pass did not
+     * run (e.g. it was skipped or out of memory). */
+    uint64_t rnd = S->seed ? _free_var_fill(S->seed, var_id, 0) : 0;
     for (uint32_t p = 0; p < n; p++) {
         /* logical bit p (0 = LSB) lives at bits[size-1-p] */
-        int b = zsp_aig_cnf_value(S->cnf, v->bv.bits[v->bv.size - 1 - p]);
-        if (b == 1) val |= (uint64_t)1 << p;
+        zsp_aig_node_t bit = v->bv.bits[v->bv.size - 1 - p];
+        int set;
+        if (S->node_val)                                 /* flip-check result */
+            set = _lit_val(S->node_val, bit);
+        else if (S->seed && zsp_aig_cnf_is_free(S->cnf, bit))
+            set = (int)((rnd >> p) & 1);
+        else
+            set = (zsp_aig_cnf_value(S->cnf, bit) == 1) ? 1 : 0;
+        if (set) val |= (uint64_t)1 << p;
     }
     if (v->is_signed && v->width < 64) {
         /* sign-extend from `width` to 64 */
@@ -1238,7 +1463,16 @@ int zsp_bbsolver_value_wide(zsp_bbsolver_t *S, uint32_t var_id,
     if (!v->defined) return -1;
     for (uint32_t i = 0; i < n_limbs; i++) limbs[i] = 0;
     if (!v->bv_built) {
-        /* Variable never referenced — zero by convention (limbs already 0). */
+        /* Unreferenced variable: seeded-random for a diversity solve, else 0. */
+        if (S->seed) {
+            uint32_t full = v->width / 64;      /* fully-used limbs */
+            for (uint32_t i = 0; i < n_limbs; i++) {
+                uint64_t r = _free_var_fill(S->seed, var_id, i);
+                if (i < full) limbs[i] = r;
+                else if (i == full && (v->width & 63))
+                    limbs[i] = r & (((uint64_t)1 << (v->width & 63)) - 1);
+            }
+        }
         return 0;
     }
     /* Little-endian limbs: logical bit p (0 = LSB) → limbs[p/64] bit (p%64).
@@ -1247,8 +1481,18 @@ int zsp_bbsolver_value_wide(zsp_bbsolver_t *S, uint32_t var_id,
     uint32_t cap = n_limbs * 64;
     uint32_t n = v->bv.size < cap ? v->bv.size : cap;
     for (uint32_t p = 0; p < n; p++) {
-        int b = zsp_aig_cnf_value(S->cnf, v->bv.bits[v->bv.size - 1 - p]);
-        if (b == 1) limbs[p >> 6] |= (uint64_t)1 << (p & 63);
+        zsp_aig_node_t bit = v->bv.bits[v->bv.size - 1 - p];
+        int set;
+        if (S->node_val) {                               /* flip-check result */
+            set = _lit_val(S->node_val, bit);
+        } else if (S->seed && zsp_aig_cnf_is_free(S->cnf, bit)) {
+            /* don't-care bit: seeded-random (see zsp_bbsolver_value) */
+            uint64_t r = _free_var_fill(S->seed, var_id, p >> 6);
+            set = (int)((r >> (p & 63)) & 1);
+        } else {
+            set = (zsp_aig_cnf_value(S->cnf, bit) == 1) ? 1 : 0;
+        }
+        if (set) limbs[p >> 6] |= (uint64_t)1 << (p & 63);
     }
     return 0;
 }

@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "arbiter_fairness_bmc_d16",
   "result": "unsat",
-  "solve_time_ms": 5.563380997045897,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 8.344419999048114,
+  "peak_memory_kb": 42496,
   "returncode": 1,
   "stdout": "unsat\n",
   "stderr": ""

@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "verilatorops",
   "result": "sat",
-  "solve_time_ms": 7.05703254789114,
-  "peak_memory_kb": 41068,
+  "solve_time_ms": 1.6541139921173453,
+  "peak_memory_kb": 42240,
   "returncode": 0,
   "stdout": "sat\n(\n  (a #b11000101)\n  (b #b11001000)\n  (sum_ab #b110001101)\n  (masked #b0101)\n)\n",
   "stderr": ""

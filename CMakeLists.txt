@@ -284,6 +284,18 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 install(TARGETS dv-solve-smt2 RUNTIME DESTINATION bin)
 
+# In-process randomize() benchmark: reuses the frontend parser to build one
+# problem once, then times rediversify+readback -- the per-randomize cost an
+# embedded (DPI) Verilator integration would pay, with no parse/build/reset/IPC.
+add_executable(bench_inproc
+    tests/c/bench_inproc.c
+    src/c/smt2/smt2_lexer.c
+    src/c/smt2/smt2_parser.c
+    src/c/smt2/smt2_frontend.c
+)
+target_link_libraries(bench_inproc PRIVATE dv_solve)
+target_include_directories(bench_inproc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+
 # ------------------------------------------------------------------ #
 # SMT-LIB2 frontend unit tests                                        #
 # ------------------------------------------------------------------ #

@@ -340,6 +340,14 @@ int zsp_aig_cnf_value(zsp_aig_cnf_t *e, zsp_aig_node_t node) {
     return node < 0 ? -val : val;
 }
 
+int zsp_aig_cnf_is_free(const zsp_aig_cnf_t *e, zsp_aig_node_t node) {
+    /* A non-constant node that was never encoded into CNF lies outside the cone
+     * of every asserted constraint: the SAT model does not determine it, so its
+     * value is a don't-care. */
+    if (node == ZSP_AIG_TRUE || node == ZSP_AIG_FALSE) return 0;
+    return !is_node_encoded(e, node);
+}
+
 uint64_t zsp_aig_cnf_num_vars(const zsp_aig_cnf_t *e)     { return e->num_vars; }
 uint64_t zsp_aig_cnf_num_clauses(const zsp_aig_cnf_t *e)  { return e->num_clauses; }
 uint64_t zsp_aig_cnf_num_literals(const zsp_aig_cnf_t *e) { return e->num_literals; }

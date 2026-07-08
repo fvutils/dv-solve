@@ -2,9 +2,9 @@
   "solver": "dv-solve-smt2",
   "benchmark": "condinside",
   "result": "sat",
-  "solve_time_ms": 2.766366000287235,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 2.671303111128509,
+  "peak_memory_kb": 42496,
   "returncode": 0,
-  "stdout": "sat\n((a (_ bv39 7))\n (b (_ bv82 7)))\n",
+  "stdout": "sat\n((a #b0000000)\n (b #b0010010))\n",
   "stderr": ""
 }

@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "fsm_onehot_bmc_d8",
   "result": "unsat",
-  "solve_time_ms": 6.641592000960372,
-  "peak_memory_kb": 35840,
+  "solve_time_ms": 6.359586026519537,
+  "peak_memory_kb": 42496,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

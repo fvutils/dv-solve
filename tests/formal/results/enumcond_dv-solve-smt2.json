@@ -2,9 +2,9 @@
   "solver": "dv-solve-smt2",
   "benchmark": "enumcond",
   "result": "sat",
-  "solve_time_ms": 3.8664440071443096,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 2.8398450231179595,
+  "peak_memory_kb": 42496,
   "returncode": 0,
-  "stdout": "sat\n((op (_ bv2 2))\n (addr (_ bv0 12))\n (wdata (_ bv0 8))\n (rdata_exp (_ bv0 8))\n (cfg_reg (_ bv4 4))\n (cfg_val (_ bv36 6))\n (status (_ bv1 2)))\n",
+  "stdout": "sat\n((op #b00)\n (addr #b000011000110)\n (wdata #b00000000)\n (rdata_exp #b00000000)\n (cfg_reg #b0000)\n (cfg_val #b000000)\n (status #b00))\n",
   "stderr": ""
 }

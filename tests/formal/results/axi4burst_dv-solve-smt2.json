@@ -2,9 +2,9 @@
   "solver": "dv-solve-smt2",
   "benchmark": "axi4burst",
   "result": "sat",
-  "solve_time_ms": 3.9026029990054667,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 2.422839985229075,
+  "peak_memory_kb": 42496,
   "returncode": 0,
-  "stdout": "sat\n((addr_word (_ bv852 10))\n (addr_page (_ bv5 4))\n (len_m1 (_ bv3 8))\n (burst (_ bv2 2))\n (end_word (_ bv856 11)))\n",
+  "stdout": "sat\n((addr_word #b0000000000)\n (addr_page #b0000)\n (len_m1 #b00000000)\n (burst #b00)\n (end_word #b00000000001))\n",
   "stderr": ""
 }

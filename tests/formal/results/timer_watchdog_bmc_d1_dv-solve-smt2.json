@@ -1,10 +1,10 @@
 {
   "solver": "dv-solve-smt2",
   "benchmark": "timer_watchdog_bmc_d1",
-  "result": "unknown",
-  "solve_time_ms": 3.432455996517092,
-  "peak_memory_kb": 42240,
-  "returncode": 2,
-  "stdout": "unknown\n",
+  "result": "unsat",
+  "solve_time_ms": 2.4845979642122984,
+  "peak_memory_kb": 42496,
+  "returncode": 1,
+  "stdout": "unsat\n",
   "stderr": ""
 }

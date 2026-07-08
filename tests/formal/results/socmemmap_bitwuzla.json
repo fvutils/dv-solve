@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "socmemmap",
   "result": "sat",
-  "solve_time_ms": 75.170180760324,
-  "peak_memory_kb": 41068,
+  "solve_time_ms": 2.573115983977914,
+  "peak_memory_kb": 42240,
   "returncode": 0,
   "stdout": "sat\n(\n  (boot_base #b0000000000000000)\n  (boot_size #b001000000000000)\n  (boot_end_addr #b0001000000000000)\n  (sram_base #b0001000000000000)\n  (sram_size #b001000000000000)\n  (sram_end_addr #b0010000000000000)\n  (periph_base #b0010000000000000)\n  (periph_size #b001000000000000)\n  (periph_end_addr #b0011000000000000)\n  (dma_base #b0011000000000000)\n  (dma_size #b001000000000000)\n  (dma_end_addr #b0100000000000000)\n)\n",
   "stderr": ""

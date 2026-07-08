@@ -2,9 +2,9 @@
   "solver": "dv-solve-smt2",
   "benchmark": "onehot8",
   "result": "sat",
-  "solve_time_ms": 2.783969001029618,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 2.439672010950744,
+  "peak_memory_kb": 42496,
   "returncode": 0,
-  "stdout": "sat\n((value (_ bv168 8))\n (count (_ bv1 1)))\n",
+  "stdout": "sat\n((value #b00000001)\n (count #b1))\n",
   "stderr": ""
 }

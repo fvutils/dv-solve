@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "packethdr",
   "result": "sat",
-  "solve_time_ms": 74.87308699637651,
-  "peak_memory_kb": 41068,
+  "solve_time_ms": 1.7223539762198925,
+  "peak_memory_kb": 42240,
   "returncode": 0,
   "stdout": "sat\n(\n  (src_port #b1111111111111111)\n  (dst_port #b0000010111011100)\n  (length #b10111011100)\n)\n",
   "stderr": ""

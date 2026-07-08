@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "fsm_onehot_kind_k1",
   "result": "unsat",
-  "solve_time_ms": 4.584053007420152,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 4.988701897673309,
+  "peak_memory_kb": 42496,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

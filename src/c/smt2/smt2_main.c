@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include "smt2/smt2_lexer.h"
 #include "smt2/smt2_parser.h"
@@ -30,6 +31,11 @@ static void _usage(FILE *f) {
         "  --batch           Force batch (whole-file) stdin mode\n"
         "  --smt2            Accepted for compatibility (the only supported mode)\n"
         "  --no-incremental  Reject (push N) with N>1 (advisory; incremental works)\n"
+        "  --engine=E        Force solve engine: cdcl | bitblast | auto\n"
+        "  --mode=M          verilator | default. In verilator mode, check-sat-\n"
+        "                    assuming is served as a randomization-diversity\n"
+        "                    request (one seeded base solve) instead of a literal\n"
+        "                    assumption solve. Use for VERILATOR_SOLVER.\n"
         "\n"
         "If no file is given, reads from stdin.  Interactive mode is the\n"
         "default when stdin is a pipe/tty.\n");
@@ -133,7 +139,7 @@ static int _read_one_sexpr(FILE *f, GrowBuf *g) {
 /* Run modes                                                          */
 /* ------------------------------------------------------------------ */
 
-static int _run_batch(FILE *f, int show_stats) {
+static int _run_batch(FILE *f, int show_stats, int verilator_mode) {
     size_t buf_len;
     char *buf = _read_all(f, &buf_len);
     if (!buf) {
@@ -163,6 +169,7 @@ static int _run_batch(FILE *f, int show_stats) {
     }
     smt2_frontend_init(&fe, stdout, err_fp);
     fe.print_stats = show_stats;
+    fe.verilator_mode = verilator_mode;
 
     int exit_code = 0;
     for (;;) {
@@ -171,8 +178,11 @@ static int _run_batch(FILE *f, int show_stats) {
         if (!cmd) break;
 
         int rc = smt2_frontend_dispatch(&fe, cmd);
-        if (rc == 1) break;
-        if (rc < 0) { exit_code = 2; break; }
+        if (rc == 1) break;                 /* (exit) */
+        /* A command error is recorded but does NOT terminate the REPL: staying
+         * alive keeps the response stream in sync with the driver (an early exit
+         * closes the pipe and hangs a driver blocked on read). */
+        if (rc < 0) exit_code = 2;
     }
 
     if (exit_code == 0 && fe.has_result) {
@@ -189,7 +199,7 @@ static int _run_batch(FILE *f, int show_stats) {
     return exit_code;
 }
 
-static int _run_interactive(FILE *f, int show_stats) {
+static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
     GrowBuf cmd_buf = {0};
     SexprArena arena;
     sexpr_arena_init(&arena, 8192);
@@ -210,6 +220,7 @@ static int _run_interactive(FILE *f, int show_stats) {
     }
     smt2_frontend_init(&fe, stdout, err_fp);
     fe.print_stats = show_stats;
+    fe.verilator_mode = verilator_mode;
 
     int exit_code = 0;
     for (;;) {
@@ -226,8 +237,11 @@ static int _run_interactive(FILE *f, int show_stats) {
 
         int rc = smt2_frontend_dispatch(&fe, cmd);
         fflush(stdout);
-        if (rc == 1) break;
-        if (rc < 0) { exit_code = 2; break; }
+        if (rc == 1) break;                 /* (exit) */
+        /* Keep the REPL alive on a command error so the response stream stays
+         * in sync with the driver (an early exit would hang a driver that is
+         * blocked reading our next reply). */
+        if (rc < 0) exit_code = 2;
     }
 
     if (exit_code == 0 && fe.has_result) {
@@ -250,6 +264,7 @@ int main(int argc, char **argv) {
     int         force_interactive = 0;
     int         force_batch = 0;
     int         no_incremental = 0;
+    int         verilator_mode = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -264,6 +279,21 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--interactive") == 0) { force_interactive = 1; continue; }
         if (strcmp(argv[i], "--batch") == 0) { force_batch = 1; continue; }
         if (strcmp(argv[i], "--smt2") == 0) { continue; }  /* compat no-op */
+        /* --mode=verilator: treat check-sat-assuming as a randomization
+         * diversity request (see Smt2Frontend.verilator_mode). --mode=default
+         * (or =smt) is the standard SMT-LIB behavior. */
+        if (strncmp(argv[i], "--mode=", 7) == 0) {
+            const char *m = argv[i] + 7;
+            if (strcmp(m, "verilator") == 0) {
+                verilator_mode = 1;
+            } else if (strcmp(m, "default") == 0 || strcmp(m, "smt") == 0) {
+                verilator_mode = 0;
+            } else {
+                fprintf(stderr, "error: unknown mode '%s' (expected verilator|default)\n", m);
+                return 2;
+            }
+            continue;
+        }
         if (strcmp(argv[i], "--no-incremental") == 0) {
             no_incremental = 1;
             (void)no_incremental;  /* reserved for future enforcement */
@@ -309,8 +339,8 @@ int main(int argc, char **argv) {
     if (force_batch)       interactive = 0;
     if (force_interactive) interactive = 1;
 
-    int rc = interactive ? _run_interactive(f, show_stats)
-                         : _run_batch(f, show_stats);
+    int rc = interactive ? _run_interactive(f, show_stats, verilator_mode)
+                         : _run_batch(f, show_stats, verilator_mode);
 
     if (input_file) fclose(f);
     return rc;

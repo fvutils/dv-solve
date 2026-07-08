@@ -1,10 +1,10 @@
 {
   "solver": "dv-solve-smt2",
   "benchmark": "cache_direct_1way_bmc_d8",
-  "result": "error",
-  "solve_time_ms": 53.68330000783317,
-  "peak_memory_kb": 2056,
+  "result": "unsat",
+  "solve_time_ms": 26.433390914462507,
+  "peak_memory_kb": 42496,
   "returncode": 1,
-  "stdout": "",
-  "stderr": "AddressSanitizer:DEADLYSIGNAL\n=================================================================\n==807266==ERROR: AddressSanitizer: SEGV on unknown address 0x7b32b1172281 (pc 0x7b3279db8570 bp 0x7ffc087adc30 sp 0x7ffc087adc10 T0)\n==807266==The signal is caused by a READ memory access.\n    #0 0x7b3279db8570 in var_lo64 /home/mballance/projects/fvutils/dv-solve/src/c/zsp_ctx.h:221\n    #1 0x7b3279db970f in ctx_tighten_lb64 /home/mballance/projects/fvutils/dv-solve/src/c/zsp_propagate.c:126\n    #2 0x7b3279dcf1d5 in _solver_solve_core /home/mballance/projects/fvutils/dv-solve/src/c/zsp_search.c:309\n    #3 0x7b3279dcf74b in solver_solve /home/mballance/projects/fvutils/dv-solve/src/c/zsp_search.c:395\n    #4 0x652d3dc5ed85 in _cmd_check_sat /home/mballance/projects/fvutils/dv-solve/src/c/smt2/smt2_frontend.c:1523\n    #5 0x652d3dc62c8d in smt2_frontend_dispatch /home/mballance/projects/fvutils/dv-solve/src/c/smt2/smt2_frontend.c:1882\n    #6 0x652d3dc63a5a in _run_batch /home/mballance/projects/fvutils/dv-solve/src/c/smt2/smt2_main.c:158\n    #7 0x652d3dc646f3 in main /home/mballance/projects/fvutils/dv-solve/src/c/smt2/smt2_main.c:264\n    #8 0x7b3279a2a1c9 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58\n    #9 0x7b3279a2a28a in __libc_start_main_impl ../csu/libc-start.c:360\n    #10 0x652d3dc3b984 in _start (/home/mballance/projects/fvutils/dv-solve/build/dv-solve-smt2+0x6984) (BuildId: 4748069a930ef4330fa3ee96cb7e10d94f1a7a77)\n\nAddressSanitizer can not provide additional info.\nSUMMARY: AddressSanitizer: SEGV /home/mballance/projects/fvutils/dv-solve/src/c/zsp_ctx.h:221 in var_lo64\n==807266==ABORTING\n"
+  "stdout": "unsat\n",
+  "stderr": ""
 }

@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "alu_pipeline_kind_k2",
   "result": "unsat",
-  "solve_time_ms": 4.638906990294345,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 2.780391019769013,
+  "peak_memory_kb": 42496,
   "returncode": 1,
   "stdout": "unsat\n",
   "stderr": ""

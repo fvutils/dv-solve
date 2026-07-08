@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "pcietlp",
   "result": "sat",
-  "solve_time_ms": 0.8689569949638098,
-  "peak_memory_kb": 36096,
+  "solve_time_ms": 0.8639369625598192,
+  "peak_memory_kb": 42240,
   "returncode": 10,
   "stdout": "sat\n(\n (tlp_type #b01)\n (length #b00101)\n (address #b1000001111111100)\n (first_be #b0011)\n (last_be #b0010)\n (tag #b00000000)\n (fmt #b01)\n)\n",
   "stderr": ""
