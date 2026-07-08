@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "alignedaddr",
   "result": "sat",
-  "solve_time_ms": 2.6255659759044647,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 3.5075460327789187,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((addr #b0000000000000000)\n (mask #b1111)\n (masked #b0000))\n",
   "stderr": ""

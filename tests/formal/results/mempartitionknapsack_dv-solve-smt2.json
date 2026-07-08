@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "mempartitionknapsack",
   "result": "sat",
-  "solve_time_ms": 5.117055959999561,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 5.292594083584845,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((s0 #b0001000000)\n (s1 #b0100000000)\n (s2 #b0001000000)\n (s3 #b0001000000)\n (s4 #b0001000000)\n (s5 #b1000000000)\n (s6 #b1000000000)\n (s7 #b1000000000)\n (a0 #b0)\n (a1 #b00001000000)\n (a2 #b00101000000)\n (a3 #b00110000000)\n (a4 #b00111000000)\n (a5 #b01000000000)\n (a6 #b10000000000)\n (a7 #b11000000000)\n (total #b100000000000))\n",
   "stderr": ""

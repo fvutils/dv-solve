@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "distweighted",
   "result": "sat",
-  "solve_time_ms": 2.4639290058985353,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 3.162898006848991,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((x #b0000000))\n",
   "stderr": ""

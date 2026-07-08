@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "verilatorops",
   "result": "sat",
-  "solve_time_ms": 2.592572942376137,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 3.4087469102814794,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((a #b11000000)\n (b #b11001000)\n (sum_ab #b110001000)\n (masked #b0000))\n",
   "stderr": ""

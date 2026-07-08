@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "ddr5moderegister",
   "result": "sat",
-  "solve_time_ms": 1.8510789377614856,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 1.8085729097947478,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n(\n  (mra #b10)\n  (op_burst_len #b00)\n  (op_cas_lat #b00000)\n  (op_rfu_7 #b0)\n  (op_rd_pre #b000)\n  (op_rfu_5 #b0)\n  (op_crc_en #b1)\n)\n",
   "stderr": ""

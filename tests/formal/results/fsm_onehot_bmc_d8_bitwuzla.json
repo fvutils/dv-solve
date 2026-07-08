@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "fsm_onehot_bmc_d8",
   "result": "unsat",
-  "solve_time_ms": 3.993934951722622,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 4.189688013866544,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

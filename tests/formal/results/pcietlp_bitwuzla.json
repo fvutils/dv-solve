@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "pcietlp",
   "result": "sat",
-  "solve_time_ms": 1.8590550171211362,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 1.5271959127858281,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n(\n  (tlp_type #b10)\n  (length #b10000)\n  (address #b0000000000000011)\n  (first_be #b1111)\n  (last_be #b1111)\n  (tag #b00000000)\n  (fmt #b10)\n)\n",
   "stderr": ""

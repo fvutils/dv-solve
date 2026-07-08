@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "condinside",
   "result": "sat",
-  "solve_time_ms": 2.045750035904348,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 1.3731119688600302,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n(\n  (a #b1100100)\n  (b #b0110010)\n)\n",
   "stderr": ""

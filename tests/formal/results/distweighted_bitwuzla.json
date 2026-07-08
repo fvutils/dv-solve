@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "distweighted",
   "result": "sat",
-  "solve_time_ms": 1.6358089633286,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 2.0479189697653055,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((x #b1100000))\n",
   "stderr": ""

@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "timer_watchdog_bmc_d16",
   "result": "unsat",
-  "solve_time_ms": 5.0828109961003065,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 4.565145005472004,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

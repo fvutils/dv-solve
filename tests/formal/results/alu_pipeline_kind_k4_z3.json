@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "alu_pipeline_kind_k4",
   "result": "unsat",
-  "solve_time_ms": 5.003058933652937,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 6.435004994273186,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

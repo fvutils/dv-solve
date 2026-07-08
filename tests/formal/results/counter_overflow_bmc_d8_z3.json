@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "counter_overflow_bmc_d8",
   "result": "unsat",
-  "solve_time_ms": 4.229945014230907,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 5.4047980811446905,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "onehot8",
   "result": "sat",
-  "solve_time_ms": 0.937648001126945,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 0.4900450585409999,
+  "peak_memory_kb": 41984,
   "returncode": 10,
   "stdout": "sat\n(\n (value #b00000001)\n (count true)\n)\n",
   "stderr": ""

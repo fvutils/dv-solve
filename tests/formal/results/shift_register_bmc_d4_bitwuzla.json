@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "shift_register_bmc_d4",
   "result": "unsat",
-  "solve_time_ms": 1.8073460087180138,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 1.5787240117788315,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

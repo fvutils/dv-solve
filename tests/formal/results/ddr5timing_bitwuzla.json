@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "ddr5timing",
   "result": "sat",
-  "solve_time_ms": 1.9997030030936003,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 3.883303957991302,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n(\n  (cmd_prev #b100)\n  (cmd #b100)\n  (ap_prev #b0)\n  (cancel_prev #b0)\n  (max_tccd #b1000)\n  (tccd #b110010)\n  (tccd_base #b101010)\n)\n",
   "stderr": ""

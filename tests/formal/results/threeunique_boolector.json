@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "threeunique",
   "result": "sat",
-  "solve_time_ms": 1.4403159730136395,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 1.5861480496823788,
+  "peak_memory_kb": 41984,
   "returncode": 10,
   "stdout": "sat\n(\n (a #b0000010)\n (b #b0100000)\n (c #b0100011)\n)\n",
   "stderr": ""

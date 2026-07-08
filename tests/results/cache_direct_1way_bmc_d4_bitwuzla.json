@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "cache_direct_1way_bmc_d4",
   "result": "unknown",
-  "solve_time_ms": 2.1690860157832503,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 1.8707909621298313,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "[bzla] warning: Equality over constant arrays not fully supported yet\nunknown\n",
   "stderr": ""

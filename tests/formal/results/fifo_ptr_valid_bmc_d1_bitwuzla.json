@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "fifo_ptr_valid_bmc_d1",
   "result": "unsat",
-  "solve_time_ms": 2.1215149899944663,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 1.757966005243361,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

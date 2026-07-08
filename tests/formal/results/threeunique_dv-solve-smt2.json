@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "threeunique",
   "result": "sat",
-  "solve_time_ms": 2.426355960778892,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 4.202542011626065,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((a #b0000000)\n (b #b1011101)\n (c #b0111010))\n",
   "stderr": ""

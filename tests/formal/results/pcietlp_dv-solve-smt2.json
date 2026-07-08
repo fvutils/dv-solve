@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "pcietlp",
   "result": "sat",
-  "solve_time_ms": 2.530425088480115,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 3.4462290350347757,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((tlp_type #b00)\n (length #b00001)\n (address #b0000000000000000)\n (first_be #b0001)\n (last_be #b0000)\n (tag #b00000000)\n (fmt #b00))\n",
   "stderr": ""

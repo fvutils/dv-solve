@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "softrelaxbaseline",
   "result": "sat",
-  "solve_time_ms": 1.5296869678422809,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 1.3501880457624793,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((x #b11111100))\n",
   "stderr": ""

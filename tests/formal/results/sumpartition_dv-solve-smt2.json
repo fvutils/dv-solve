@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "sumpartition",
   "result": "sat",
-  "solve_time_ms": 2.4628760293126106,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 3.4186060074716806,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((p0 #b0001010)\n (p1 #b0001010)\n (p2 #b0001010)\n (p3 #b0001010)\n (p4 #b0001010)\n (p5 #b1001010)\n (p6 #b1001100)\n (s01 #b00010100)\n (s012 #b00011110)\n (s0123 #b000101000)\n (s01234 #b000110010)\n (s012345 #b001111100))\n",
   "stderr": ""

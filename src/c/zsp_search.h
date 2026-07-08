@@ -28,8 +28,12 @@ typedef enum {
 typedef struct {
     uint32_t var_id;        /* variable assigned at this decision      */
     int64_t  tried_value;   /* value tried (used on backtrack)         */
-    uint8_t  tried_lower;   /* 1 = already tried values below tried_value */
-    uint8_t  _dec_pad[7];
+    uint8_t  tried_lower;   /* for a split: 0 = upper half being tried,
+                             *              1 = lower half being tried    */
+    uint8_t  is_split;      /* 1 = this level is a reversible domain split
+                             *     (two-way branch that excludes tried_value)
+                             *     rather than a plain value decision       */
+    uint8_t  _dec_pad[6];
 } DecisionRecord;
 
 /* ------------------------------------------------------------------ */

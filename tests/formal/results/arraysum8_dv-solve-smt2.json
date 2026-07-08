@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "arraysum8",
   "result": "sat",
-  "solve_time_ms": 2.876223996281624,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 4.307874012738466,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((a0 #b00000000)\n (a1 #b00000000)\n (a2 #b00000000)\n (a3 #b00000000)\n (a4 #b11110011)\n (a5 #b11111111)\n (a6 #b11111001)\n (a7 #b11111101)\n (s #b01111101000))\n",
   "stderr": ""

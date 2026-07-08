@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "memtransaction",
   "result": "sat",
-  "solve_time_ms": 1.754745957441628,
-  "peak_memory_kb": 42240,
+  "solve_time_ms": 2.955831936560571,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n(\n  (addr #b00000000)\n  (length #b00001)\n  (end_addr #b000000001)\n)\n",
   "stderr": ""

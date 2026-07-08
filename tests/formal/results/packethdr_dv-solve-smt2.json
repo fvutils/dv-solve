@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "packethdr",
   "result": "sat",
-  "solve_time_ms": 3.342363052070141,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 3.492967924103141,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "sat\n((src_port #b1101111100001000)\n (dst_port #b0000000000000000)\n (length #b00000010100))\n",
   "stderr": ""

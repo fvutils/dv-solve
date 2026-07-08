@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "fifo_ptr_valid_bmc_d8",
   "result": "unsat",
-  "solve_time_ms": 10.495882015675306,
-  "peak_memory_kb": 42496,
+  "solve_time_ms": 10.471240035258234,
+  "peak_memory_kb": 41984,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""
