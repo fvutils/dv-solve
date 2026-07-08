@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "bustransaction",
   "result": "sat",
-  "solve_time_ms": 2.1665659733116627,
-  "peak_memory_kb": 41984,
+  "solve_time_ms": 1.7134599620476365,
+  "peak_memory_kb": 41472,
   "returncode": 0,
   "stdout": "sat\n(\n  (word_addr #b1111111111111111)\n  (burst_len #b00000000)\n  (beat_size #b00)\n  (end_addr #b01111111111111111)\n)\n",
   "stderr": ""

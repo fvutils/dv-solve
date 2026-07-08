@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "distweighted",
   "result": "sat",
-  "solve_time_ms": 0.8169700158759952,
-  "peak_memory_kb": 41984,
+  "solve_time_ms": 0.42589299846440554,
+  "peak_memory_kb": 41472,
   "returncode": 10,
   "stdout": "sat\n((x #b0110011))\n",
   "stderr": ""

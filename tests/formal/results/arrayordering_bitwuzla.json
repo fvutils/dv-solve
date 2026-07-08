@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "arrayordering",
   "result": "unsat",
-  "solve_time_ms": 2.94211704749614,
-  "peak_memory_kb": 41984,
+  "solve_time_ms": 2.753094071522355,
+  "peak_memory_kb": 41472,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

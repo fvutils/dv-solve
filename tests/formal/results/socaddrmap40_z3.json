@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "socaddrmap40",
   "result": "sat",
-  "solve_time_ms": 17.161841969937086,
-  "peak_memory_kb": 41984,
+  "solve_time_ms": 17.396089038811624,
+  "peak_memory_kb": 41728,
   "returncode": 1,
   "stdout": "(error \"line 1 column 19: unknown parameter 'seed'\nLegal parameters are:\n  auto_config (bool) (default: true)\n  ctrl_c (bool) (default: true)\n  debug_ref_count (bool) (default: false)\n  dot_proof_file (string) (default: proof.dot)\n  dump_models (bool) (default: false)\n  encoding (string) (default: unicode)\n  memory_high_watermark (unsigned int) (default: 0)\n  memory_high_watermark_mb (unsigned int) (default: 0)\n  memory_max_alloc_count (unsigned int) (default: 0)\n  memory_max_size (unsigned int) (default: 0)\n  model (bool) (default: true)\n  model_validate (bool) (default: false)\n  proof (bool) (default: false)\n  rlimit (unsigned int) (default: 0)\n  smtlib2_compliant (bool) (default: false)\n  stats (bool) (default: false)\n  timeout (unsigned int) (default: 4294967295)\n  trace (bool) (default: false)\n  trace_file_name (string) (default: z3.log)\n  type_check (bool) (default: true)\n  unsat_core (bool) (default: false)\n  verbose (unsigned int) (default: 0)\n  warning (bool) (default: true)\n  well_sorted_check (bool) (default: false)\")\nsat\n((r0_base #x02c0fff9fe)\n (r0_size #b0101000101111110001100100110000100)\n (r0_end #x0406f8c382)\n (r1_base #x040978afff)\n (r1_size #b0001001011000011101111111111110111)\n (r1_end #x045487aff6)\n (r2_base #x046c86f3fb)\n (r2_size #b0110111100010000011011101110111011)\n (r2_end #x0628c8afb6)\n (r3_base #x063df0757f)\n (r3_size #b0001000000000111111000110110000100)\n (r3_end #x067e100303)\n (r4_base #x067fea8cff)\n (r4_size #b0100000000010001100000010000000100)\n (r4_end #x0780309103)\n (r5_base #x1e3fffffff)\n (r5_size #b0011010000000000000000011101000011)\n (r5_end #x1f10000742)\n (r6_base #x22fe3fffbe)\n (r6_size #b0100000011000000000000000010010101)\n (r6_end #x2401400053)\n (r7_base #xfdffffffff)\n (r7_size #b0010000000000000000000000000000000)\n (r7_end #xfe7fffffff))\n",
   "stderr": ""

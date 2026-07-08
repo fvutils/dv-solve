@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "fifoctrl",
   "result": "sat",
-  "solve_time_ms": 1.3893020804971457,
-  "peak_memory_kb": 41984,
+  "solve_time_ms": 1.3582819374278188,
+  "peak_memory_kb": 41472,
   "returncode": 0,
   "stdout": "sat\n(\n  (wr_ptr #b11111110)\n  (rd_ptr #b11111111)\n  (watermark_lo #b111111)\n  (watermark_hi #b11111111)\n)\n",
   "stderr": ""

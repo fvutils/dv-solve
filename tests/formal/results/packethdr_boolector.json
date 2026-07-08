@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "packethdr",
   "result": "sat",
-  "solve_time_ms": 1.1108809849247336,
-  "peak_memory_kb": 41984,
+  "solve_time_ms": 1.7959880642592907,
+  "peak_memory_kb": 41472,
   "returncode": 10,
   "stdout": "sat\n(\n (src_port #b1000101111111111)\n (dst_port #b0000000011011111)\n (length #b10110011101)\n)\n",
   "stderr": ""

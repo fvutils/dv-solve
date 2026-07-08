@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "inequalityweb",
   "result": "sat",
-  "solve_time_ms": 1.6204139683395624,
-  "peak_memory_kb": 41984,
+  "solve_time_ms": 1.6704180743545294,
+  "peak_memory_kb": 41472,
   "returncode": 0,
   "stdout": "sat\n(\n  (a #b000001)\n  (b #b000010)\n  (c #b000011)\n  (d #b000100)\n  (e #b000101)\n  (f #b000110)\n  (g #b000111)\n  (h #b001000)\n)\n",
   "stderr": ""

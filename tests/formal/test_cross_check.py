@@ -33,6 +33,10 @@ from .harness.z3_solver import Z3Solver
 TIER_DIRS = [
     Path(__file__).resolve().parent / "smt2" / "tier2",
     Path(__file__).resolve().parent / "smt2" / "tier3",
+    # Fixtures sanitized from real Verilator randomize transcripts
+    # (tests/formal/verilator/capture_fixtures.sh). These validate the actual
+    # SMT shapes Verilator emits, not just hand-authored ones.
+    Path(__file__).resolve().parent / "smt2" / "verilator",
 ]
 
 PER_SOLVER_TIMEOUT_S = 10.0

@@ -1,0 +1,11 @@
+; Sanitized from Verilator transcript: t_constraint_unsat
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun addr () (_ BitVec 8))
+(declare-fun data () (_ BitVec 8))
+(assert (= #b1 (__Vbv (bvult ((_ zero_extend 24) addr) #x0000007f))))
+(assert (= #b1 (bvand (__Vbv (bvugt ((_ zero_extend 24) data) #x0000000a)) (__Vbv (bvult ((_ zero_extend 24) data) #x000000c8)))))
+(assert (= #b1 (__Vbv (= addr #x32))))
+(assert (= #b1 (__Vbv (= data #x64))))
+(check-sat)

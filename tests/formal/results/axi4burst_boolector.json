@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "axi4burst",
   "result": "sat",
-  "solve_time_ms": 1.3894831063225865,
-  "peak_memory_kb": 41984,
+  "solve_time_ms": 1.4463899424299598,
+  "peak_memory_kb": 41472,
   "returncode": 10,
   "stdout": "sat\n(\n (addr_word #b1000011110)\n (addr_page #b0000)\n (len_m1 #b00100001)\n (burst #b01)\n (end_word #b01001000000)\n)\n",
   "stderr": ""
