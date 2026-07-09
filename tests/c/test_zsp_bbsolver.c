@@ -258,11 +258,15 @@ static void test_wide_readback(void) {
     CHECK((limbs[0] & 1ull) == 1ull, "value_wide: bit 0 set in limb[0]");
     CHECK((limbs[1] & (1ull << 36)) != 0, "value_wide: bit 100 set in limb[1]");
 
-    /* The int64 fast path must still work for the low word (no UB, no crash),
-     * seeing just the low 64 bits (bit 0 set -> value 1). */
+    /* The int64 fast path must still work for the low word (no UB, no crash):
+     * it returns exactly the low 64 bits, i.e. the same word value_wide put in
+     * limb[0]. Bit 0 is pinned to 1; the other low bits are unconstrained and
+     * get seeded-random values from the diversity pass, so assert the pinned bit
+     * and fast/wide agreement rather than an exact literal. */
     int64_t low = -1;
     zsp_bbsolver_value(S, 0, &low);
-    CHECK(low == 1, "value (int64 fast path) returns low-64-bits = 1");
+    CHECK((low & 1) == 1, "value (int64 fast path): pinned bit 0 is set");
+    CHECK((uint64_t)low == limbs[0], "value (int64 fast path) == wide-readback low word");
 
     zsp_bbsolver_free(S);
     builder_free_problem(b, p, sz);

@@ -92,6 +92,53 @@ uint64_t zsp_sat_num_clauses(const zsp_sat_t *s);
 /** Return highest variable id seen so far. */
 zsp_sat_var_t zsp_sat_max_var(const zsp_sat_t *s);
 
+/* Phase B.1 step 3: clause-arena observers. Forward calls to the
+ * underlying kissat fork. Used by telemetry now; substrate for the
+ * future LevelMark integration that ties the SAT clause DB into the
+ * dv-solve checkpoint system. */
+size_t zsp_sat_arena_size_bytes(zsp_sat_t *s);
+size_t zsp_sat_arena_capacity_bytes(zsp_sat_t *s);
+
+/* Phase B.1 step 5 (plumbing slice): arena mark. Opaque to callers;
+ * today aliases the kissat arena top in `ward` units. Saved into the
+ * dv-solve LevelMark/CheckpointMark by the checkpoint code so a single
+ * dv-solve checkpoint records the SAT-side arena position too.
+ * No matching _rewind_to is exposed yet — sound rewind needs the
+ * deep kissat refactor (invalidate watches/occurrences/etc.) which
+ * this slice does not attempt. */
+typedef size_t zsp_sat_arena_mark_t;
+zsp_sat_arena_mark_t zsp_sat_arena_save_mark(zsp_sat_t *s);
+
+/* Phase B.1 step 3 (incremental API surface — stub semantics).
+ *
+ * Kissat is non-incremental and the fork has not yet been adapted to
+ * preserve state across solve calls. This block defines the public
+ * surface that the bbsolver / step-5 LevelMark work will code against,
+ * with conservative correct-but-non-incremental behavior today:
+ *
+ *   - push/pop track frame depth. If clauses were added inside a frame
+ *     that is then popped, the solver is marked "tainted": the caller
+ *     must discard the instance and rebuild (the next solve call returns
+ *     ZSP_SAT_UNKNOWN). Use zsp_sat_is_tainted() to poll.
+ *   - assume(lit) queues an assumption replayed as a unit clause at the
+ *     next solve. One-shot: the assumed unit becomes permanent in the
+ *     kissat instance, so a follow-on solve with conflicting assumptions
+ *     will see them as hard constraints.
+ *   - failed(lit) is reserved for the future real implementation that
+ *     can report unsat-core membership. Always returns 0 in stub mode.
+ *
+ * When the deeper kissat refactor lands (snapshot trail / clause DB /
+ * unit clauses on push, restore on pop; real assumption tracking), the
+ * API stays the same — semantics tighten from "rebuild on taint" to
+ * "true incremental rollback". */
+void zsp_sat_push(zsp_sat_t *s);
+void zsp_sat_pop(zsp_sat_t *s);
+int  zsp_sat_push_depth(const zsp_sat_t *s);
+int  zsp_sat_is_tainted(const zsp_sat_t *s);
+
+void zsp_sat_assume(zsp_sat_t *s, zsp_sat_lit_t lit);
+int  zsp_sat_failed(zsp_sat_t *s, zsp_sat_lit_t lit);
+
 #ifdef __cplusplus
 }
 #endif

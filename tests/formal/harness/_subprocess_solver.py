@@ -6,12 +6,13 @@ here.
 """
 from __future__ import annotations
 
+import os
 import resource
 import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from .protocol import FormalResult
 
@@ -38,6 +39,7 @@ def run_smt2_solver(
     *,
     timeout_s: float = 30.0,
     benchmark: str | None = None,
+    env_overrides: Mapping[str, str] | None = None,
 ) -> FormalResult:
     """Run an SMT solver subprocess and return a FormalResult.
 
@@ -51,6 +53,11 @@ def run_smt2_solver(
     # Snapshot child RSS before the run so we can isolate this call
     pre_rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
 
+    sub_env = None
+    if env_overrides:
+        sub_env = os.environ.copy()
+        sub_env.update(env_overrides)
+
     t0 = time.monotonic()
     try:
         proc = subprocess.run(
@@ -58,6 +65,7 @@ def run_smt2_solver(
             capture_output=True,
             text=True,
             timeout=timeout_s,
+            env=sub_env,
         )
     except subprocess.TimeoutExpired:
         dt_ms = (time.monotonic() - t0) * 1000.0

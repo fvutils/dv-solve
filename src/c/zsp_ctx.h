@@ -56,6 +56,11 @@ typedef struct {
     TrailEntry      *trail_top;
     uint64_t         trail_count;
     zsp_stack_mark_t stack_mark;
+    /* Phase B.1 step 5 (plumbing slice): SAT clause-arena position at
+     * the time of the checkpoint. Zero today; populated once step 6
+     * wires bbsolver to re-use a kissat instance across check-sat
+     * calls. See LevelMark.sat_arena_top for the rationale. */
+    size_t           sat_arena_top;
 } CheckpointMark;
 
 typedef struct SolveCtx {

@@ -1,0 +1,12 @@
+; Sanitized from Verilator transcript: t_constraint_redops
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun rand_val () (_ BitVec 1))
+(declare-fun redand () (_ BitVec 1))
+(declare-fun redor () (_ BitVec 1))
+(declare-fun redxor () (_ BitVec 1))
+(assert (= #b1 (__Vbv (= redand (__Vbv (= (bvnot rand_val) #b0))))))
+(assert (= #b1 (__Vbv (= redxor ((_ extract 0 0) rand_val)))))
+(assert (= #b1 (__Vbv (= redor (__Vbv (not (= rand_val #b0)))))))
+(check-sat)

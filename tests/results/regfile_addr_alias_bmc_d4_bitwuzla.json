@@ -1,0 +1,10 @@
+{
+  "solver": "bitwuzla",
+  "benchmark": "regfile_addr_alias_bmc_d4",
+  "result": "unsat",
+  "solve_time_ms": 1.7447080463171005,
+  "peak_memory_kb": 42480,
+  "returncode": 0,
+  "stdout": "unsat\n",
+  "stderr": ""
+}

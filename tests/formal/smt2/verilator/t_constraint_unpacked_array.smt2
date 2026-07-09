@@ -1,0 +1,11 @@
+; Sanitized from Verilator transcript: t_constraint_unpacked_array
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun data () (Array (_ BitVec 32) (_ BitVec 8)))
+(assert (= #b1 (bvor (bvor (bvor (bvor (__Vbv (= (select data #x00000000) #x10)) (__Vbv (= (select data #x00000000) #x20))) (__Vbv (= (select data #x00000000) #x30))) (__Vbv (= (select data #x00000000) #x40))) (__Vbv (= (select data #x00000000) #x50)))))
+(assert (= #b1 (bvor (bvor (bvor (bvor (__Vbv (= (select data #x00000001) #x10)) (__Vbv (= (select data #x00000001) #x20))) (__Vbv (= (select data #x00000001) #x30))) (__Vbv (= (select data #x00000001) #x40))) (__Vbv (= (select data #x00000001) #x50)))))
+(assert (= #b1 (bvor (bvor (bvor (bvor (__Vbv (= (select data #x00000002) #x10)) (__Vbv (= (select data #x00000002) #x20))) (__Vbv (= (select data #x00000002) #x30))) (__Vbv (= (select data #x00000002) #x40))) (__Vbv (= (select data #x00000002) #x50)))))
+(assert (= #b1 (bvor (bvor (bvor (bvor (__Vbv (= (select data #x00000003) #x10)) (__Vbv (= (select data #x00000003) #x20))) (__Vbv (= (select data #x00000003) #x30))) (__Vbv (= (select data #x00000003) #x40))) (__Vbv (= (select data #x00000003) #x50)))))
+(assert (= #b1 (bvor (bvor (bvor (bvor (__Vbv (= (select data #x00000004) #x10)) (__Vbv (= (select data #x00000004) #x20))) (__Vbv (= (select data #x00000004) #x30))) (__Vbv (= (select data #x00000004) #x40))) (__Vbv (= (select data #x00000004) #x50)))))
+(check-sat)

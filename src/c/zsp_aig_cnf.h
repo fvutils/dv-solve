@@ -49,6 +49,10 @@ void zsp_aig_cnf_encode(zsp_aig_cnf_t *e, zsp_aig_node_t root, int top_level);
  *  returned ZSP_SAT_SAT. */
 int zsp_aig_cnf_value(zsp_aig_cnf_t *e, zsp_aig_node_t node);
 
+/** True if `node` is a non-constant AIG node that was never encoded into CNF --
+ *  i.e. a don't-care whose value the SAT model does not determine. */
+int zsp_aig_cnf_is_free(const zsp_aig_cnf_t *e, zsp_aig_node_t node);
+
 /** Statistics. */
 uint64_t zsp_aig_cnf_num_vars(const zsp_aig_cnf_t *e);
 uint64_t zsp_aig_cnf_num_clauses(const zsp_aig_cnf_t *e);

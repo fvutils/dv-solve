@@ -1,10 +1,10 @@
 {
   "solver": "dv-solve-smt2",
   "benchmark": "regfile_simple_bmc_d2",
-  "result": "timeout",
-  "solve_time_ms": 60060.86967998999,
-  "peak_memory_kb": 0,
-  "returncode": -1,
-  "stdout": "",
-  "stderr": "Timed out after 60.0s"
+  "result": "unsat",
+  "solve_time_ms": 14.400677988305688,
+  "peak_memory_kb": 42480,
+  "returncode": 1,
+  "stdout": "unsat\n",
+  "stderr": ""
 }

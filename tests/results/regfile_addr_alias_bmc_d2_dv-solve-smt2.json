@@ -1,10 +1,10 @@
 {
   "solver": "dv-solve-smt2",
   "benchmark": "regfile_addr_alias_bmc_d2",
-  "result": "sat",
-  "solve_time_ms": 3.048851009225473,
-  "peak_memory_kb": 38408,
-  "returncode": 0,
-  "stdout": "sat\n",
+  "result": "unsat",
+  "solve_time_ms": 15.206495067104697,
+  "peak_memory_kb": 42480,
+  "returncode": 1,
+  "stdout": "unsat\n",
   "stderr": ""
 }

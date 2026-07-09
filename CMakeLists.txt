@@ -203,6 +203,11 @@ target_link_libraries(test_kissat_zsp_alloc PRIVATE dv_solve kissat)
 target_include_directories(test_kissat_zsp_alloc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_kissat_zsp_alloc COMMAND test_kissat_zsp_alloc)
 
+add_executable(test_zsp_sat_incremental tests/c/test_zsp_sat_incremental.c)
+target_link_libraries(test_zsp_sat_incremental PRIVATE dv_solve kissat)
+target_include_directories(test_zsp_sat_incremental PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_sat_incremental COMMAND test_zsp_sat_incremental)
+
 add_executable(test_zsp_aig tests/c/test_zsp_aig.c)
 target_link_libraries(test_zsp_aig PRIVATE dv_solve)
 target_include_directories(test_zsp_aig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -278,6 +283,18 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_link_options(dv-solve-smt2 PRIVATE -fsanitize=address)
 endif()
 install(TARGETS dv-solve-smt2 RUNTIME DESTINATION bin)
+
+# In-process randomize() benchmark: reuses the frontend parser to build one
+# problem once, then times rediversify+readback -- the per-randomize cost an
+# embedded (DPI) Verilator integration would pay, with no parse/build/reset/IPC.
+add_executable(bench_inproc
+    tests/c/bench_inproc.c
+    src/c/smt2/smt2_lexer.c
+    src/c/smt2/smt2_parser.c
+    src/c/smt2/smt2_frontend.c
+)
+target_link_libraries(bench_inproc PRIVATE dv_solve)
+target_include_directories(bench_inproc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 
 # ------------------------------------------------------------------ #
 # SMT-LIB2 frontend unit tests                                        #

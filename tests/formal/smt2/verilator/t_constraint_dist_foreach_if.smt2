@@ -1,0 +1,10 @@
+; Sanitized from Verilator transcript: t_constraint_dist_foreach_if
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun a () (Array (_ BitVec 32) (_ BitVec 4)))
+(assert (= #b1 (__Vbv (=> (__Vbool #b1) (__Vbool (bvand (bvor (bvand (__Vbv (bvuge (select a #x00000000) #x1)) (__Vbv (bvule (select a #x00000000) #x4))) (__Vbv (= (select a #x00000000) #x0))) (__Vbv (= (select a #x00000000) #x1))))))))
+(assert (= #b1 (__Vbv (=> (__Vbool #b1) (__Vbool (bvand (bvor (bvand (__Vbv (bvuge (select a #x00000001) #x1)) (__Vbv (bvule (select a #x00000001) #x4))) (__Vbv (= (select a #x00000001) #x0))) (__Vbv (= (select a #x00000001) #x4))))))))
+(assert (= #b1 (__Vbv (=> (__Vbool #b1) (__Vbool (bvand (bvor (bvand (__Vbv (bvuge (select a #x00000002) #x1)) (__Vbv (bvule (select a #x00000002) #x4))) (__Vbv (= (select a #x00000002) #x0))) (__Vbv (= (select a #x00000002) #x2))))))))
+(assert (= #b1 (__Vbv (=> (__Vbool #b1) (__Vbool (bvand (bvor (bvand (__Vbv (bvuge (select a #x00000003) #x1)) (__Vbv (bvule (select a #x00000003) #x4))) (__Vbv (= (select a #x00000003) #x0))) (__Vbv (= (select a #x00000003) #x1))))))))
+(check-sat)

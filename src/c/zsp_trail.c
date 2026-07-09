@@ -27,6 +27,10 @@ void trail_push_level(SolveCtx *ctx) {
     mark->stack_mark  = zsp_stack_push(ctx->dynamic);
     mark->trail_top   = ctx->trail_top;
     mark->trail_count = ctx->trail_count;
+    /* Phase B.1 step 5 (plumbing slice): SAT-arena top defaults to 0 —
+     * SolveCtx does not hold a zsp_sat handle yet. Future step 6 will
+     * set this from zsp_sat_arena_save_mark. */
+    mark->sat_arena_top = 0;
     ctx->decision_level = lvl + 1;
 }
 

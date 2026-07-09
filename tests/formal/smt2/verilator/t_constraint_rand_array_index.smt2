@@ -1,0 +1,13 @@
+; Sanitized from Verilator transcript: t_constraint_rand_array_index
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun data () (Array (_ BitVec 32) (_ BitVec 8)))
+(declare-fun idx () (_ BitVec 2))
+(declare-fun selected_value () (_ BitVec 8))
+(assert (= #b1 (__Vbv (= selected_value (select data ((_ zero_extend 30) idx))))))
+(assert (= #b1 (bvand (__Vbv (bvuge (select data #x00000000) #x0a)) (__Vbv (bvule (select data #x00000000) #x32)))))
+(assert (= #b1 (bvand (__Vbv (bvuge (select data #x00000001) #x0a)) (__Vbv (bvule (select data #x00000001) #x32)))))
+(assert (= #b1 (bvand (__Vbv (bvuge (select data #x00000002) #x0a)) (__Vbv (bvule (select data #x00000002) #x32)))))
+(assert (= #b1 (bvand (__Vbv (bvuge (select data #x00000003) #x0a)) (__Vbv (bvule (select data #x00000003) #x32)))))
+(check-sat)

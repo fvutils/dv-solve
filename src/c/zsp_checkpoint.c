@@ -20,6 +20,12 @@ int solver_checkpoint(SolveCtx *ctx) {
     m->n_clauses_at_cp = ctx->lcg ? ((LCGCtx *)ctx->lcg)->clause_db.n_clauses : 0;
     m->trail_top      = ctx->trail_top;
     m->trail_count    = ctx->trail_count;
+    /* Phase B.1 step 5 (plumbing slice): SAT-arena top is zero today —
+     * SolveCtx does not hold a zsp_sat handle yet. The future step 6
+     * wiring will set this to `zsp_sat_arena_save_mark(ctx->sat)`. The
+     * matching rewind on solver_restore is deferred to the deep kissat
+     * refactor (see zsp_trail.h:LevelMark for the full note). */
+    m->sat_arena_top  = 0;
 
     if (ctx->dynamic)
         m->stack_mark = zsp_stack_push(ctx->dynamic);

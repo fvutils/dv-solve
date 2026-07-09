@@ -339,8 +339,19 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                                           (uint32_t)_Alignof(int64_t));
         if (ps_ref != EXPR_NULL) {
             ctx->phase_save = (int64_t *)zsp_pool_ptr(&ctx->pool, ps_ref);
-            for (uint32_t i = 0; i < ctx->n_vars; i++)
-                ctx->phase_save[i] = var_lo64(ctx, &ctx->vars[i]);
+            /* For a diversity solve (nonzero seed) seed each var's initial phase
+             * to a RANDOM in-domain value rather than its lower bound. Otherwise
+             * _pick_value keeps returning the saved lower bound and an otherwise-
+             * unconstrained (or loosely bounded) rand var never varies across
+             * seeds. The value is still assigned through _pick_value ->
+             * propagation, so coupled constraints stay respected. Seed 0
+             * (BMC/decision) keeps the deterministic lower-bound phase. */
+            int diversify = (opts->seed != 0);
+            for (uint32_t i = 0; i < ctx->n_vars; i++) {
+                int64_t lo = var_lo64(ctx, &ctx->vars[i]);
+                int64_t hi = var_hi64(ctx, &ctx->vars[i]);
+                ctx->phase_save[i] = diversify ? _rand_range64(ctx, lo, hi) : lo;
+            }
         }
     }
 
@@ -426,6 +437,7 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
         ctx->decisions[dec_idx].var_id      = x_id;
         ctx->decisions[dec_idx].tried_value = v;
         ctx->decisions[dec_idx].tried_lower = 0;
+        ctx->decisions[dec_idx].is_split    = 0;  /* plain value decision */
 
         /* ── Push level and assign ──
          * The tighten helpers auto-detect singleton pinning (lo == hi
@@ -530,14 +542,38 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
             /* Backtrack to the previous level */
             trail_backtrack(ctx, cur - 1);
 
-            /* Exclude `val` from dv's domain at the previous level.
-             * Sign-aware ordering so an unsigned domain in/across the upper
-             * half is split correctly (a signed compare/midpoint would mis-
-             * order it and either declare it empty or bisect the wrong way). */
+            /* Resolve the conflict. Sign-aware ordering so an unsigned domain
+             * in/across the upper half is handled correctly (a signed
+             * compare/midpoint would mis-order it).
+             *
+             * A plain value decision that conflicts is excluded. If `val` is at
+             * a domain boundary the exclusion is a single bound tightening at
+             * this level. If `val` is interior we cannot exclude one value with
+             * bounds alone, so we open a *reversible two-way split* that
+             * excludes `val`: phase 1 = [dlo, val-1], and — reached by
+             * backtracking to this same level — phase 2 = [val+1, dhi]. The
+             * split lives at its own decision level (via trail_push_level) so
+             * both halves are always explored. (The previous two-phase code
+             * kept its phase flag on the decision record but tightened at the
+             * *parent* level and returned to the decision loop, which reset the
+             * flag on the next decision — so phase 2 never ran and satisfiable
+             * problems whose only solutions sat in a variable's upper half were
+             * reported UNSAT. See BUG-3.) */
             const Variable *dvv = &ctx->vars[dv];
             int64_t dlo = var_lo64(ctx, dvv);
             int64_t dhi = var_hi64(ctx, dvv);
-            if (var_b_gt(dvv, dlo, dhi)) {
+            if (d->is_split && d->tried_lower) {
+                /* Lower half [dlo, val-1] exhausted -> explore the upper half
+                 * (val, dhi]. `val` was excluded from the lower half already. */
+                d->tried_lower = 0;
+                trail_push_level(ctx);
+                pr = ctx_tighten_lb64(ctx, dv, val + 1);
+            } else if (d->is_split) {
+                /* Both halves of the split exhausted -> this subtree is UNSAT;
+                 * fail up to the parent decision. */
+                d->is_split = 0;
+                pr = PROP_CONFLICT;
+            } else if (var_b_gt(dvv, dlo, dhi)) {
                 /* Domain already empty after backtrack — propagate conflict up */
                 pr = PROP_CONFLICT;
             } else if (!var_b_gt(dvv, val, dlo)) {  /* val <= dlo */
@@ -545,22 +581,14 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
             } else if (!var_b_lt(dvv, val, dhi)) {  /* val >= dhi */
                 pr = ctx_tighten_ub64(ctx, dv, dhi - 1);
             } else {
-                /* Middle value: two-phase domain bisection.
-                 * Split at the midpoint of [dlo, dhi] (not at val)
-                 * for systematic, logarithmic-depth exploration.
-                 * Phase 1: explore lower half [dlo, mid].
-                 * Phase 2: explore upper half [mid+1, dhi].
-                 * Unsigned-safe midpoint (avoids signed overflow and a
-                 * negative half-width when the span exceeds 2^63). */
-                int64_t mid = (int64_t)((uint64_t)dlo +
-                                        (((uint64_t)dhi - (uint64_t)dlo) >> 1));
-                if (!d->tried_lower) {
-                    d->tried_lower = 1;
-                    pr = ctx_tighten_ub64(ctx, dv, mid);
-                } else {
-                    d->tried_lower = 0;
-                    pr = ctx_tighten_lb64(ctx, dv, mid + 1);
-                }
+                /* Interior value: open a reversible split excluding `val`.
+                 * Phase 1 explores [dlo, val-1] at a fresh level; on backtrack
+                 * to this level the branch above flips to [val+1, dhi]. */
+                d->is_split    = 1;
+                d->tried_lower = 1;
+                /* d->tried_value stays == val (the excluded pivot). */
+                trail_push_level(ctx);
+                pr = ctx_tighten_ub64(ctx, dv, val - 1);
             }
 
             if (pr == PROP_OK) {

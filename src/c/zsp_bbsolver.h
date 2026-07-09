@@ -55,6 +55,17 @@ void zsp_bbsolver_free(zsp_bbsolver_t *bb);
 int zsp_bbsolver_check(zsp_bbsolver_t *bb, uint64_t seed);
 
 /**
+ * Re-diversify an already-solved SAT instance with a fresh seed WITHOUT
+ * re-solving. Re-runs only the don't-care flip-check over the cached model, so
+ * repeated randomize()s of an identical problem produce different (still sound)
+ * models at a fraction of a full bit-blast + SAT cost. The kept model is read
+ * back via zsp_bbsolver_value / _value_wide as usual. Uses only solver-owned
+ * state (AIG/CNF/vars/model) — safe even if the SolveProblem it was built from
+ * has since been freed. Returns 0 on success, -1 if the instance is not SAT.
+ */
+int zsp_bbsolver_rediversify(zsp_bbsolver_t *bb, uint64_t seed);
+
+/**
  * Soft-aware MaxSAT serve (DSE-2). Keeps the maximal priority-respecting set of
  * the problem's soft constraints (`softs_head`), mirroring the primary engine's
  * relaxation policy: all softs kept, dropping the lowest-preference (highest

@@ -1,38 +1,38 @@
 # Tier 1 Baseline Results
 
-| Benchmark | boolector (ms) | boolector result | boolector mem (KB) | dv-solve-smt2 (ms) | dv-solve-smt2 result | dv-solve-smt2 mem (KB) | z3 (ms) | z3 result | z3 mem (KB) |
-|-----------|----------:|:----------:|------------:|----------:|:----------:|------------:|----------:|:----------:|------------:|
-| alignedaddr | 1.0 | sat | 36096 | 3.4 | sat | 42240 | 5.0 | sat | 36096 |
-| arrayordering | 2.2 | unsat | 36096 | 4.3 | sat | 42240 | 8.2 | unsat | 2048 |
-| arraysum8 | 4.7 | sat | 36096 | 3.4 | sat | 42240 | 7.5 | sat | 38144 |
-| axi4burst | 1.9 | sat | 36096 | 3.9 | sat | 42240 | 6.9 | sat | 38144 |
-| bustransaction | 1.3 | sat | 36096 | 2.6 | sat | 42240 | 6.3 | sat | 38144 |
-| condinside | 0.8 | sat | 36096 | 2.8 | sat | 42240 | 6.0 | sat | 38144 |
-| ddr5cmdbasic | 1.0 | sat | 36096 | 3.1 | sat | 42240 | 6.5 | sat | 38144 |
-| ddr5moderegister | 0.7 | sat | 36096 | 3.2 | sat | 42240 | 6.4 | sat | 38144 |
-| ddr5timing | 1.6 | sat | 36096 | 3.0 | sat | 42240 | 5.9 | sat | 38144 |
-| distweighted | 0.8 | sat | 36096 | 2.9 | sat | 42240 | 4.5 | sat | 38144 |
-| enumcond | 6.2 | sat | 36096 | 3.9 | sat | 42240 | 7.1 | sat | 38144 |
-| fifoctrl | 0.7 | sat | 36096 | 2.7 | sat | 42240 | 5.1 | sat | 38144 |
-| implicationchain8 | 1.1 | sat | 36096 | 3.5 | sat | 42240 | 5.6 | sat | 38144 |
-| inequalityweb | 3.0 | sat | 36096 | 2.9 | sat | 42240 | 6.2 | sat | 38144 |
-| memmaptight32 | 116.8 | sat | 36096 | 6.8 | sat | 42240 | 39.6 | sat | 4096 |
-| mempartitionknapsack | 9.0 | sat | 36096 | 3.9 | sat | 42240 | 9.3 | sat | 42240 |
-| memtransaction | 1.2 | sat | 36096 | 3.7 | sat | 42240 | 7.5 | sat | 42240 |
-| muldivscenario | 11.5 | sat | 36096 | 3.3 | sat | 42240 | 7.9 | sat | 42240 |
-| nqueens8 | 10.3 | sat | 36096 | 3.9 | sat | 42240 | 8.6 | sat | 42240 |
-| onehot8 | 0.6 | sat | 36096 | 2.8 | sat | 42240 | 5.2 | sat | 42240 |
-| packethdr | 1.2 | sat | 36096 | 2.8 | sat | 42240 | 7.3 | sat | 42240 |
-| pcietlp | 0.9 | sat | 36096 | 2.8 | sat | 42240 | 6.4 | sat | 42240 |
-| shiftaligned | 0.6 | sat | 36096 | 2.7 | sat | 42240 | 4.6 | sat | 42240 |
-| socaddrmap32 | 50.6 | sat | 36096 | 3.4 | sat | 42240 | 12.5 | sat | 42240 |
-| socaddrmap40 | 56.8 | sat | 36096 | 3.2 | sat | 42240 | 14.2 | sat | 42240 |
-| socmemmap | 11.6 | sat | 36096 | 3.0 | sat | 42240 | 7.7 | sat | 42240 |
-| softrelaxbaseline | 0.7 | sat | 36096 | 2.6 | sat | 42240 | 7.1 | sat | 42240 |
-| softrelaxwithconflict | 0.6 | sat | 36096 | 2.5 | sat | 42240 | 6.6 | sat | 42240 |
-| sumpartition | 8.8 | sat | 36096 | 3.9 | sat | 42240 | 8.7 | sat | 42240 |
-| threeunique | 1.5 | sat | 36096 | 2.6 | sat | 42240 | 5.9 | sat | 42240 |
-| unique16 | 21.0 | sat | 36096 | 3.7 | sat | 42240 | 8.8 | sat | 42240 |
-| unique32 | 1.0 | sat | 36096 | 3.1 | sat | 42240 | 4.8 | sat | 42240 |
-| unsignedops | 1.0 | sat | 36096 | 3.6 | sat | 42240 | 7.2 | sat | 42240 |
-| verilatorops | 2.5 | sat | 36096 | 2.6 | sat | 42240 | 6.6 | sat | 42240 |
+| Benchmark | bitwuzla (ms) | bitwuzla result | bitwuzla mem (KB) | boolector (ms) | boolector result | boolector mem (KB) | dv-solve-smt2 (ms) | dv-solve-smt2 result | dv-solve-smt2 mem (KB) | z3 (ms) | z3 result | z3 mem (KB) |
+|-----------|----------:|:----------:|------------:|----------:|:----------:|------------:|----------:|:----------:|------------:|----------:|:----------:|------------:|
+| alignedaddr | 2.3 | sat | 42480 | 0.6 | sat | 42480 | 2.9 | sat | 42480 | 5.1 | sat | 42480 |
+| arrayordering | 2.7 | unsat | 42480 | 1.6 | unsat | 42480 | 2.9 | unsat | 42480 | 7.1 | unsat | 42480 |
+| arraysum8 | 2.4 | sat | 42480 | 5.2 | sat | 42480 | 2.7 | sat | 42480 | 7.7 | sat | 42480 |
+| axi4burst | 1.8 | sat | 42480 | 1.9 | sat | 42480 | 3.0 | sat | 42480 | 7.0 | sat | 42480 |
+| bustransaction | 2.1 | sat | 42480 | 0.7 | sat | 42480 | 2.8 | sat | 42480 | 7.7 | sat | 42480 |
+| condinside | 1.9 | sat | 42480 | 0.7 | sat | 42480 | 2.6 | sat | 42480 | 6.1 | sat | 42480 |
+| ddr5cmdbasic | 2.2 | sat | 42480 | 0.8 | sat | 42480 | 2.8 | sat | 42480 | 6.6 | sat | 42480 |
+| ddr5moderegister | 1.5 | sat | 42480 | 1.0 | sat | 42480 | 2.7 | sat | 42480 | 6.2 | sat | 42480 |
+| ddr5timing | 2.8 | sat | 42480 | 1.5 | sat | 42480 | 2.6 | sat | 42480 | 6.3 | sat | 42480 |
+| distweighted | 1.6 | sat | 42480 | 0.8 | sat | 42480 | 3.1 | sat | 42480 | 4.6 | sat | 42480 |
+| enumcond | 2.0 | sat | 42480 | 5.9 | sat | 42480 | 3.0 | sat | 42480 | 6.7 | sat | 42480 |
+| fifoctrl | 2.0 | sat | 42480 | 0.5 | sat | 42480 | 2.8 | sat | 42480 | 4.5 | sat | 42480 |
+| implicationchain8 | 2.3 | sat | 42480 | 0.9 | sat | 42480 | 2.8 | sat | 42480 | 5.9 | sat | 42480 |
+| inequalityweb | 2.2 | sat | 42480 | 4.1 | sat | 42480 | 2.4 | sat | 42480 | 6.5 | sat | 42480 |
+| memmaptight32 | 12.5 | sat | 42480 | 114.0 | sat | 42480 | 3.4 | sat | 42480 | 42.2 | sat | 42480 |
+| mempartitionknapsack | 3.9 | sat | 42480 | 9.3 | sat | 42480 | 3.9 | sat | 42480 | 10.1 | sat | 42480 |
+| memtransaction | 2.4 | sat | 42480 | 1.4 | sat | 42480 | 2.5 | sat | 42480 | 6.4 | sat | 42480 |
+| muldivscenario | 2.2 | sat | 42480 | 11.5 | sat | 42480 | 2.4 | sat | 42480 | 8.2 | sat | 42480 |
+| nqueens8 | 4.6 | sat | 42480 | 10.9 | sat | 42480 | 2.8 | sat | 42480 | 8.1 | sat | 42480 |
+| onehot8 | 1.9 | sat | 42480 | 0.5 | sat | 42480 | 2.8 | sat | 42480 | 4.8 | sat | 42480 |
+| packethdr | 1.8 | sat | 42480 | 1.6 | sat | 42480 | 2.8 | sat | 42480 | 7.3 | sat | 42480 |
+| pcietlp | 2.1 | sat | 42480 | 1.2 | sat | 42480 | 2.6 | sat | 42480 | 5.8 | sat | 42480 |
+| shiftaligned | 1.4 | sat | 42480 | 0.7 | sat | 42480 | 2.5 | sat | 42480 | 5.2 | sat | 42480 |
+| socaddrmap32 | 4.8 | sat | 42480 | 50.3 | sat | 42480 | 2.7 | sat | 42480 | 14.3 | sat | 42480 |
+| socaddrmap40 | 4.8 | sat | 42480 | 59.4 | sat | 42480 | 2.6 | sat | 42480 | 14.1 | sat | 42480 |
+| socmemmap | 2.2 | sat | 42480 | 10.9 | sat | 42480 | 2.5 | sat | 42480 | 8.9 | sat | 42480 |
+| softrelaxbaseline | 1.3 | sat | 42480 | 0.8 | sat | 42480 | 2.4 | sat | 42480 | 6.9 | sat | 42480 |
+| softrelaxwithconflict | 1.6 | sat | 42480 | 0.8 | sat | 42480 | 2.4 | sat | 42480 | 6.3 | sat | 42480 |
+| sumpartition | 2.4 | sat | 42480 | 9.1 | sat | 42480 | 2.4 | sat | 42480 | 7.7 | sat | 42480 |
+| threeunique | 1.5 | sat | 42480 | 1.5 | sat | 42480 | 2.4 | sat | 42480 | 5.2 | sat | 42480 |
+| unique16 | 4.6 | sat | 42480 | 20.2 | sat | 42480 | 2.5 | sat | 42480 | 6.8 | sat | 42480 |
+| unique32 | 1.7 | sat | 42480 | 1.0 | sat | 42480 | 2.4 | sat | 42480 | 4.2 | sat | 42480 |
+| unsignedops | 1.6 | sat | 42480 | 1.1 | sat | 42480 | 2.4 | sat | 42480 | 6.4 | sat | 42480 |
+| verilatorops | 2.0 | sat | 42480 | 2.7 | sat | 42480 | 2.5 | sat | 42480 | 6.8 | sat | 42480 |

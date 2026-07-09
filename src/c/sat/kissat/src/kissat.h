@@ -50,4 +50,23 @@ void kissat_set_decision_limit (kissat *solver, unsigned);
 
 void kissat_print_statistics (kissat *solver);
 
+/* dv-solve fork: clause-arena observation. Lets external machinery
+ * (e.g., dv-solve's checkpoint/LevelMark system) measure SAT-layer
+ * state without poking at kissat internals. Cheap getters; no side
+ * effects. Useful for telemetry now; required substrate for step 5
+ * (LevelMark integration) later. */
+#include <stddef.h>
+size_t kissat_arena_size_bytes (kissat *solver);
+size_t kissat_arena_capacity_bytes (kissat *solver);
+
+/* dv-solve fork (Phase B.1 step 5, plumbing slice): low-level arena
+ * mark. The current arena top expressed in `ward` units — the same
+ * unit kissat_allocate_clause measures against. Saved into LevelMark
+ * / CheckpointMark by future caller code so a single dv-solve
+ * checkpoint records the SAT-arena position. Intentionally NOT paired
+ * with a public _rewind_to() — sound arena rewind requires
+ * invalidating watch/occurrence lists and is the multi-week deep
+ * refactor that this slice is intentionally NOT doing. */
+size_t kissat_arena_size_words (kissat *solver);
+
 #endif

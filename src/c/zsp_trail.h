@@ -80,6 +80,15 @@ typedef struct {
     zsp_stack_mark_t   stack_mark;   /* dynamic-stack checkpoint       */
     TrailEntry        *trail_top;    /* trail_top at time of push      */
     uint64_t           trail_count;  /* trail_count at time of push    */
+    /* Phase B.1 step 5 (plumbing slice): SAT clause-arena position at
+     * the time of the push, expressed in `ward` units (see
+     * zsp_sat_arena_mark_t). Zero today — no SolveCtx→zsp_sat handle
+     * exists; the field is populated when step 6 wires the bbsolver
+     * to re-use a kissat instance across check-sat. The matching
+     * "rewind kissat arena to this mark on restore" is intentionally
+     * not implemented — sound rewind requires the deep kissat
+     * refactor (invalidate watches/occurrences). */
+    size_t             sat_arena_top;
 } LevelMark;
 
 /* ------------------------------------------------------------------ */

@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 #include "zsp_propagator.h"
 #include "zsp_ctx.h"
 #include "zsp_lcg.h"
@@ -820,6 +821,91 @@ uint32_t prop_add_reification_eq_32(SolveCtx *ctx, uint32_t guard_id,
 /* BitSlice_32:  r = a[hi_bit:lo_bit]                                 */
 /* ------------------------------------------------------------------ */
 
+/* Backward bit-slice support: for r == extract(a, hi, lo) with r fixed to a
+ * single value v, the bits [lo,hi] of a must equal v. These helpers compute the
+ * tightest bound on the operand a within [alo,ahi] consistent with that
+ * (all-unsigned arithmetic). Without backward propagation the operand is left
+ * free, and because a forward-only slice is not bounds-consistent the search's
+ * domain-bisection can wrongly report UNSAT (BUG-2). Exhaustively validated
+ * against brute force for widths <= 10 by tests/unit/test_bitslice_backward.py. */
+
+/* Values of `a` whose slice [lo,hi]==v form, within each fixed setting of the
+ * bits above `hi`, a contiguous run [group_base, group_base|lomask] where
+ * group_base = (high_bits | (v<<lo)) and the free low bits [0,lo) vary. The
+ * helpers below walk to the nearest such run. */
+
+/* Smallest a in [alo,ahi] whose slice [lo,hi] == v; *ok=0 if none exists. */
+static uint64_t _slice_min_ge(uint64_t alo, uint64_t ahi,
+                              uint32_t lo, uint32_t hi, uint64_t v, int *ok) {
+    uint32_t sw = hi - lo + 1;
+    uint64_t smask  = ((sw >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << sw) - 1)) << lo;
+    uint64_t lomask = (lo == 0) ? 0 : (((uint64_t)1 << lo) - 1);
+    uint64_t himask = (hi + 1 >= 64) ? 0 : ~(((uint64_t)1 << (hi + 1)) - 1);
+    uint64_t tgt = (v << lo) & smask;
+    uint64_t base = (alo & himask) | tgt;   /* this group's run, low bits = 0 */
+    uint64_t run_hi = base | lomask;
+    uint64_t nlo;
+    if (base >= alo)          nlo = base;   /* whole run is >= alo */
+    else if (run_hi >= alo)   nlo = alo;    /* alo sits inside this run */
+    else {                                  /* run is below alo -> next group up */
+        if (hi + 1 >= 64) { *ok = 0; return 0; }
+        uint64_t nh = (alo >> (hi + 1)) + 1;
+        nlo = (nh << (hi + 1)) | tgt;
+    }
+    if (nlo > ahi) { *ok = 0; return 0; }
+    *ok = 1; return nlo;
+}
+
+/* Largest a in [alo,ahi] whose slice [lo,hi] == v; *ok=0 if none exists. */
+static uint64_t _slice_max_le(uint64_t alo, uint64_t ahi,
+                              uint32_t lo, uint32_t hi, uint64_t v, int *ok) {
+    uint32_t sw = hi - lo + 1;
+    uint64_t smask  = ((sw >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << sw) - 1)) << lo;
+    uint64_t lomask = (lo == 0) ? 0 : (((uint64_t)1 << lo) - 1);
+    uint64_t himask = (hi + 1 >= 64) ? 0 : ~(((uint64_t)1 << (hi + 1)) - 1);
+    uint64_t tgt = (v << lo) & smask;
+    uint64_t base = (ahi & himask) | tgt;   /* this group's run, low bits = 0 */
+    uint64_t run_hi = base | lomask;
+    uint64_t nhi;
+    if (run_hi <= ahi)        nhi = run_hi;  /* whole run is <= ahi */
+    else if (base <= ahi)     nhi = ahi;     /* ahi sits inside this run */
+    else {                                   /* run is above ahi -> next group down */
+        uint64_t hh = (hi + 1 >= 64) ? 0 : (ahi >> (hi + 1));
+        if (hh == 0) { *ok = 0; return 0; }
+        hh -= 1;
+        nhi = (hh << (hi + 1)) | tgt | lomask;
+    }
+    if (nhi < alo) { *ok = 0; return 0; }
+    *ok = 1; return nhi;
+}
+
+/* Tighten operand `aid` from a singleton result `v` for slice [lo,hi]. Applies
+ * only for a non-negative (unsigned-interpretable) operand interval.
+ *
+ * The `DV_NO_BITSLICE_BACKWARD` env var (read once) disables this backward
+ * pruning, leaving the propagator forward-only. That is a *test knob*: with
+ * backward pruning off the operand must be resolved by the search alone, which
+ * exercises the domain-bisection completeness fix for BUG-3
+ * (tests/unit/test_search_completeness.py). It has no effect on results — a
+ * correct solver returns the same SAT/UNSAT either way — only on how much work
+ * the search does. Not for production use. */
+static PropResult _bit_slice_backward(SolveCtx *ctx, uint32_t aid,
+                                      uint32_t lo, uint32_t hi, uint64_t v,
+                                      int64_t alo, int64_t ahi) {
+    static int disabled = -1;
+    if (disabled < 0) disabled = getenv("DV_NO_BITSLICE_BACKWARD") ? 1 : 0;
+    if (disabled) return PROP_OK;
+    if (alo < 0 || ahi < 0 || (uint64_t)alo > (uint64_t)ahi) return PROP_OK;
+    int ok1, ok2;
+    uint64_t nlo = _slice_min_ge((uint64_t)alo, (uint64_t)ahi, lo, hi, v, &ok1);
+    uint64_t nhi = _slice_max_le((uint64_t)alo, (uint64_t)ahi, lo, hi, v, &ok2);
+    if (!ok1 || !ok2) return PROP_CONFLICT;
+    PropResult r;
+    if ((r = ctx_tighten_lb64(ctx, aid, (int64_t)nlo)) != PROP_OK) return r;
+    if ((r = ctx_tighten_ub64(ctx, aid, (int64_t)nhi)) != PROP_OK) return r;
+    return PROP_OK;
+}
+
 static PropResult _fire_bit_slice_32(Propagator *self, SolveCtx *ctx) {
     BitSlice_32_t *bself = (BitSlice_32_t *)self;
     PropWatchSect *ws    = PROP_WS(self);
@@ -833,9 +919,7 @@ static PropResult _fire_bit_slice_32(Propagator *self, SolveCtx *ctx) {
     if ((res = ctx_tighten_lb32(ctx, rid, 0))     != PROP_OK) return res;
     if ((res = ctx_tighten_ub32(ctx, rid, max_v)) != PROP_OK) return res;
 
-    /* When the operand is pinned, compute r exactly. Also back-propagate
-     * a singleton r into the operand bits when the operand is loose by
-     * only one bit-slice position. */
+    /* When the operand is pinned, compute r exactly. */
     int64_t alo = var_lo64(ctx, &ctx->vars[aid]);
     int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
     if (alo == ahi) {
@@ -845,6 +929,19 @@ static PropResult _fire_bit_slice_32(Propagator *self, SolveCtx *ctx) {
         if ((res = ctx_tighten_lb32(ctx, rid, (int32_t)v)) != PROP_OK) return res;
         if ((res = ctx_tighten_ub32(ctx, rid, (int32_t)v)) != PROP_OK) return res;
         return PROP_ENTAILED;
+    }
+    /* Backward: operand not singleton, but if the slice result is fixed, tighten
+     * the operand's bounds to values whose slice matches. Required for
+     * bounds-consistency and a complete search — see _bit_slice_backward /
+     * BUG-2 (the old forward-only version returned spurious UNSAT). */
+    {
+        int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
+        int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
+        if (rlo == rhi) {
+            res = _bit_slice_backward(ctx, aid, bself->lo_bit, bself->hi_bit,
+                                      (uint64_t)rlo, alo, ahi);
+            if (res != PROP_OK) return res;
+        }
     }
     return PROP_OK;
 }
@@ -2335,6 +2432,16 @@ static PropResult _fire_bit_slice_64(Propagator *self, SolveCtx *ctx) {
         if ((r = ctx_tighten_ub64(ctx, rid, (int64_t)v)) != PROP_OK) return r;
         return PROP_ENTAILED;
     }
+    /* Backward bounds-consistency when the slice result is fixed (BUG-2). */
+    {
+        int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
+        int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
+        if (rlo == rhi) {
+            r = _bit_slice_backward(ctx, aid, bself->lo_bit, bself->hi_bit,
+                                    (uint64_t)rlo, alo, ahi);
+            if (r != PROP_OK) return r;
+        }
+    }
     return PROP_OK;
 }
 uint32_t prop_add_bit_slice_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
@@ -3013,38 +3120,56 @@ static PropResult _fire_all_different_32(Propagator *self, SolveCtx *ctx) {
     AllDifferent_t *ad = (AllDifferent_t *)self;
     uint32_t n = ad->n_vars;
 
-    /* --- Singleton exclusion (most common propagation) --- */
+    /* Read tier-aware 64-bit bounds up front. A width-32 *unsigned* variable is
+     * tier-1 -- its true bounds live in a pooled WideBounds64 and the raw
+     * Variable.lo/.hi int32 fields are pinned to 0 (see _init_tier1). The old
+     * code read those int32 fields directly, so every unsigned-32 var looked
+     * like the singleton [0,0]: the pigeonhole check then saw a union of size 1
+     * and fabricated PROP_CONFLICT -> spurious UNSAT for the default PSS int.
+     * var_lo64/var_hi64 resolve the real bounds for every tier; L[]/H[] cache
+     * them (n <= 16) and are refreshed after each tighten. Overflow guards on
+     * the span/Hall-width arithmetic ensure a very wide (width-64 unsigned)
+     * domain can never wrap negative and manufacture a false conflict; that
+     * edge stays sound (it may under-propagate, never mis-report). */
+    int64_t L[MAX_ALLDIFF_VARS], H[MAX_ALLDIFF_VARS];
     for (uint32_t i = 0; i < n; i++) {
         Variable *vi = &ctx->vars[ad->var_ids[i]];
-        if (vi->lo != vi->hi) continue;
-        int32_t val = vi->lo;
+        L[i] = var_lo64(ctx, vi);
+        H[i] = var_hi64(ctx, vi);
+    }
+
+    /* --- Singleton exclusion (most common propagation) --- */
+    for (uint32_t i = 0; i < n; i++) {
+        if (L[i] != H[i]) continue;
+        int64_t val = L[i];
         for (uint32_t j = 0; j < n; j++) {
             if (j == i) continue;
             uint32_t vj_id = ad->var_ids[j];
-            Variable *vj = &ctx->vars[vj_id];
-            if (vj->lo == val) {
-                PropResult r = ctx_tighten_lb32(ctx, vj_id, val + 1);
-                if (r == PROP_CONFLICT) return PROP_CONFLICT;
+            if (L[j] == val) {
+                if (ctx_tighten_lb64(ctx, vj_id, val + 1) == PROP_CONFLICT)
+                    return PROP_CONFLICT;
+                L[j] = var_lo64(ctx, &ctx->vars[vj_id]);
             }
-            if (vj->hi == val) {
-                PropResult r = ctx_tighten_ub32(ctx, vj_id, val - 1);
-                if (r == PROP_CONFLICT) return PROP_CONFLICT;
+            if (H[j] == val) {
+                if (ctx_tighten_ub64(ctx, vj_id, val - 1) == PROP_CONFLICT)
+                    return PROP_CONFLICT;
+                H[j] = var_hi64(ctx, &ctx->vars[vj_id]);
             }
         }
     }
 
     /* --- Pigeonhole check --- */
     /* Find global lo/hi across all variables */
-    int32_t glo = ctx->vars[ad->var_ids[0]].lo;
-    int32_t ghi = ctx->vars[ad->var_ids[0]].hi;
+    int64_t glo = L[0], ghi = H[0];
     for (uint32_t i = 1; i < n; i++) {
-        Variable *vi = &ctx->vars[ad->var_ids[i]];
-        if (vi->lo < glo) glo = vi->lo;
-        if (vi->hi > ghi) ghi = vi->hi;
+        if (L[i] < glo) glo = L[i];
+        if (H[i] > ghi) ghi = H[i];
     }
-    /* Domain union cardinality upper bound */
-    int64_t union_size = (int64_t)ghi - (int64_t)glo + 1;
-    if (union_size < (int64_t)n) return PROP_CONFLICT;
+    /* Domain union cardinality upper bound (#values - 1 = ghi - glo). The
+     * `span >= 0` guard skips the test when the difference wrapped (a domain
+     * too wide to ever pigeonhole n <= 16 vars anyway). */
+    int64_t span = ghi - glo;
+    if (span >= 0 && span + 1 < (int64_t)n) return PROP_CONFLICT;
 
     /* --- Hall interval detection via sweep --- */
     /* Sort variables by lo bound (insertion sort, n <= 16) */
@@ -3052,9 +3177,9 @@ static PropResult _fire_all_different_32(Propagator *self, SolveCtx *ctx) {
     for (uint32_t i = 0; i < n; i++) sorted[i] = i;
     for (uint32_t i = 1; i < n; i++) {
         uint32_t key = sorted[i];
-        int32_t key_lo = ctx->vars[ad->var_ids[key]].lo;
+        int64_t key_lo = L[key];
         uint32_t j = i;
-        while (j > 0 && ctx->vars[ad->var_ids[sorted[j - 1]]].lo > key_lo) {
+        while (j > 0 && L[sorted[j - 1]] > key_lo) {
             sorted[j] = sorted[j - 1];
             j--;
         }
@@ -3064,35 +3189,36 @@ static PropResult _fire_all_different_32(Propagator *self, SolveCtx *ctx) {
     /* Sweep: for each starting position, count how many domains are
        fully contained in [start_lo, end_hi].  If count > width, tighten. */
     for (uint32_t start = 0; start < n; start++) {
-        int32_t lo_s = ctx->vars[ad->var_ids[sorted[start]]].lo;
-        int32_t max_hi = lo_s;
+        int64_t lo_s = L[sorted[start]];
+        int64_t max_hi = lo_s;
         uint32_t count = 0;
         for (uint32_t end = start; end < n; end++) {
-            uint32_t idx = ad->var_ids[sorted[end]];
-            Variable *ve = &ctx->vars[idx];
-            if (ve->lo >= lo_s) {
-                if (ve->hi > max_hi) max_hi = ve->hi;
+            uint32_t si = sorted[end];
+            if (L[si] >= lo_s) {
+                if (H[si] > max_hi) max_hi = H[si];
                 count++;
             }
-            int64_t width = (int64_t)max_hi - (int64_t)lo_s + 1;
+            int64_t width = max_hi - lo_s + 1;
+            if (width < 0) continue;   /* wrapped: too wide to pigeonhole */
             if ((int64_t)count > width) return PROP_CONFLICT;
             /* If count == width (Hall interval), variables outside must
                avoid [lo_s, max_hi] */
             if ((int64_t)count == width && count >= 2) {
                 for (uint32_t k = 0; k < n; k++) {
                     uint32_t kid = ad->var_ids[k];
-                    Variable *vk = &ctx->vars[kid];
                     /* Skip variables that are part of this Hall interval */
-                    int in_hall = (vk->lo >= lo_s && vk->hi <= max_hi);
+                    int in_hall = (L[k] >= lo_s && H[k] <= max_hi);
                     if (in_hall) continue;
                     /* If vk overlaps the Hall interval, tighten */
-                    if (vk->lo >= lo_s && vk->lo <= max_hi) {
-                        PropResult r = ctx_tighten_lb32(ctx, kid, max_hi + 1);
-                        if (r == PROP_CONFLICT) return PROP_CONFLICT;
+                    if (L[k] >= lo_s && L[k] <= max_hi) {
+                        if (ctx_tighten_lb64(ctx, kid, max_hi + 1) == PROP_CONFLICT)
+                            return PROP_CONFLICT;
+                        L[k] = var_lo64(ctx, &ctx->vars[kid]);
                     }
-                    if (vk->hi >= lo_s && vk->hi <= max_hi) {
-                        PropResult r = ctx_tighten_ub32(ctx, kid, lo_s - 1);
-                        if (r == PROP_CONFLICT) return PROP_CONFLICT;
+                    if (H[k] >= lo_s && H[k] <= max_hi) {
+                        if (ctx_tighten_ub64(ctx, kid, lo_s - 1) == PROP_CONFLICT)
+                            return PROP_CONFLICT;
+                        H[k] = var_hi64(ctx, &ctx->vars[kid]);
                     }
                 }
             }
@@ -3102,16 +3228,13 @@ static PropResult _fire_all_different_32(Propagator *self, SolveCtx *ctx) {
     /* --- Entailment check --- */
     int all_assigned = 1;
     for (uint32_t i = 0; i < n; i++) {
-        Variable *vi = &ctx->vars[ad->var_ids[i]];
-        if (vi->lo != vi->hi) { all_assigned = 0; break; }
+        if (L[i] != H[i]) { all_assigned = 0; break; }
     }
     if (all_assigned) {
         /* Verify all distinct (should be guaranteed by propagation) */
         for (uint32_t i = 0; i < n; i++) {
             for (uint32_t j = i + 1; j < n; j++) {
-                if (ctx->vars[ad->var_ids[i]].lo ==
-                    ctx->vars[ad->var_ids[j]].lo)
-                    return PROP_CONFLICT;
+                if (L[i] == L[j]) return PROP_CONFLICT;
             }
         }
         return PROP_ENTAILED;
@@ -3255,12 +3378,25 @@ uint32_t prop_add_sum_eq_32(SolveCtx *ctx, uint32_t result_id,
 /* Countones_32: result == popcount(operand)                           */
 /* ------------------------------------------------------------------ */
 
-static int _popcount32(uint32_t v) {
-    v = v - ((v >> 1) & 0x55555555u);
-    v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
-    return (int)(((v + (v >> 4)) & 0x0F0F0F0Fu) * 0x01010101u >> 24);
+static int _popcount64(uint64_t v) {
+    int c = 0;
+    while (v) { v &= v - 1; c++; }
+    return c;
 }
 
+/* result == popcount(operand).
+ *
+ * Tier-aware: reads operand/result bounds via var_lo64/var_hi64 and tightens
+ * via ctx_tighten_*_64, so it is correct for tier-0 AND tier-1 (33-64 bit, incl.
+ * 32-bit unsigned) vars. The earlier _32 version read Variable.lo/hi directly,
+ * which is garbage for tier-1 vars -> silent wrong models (BUG-1).
+ *
+ * Soundness rests on the forward-singleton rule: once the operand is fully
+ * assigned, result is tightened to the exact popcount, so any inconsistent leaf
+ * conflicts. The backward interval rules only prune; to stay clear of int64 sign
+ * issues at the top of the range they are applied only for width <= 62 (the
+ * exact all-ones and >=63-bit cases still terminate soundly via the forward
+ * rule, just with less pruning). */
 static PropResult _fire_countones_32(Propagator *self, SolveCtx *ctx) {
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0];  /* result */
@@ -3269,60 +3405,63 @@ static PropResult _fire_countones_32(Propagator *self, SolveCtx *ctx) {
     Variable *xv = &ctx->vars[xid];
 
     uint16_t width = xv->width;
-    if (width > 32) width = 32;
+    if (width > 64) width = 64;
+    uint64_t mask = (width < 64) ? (((uint64_t)1 << width) - 1) : ~(uint64_t)0;
+    int bw_safe = (width <= 62);  /* backward shifts stay in positive int64 */
+
+    int64_t xlo = var_lo64(ctx, xv);
+    int64_t xhi = var_hi64(ctx, xv);
+    int64_t rlo = var_lo64(ctx, rv);
+    int64_t rhi = var_hi64(ctx, rv);
 
     PropResult r;
 
     /* Forward: bound result from operand's domain */
-    if (xv->lo == xv->hi) {
+    if (xlo == xhi) {
         /* Operand is singleton: result is exact popcount */
-        int pc = _popcount32((uint32_t)xv->lo & ((width < 32) ? ((1u << width) - 1) : 0xFFFFFFFFu));
-        if ((r = ctx_tighten_lb32(ctx, rid, pc)) != PROP_OK) return r;
-        if ((r = ctx_tighten_ub32(ctx, rid, pc)) != PROP_OK) return r;
+        int pc = _popcount64((uint64_t)xlo & mask);
+        if ((r = ctx_tighten_lb64(ctx, rid, pc)) != PROP_OK) return r;
+        if ((r = ctx_tighten_ub64(ctx, rid, pc)) != PROP_OK) return r;
     } else {
         /* Coarse bounds: min popcount >= popcount(bits that must be 1),
-         * max popcount <= width - count of bits that must be 0 */
-        uint32_t mask = (width < 32) ? ((1u << width) - 1) : 0xFFFFFFFFu;
-        uint32_t must_1 = (uint32_t)xv->lo & (uint32_t)xv->hi & mask;  /* approximate */
-        int min_pc = _popcount32(must_1);
-        if ((r = ctx_tighten_lb32(ctx, rid, min_pc)) != PROP_OK) return r;
-        if ((r = ctx_tighten_ub32(ctx, rid, (int32_t)width)) != PROP_OK) return r;
+         * max popcount <= width */
+        uint64_t must_1 = (uint64_t)xlo & (uint64_t)xhi & mask;  /* approximate */
+        int min_pc = _popcount64(must_1);
+        if ((r = ctx_tighten_lb64(ctx, rid, min_pc)) != PROP_OK) return r;
+        if ((r = ctx_tighten_ub64(ctx, rid, (int64_t)width)) != PROP_OK) return r;
     }
 
     /* Backward: bound operand from result */
-    if (rv->lo == rv->hi) {
-        int32_t k = rv->lo;
-        if (k < 0 || k > (int32_t)width) return PROP_CONFLICT;
+    if (rlo == rhi) {
+        int64_t k = rlo;
+        if (k < 0 || k > (int64_t)width) return PROP_CONFLICT;
         if (k == 0) {
-            if ((r = ctx_tighten_lb32(ctx, xid, 0)) != PROP_OK) return r;
-            if ((r = ctx_tighten_ub32(ctx, xid, 0)) != PROP_OK) return r;
-        } else if (k == (int32_t)width) {
-            uint32_t mask = (width < 32) ? ((1u << width) - 1) : 0xFFFFFFFFu;
-            if ((r = ctx_tighten_lb32(ctx, xid, (int32_t)mask)) != PROP_OK) return r;
-            if ((r = ctx_tighten_ub32(ctx, xid, (int32_t)mask)) != PROP_OK) return r;
-        } else if (k > 0 && k <= (int32_t)width) {
+            if ((r = ctx_tighten_lb64(ctx, xid, 0)) != PROP_OK) return r;
+            if ((r = ctx_tighten_ub64(ctx, xid, 0)) != PROP_OK) return r;
+        } else if (k == (int64_t)width && bw_safe) {
+            if ((r = ctx_tighten_lb64(ctx, xid, (int64_t)mask)) != PROP_OK) return r;
+            if ((r = ctx_tighten_ub64(ctx, xid, (int64_t)mask)) != PROP_OK) return r;
+        } else if (k > 0 && k < (int64_t)width && bw_safe) {
             /* min x with popcount k: lowest k bits set = (1<<k)-1 */
-            uint32_t min_x = (uint32_t)((1u << k) - 1);
+            uint64_t min_x = ((uint64_t)1 << k) - 1;
             /* max x with popcount k: highest k bits set (within width) */
-            uint32_t max_x = (width < 32)
-                ? (uint32_t)(((1u << k) - 1) << (width - (uint16_t)k))
-                : (uint32_t)(((1u << k) - 1) << (32 - k));
-            if ((r = ctx_tighten_lb32(ctx, xid, (int32_t)min_x)) != PROP_OK) return r;
-            if ((r = ctx_tighten_ub32(ctx, xid, (int32_t)max_x)) != PROP_OK) return r;
+            uint64_t max_x = (((uint64_t)1 << k) - 1) << (width - (uint16_t)k);
+            if ((r = ctx_tighten_lb64(ctx, xid, (int64_t)min_x)) != PROP_OK) return r;
+            if ((r = ctx_tighten_ub64(ctx, xid, (int64_t)max_x)) != PROP_OK) return r;
         }
     } else {
         /* result_lo > 0 means operand cannot be 0 */
-        if (rv->lo > 0) {
-            if ((r = ctx_tighten_lb32(ctx, xid, 1)) != PROP_OK) return r;
+        if (rlo > 0) {
+            if ((r = ctx_tighten_lb64(ctx, xid, 1)) != PROP_OK) return r;
         }
         /* result_hi < width means not all bits can be set */
-        if (rv->hi < (int32_t)width && rv->hi >= 0) {
-            /* max x with at most rv->hi bits set */
-            uint32_t max_bits = (uint32_t)rv->hi;
-            uint32_t max_x = (width < 32)
-                ? (uint32_t)(((1u << max_bits) - 1) << (width - (uint16_t)max_bits))
-                : (uint32_t)(((1u << max_bits) - 1) << (32 - max_bits));
-            if ((r = ctx_tighten_ub32(ctx, xid, (int32_t)max_x)) != PROP_OK) return r;
+        if (rhi >= 0 && rhi < (int64_t)width && bw_safe) {
+            /* max x with at most rhi bits set: top rhi bits within width */
+            uint64_t max_bits = (uint64_t)rhi;
+            uint64_t max_x = (max_bits == 0)
+                ? 0
+                : ((((uint64_t)1 << max_bits) - 1) << (width - (uint16_t)max_bits));
+            if ((r = ctx_tighten_ub64(ctx, xid, (int64_t)max_x)) != PROP_OK) return r;
         }
     }
 
@@ -3340,14 +3479,20 @@ uint32_t prop_add_countones_32(SolveCtx *ctx, uint32_t result_id,
 /* Clog2_32: result == ceil(log2(operand))                             */
 /* ------------------------------------------------------------------ */
 
-static int32_t _clog2_32(uint32_t v) {
+static int32_t _clog2_64(uint64_t v) {
     if (v <= 1) return 0;
     int32_t r = 0;
-    uint32_t t = v - 1;
+    uint64_t t = v - 1;
     while (t) { r++; t >>= 1; }
     return r;
 }
 
+/* result == ceil(log2(operand)); operand is forced > 0.
+ *
+ * Tier-aware (see _fire_countones_32 for the BUG-1 rationale). The backward
+ * interval rule is applied only for k < 62 so `1 << k` stays in positive int64;
+ * wider results still converge soundly via the forward monotone/singleton
+ * rules. */
 static PropResult _fire_clog2_32(Propagator *self, SolveCtx *ctx) {
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0];  /* result */
@@ -3358,27 +3503,29 @@ static PropResult _fire_clog2_32(Propagator *self, SolveCtx *ctx) {
     PropResult r;
 
     /* Guard: operand must be > 0 for clog2 to be defined */
-    if ((r = ctx_tighten_lb32(ctx, xid, 1)) != PROP_OK) return r;
+    if ((r = ctx_tighten_lb64(ctx, xid, 1)) != PROP_OK) return r;
 
     /* Forward: clog2 is monotonically non-decreasing */
-    int32_t clog_lo = _clog2_32((uint32_t)xv->lo);
-    int32_t clog_hi = _clog2_32((uint32_t)xv->hi);
-    if ((r = ctx_tighten_lb32(ctx, rid, clog_lo)) != PROP_OK) return r;
-    if ((r = ctx_tighten_ub32(ctx, rid, clog_hi)) != PROP_OK) return r;
+    int32_t clog_lo = _clog2_64((uint64_t)var_lo64(ctx, xv));
+    int32_t clog_hi = _clog2_64((uint64_t)var_hi64(ctx, xv));
+    if ((r = ctx_tighten_lb64(ctx, rid, clog_lo)) != PROP_OK) return r;
+    if ((r = ctx_tighten_ub64(ctx, rid, clog_hi)) != PROP_OK) return r;
 
     /* Backward: if result is singleton k, tighten operand range */
-    if (rv->lo == rv->hi) {
-        int32_t k = rv->lo;
+    int64_t rlo = var_lo64(ctx, rv);
+    int64_t rhi = var_hi64(ctx, rv);
+    if (rlo == rhi) {
+        int64_t k = rlo;
         if (k == 0) {
             /* clog2(x) == 0 -> x == 1 */
-            if ((r = ctx_tighten_lb32(ctx, xid, 1)) != PROP_OK) return r;
-            if ((r = ctx_tighten_ub32(ctx, xid, 1)) != PROP_OK) return r;
-        } else if (k > 0 && k < 31) {
+            if ((r = ctx_tighten_lb64(ctx, xid, 1)) != PROP_OK) return r;
+            if ((r = ctx_tighten_ub64(ctx, xid, 1)) != PROP_OK) return r;
+        } else if (k > 0 && k < 62) {
             /* clog2(x) == k -> x in [(1 << (k-1)) + 1, 1 << k] */
-            int32_t x_lo = (1 << (k - 1)) + 1;
-            int32_t x_hi = (1 << k);
-            if ((r = ctx_tighten_lb32(ctx, xid, x_lo)) != PROP_OK) return r;
-            if ((r = ctx_tighten_ub32(ctx, xid, x_hi)) != PROP_OK) return r;
+            int64_t x_lo = ((int64_t)1 << (k - 1)) + 1;
+            int64_t x_hi = ((int64_t)1 << k);
+            if ((r = ctx_tighten_lb64(ctx, xid, x_lo)) != PROP_OK) return r;
+            if ((r = ctx_tighten_ub64(ctx, xid, x_hi)) != PROP_OK) return r;
         }
     }
 
