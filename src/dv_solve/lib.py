@@ -356,6 +356,19 @@ def _wire_builder_argtypes(lib: ctypes.CDLL) -> None:
     lib.builder_expr_extract.argtypes = [c.c_void_p, c.c_uint32,
                                          c.c_uint8, c.c_uint8]
 
+    # Without explicit argtypes, ctypes passes the 64-bit builder pointer as a
+    # C int, truncating it — harmless only when the builder happens to sit at a
+    # low address, but a wild-pointer crash under ASAN / a high-address heap
+    # (e.g. CI). Every other builder_expr_* is wired; concat was the one gap.
+    # Without explicit argtypes, ctypes passes the 64-bit builder pointer as a
+    # C int, truncating it — harmless only when the builder happens to sit at a
+    # low address, but a wild-pointer crash under ASAN / a high-address heap
+    # (e.g. CI). Every other builder_expr_* is wired; concat was the one gap.
+    # Regression-guarded by pyvsc ve/unit/test_dvsolve_ctypes_wiring.py.
+    lib.builder_expr_concat.restype  = c.c_uint32
+    lib.builder_expr_concat.argtypes = [c.c_void_p, c.c_uint32,
+                                        c.c_uint32, c.c_uint8]
+
     lib.builder_add_var.restype  = c.c_uint32
     lib.builder_add_var.argtypes = [c.c_void_p, c.c_uint32,
                                     c.c_uint8, c.c_uint8,
