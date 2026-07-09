@@ -222,4 +222,7 @@ __marimo__/
 .codex/
 packages/
 tests/bench/results/
+# Per-(benchmark,solver) run artifacts (timing+stdout, regenerated every run,
+# not read as gold). Keep the CSV/MD summaries; ignore the churn-y JSONs.
+tests/formal/results/*.json
 
