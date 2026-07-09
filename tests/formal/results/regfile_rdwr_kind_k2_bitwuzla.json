@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "regfile_rdwr_kind_k2",
   "result": "unsat",
-  "solve_time_ms": 5.692212958820164,
-  "peak_memory_kb": 41728,
+  "solve_time_ms": 3.7349340273067355,
+  "peak_memory_kb": 42480,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

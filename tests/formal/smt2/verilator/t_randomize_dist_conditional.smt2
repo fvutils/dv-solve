@@ -1,0 +1,8 @@
+; Sanitized from Verilator transcript: t_randomize_dist_conditional
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun mode () (_ BitVec 1))
+(declare-fun x () (_ BitVec 8))
+(assert (= #b1 (ite (__Vbool mode) (bvand (bvor (__Vbv (= x #xff)) (__Vbv (= x #x00))) (__Vbv (= x #xff))) (bvand (bvor (__Vbv (= x #xff)) (__Vbv (= x #x00))) (__Vbv (= x #x00))))))
+(check-sat)

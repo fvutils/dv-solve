@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "arrayordering",
   "result": "unsat",
-  "solve_time_ms": 1.843718928284943,
-  "peak_memory_kb": 41472,
+  "solve_time_ms": 1.6164630651474,
+  "peak_memory_kb": 42480,
   "returncode": 1,
   "stdout": "unsat\n",
   "stderr": "boolector: /home/mballance/projects/fvutils/dv-solve/tests/formal/smt2/tier1/arrayordering.smt2:87:13: expected '(' at 'v0'\n"

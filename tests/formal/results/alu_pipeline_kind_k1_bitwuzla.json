@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "alu_pipeline_kind_k1",
   "result": "sat",
-  "solve_time_ms": 4.61340497713536,
-  "peak_memory_kb": 41728,
+  "solve_time_ms": 4.543295945040882,
+  "peak_memory_kb": 42480,
   "returncode": 0,
   "stdout": "sat\n",
   "stderr": ""

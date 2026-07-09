@@ -42,7 +42,7 @@ def test_unsupported_op_yields_unknown_and_stays_alive():
     out = _run(
         "(set-logic QF_BV)"
         "(declare-fun x () (_ BitVec 8))"
-        "(assert (= x (bvsdiv x #x02)))"   # bvsdiv: unsupported signed arith
+        "(assert (= x (bvnand x #x02)))"   # bvnand: unsupported bitwise op
         "(check-sat)"                       # -> unknown (tainted)
         "(reset)"                           # clears taint
         "(declare-fun y () (_ BitVec 8))"
@@ -74,7 +74,7 @@ def test_taint_unwinds_on_pop():
         "(declare-fun x () (_ BitVec 8))"
         "(assert (bvugt x #x00))"
         "(push 1)"
-        "(assert (= x (bvsdiv x #x02)))"    # taints only the pushed scope
+        "(assert (= x (bvnand x #x02)))"    # bvnand taints only the pushed scope
         "(check-sat)"                        # -> unknown
         "(pop 1)"                            # un-taints
         "(check-sat)"                        # -> sat (outer scope is clean)

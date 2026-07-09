@@ -231,6 +231,12 @@ typedef struct {
      * and restored across (push)/(pop) like the other incremental watermarks. */
     int                  incomplete;
 
+    /* Set when a construct is lowered into a composed expression the CDCL
+     * engine cannot solve soundly (e.g. signed bvsdiv/bvsrem lower to an ITE of
+     * unsigned divisions whose result CDCL leaves unpinned -> wrong model). The
+     * bitblast engine handles these exactly, so the solve is forced onto it. */
+    int                  needs_bitblast;
+
     /* Logic set via (set-logic ...). Used by engine auto-routing in
      * _cmd_check_sat: QF_UFBV / QF_ABV / QF_AUFBV default to the
      * bitblast engine because the CDCL theory loop is dramatically

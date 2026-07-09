@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "timer_watchdog_kind_k1",
   "result": "unsat",
-  "solve_time_ms": 2.7046019677072763,
-  "peak_memory_kb": 41728,
+  "solve_time_ms": 2.1545690251514316,
+  "peak_memory_kb": 42480,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

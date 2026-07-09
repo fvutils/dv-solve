@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "softrelaxbaseline",
   "result": "sat",
-  "solve_time_ms": 3.77681793179363,
-  "peak_memory_kb": 41728,
+  "solve_time_ms": 2.392173046246171,
+  "peak_memory_kb": 42480,
   "returncode": 0,
   "stdout": "sat\n((x #b01100100))\n",
   "stderr": ""

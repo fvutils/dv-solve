@@ -2,8 +2,8 @@
   "solver": "boolector",
   "benchmark": "arraysum8",
   "result": "sat",
-  "solve_time_ms": 4.58806601818651,
-  "peak_memory_kb": 41472,
+  "solve_time_ms": 5.198064958676696,
+  "peak_memory_kb": 42480,
   "returncode": 10,
   "stdout": "sat\n(\n (a0 #b11010000)\n (a1 #b11010000)\n (a2 #b10000000)\n (a3 #b00100110)\n (a4 #b00000000)\n (a5 #b10010100)\n (a6 #b00110100)\n (a7 #b11011010)\n (s #b01111101000)\n)\n",
   "stderr": ""

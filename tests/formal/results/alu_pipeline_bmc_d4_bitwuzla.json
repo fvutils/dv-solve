@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "alu_pipeline_bmc_d4",
   "result": "unsat",
-  "solve_time_ms": 6.512498948723078,
-  "peak_memory_kb": 41728,
+  "solve_time_ms": 6.31299102678895,
+  "peak_memory_kb": 42480,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

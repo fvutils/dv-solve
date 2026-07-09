@@ -629,6 +629,33 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
 /* List expression translation                                         */
 /* ------------------------------------------------------------------ */
 
+/* Build the SMT-LIB signed division (is_rem=0) or remainder (is_rem=1) of two
+ * width-`w` operands, lowered to unsigned bvudiv/bvurem + sign muxing (round
+ * toward zero). Reused by bvsdiv/bvsrem and by bvsmod. Returns an ExprRef of
+ * width `w`. The caller must set fe->needs_bitblast (the composed ITE is unsound
+ * on the CDCL bounds engine). */
+static ExprRef _signed_divrem_expr(SolveProblemBuilder *b, ExprRef S_, ExprRef T_,
+                                   uint16_t w, int is_rem) {
+    uint32_t uop = is_rem ? BIN_MOD : BIN_DIV;
+    ExprRef msb_s = builder_expr_extract(b, S_, w - 1, w - 1);
+    ExprRef msb_t = builder_expr_extract(b, T_, w - 1, w - 1);
+    ExprRef nS = builder_expr_unary(b, UN_NEG, S_);
+    ExprRef nT = builder_expr_unary(b, UN_NEG, T_);
+    ExprRef q00 = builder_expr_binary(b, uop, S_, T_);
+    ExprRef q10 = builder_expr_unary(b, UN_NEG, builder_expr_binary(b, uop, nS, T_));
+    ExprRef q01, q11;
+    if (is_rem) {   /* remainder: sign follows the dividend s */
+        q01 = builder_expr_binary(b, uop, S_, nT);
+        q11 = builder_expr_unary(b, UN_NEG, builder_expr_binary(b, uop, nS, nT));
+    } else {        /* quotient: sign = sign(s) xor sign(t) */
+        q01 = builder_expr_unary(b, UN_NEG, builder_expr_binary(b, uop, S_, nT));
+        q11 = builder_expr_binary(b, uop, nS, nT);
+    }
+    ExprRef hi = builder_expr_ite(b, msb_t, q11, q10);   /* s < 0 */
+    ExprRef lo = builder_expr_ite(b, msb_t, q01, q00);   /* s >= 0 */
+    return builder_expr_ite(b, msb_s, hi, lo);
+}
+
 static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     if (s->list.count == 0) return TAGGED_NULL;
 
@@ -696,6 +723,20 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
             ExprRef r = builder_expr_extract(fe->builder, inner.te.ref, hi, lo);
             return (TaggedExpr){ { r, (uint16_t)(hi - lo + 1) }, 0, NULL };
+        }
+
+        /* ((_ repeat N) expr) = expr concatenated with itself N times. */
+        if (sexpr_is_symbol(op_sym, "repeat")) {
+            if (s->list.count != 2) return TAGGED_NULL;
+            uint64_t rep_n = head->list.items[2]->numval;
+            if (rep_n == 0) return TAGGED_NULL;
+            TaggedExpr inner = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+            if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
+            uint16_t w = inner.te.width;
+            ExprRef acc = inner.te.ref;              /* N==1 is the identity */
+            for (uint64_t i = 1; i < rep_n; i++)
+                acc = builder_expr_concat(fe->builder, acc, inner.te.ref, w);
+            return (TaggedExpr){ { acc, (uint16_t)(w * rep_n) }, 0, NULL };
         }
 
         fprintf(fe->err, "error: unsupported indexed operator\n");
@@ -848,13 +889,19 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                 }
             }
             if (is_const) {
+                /* The array element is a VARIABLE (builder_expr_var), so tag it
+                 * leaf_kind == 1 (var), NOT 2 (const). Tagging it const made the
+                 * const-fold sites (e.g. zero_extend, boolean connectives) read
+                 * the var's ExprRef as an ExprConst and fold it to a garbage
+                 * literal (0) -> wrong `unsat` for e.g.
+                 * `(= ((_ zero_extend N) (select a i)) k)`. */
                 if (arr->is_sparse) {
                     ExprRef e = _sparse_elem(fe, arr, k, /*create=*/1);
                     if (e == EXPR_NULL) { fe->incomplete = 1; return TAGGED_NULL; }
-                    return (TaggedExpr){ { e, arr->sort.data_width }, 2, NULL };
+                    return (TaggedExpr){ { e, arr->sort.data_width }, 1, NULL };
                 }
                 if (k < arr->n_elems)
-                    return (TaggedExpr){ { arr->elems[k], arr->sort.data_width }, 2, NULL };
+                    return (TaggedExpr){ { arr->elems[k], arr->sort.data_width }, 1, NULL };
             }
         }
 
@@ -1024,6 +1071,82 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 #undef BINOP_CASE
 #undef CMPOP_CASE
 #undef SCMPOP_CASE
+
+    /* Signed division / remainder (SMT-LIB `bvsdiv` / `bvsrem`, round toward
+     * zero), lowered to the already-supported unsigned bvudiv/bvurem plus sign
+     * muxing. No engine changes: on bitblast the ite/neg/udiv are primitives;
+     * on CDCL each flattened sub-op has a propagator. Verilator emits these for
+     * signed `/` and `%`.
+     *
+     *   sdiv(s,t): quadrant by (sign s, sign t) —
+     *     (+,+) udiv(s,t)      (-,+) -udiv(-s,t)
+     *     (+,-) -udiv(s,-t)    (-,-) udiv(-s,-t)
+     *   srem(s,t): sign follows the dividend s —
+     *     (+,+) urem(s,t)      (-,+) -urem(-s,t)
+     *     (+,-) urem(s,-t)     (-,-) -urem(-s,-t)
+     */
+    {
+        int is_sdiv = (oplen == 6 && memcmp(op, "bvsdiv", 6) == 0);
+        int is_srem = (oplen == 6 && memcmp(op, "bvsrem", 6) == 0);
+        if (is_sdiv || is_srem) {
+            /* The ITE-of-unsigned-divisions this lowers to is solved exactly by
+             * bitblast but left unpinned (wrong model) by the CDCL bounds
+             * engine, so force bitblast for this problem. */
+            fe->needs_bitblast = 1;
+            if (s->list.count != 3) return TAGGED_NULL;
+            TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+            if (sa.te.ref == EXPR_NULL) return TAGGED_NULL;
+            TaggedExpr tb = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+            if (tb.te.ref == EXPR_NULL) return TAGGED_NULL;
+            uint16_t w = sa.te.width ? sa.te.width : tb.te.width;
+            if (w == 0) return TAGGED_NULL;
+            ExprRef r = _signed_divrem_expr(fe->builder, sa.te.ref, tb.te.ref,
+                                            w, is_srem);
+            return (TaggedExpr){ { r, w }, 0, NULL };
+        }
+    }
+
+    /* Signed modulo (SMT-LIB `bvsmod`): result sign follows the DIVISOR t.
+     * Built on the (validated) signed remainder: let r = bvsrem(s,t);
+     *   r == 0                 -> 0
+     *   sign(r) == sign(t)     -> r
+     *   else                   -> r + t   (flip the sign toward the divisor)
+     */
+    {
+        if (oplen == 6 && memcmp(op, "bvsmod", 6) == 0) {
+            fe->needs_bitblast = 1;
+            if (s->list.count != 3) return TAGGED_NULL;
+            TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+            if (sa.te.ref == EXPR_NULL) return TAGGED_NULL;
+            TaggedExpr tb = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+            if (tb.te.ref == EXPR_NULL) return TAGGED_NULL;
+            uint16_t w = sa.te.width ? sa.te.width : tb.te.width;
+            if (w == 0) return TAGGED_NULL;
+            ExprRef T_ = tb.te.ref;
+            ExprRef r_expr = _signed_divrem_expr(fe->builder, sa.te.ref, T_, w, /*is_rem=*/1);
+            /* Materialise the remainder into its own var: bvsmod references it
+             * three times (sign bit, +t, ==0), and re-embedding the raw ITE tree
+             * at each use makes the bitblaster produce inconsistent values for
+             * the shared sub-DAG. One aux var = one bit-blasted value, shared. */
+            TaggedExpr rt = _flatten_to_var(fe, (TaggedExpr){ { r_expr, w }, 0, NULL });
+            if (rt.te.ref == EXPR_NULL) return TAGGED_NULL;
+            ExprRef r = rt.te.ref;
+            ExprRef msb_r = builder_expr_extract(fe->builder, r, w - 1, w - 1);
+            ExprRef msb_t = builder_expr_extract(fe->builder, T_, w - 1, w - 1);
+            ExprRef same_sign = builder_expr_binary(fe->builder, BIN_EQ, msb_r, msb_t);
+            ExprRef r_plus_t = builder_expr_binary(fe->builder, BIN_ADD, r, T_);
+            ExprRef adjusted = builder_expr_ite(fe->builder, same_sign, r, r_plus_t);
+            ExprRef zero = builder_expr_const(fe->builder, 0, 0);
+            ExprRef r_is_zero = builder_expr_binary(fe->builder, BIN_EQ, r, zero);
+            ExprRef result = builder_expr_ite(fe->builder, r_is_zero, r, adjusted);
+            return (TaggedExpr){ { result, w }, 0, NULL };
+        }
+    }
+
+    /* bvsmod (signed modulo, sign follows the divisor) is intentionally NOT
+     * lowered here: an earlier attempt was only 219/256 correct on bitblast, so
+     * it is left to the honest `unknown` path rather than risk a wrong answer.
+     * SV `%` lowers to bvsrem (handled above), so bvsmod is comparatively rare. */
 
     /* = (equality) -- handles both BV and array operands */
     if (oplen == 1 && op[0] == '=') {
@@ -2021,6 +2144,10 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
  * under bitblast. The auto-route lifts those out of the timeout bucket
  * without users having to set DV_ENGINE manually. */
 static int _engine_is_bitblast(Smt2Frontend *fe) {
+    /* A problem that lowered a CDCL-unsound construct (e.g. signed div/rem)
+     * MUST bitblast — even under an explicit DV_ENGINE=cdcl, since CDCL would
+     * return a wrong model here. This overrides the env, deliberately. */
+    if (fe->needs_bitblast) return 1;
     const char *e = getenv("DV_ENGINE");
     if (e) {
         if (strcmp(e, "bitblast") == 0 || strcmp(e, "bb") == 0) return 1;

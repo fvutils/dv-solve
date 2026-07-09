@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "timer_watchdog_kind_k2",
   "result": "unsat",
-  "solve_time_ms": 3.569933003745973,
-  "peak_memory_kb": 41728,
+  "solve_time_ms": 2.3896979400888085,
+  "peak_memory_kb": 42480,
   "returncode": 1,
   "stdout": "unsat\n",
   "stderr": ""

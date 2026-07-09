@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "threeunique",
   "result": "sat",
-  "solve_time_ms": 1.4777510659769177,
-  "peak_memory_kb": 41472,
+  "solve_time_ms": 1.5309200389310718,
+  "peak_memory_kb": 42480,
   "returncode": 0,
   "stdout": "sat\n(\n  (a #b1100100)\n  (b #b0000100)\n  (c #b0100100)\n)\n",
   "stderr": ""

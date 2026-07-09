@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "muldivscenario",
   "result": "sat",
-  "solve_time_ms": 1.884676981717348,
-  "peak_memory_kb": 41472,
+  "solve_time_ms": 2.245954005047679,
+  "peak_memory_kb": 42480,
   "returncode": 0,
   "stdout": "sat\n(\n  (unit_price #b10011100010000)\n  (quantity #b1100100)\n  (total #b00000100001001000000)\n)\n",
   "stderr": ""

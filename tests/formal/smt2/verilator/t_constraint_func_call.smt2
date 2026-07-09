@@ -1,0 +1,10 @@
+; Sanitized from Verilator transcript: t_constraint_func_call
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun mask () (_ BitVec 8))
+(declare-fun value () (_ BitVec 8))
+(assert (= #b1 (bvand (__Vbv (bvuge mask #x10)) (__Vbv (bvule mask #xf0)))))
+(assert (= #b1 (__Vbv (bvuge value (bvand mask #xf0)))))
+(assert (= #b1 (__Vbv (bvule value (bvor mask #x0f)))))
+(check-sat)

@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "shiftaligned",
   "result": "sat",
-  "solve_time_ms": 2.111118985339999,
-  "peak_memory_kb": 41472,
+  "solve_time_ms": 1.3626388972625136,
+  "peak_memory_kb": 42480,
   "returncode": 0,
   "stdout": "sat\n(\n  (base_addr #b0000000000)\n  (aligned #b0000000000)\n)\n",
   "stderr": ""
