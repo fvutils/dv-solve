@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
 #include "zsp_search.h"
 #include "zsp_ctx.h"
 #include "zsp_propagator.h"
@@ -300,10 +301,34 @@ static int64_t _pick_value(SolveCtx *ctx, uint32_t var_id,
 /* solver_solve                                                        */
 /* ------------------------------------------------------------------ */
 
+/* Monotonic wall-clock seconds — for the CDCL time budget (B10). The
+ * conflict/restart counters bound *work* but not *time*: a hard problem can
+ * churn through a Luby-growing conflict budget for many minutes, which reads as
+ * a hang. A wall-clock deadline lets the search bail to SOLVE_TIMEOUT so the
+ * caller degrades to `unknown` (and, outside DV_NO_BITBLAST, escalates to
+ * bitblast). CDCL must be correct-or-unknown in bounded time — never hang. */
+static double _now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
 static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     /* Seed or preserve RNG. */
     if (opts && opts->seed != 0) ctx->rng_state = opts->seed;
     if (ctx->rng_state == 0)     ctx->rng_state = 0xDEADBEEF12345678ULL;
+
+    /* Wall-clock budget (B10). Default 10s; DV_CDCL_TIME_LIMIT overrides
+     * (<=0 disables). deadline==0.0 means unlimited. Checked cheaply (every
+     * ~1024 iters) in both the decision loop and the conflict loop. */
+    double _deadline = 0.0;
+    {
+        double tl = 10.0;
+        const char *e = getenv("DV_CDCL_TIME_LIMIT");
+        if (e && *e) tl = atof(e);
+        if (tl > 0.0) _deadline = _now_sec() + tl;
+    }
+    uint64_t _tick = 0;   /* cheap gate for the clock_gettime checks */
 
     /* Decision-variable tie-break mode for this solve (default fast). */
     ctx->fair_pick = (opts && opts->fair_pick) ? 1 : 0;
@@ -401,6 +426,10 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     }
 
     for (;;) {
+        /* Wall-clock budget check (decision loop). */
+        if (_deadline > 0.0 && (++_tick & 0x3FF) == 0 && _now_sec() > _deadline)
+            return SOLVE_TIMEOUT;
+
         /* ── Variable selection ── */
         uint32_t x_id = _select_unassigned(ctx);
         if (x_id == EXPR_NULL) {
@@ -454,6 +483,13 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
         while (pr == PROP_CONFLICT) {
             ctx->conflict_count++;
             local_conflicts++;
+
+            /* Wall-clock budget check (conflict loop). This loop learns a
+             * clause and `continue`s back to itself; a non-progressing
+             * learn/propagate cycle would otherwise never reach the outer
+             * loop's check, so the deadline must be tested here too. */
+            if (_deadline > 0.0 && (++_tick & 0x3FF) == 0 && _now_sec() > _deadline)
+                return SOLVE_TIMEOUT;
 
             uint32_t cur = ctx->decision_level;
 

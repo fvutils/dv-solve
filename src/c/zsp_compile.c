@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "zsp_ctx.h"
 #include "zsp_propagator.h"
 #include "zsp_problem.h"
@@ -853,6 +854,34 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
         cmp_vid = _resolve(ctx, cmp_vid);
         uint8_t cv_w = ctx->vars[cmp_vid].width;
 
+        /* Compile-time fold of an inequality that is trivially true/false at the
+         * var's UNSIGNED range boundary [0, 2^w-1]. Critical for `var >= 0`
+         * (always true for an unsigned var): the inequality path below reifies
+         * `var >= c` as NOT(var <= c-1); for c==0 that threshold is -1, which as
+         * an unsigned bound wraps to 2^w-1, making `var <= -1` always true and
+         * wrongly inverting the guard to false. Folding first avoids that. */
+        if (eff != BIN_EQ && eff != BIN_NEQ &&
+            !(ctx->vars[cmp_vid].flags & VAR_SIGNED)) {
+            int64_t vmax = (cv_w < 64) ? (int64_t)(((uint64_t)1 << cv_w) - 1)
+                                       : INT64_MAX;
+            int fold = -1;  /* -1 none, 0 false, 1 true */
+            switch (eff) {
+            case BIN_LT:  fold = (cmp_cv <= 0) ? 0 : (cmp_cv >  vmax ? 1 : -1); break;
+            case BIN_LTE: fold = (cmp_cv <  0) ? 0 : (cmp_cv >= vmax ? 1 : -1); break;
+            case BIN_GT:  fold = (cmp_cv <  0) ? 1 : (cmp_cv >= vmax ? 0 : -1); break;
+            case BIN_GTE: fold = (cmp_cv <= 0) ? 1 : (cmp_cv >  vmax ? 0 : -1); break;
+            default: break;
+            }
+            if (fold >= 0) {
+                if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
+                uint32_t gid = ctx->n_vars;
+                _init_tier0(&ctx->vars[gid], 1, VAR_AUX, fold, fold);
+                ctx->n_vars = gid + 1;
+                if (ctx->watcher_heads) ctx->watcher_heads[gid] = EXPR_NULL;
+                return gid;
+            }
+        }
+
         if (eff == BIN_EQ) {
             if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
             uint32_t gid = ctx->n_vars;
@@ -1289,13 +1318,45 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
             }
         }
 
-        /* AND constraint: both sides must hold — compile each separately */
+        /* AND constraint: every conjunct must hold. Flatten the maximal AND
+         * spine ITERATIVELY — a deep (and c1 (and c2 (and c3 ...))) chain, as
+         * large graph-colouring / edge-matching instances build, would otherwise
+         * recurse one C-stack frame per conjunct and overflow the stack (was
+         * crash B10, CDCL half). Only raw BIN_AND spine nodes are flattened;
+         * every other shape (incl. not-wrapped / OR) stays a leaf compiled
+         * through the full _compile_constraint, so de Morgan / folding semantics
+         * are unchanged. Returns -1 (contradiction) on the first unsat conjunct,
+         * else 0 if any conjunct was dropped, else 1. */
         if (e->op == BIN_AND) {
-            int r1 = _compile_constraint(ctx, sp, e->lhs);
-            if (r1 < 0) return r1;
-            int r2 = _compile_constraint(ctx, sp, e->rhs);
-            if (r2 < 0) return r2;
-            return (r1 == 0 || r2 == 0) ? 0 : 1;
+            ExprRef *stk = NULL;
+            size_t n = 0, cap = 0;
+            int any_dropped = 0;
+            #define CC_PUSH(R) do {                                             \
+                if (n == cap) { size_t nc = cap ? cap * 2 : 32;                 \
+                    ExprRef *t = (ExprRef *)realloc(stk, nc * sizeof(ExprRef)); \
+                    if (!t) { free(stk); return 0; }                           \
+                    stk = t; cap = nc; }                                        \
+                stk[n++] = (R);                                                 \
+            } while (0)
+            CC_PUSH(e->rhs);
+            CC_PUSH(e->lhs);
+            while (n > 0) {
+                ExprRef r = stk[--n];
+                ExprKind *ck = (ExprKind *)zsp_pool_ptr(&sp->pool, r);
+                if (ck && *ck == EXPR_BINARY &&
+                    ((const ExprBinary *)ck)->op == BIN_AND) {
+                    const ExprBinary *cb = (const ExprBinary *)ck;
+                    CC_PUSH(cb->rhs);
+                    CC_PUSH(cb->lhs);
+                    continue;
+                }
+                int ri = _compile_constraint(ctx, sp, r);
+                if (ri < 0) { free(stk); return ri; }
+                if (ri == 0) any_dropped = 1;
+            }
+            #undef CC_PUSH
+            free(stk);
+            return any_dropped ? 0 : 1;
         }
 
         /* OR tree of comparisons → DisjClause propagator (with
@@ -1909,7 +1970,8 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                 uint32_t operand_id = _value_to_var(ctx, sp, ext->operand, ext->from_bits);
                 if (operand_id != EXPR_NULL) {
                     if (!ext->sign_extend) {
-                        /* Zero-extend: r in [0, (1<<from_bits)-1] */
+                        /* Zero-extend: r in [0, (1<<from_bits)-1]; r == operand
+                         * exactly (extra bits are zero), so bounds_eq is sound. */
                         int64_t max_val = (ext->from_bits < 64)
                             ? ((int64_t)1 << ext->from_bits) - 1
                             : INT64_MAX;
@@ -1921,8 +1983,25 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                             return -1;
                         if (ctx_tighten_ub64(ctx, operand_id, max_val) == PROP_CONFLICT)
                             return -1;
-                    } else {
-                        /* Sign-extend: r in [-2^(from-1), 2^(from-1)-1] */
+                        /* Link r and operand via EQ propagator */
+                        prop_add_bounds_eq_64(ctx, r_id, operand_id, 0);
+                        return 1;
+                    }
+                    /* Sign-extend: the bounds+equality model
+                     *   r ∈ [-2^(from-1), 2^(from-1)-1],  r == operand
+                     * is sound ONLY when the result var is SIGNED — then the
+                     * negative range is represented correctly and r equals the
+                     * operand's signed value. For an UNSIGNED result var the
+                     * negative lower bound wraps to a high sliver (a split
+                     * domain), which the old code mis-modeled as a contiguous
+                     * range → spurious compile-time UNSAT (e.g. a 64-bit result).
+                     * For that case leave it UNCOMPILED (return 0): CDCL drops
+                     * it, the model-validation net re-checks it against the full
+                     * problem, and an unknown escalates to bitblast (which lowers
+                     * sign-extend exactly). Never a wrong answer. */
+                    if (!(ctx->vars[r_id].flags & VAR_SIGNED))
+                        return 0;
+                    {
                         int64_t min_val = -((int64_t)1 << (ext->from_bits - 1));
                         int64_t max_val = ((int64_t)1 << (ext->from_bits - 1)) - 1;
                         if (ctx_tighten_lb64(ctx, r_id, min_val) == PROP_CONFLICT)
@@ -1933,10 +2012,9 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                             return -1;
                         if (ctx_tighten_ub64(ctx, operand_id, max_val) == PROP_CONFLICT)
                             return -1;
+                        prop_add_bounds_eq_64(ctx, r_id, operand_id, 0);
+                        return 1;
                     }
-                    /* Link r and operand via EQ propagator */
-                    prop_add_bounds_eq_64(ctx, r_id, operand_id, 0);
-                    return 1;
                 }
             }
         }
@@ -1999,6 +2077,18 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                 uint8_t r_w = ctx->vars[r_id].width;
                 uint8_t lo_w = cat->lo_width;
                 uint8_t hi_w = (r_w >= lo_w) ? (uint8_t)(r_w - lo_w) : 0;
+                /* Soundness guard: the concat bounds propagator reasons in
+                 * signed int64 (`hi << lo_w`, arithmetic `r >> lo_w`, `>= 0`
+                 * guards). A full 64-bit result range [0, 2^64-1] lands in the
+                 * upper half (>= 2^63), where that signed arithmetic produces
+                 * spurious empty-domain conflicts -> wrong `unsat` (e.g.
+                 * `r == concat(c,b)` with `r > K` or `c != 0`). The range isn't
+                 * representable in signed-int64 bounds, so decline native
+                 * compile for a full-width result: leave it uncompiled (return
+                 * 0) -> the model-validation net re-checks it and CDCL degrades
+                 * to `unknown`, escalating to bitblast. (Results <= 63 bits stay
+                 * within INT64_MAX and remain sound.) */
+                if (r_w >= 64) return 0;
                 uint32_t hi_id = _value_to_var(ctx, sp, cat->hi, hi_w);
                 uint32_t lo_id = _value_to_var(ctx, sp, cat->lo, lo_w);
                 if (hi_id != EXPR_NULL && lo_id != EXPR_NULL) {
@@ -2311,27 +2401,59 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                             if (negated == BIN_EQ)  return 1;   /* v == v: tautology */
                             if (negated == BIN_NEQ) return -1;  /* v != v: UNSAT */
                         }
-                        switch (negated) {
-                        case BIN_LTE: prop_add_bounds_le_32(ctx, lid, rid2, 0); return 1;
-                        case BIN_LT:  prop_add_bounds_lt_32(ctx, lid, rid2, 0); return 1;
-                        case BIN_EQ:  prop_add_bounds_eq_32(ctx, lid, rid2, 0); return 1;
-                        case BIN_NEQ: prop_add_bounds_ne_32(ctx, lid, rid2, 0); return 1;
-                        case BIN_GT:  prop_add_bounds_lt_32(ctx, rid2, lid, 0); return 1;
-                        case BIN_GTE: prop_add_bounds_le_32(ctx, rid2, lid, 0); return 1;
-                        default: break;
+                        /* Select 32- vs 64-bit propagators by width. Installing a
+                         * 32-bit propagator on a wide (64-bit / tier-1-promoted)
+                         * var truncates its bounds and never reaches fixpoint ->
+                         * solver_propagate spins forever. Mirror the width-aware
+                         * dispatch used for the non-negated comparison site. */
+                        int neg_wide = _var_needs_wide(ctx, lid) || _var_needs_wide(ctx, rid2);
+                        uint16_t neg_w = neg_wide ? 64
+                            : (ctx->vars[lid].width > ctx->vars[rid2].width
+                               ? ctx->vars[lid].width : ctx->vars[rid2].width);
+                        if (neg_w <= 32) {
+                            switch (negated) {
+                            case BIN_LTE: prop_add_bounds_le_32(ctx, lid, rid2, 0); return 1;
+                            case BIN_LT:  prop_add_bounds_lt_32(ctx, lid, rid2, 0); return 1;
+                            case BIN_EQ:  prop_add_bounds_eq_32(ctx, lid, rid2, 0); return 1;
+                            case BIN_NEQ: prop_add_bounds_ne_32(ctx, lid, rid2, 0); return 1;
+                            case BIN_GT:  prop_add_bounds_lt_32(ctx, rid2, lid, 0); return 1;
+                            case BIN_GTE: prop_add_bounds_le_32(ctx, rid2, lid, 0); return 1;
+                            default: break;
+                            }
+                        } else {
+                            switch (negated) {
+                            case BIN_LTE: prop_add_bounds_le_64(ctx, lid, rid2, 0); return 1;
+                            case BIN_LT:  prop_add_bounds_lt_64(ctx, lid, rid2, 0); return 1;
+                            case BIN_EQ:  prop_add_bounds_eq_64(ctx, lid, rid2, 0); return 1;
+                            case BIN_NEQ: prop_add_bounds_ne_64(ctx, lid, rid2, 0); return 1;
+                            case BIN_GT:  prop_add_bounds_lt_64(ctx, rid2, lid, 0); return 1;
+                            case BIN_GTE: prop_add_bounds_le_64(ctx, rid2, lid, 0); return 1;
+                            default: break;
+                            }
                         }
                     }
-                    /* var NEQ const: create const-var + NE propagator */
+                    /* var NEQ const: create const-var + NE propagator.
+                     * Width-aware: a wide (64-bit / tier-1-promoted) var — e.g.
+                     * a materialised 64-bit concat aux — must use the 64-bit
+                     * const var + ne_64. Installing the 32-bit const var + ne_32
+                     * on a wide var truncates the bounds and yields a spurious
+                     * `unsat` (same width-blindness class as the negated two-var
+                     * site / B9). */
                     if (negated == BIN_NEQ) {
                         int is_vc = _is_var(sp, inner->lhs, &lid) && _is_const(sp, inner->rhs, &cv);
                         int is_cv = !is_vc && _is_const(sp, inner->lhs, &cv) && _is_var(sp, inner->rhs, &lid);
                         if ((is_vc || is_cv) && ctx->n_vars < ctx->n_vars_capacity) {
                             lid = _resolve(ctx, lid);
+                            int nc_wide = _var_needs_wide(ctx, lid)
+                                          || ctx->vars[lid].width > 32;
                             uint32_t cv_id = ctx->n_vars;
-                            _init_tier0(&ctx->vars[cv_id], 32, 0, cv, cv);
+                            _init_tier0(&ctx->vars[cv_id], nc_wide ? 64 : 32, 0, cv, cv);
                             ctx->n_vars = cv_id + 1;
                             if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
-                            prop_add_bounds_ne_32(ctx, lid, cv_id, 0);
+                            if (nc_wide)
+                                prop_add_bounds_ne_64(ctx, lid, cv_id, 0);
+                            else
+                                prop_add_bounds_ne_32(ctx, lid, cv_id, 0);
                             return 1;
                         }
                     }

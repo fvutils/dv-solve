@@ -18,11 +18,19 @@ typedef struct zsp_bbsolver_s zsp_bbsolver_t;
 extern "C" {
 #endif
 
+/* B12 depth guard: set this to the stack size (bytes) of the thread the SMT2
+ * translator runs on, so the guard can size itself to the real stack rather
+ * than RLIMIT_STACK (which governs only the main thread). 0 = use RLIMIT_STACK.
+ * The CLI (smt2_main) runs the solve on an explicit large-stack pthread and
+ * sets this to that stack size. See _translate_depth_limit in the .c. */
+extern size_t g_smt2_translate_stack_bytes;
+
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
 #define SMT2_MAX_NAME       128
+#define SMT2_MAX_BV_BITS    128   /* widest BitVec sort accepted (Phase W1: >64-bit is bitblast-routed) */
 #define SMT2_MAX_FUNS      8192   /* yosys-smtbmc emits one per BMC unroll step */
 #define SMT2_MAX_FUN_PARAMS   8
 #define SMT2_MAX_SORTS       16
@@ -231,6 +239,14 @@ typedef struct {
      * and restored across (push)/(pop) like the other incremental watermarks. */
     int                  incomplete;
 
+    /* B12 guard: current depth of the _translate_tagged recursion. A single
+     * expression nested deeper than SMT2_MAX_TRANSLATE_DEPTH would overflow the
+     * C stack (~1490 with the default 8-12 MB), so we bail to `unknown` (set
+     * `incomplete`) instead of crashing. Transient per translate call; a stray
+     * non-zero from an earlier bail is harmless (only ever increments/compares)
+     * but it is reset to 0 at the start of every top-level expression. */
+    uint32_t             translate_depth;
+
     /* Set when a construct is lowered into a composed expression the CDCL
      * engine cannot solve soundly (e.g. signed bvsdiv/bvsrem lower to an ITE of
      * unsigned divisions whose result CDCL leaves unpinned -> wrong model). The
@@ -284,12 +300,21 @@ typedef struct {
     Smt2SortConst        sort_consts[SMT2_MAX_SORT_CONSTS];
     uint32_t             n_sort_consts;
 
-    /* Parameterized macros (define-fun) */
-    Smt2FunDef           funs[SMT2_MAX_FUNS];
+    /* Parameterized macros (define-fun). Heap-allocated, lazily grown (was an
+     * inline funs[SMT2_MAX_FUNS] ~9.8 MB array — kept off the struct so the
+     * blanket memset(fe) in init/destroy/soft_reset stays cheap; that zeroing
+     * dominated one-shot startup and every Verilator (reset). SMT2_MAX_FUNS
+     * remains the hard cap. See docs/perf_sweep_easy_band_2026-07-21.md). */
+    Smt2FunDef          *funs;
+    uint32_t             funs_cap;
     uint32_t             n_funs;
 
-    /* Substitution stack used during define-fun body translation */
-    Smt2Subst            subst_stack[SMT2_MAX_SUBST];
+    /* Substitution stack used during define-fun body + let translation.
+     * Heap-backed and grown on demand (see _subst_reserve) so deeply-nested
+     * `let` (thousands deep, common in tool-emitted SMT-LIB) is not silently
+     * truncated to `unknown`. SMT2_MAX_SUBST is only the initial capacity. */
+    Smt2Subst           *subst_stack;
+    uint32_t             subst_cap;
     uint32_t             subst_depth;
 
     /* Assumption literals from the most recent check-sat-assuming, recorded so

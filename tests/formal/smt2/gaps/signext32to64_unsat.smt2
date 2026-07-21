@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 32))(declare-const y (_ BitVec 64))
+(assert (= y ((_ sign_extend 32) x)))(assert (= ((_ extract 31 31) x) #b1))
+(assert (= ((_ extract 63 32) y) #x00000000))
+(check-sat)

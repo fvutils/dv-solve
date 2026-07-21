@@ -87,3 +87,29 @@ class DvSolveSMT2BBSolver:
         return _solve_with_engine(
             self.name, smt2_path, timeout_s, {"DV_ENGINE": "bitblast"}
         )
+
+
+class DvSolveSMT2CubeSolver:
+    """Cube-and-conquer-engine dv-solve-smt2 solver (DV_ENGINE=cube).
+
+    Search-space partitioning over the bit-blast engine: bit-blasts once,
+    then splits the search space into cubes solved (Phase 0: sequentially)
+    over the shared encoded instance via retractable CaDiCaL assumptions.
+    Same soundness contract as bitblast — SAT on any cube, UNSAT only on an
+    exhaustive all-UNSAT partition, otherwise unknown. See
+    docs/cube_and_conquer_design.md."""
+
+    @property
+    def name(self) -> str:
+        return "dv-solve-smt2-cube"
+
+    def is_available(self) -> bool:
+        exe = _BUILD_DIR / "dv-solve-smt2"
+        return exe.is_file() and exe.stat().st_mode & 0o111 != 0
+
+    def solve(
+        self, smt2_path: Path, *, timeout_s: float = 30.0
+    ) -> FormalResult:
+        return _solve_with_engine(
+            self.name, smt2_path, timeout_s, {"DV_ENGINE": "cube"}
+        )

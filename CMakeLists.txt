@@ -6,6 +6,12 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Threading backend for the parallel cube engine (src/c/zsp_thread.c). Uses
+# pthreads on POSIX; on Windows the Win32 threading APIs need no extra link
+# library, so Threads::Threads is a no-op there.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # Export all symbols from the shared libraries on Windows so the ctypes loader
 # can resolve them (MSVC exports nothing by default). No effect on ELF/Mach-O.
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
@@ -15,6 +21,36 @@ set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 # ------------------------------------------------------------------ #
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/kissat.cmake)
+
+# ------------------------------------------------------------------ #
+# Optional incremental SAT backend (CaDiCaL)                          #
+# ------------------------------------------------------------------ #
+# CaDiCaL is C++ and adds a libstdc++ dependency. It is the incremental
+# backend for the bit-blast / formal path; kissat stays the one-shot and
+# the lightweight-embeddable backend. -DZSP_WITH_CADICAL=OFF yields a
+# pure-C, kissat-only build with no C++ runtime (see
+# docs/cadical_integration_plan.md).
+option(ZSP_WITH_CADICAL "Build the incremental CaDiCaL SAT backend (adds a C++/libstdc++ dependency)" ON)
+if(MSVC)
+    # CaDiCaL is not wired for MSVC here; keep Windows builds pure-C/kissat.
+    set(ZSP_WITH_CADICAL OFF)
+endif()
+if(ZSP_WITH_CADICAL)
+    enable_language(CXX)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cadical.cmake)
+endif()
+
+# Apply the CaDiCaL backend wiring to a dv-solve library target: link the
+# static archive, define ZSP_WITH_CADICAL for the zsp_sat dispatcher, and
+# force C++ linking so libstdc++ is pulled in (a C target won't auto-detect
+# the C++ runtime from a static archive).
+function(zsp_apply_cadical tgt)
+    if(ZSP_WITH_CADICAL)
+        target_link_libraries(${tgt} PRIVATE cadical)
+        target_compile_definitions(${tgt} PRIVATE ZSP_WITH_CADICAL=1)
+        set_target_properties(${tgt} PROPERTIES LINKER_LANGUAGE CXX)
+    endif()
+endfunction()
 
 # MSVC portability for the dv-solve C sources (applies to every target defined
 # below — libraries, the CLI and the C tests). ZSP_WIN_COMPAT is set in
@@ -79,21 +115,31 @@ set(ZSP_SOURCES
     src/c/zsp_explain.c
     src/c/zsp_clause_prop.c
     src/c/zsp_sat.c
+    src/c/zsp_sat_kissat.c
     src/c/zsp_aig.c
     src/c/zsp_aig_cnf.c
     src/c/zsp_bitblast.c
     src/c/zsp_bbsolver.c
+    src/c/zsp_cube.c
+    src/c/zsp_thread.c
     src/c/zsp_arena.c
     src/c/zsp_bvdom.c
     src/c/zsp_bvbounds.c
 )
+
+# The CaDiCaL backend translation unit (pure C over the ccadical.h C API) is
+# compiled into every dv-solve library only when the backend is enabled.
+if(ZSP_WITH_CADICAL)
+    list(APPEND ZSP_SOURCES src/c/zsp_sat_cadical.c)
+endif()
 
 # ------------------------------------------------------------------ #
 # Shared library target                                                #
 # ------------------------------------------------------------------ #
 
 add_library(dv_solve SHARED ${ZSP_SOURCES})
-target_link_libraries(dv_solve PRIVATE kissat)
+target_link_libraries(dv_solve PRIVATE kissat Threads::Threads)
+zsp_apply_cadical(dv_solve)
 
 if(ZSP_CONTRADICTION_ANALYSIS)
     target_sources(dv_solve PRIVATE ${ZSP_CONTRA_SOURCES})
@@ -134,7 +180,8 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/c/
 # ------------------------------------------------------------------ #
 
 add_library(dv_solve_debug SHARED ${ZSP_SOURCES} ${ZSP_CONTRA_SOURCES})
-target_link_libraries(dv_solve_debug PRIVATE kissat)
+target_link_libraries(dv_solve_debug PRIVATE kissat Threads::Threads)
+zsp_apply_cadical(dv_solve_debug)
 
 target_compile_definitions(dv_solve_debug PRIVATE ZSP_CONTRADICTION_ANALYSIS=1)
 
@@ -161,7 +208,8 @@ add_library(dv_solve_dpi SHARED
     src/c/zsp_dpi.c
     ${ZSP_SOURCES}
 )
-target_link_libraries(dv_solve_dpi PRIVATE kissat)
+target_link_libraries(dv_solve_dpi PRIVATE kissat Threads::Threads)
+zsp_apply_cadical(dv_solve_dpi)
 
 target_include_directories(dv_solve_dpi PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
@@ -208,6 +256,13 @@ target_link_libraries(test_zsp_sat_incremental PRIVATE dv_solve kissat)
 target_include_directories(test_zsp_sat_incremental PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_zsp_sat_incremental COMMAND test_zsp_sat_incremental)
 
+# CaDiCaL backend tests: exercise real incremental behavior. Skips itself at
+# runtime when built with -DZSP_WITH_CADICAL=OFF, so it is always safe to run.
+add_executable(test_zsp_sat_cadical tests/c/test_zsp_sat_cadical.c)
+target_link_libraries(test_zsp_sat_cadical PRIVATE dv_solve)
+target_include_directories(test_zsp_sat_cadical PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_sat_cadical COMMAND test_zsp_sat_cadical)
+
 add_executable(test_zsp_aig tests/c/test_zsp_aig.c)
 target_link_libraries(test_zsp_aig PRIVATE dv_solve)
 target_include_directories(test_zsp_aig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -227,6 +282,11 @@ add_executable(test_zsp_bbsolver tests/c/test_zsp_bbsolver.c)
 target_link_libraries(test_zsp_bbsolver PRIVATE dv_solve kissat)
 target_include_directories(test_zsp_bbsolver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_zsp_bbsolver COMMAND test_zsp_bbsolver)
+
+add_executable(test_zsp_bbsolver_incremental tests/c/test_zsp_bbsolver_incremental.c)
+target_link_libraries(test_zsp_bbsolver_incremental PRIVATE dv_solve kissat)
+target_include_directories(test_zsp_bbsolver_incremental PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_bbsolver_incremental COMMAND test_zsp_bbsolver_incremental)
 
 add_executable(test_zsp_block_alloc_cache tests/c/test_zsp_block_alloc_cache.c)
 target_link_libraries(test_zsp_block_alloc_cache PRIVATE dv_solve)
@@ -274,7 +334,7 @@ set(SMT2_SOURCES
 )
 
 add_executable(dv-solve-smt2 ${SMT2_SOURCES})
-target_link_libraries(dv-solve-smt2 PRIVATE dv_solve)
+target_link_libraries(dv-solve-smt2 PRIVATE dv_solve Threads::Threads)
 target_include_directories(dv-solve-smt2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/c
 )

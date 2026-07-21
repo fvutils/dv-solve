@@ -1,0 +1,1676 @@
+[
+ {
+  "logic": "QF_ABV",
+  "family": "2019-Wolf-fmbench/2018E",
+  "name": "VexRiscv-regch0-30-unrolled-mem.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 6874.4,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153682.44,
+    "wall": 1201.03
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "20200415-Yurichev",
+  "name": "t3.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 71649.43,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153686.42,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "bubsort014un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 74440.62,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "unsat",
+    "cpu": 21032.49,
+    "wall": 164.94
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "bubsort016un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 74309.53,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "unsat",
+    "cpu": 47217.18,
+    "wall": 369.53
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "bubsort018un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 74378.28,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "unsat",
+    "cpu": 80661.49,
+    "wall": 630.86
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "bubsort020un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 73796.56,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "unsat",
+    "cpu": 103465.57,
+    "wall": 809.04
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "bubsort025un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 73720.65,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153659.57,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "bubsort030un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 73024.36,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153660.19,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "bubsort035un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 72569.69,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153660.16,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "bubsort040un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 71534.22,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153662.09,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "bubsort045un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 70863.44,
+    "wall": 1201.03
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153661.14,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "bubsort050un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 70151.09,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153665.28,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "dubreva010ue.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 29043.58,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153660.0,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "selsort012un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 4782.8,
+    "wall": 91.73
+   },
+   "Yices2": {
+    "result": "unsat",
+    "cpu": 62602.65,
+    "wall": 489.74
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "selsort014un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 44157.23,
+    "wall": 733.64
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153659.16,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "selsort030un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 64349.88,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153660.07,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "selsort040un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 43023.83,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153657.2,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "selsort045un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 33926.05,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153661.97,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere",
+  "name": "selsort050un.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 19968.83,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153662.42,
+    "wall": 1201.04
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere2",
+  "name": "countbitstable256.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 6876.4,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153809.0,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "brummayerbiere2",
+  "name": "countbitstableuninit1024.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 21379.65,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153675.28,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "platania/no_init_bubble_sort",
+  "name": "no_init_bubble_sort_safe12.c.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 4208.74,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "unsat",
+    "cpu": 11002.09,
+    "wall": 86.58
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "platania/no_init_bubble_sort",
+  "name": "no_init_bubble_sort_safe17.c.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 10809.57,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "unsat",
+    "cpu": 56267.68,
+    "wall": 440.29
+   }
+  }
+ },
+ {
+  "logic": "QF_ABV",
+  "family": "platania/no_init_bubble_sort",
+  "name": "no_init_bubble_sort_safe22.c.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 15383.39,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153658.36,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_AUFBV",
+  "family": "2019-Gonzalvez",
+  "name": "opStructure_O_16_24_2_2.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 61267.6,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153812.9,
+    "wall": 1201.03
+   }
+  }
+ },
+ {
+  "logic": "QF_AUFBV",
+  "family": "2019-Gonzalvez",
+  "name": "opStructure_O_16_32_2_2.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 49626.9,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153843.73,
+    "wall": 1201.03
+   }
+  }
+ },
+ {
+  "logic": "QF_AUFBV",
+  "family": "2019-Gonzalvez",
+  "name": "opStructure_O_32_16_2_2.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 48117.32,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153848.3,
+    "wall": 1201.03
+   }
+  }
+ },
+ {
+  "logic": "QF_AUFBV",
+  "family": "2019-Gonzalvez",
+  "name": "opStructure_O_32_32_2_2.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 26718.54,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 154020.92,
+    "wall": 1201.03
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "2017-BuchwaldFried",
+  "name": "synthesis.dump.ia32_RorMem_base_index_scale_disp2--Add32.Add32.Add32.load32.Minus32.Or32.Shr32.store32.am_shl32.0001.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 2348.2,
+    "wall": 41.08
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 27425.46,
+    "wall": 421.16
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20210312-Bouvier",
+  "name": "vlsat3_a57.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 56.07,
+    "wall": 2.04
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 4564.05,
+    "wall": 58.45
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20210312-Bouvier",
+  "name": "vlsat3_a67.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 1429.7,
+    "wall": 47.34
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 18871.12,
+    "wall": 603.3
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20210312-Bouvier",
+  "name": "vlsat3_a80.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 189.25,
+    "wall": 8.77
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 30391.05,
+    "wall": 311.19
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20220315-ecrw",
+  "name": "rw_rule_candidate_vmcai_2022_bw512_11.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 90.05,
+    "wall": 29.21
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 522.61,
+    "wall": 7.71
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20220315-ecrw",
+  "name": "rw_rule_candidate_vmcai_2022_bw512_20.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 1.77,
+    "wall": 1.66
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 0.62,
+    "wall": 0.72
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20220315-ecrw",
+  "name": "rw_rule_candidate_vmcai_2022_bw512_21.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 4702.64,
+    "wall": 1201.04
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 80539.32,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20221214-p4dfa-XiaoqiChen/StringMatching",
+  "name": "string1x16.3._bit8_na6_nr3_paired.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 38965.89,
+    "wall": 659.23
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 52718.45,
+    "wall": 853.32
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20221214-p4dfa-XiaoqiChen/StringMatching",
+  "name": "string2x8.8._bit8_na6_nr3_paired.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 71963.58,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 73122.47,
+    "wall": 1200.83
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20221214-p4dfa-XiaoqiChen/StringMatching",
+  "name": "string4x16.6._bit8_na6_nr4_pairedtwobranch.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 69966.32,
+    "wall": 1201.02
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 11041.62,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20221214-p4dfa-XiaoqiChen/TCP",
+  "name": "tcp_full_bit8_na6_nr3_paired.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 72428.69,
+    "wall": 1201.02
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 71608.7,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "20230221-oisc-gurtner",
+  "name": "AND-NESTED-20-32-src-sp-not-excluded.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 33688.21,
+    "wall": 1201.02
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 1629.65,
+    "wall": 797.03
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "Sage2",
+  "name": "bench_15955.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 69184.49,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 13098.1,
+    "wall": 251.08
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "Sage2",
+  "name": "bench_16172.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 566.66,
+    "wall": 10.51
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 14750.94,
+    "wall": 196.97
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "asp/EdgeMatching",
+  "name": "edge-matching-width=10-height=10-colours=13.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 18608.73,
+    "wall": 1097.43
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 3585.65,
+    "wall": 907.24
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "asp/GraphColouring",
+  "name": "graph-colouring-nodes=130-density=0.1-instance=3.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 37584.09,
+    "wall": 608.36
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 33142.44,
+    "wall": 453.29
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "asp/GraphColouring",
+  "name": "graph-colouring-nodes=140-density=0.1-instance=2.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 4816.23,
+    "wall": 80.26
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 8290.04,
+    "wall": 130.6
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "asp/Labyrinth",
+  "name": "laby_18_18_04.lp.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 18630.52,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 1628.56,
+    "wall": 432.04
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "asp/Sudoku",
+  "name": "sudoku.in3.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 23832.96,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 1214.68,
+    "wall": 311.95
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "brummayerbiere3",
+  "name": "maxxormaxorand032.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 1753.32,
+    "wall": 31.07
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 23856.19,
+    "wall": 341.73
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "brummayerbiere3",
+  "name": "minandmaxor256.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 56149.85,
+    "wall": 1201.02
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 69983.41,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "fft",
+  "name": "Sz1024_34824.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 4128.68,
+    "wall": 71.3
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 25594.21,
+    "wall": 409.64
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "float",
+  "name": "sin.c.25.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 32240.41,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 47829.74,
+    "wall": 822.99
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "float",
+  "name": "sin2.c.175.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 40879.88,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 6093.28,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "float",
+  "name": "test_v5_r15_vr5_c1_s23844.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 39122.4,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 18115.43,
+    "wall": 354.67
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "float",
+  "name": "test_v5_r15_vr5_c1_s8246.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 39082.15,
+    "wall": 1146.44
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 12104.21,
+    "wall": 276.24
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "float",
+  "name": "test_v7_r12_vr10_c1_s15994.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 40639.04,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 9038.28,
+    "wall": 285.04
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "float",
+  "name": "test_v7_r12_vr1_c1_s22787.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 38785.4,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 24616.58,
+    "wall": 502.52
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "float",
+  "name": "test_v7_r17_vr10_c1_s8773.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 42388.49,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 62753.46,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "log-slicing",
+  "name": "bvsmod_17.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 11854.53,
+    "wall": 193.2
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unsat",
+    "cpu": 10391.55,
+    "wall": 143.15
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "log-slicing",
+  "name": "bvurem_18.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 42533.74,
+    "wall": 683.56
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "unknown",
+    "cpu": 19198.77,
+    "wall": 252.61
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "119.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 68742.35,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 73117.93,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "126.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 72168.73,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 72993.1,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "135.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 69094.44,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 72473.23,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "140.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 7111.56,
+    "wall": 148.78
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 64125.72,
+    "wall": 1058.17
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "176.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 14434.98,
+    "wall": 369.88
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 11701.84,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "185.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 62107.05,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 4741.51,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "59.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 73108.39,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 83622.15,
+    "wall": 1200.78
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "60.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 14826.13,
+    "wall": 259.27
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 16516.97,
+    "wall": 265.12
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "68.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 13079.05,
+    "wall": 227.2
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 23801.48,
+    "wall": 377.72
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "70.smt2",
+  "status": "sat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 1732.7,
+    "wall": 38.45
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "sat",
+    "cpu": 27914.94,
+    "wall": 439.98
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "77.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 73347.08,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 82447.31,
+    "wall": 1200.83
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "mcm",
+  "name": "95.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 73387.39,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 79992.98,
+    "wall": 1200.86
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "uum",
+  "name": "uum32.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 76361.53,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 76667.85,
+    "wall": 1200.79
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "wienand-cav2008/Booth",
+  "name": "mult_ub_16x16_1.sf.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 74934.98,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 76763.43,
+    "wall": 1200.73
+   }
+  }
+ },
+ {
+  "logic": "QF_BV",
+  "family": "wienand-cav2008/Booth",
+  "name": "mult_ub_64x64_1.sf.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 69646.74,
+    "wall": 1201.01
+   },
+   "STP-Parti-Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 69950.31,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20210312-Bouvier",
+  "name": "vlsat3_d15.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 57.89,
+    "wall": 3.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153671.15,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20210312-Bouvier",
+  "name": "vlsat3_d21.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 69.81,
+    "wall": 2.62
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153668.75,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20210312-Bouvier",
+  "name": "vlsat3_d24.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 43.71,
+    "wall": 1.93
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153664.43,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20210312-Bouvier",
+  "name": "vlsat3_d35.smt2",
+  "status": "unsat",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "unsat",
+    "cpu": 139.56,
+    "wall": 5.26
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153668.02,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "11775_ad46e5b8db4748c51973_42_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 8170.29,
+    "wall": 373.51
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153977.75,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "17512_5c1021b0faa6b6e1791b_19_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 12574.6,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 154040.31,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "17512_5c1021b0faa6b6e1791b_21_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 14872.04,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 154043.01,
+    "wall": 1201.03
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "25959_5dee2e2f6ef44465a2bea4b085818948_66_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 2518.56,
+    "wall": 134.1
+   },
+   "Yices2": {
+    "result": "sat",
+    "cpu": 76.6,
+    "wall": 1.2
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "30078_f817a923328f75af7e60_27_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 58540.25,
+    "wall": 1207.75
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153748.75,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "3106_1c933134166dbad31f79_38_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 42823.86,
+    "wall": 1201.02
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153707.66,
+    "wall": 1201.01
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "38347_525a1ca0331f2bcbf520_54_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 30808.01,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153695.75,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "41958_32933c5a1384696720a2_62_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 565.29,
+    "wall": 253.44
+   },
+   "Yices2": {
+    "result": "sat",
+    "cpu": 44172.82,
+    "wall": 347.29
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "44289_4066055e0f64d96da11a_15_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 44749.27,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "sat",
+    "cpu": 10832.37,
+    "wall": 85.99
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "44289_b077fc096b3d41cba49f8628caff7fa5_16_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 31931.49,
+    "wall": 908.51
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 154005.82,
+    "wall": 1201.04
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "65782_cd31513fdcd15701933b_5_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 28610.76,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153761.39,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "65782_cd31513fdcd15701933b_8_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 8449.06,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153779.84,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "66603_accdadf23a1cf70ae043_75_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 65443.61,
+    "wall": 1201.13
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153994.08,
+    "wall": 1201.02
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "83314_a702bf8b823398c9e37a_1_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "sat",
+    "cpu": 1148.95,
+    "wall": 69.89
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 153797.63,
+    "wall": 1201.03
+   }
+  }
+ },
+ {
+  "logic": "QF_UFBV",
+  "family": "20230314-Jaroslav-Bendik-Certora",
+  "name": "93493_798593962ee29ad45ac8_52_QF_UFBV.smt2",
+  "status": "unknown",
+  "solvers": {
+   "Bitwuzla": {
+    "result": "Timeout",
+    "cpu": 44987.38,
+    "wall": 1201.01
+   },
+   "Yices2": {
+    "result": "Timeout",
+    "cpu": 154130.11,
+    "wall": 1201.02
+   }
+  }
+ }
+]

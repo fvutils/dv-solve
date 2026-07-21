@@ -895,7 +895,23 @@ static PropResult _bit_slice_backward(SolveCtx *ctx, uint32_t aid,
     static int disabled = -1;
     if (disabled < 0) disabled = getenv("DV_NO_BITSLICE_BACKWARD") ? 1 : 0;
     if (disabled) return PROP_OK;
-    if (alo < 0 || ahi < 0 || (uint64_t)alo > (uint64_t)ahi) return PROP_OK;
+    /* alo/ahi are raw 64-bit bound patterns. For an UNSIGNED width>=64 source a
+     * bound above INT64_MAX (e.g. a full-range hi = 2^64-1) reads as negative in
+     * int64 — that is a valid unsigned value, not a malformed bound. The slice
+     * math below is purely unsigned (_slice_min_ge/_max_le take uint64_t), so it
+     * is correct across the full range; only reject a genuinely inverted domain.
+     * For a signed source (or a narrow unsigned var with a negative *intermediate*
+     * bound) a negative pattern is real and the unsigned slice logic doesn't
+     * apply, so bail as before. Fixes B6: `((_ extract 63 63) v) == 1` on a
+     * 64-bit unsigned v used to bail here (ahi = -1) → v never forced to bit 63
+     * → wrong `unsat`. */
+    const Variable *av = &ctx->vars[aid];
+    int wide_unsigned = !(av->flags & VAR_SIGNED) && av->width >= 64;
+    if (wide_unsigned) {
+        if ((uint64_t)alo > (uint64_t)ahi) return PROP_OK;
+    } else {
+        if (alo < 0 || ahi < 0 || (uint64_t)alo > (uint64_t)ahi) return PROP_OK;
+    }
     int ok1, ok2;
     uint64_t nlo = _slice_min_ge((uint64_t)alo, (uint64_t)ahi, lo, hi, v, &ok1);
     uint64_t nhi = _slice_max_le((uint64_t)alo, (uint64_t)ahi, lo, hi, v, &ok2);
@@ -2621,12 +2637,8 @@ static PropResult _fire_bounds_bxor_64(Propagator *self, SolveCtx *ctx) {
      * works correctly when the other operand is also singleton.
      * For non-singleton cases, XOR can scramble bit ordering.
      * Only do backward propagation when both endpoints XOR to valid bounds. */
-    if (alo == ahi && blo == bhi) {
-        /* Already handled above */
-    } else if (alo == ahi) {
+    if (alo == ahi) {
         int64_t k = alo;
-        /* Only safe if b is singleton (already handled) or for backward
-         * propagation when r is singleton */
         int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
         int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
         if (rlo == rhi) {
@@ -2644,6 +2656,38 @@ static PropResult _fire_bounds_bxor_64(Propagator *self, SolveCtx *ctx) {
             int64_t a_exact = rlo ^ k;
             if ((res = ctx_tighten_lb64(ctx, aid, a_exact)) != PROP_OK) return res;
             if ((res = ctx_tighten_ub64(ctx, aid, a_exact)) != PROP_OK) return res;
+        }
+    }
+
+    /* Single-bit constant operand (r = y ^ 2^m): xor flips only bit m, so it is
+     * an order-preserving shift on any range whose values all share the same
+     * bit m (i.e. lie in one 2^m-aligned block: (lo>>m)==(hi>>m)). This is the
+     * signed-compare MSB-flip case (2^(w-1)); without bounds propagation here
+     * the flipped var is only linked to its source at singleton assignment, so
+     * the search loses all bound guidance and blind-enumerates. Propagate both
+     * directions when the block condition holds. Positive powers of two only
+     * (excludes the int64-negative 2^63, i.e. 64-bit sign bit — sound: that
+     * stays `unknown`). */
+    int have_k = 0; int64_t kbit = 0; uint32_t yid = 0;
+    if (blo == bhi && blo > 0 && (blo & (blo - 1)) == 0) { kbit = blo; yid = aid; have_k = 1; }
+    else if (alo == ahi && alo > 0 && (alo & (alo - 1)) == 0) { kbit = alo; yid = bid; have_k = 1; }
+    if (have_k) {
+        int m = __builtin_ctzll((uint64_t)kbit);
+        int64_t ylo = var_lo64(ctx, &ctx->vars[yid]);
+        int64_t yhi = var_hi64(ctx, &ctx->vars[yid]);
+        if (ylo >= 0 && (ylo >> m) == (yhi >> m)) {
+            int64_t r0 = ylo ^ kbit, r1 = yhi ^ kbit;
+            int64_t rmin = r0 < r1 ? r0 : r1, rmax = r0 < r1 ? r1 : r0;
+            if ((res = ctx_tighten_lb64(ctx, rid, rmin)) != PROP_OK) return res;
+            if ((res = ctx_tighten_ub64(ctx, rid, rmax)) != PROP_OK) return res;
+        }
+        int64_t rl = var_lo64(ctx, &ctx->vars[rid]);
+        int64_t rh = var_hi64(ctx, &ctx->vars[rid]);
+        if (rl >= 0 && (rl >> m) == (rh >> m)) {
+            int64_t y0 = rl ^ kbit, y1 = rh ^ kbit;
+            int64_t ymin = y0 < y1 ? y0 : y1, ymax = y0 < y1 ? y1 : y0;
+            if ((res = ctx_tighten_lb64(ctx, yid, ymin)) != PROP_OK) return res;
+            if ((res = ctx_tighten_ub64(ctx, yid, ymax)) != PROP_OK) return res;
         }
     }
 

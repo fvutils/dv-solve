@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const a (_ BitVec 4))(declare-const b (_ BitVec 4))(declare-const c (_ BitVec 4))(declare-const d (_ BitVec 4))
+(assert (= (bvmul (bvmul a b) (bvmul c d)) (_ bv6 4)))
+(assert (bvuge a (_ bv1 4)))(assert (bvuge b (_ bv1 4)))
+(check-sat)

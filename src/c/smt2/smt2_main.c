@@ -13,6 +13,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 #include "smt2/smt2_lexer.h"
 #include "smt2/smt2_parser.h"
 #include "smt2/smt2_frontend.h"
@@ -258,6 +259,55 @@ static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
     return exit_code;
 }
 
+/* B12: the SMT2 expression translator recurses one C frame per nesting level
+ * (~8.6 KB each), so deeply-nested input can overflow the default ~8 MB stack
+ * and SIGSEGV. We run the solve on a pthread with an explicit large stack (a
+ * reliably-reserved region, unlike runtime setrlimit raises which Linux may
+ * refuse to honour). The frontend's depth guard is sized from this same value
+ * (g_smt2_translate_stack_bytes) so it bails to `unknown` just under the true
+ * overflow point — crash-proof, never a wrong answer. */
+#define SMT2_WORKER_STACK_BYTES  ((size_t)1 << 30)   /* 1 GiB */
+
+typedef struct {
+    FILE *f;
+    int   show_stats;
+    int   verilator_mode;
+    int   interactive;
+    int   rc;
+} Smt2WorkerArgs;
+
+static void *_smt2_worker(void *p) {
+    Smt2WorkerArgs *a = (Smt2WorkerArgs *)p;
+    a->rc = a->interactive
+        ? _run_interactive(a->f, a->show_stats, a->verilator_mode)
+        : _run_batch(a->f, a->show_stats, a->verilator_mode);
+    return NULL;
+}
+
+/* Run the batch/interactive dispatch on a large-stack thread when possible;
+ * fall back to running inline on the main thread if thread setup fails (the
+ * frontend's RLIMIT_STACK-based guard still keeps that path crash-proof). */
+static int _run_on_worker_stack(FILE *f, int show_stats, int verilator_mode,
+                                int interactive) {
+    Smt2WorkerArgs args = { f, show_stats, verilator_mode, interactive, 2 };
+    pthread_attr_t attr;
+    pthread_t      tid;
+    if (pthread_attr_init(&attr) == 0) {
+        if (pthread_attr_setstacksize(&attr, SMT2_WORKER_STACK_BYTES) == 0 &&
+            pthread_create(&tid, &attr, _smt2_worker, &args) == 0) {
+            g_smt2_translate_stack_bytes = SMT2_WORKER_STACK_BYTES;
+            pthread_join(tid, NULL);
+            pthread_attr_destroy(&attr);
+            return args.rc;
+        }
+        pthread_attr_destroy(&attr);
+    }
+    /* Fallback: run inline; guard sizes itself from RLIMIT_STACK (0 = unset). */
+    g_smt2_translate_stack_bytes = 0;
+    _smt2_worker(&args);
+    return args.rc;
+}
+
 int main(int argc, char **argv) {
     const char *input_file = NULL;
     int         show_stats = 0;
@@ -339,8 +389,7 @@ int main(int argc, char **argv) {
     if (force_batch)       interactive = 0;
     if (force_interactive) interactive = 1;
 
-    int rc = interactive ? _run_interactive(f, show_stats, verilator_mode)
-                         : _run_batch(f, show_stats, verilator_mode);
+    int rc = _run_on_worker_stack(f, show_stats, verilator_mode, interactive);
 
     if (input_file) fclose(f);
     return rc;

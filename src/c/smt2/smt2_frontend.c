@@ -3,9 +3,11 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <time.h>
+#include <sys/resource.h>
 #include "smt2/smt2_frontend.h"
 #include "zsp_lcg.h"
 #include "zsp_bbsolver.h"
+#include "zsp_cube.h"
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -61,6 +63,11 @@ static int _add_var(Smt2Frontend *fe, const char *name, uint32_t len,
     v->width    = width;
     v->is_signed = 0;
     v->_pad[0] = v->_pad[1] = 0;
+    /* Any >64-bit variable is bitblast-only: the CDCL bounds engine models a
+     * variable's domain with an int64 [lo,hi], which cannot represent a wide
+     * value. Routing here is central — it covers scalar, aux, array-element,
+     * and function-return vars alike. */
+    if (width > 64) fe->needs_bitblast = 1;
     return 0;
 }
 
@@ -118,6 +125,22 @@ static Smt2ArrayVar *_find_array_var(Smt2Frontend *fe, const char *name, uint32_
     return NULL;
 }
 
+/* Ensure the substitution stack can hold `need` more entries beyond the current
+ * depth, growing the heap buffer geometrically. Returns 0 only on OOM (caller
+ * then falls back to `unknown`). Never caches a Smt2Subst* across a call that
+ * may reserve — lookups re-index fe->subst_stack, so realloc during recursion
+ * is safe. */
+static int _subst_reserve(Smt2Frontend *fe, uint32_t need) {
+    if (fe->subst_depth + need <= fe->subst_cap) return 1;
+    uint32_t nc = fe->subst_cap ? fe->subst_cap : SMT2_MAX_SUBST;
+    while (nc < fe->subst_depth + need) nc *= 2;
+    Smt2Subst *ns = (Smt2Subst *)realloc(fe->subst_stack, (size_t)nc * sizeof(Smt2Subst));
+    if (!ns) return 0;
+    fe->subst_stack = ns;
+    fe->subst_cap   = nc;
+    return 1;
+}
+
 /* Walk the substitution stack (most recent first) to resolve a symbol.
  * Uses stored lengths rather than strlen to support non-null-terminated
  * names (e.g. let-binding names that point into the parser's arena). */
@@ -171,8 +194,32 @@ static uint8_t _parse_bitvec_sort(Smt2Frontend *fe, const Sexpr *sort) {
     if (!sexpr_is_symbol(sort->list.items[1], "BitVec")) return 0;
     if (sort->list.items[2]->kind != SEXPR_NUMERAL) return 0;
     uint64_t w = sort->list.items[2]->numval;
-    if (w == 0 || w > 64) return 0;
+    if (w == 0 || w > SMT2_MAX_BV_BITS) return 0;
     return (uint8_t)w;
+}
+
+/* Upper bound (as an int64) for an *unsigned* bit-vector of `width` bits.
+ * A width >= 64 cannot represent its full unsigned range in an int64. Wide
+ * (>64-bit) vars are bitblast-only — their true domain is the bit width, not
+ * this bound — so INT64_MAX signals "full range" without the -1 aliasing that
+ * (int64_t)UINT64_MAX would produce. The 64-bit case keeps its legacy
+ * UINT64_MAX(-1) encoding so existing CDCL 64-bit behavior is unchanged. */
+static int64_t _bv_unsigned_hi(uint32_t width) {
+    if (width > 64)  return INT64_MAX;
+    if (width == 64) return (int64_t)UINT64_MAX;
+    return (int64_t)((1ULL << width) - 1);
+}
+
+/* A width >= 64 value produced by ARITHMETIC / bitwise / shift / ite is a CDCL
+ * soundness hazard: the engine models a variable's domain with an int64
+ * [lo,hi], so any result landing in [2^63, 2^64) reads as *negative* and breaks
+ * unsigned propagation — e.g. `(bvult (bvadd x y) x)` (unsigned-overflow check)
+ * returns a wrong `unsat`. Route such a problem to the bit-exact bit-blast
+ * engine. Plain comparisons / equality over 64-bit values are sound (they yield
+ * a 1-bit result and never materialize a >=2^63-bounded aux var), so they stay
+ * on CDCL — this keeps the routing targeted (width-64 arithmetic is rare). */
+static void _flag_wide_arith(Smt2Frontend *fe, uint32_t width) {
+    if (width >= 64) fe->needs_bitblast = 1;
 }
 
 /* Returns 1 on success (populates *out), 0 if not an Array sort,
@@ -204,16 +251,24 @@ static int _is_opaque_sort(Smt2Frontend *fe, const Sexpr *sort) {
 /* Parse (_ bvN W) symbol                                              */
 /* ------------------------------------------------------------------ */
 
-static int _parse_bv_sym(const Sexpr *sym, uint64_t *val_out) {
+static int _parse_bv_sym(const Sexpr *sym, uint64_t *val_out, int *overflow_out) {
+    if (overflow_out) *overflow_out = 0;
     if (sym->kind != SEXPR_SYMBOL) return 0;
     if (sym->sym.len < 3) return 0;
     if (sym->sym.str[0] != 'b' || sym->sym.str[1] != 'v') return 0;
     uint64_t v = 0;
+    int ovf = 0;
     for (uint32_t i = 2; i < sym->sym.len; i++) {
         char c = sym->sym.str[i];
         if (c < '0' || c > '9') return 0;
-        v = v * 10 + (uint64_t)(c - '0');
+        uint64_t d = (uint64_t)(c - '0');
+        /* Detect a value that no longer fits in 64 bits. W1 represents constant
+         * values as 64-bit, so a wider decimal literal must be flagged and the
+         * caller must fall back to `unknown` rather than use a truncated value. */
+        if (v > (UINT64_MAX - d) / 10u) ovf = 1;
+        v = v * 10u + d;
     }
+    if (overflow_out) *overflow_out = ovf;
     *val_out = v;
     return 1;
 }
@@ -235,8 +290,8 @@ static uint32_t _next_var_id(Smt2Frontend *fe) {
 
 static uint32_t _fresh_aux(Smt2Frontend *fe, uint16_t width) {
     uint32_t var_id = _next_var_id(fe);
-    uint64_t max_val = (width >= 64) ? UINT64_MAX : ((1ULL << width) - 1);
-    ExprRef vref = builder_add_var(fe->builder, var_id, (uint8_t)width, 0, 0, (int64_t)max_val);
+    int64_t max_val = _bv_unsigned_hi(width);
+    ExprRef vref = builder_add_var(fe->builder, var_id, (uint8_t)width, 0, 0, max_val);
     /* Mark aux vars as VAR_AUX so search never decides them: they are
      * fully determined by their defining constraint. With the ITE_value
      * cond back-propagation in place, propagation can pin them on its
@@ -329,10 +384,9 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
 
     for (uint32_t i = 0; i < n_elems; i++) {
         uint32_t var_id = _next_var_id(fe);
-        uint64_t max_val = (sort.data_width >= 64) ? UINT64_MAX
-                           : ((1ULL << sort.data_width) - 1);
+        int64_t max_val = _bv_unsigned_hi(sort.data_width);
         builder_add_var(fe->builder, var_id, sort.data_width, 0, 0,
-                        (int64_t)max_val);
+                        max_val);
         char elem_name[SMT2_MAX_NAME];
         snprintf(elem_name, sizeof(elem_name), "%.*s[%u]", (int)copy_len, name, i);
         _add_var(fe, elem_name, (uint32_t)strlen(elem_name), var_id,
@@ -381,9 +435,8 @@ static ExprRef _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
     }
 
     uint32_t var_id = _next_var_id(fe);
-    uint64_t max_val = (arr->sort.data_width >= 64) ? UINT64_MAX
-                       : ((1ULL << arr->sort.data_width) - 1);
-    builder_add_var(fe->builder, var_id, arr->sort.data_width, 0, 0, (int64_t)max_val);
+    int64_t max_val = _bv_unsigned_hi(arr->sort.data_width);
+    builder_add_var(fe->builder, var_id, arr->sort.data_width, 0, 0, max_val);
     char nm[SMT2_MAX_NAME];
     snprintf(nm, sizeof(nm), "__arr%u_%llu", var_id, (unsigned long long)k);
     _add_var(fe, nm, (uint32_t)strlen(nm), var_id, arr->sort.data_width);
@@ -408,6 +461,67 @@ typedef struct {
 static const TaggedExpr TAGGED_NULL = { { EXPR_NULL, 0 }, 0, NULL };
 
 static TaggedExpr _translate_tagged(Smt2Frontend *fe, const Sexpr *s);
+static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s);
+
+/* Set by smt2_main to the worker thread's stack size (bytes) so the B12 depth
+ * guard sizes itself to the REAL stack the translator runs on. Necessary
+ * because RLIMIT_STACK governs only the main thread — the CLI runs the solve on
+ * an explicit large-stack pthread, and runtime setrlimit raises are unreliable
+ * (Linux may refuse to grow the main stack past its initial reservation). 0 =
+ * unset (library / main-thread use) -> fall back to RLIMIT_STACK. */
+size_t g_smt2_translate_stack_bytes = 0;
+
+/* B12: maximum _translate_tagged recursion depth before we bail to `unknown`
+ * rather than overflow the C stack (SIGSEGV). The translator uses ~8.6 KB of
+ * stack per nesting level; budget a conservative 16 KB/level and use 70% of the
+ * available stack, so the bound is always comfortably below the true overflow
+ * point regardless of how the stack was provisioned. Clamp to a sane range so a
+ * missing/unlimited limit can't produce a degenerate bound. Computed once and
+ * cached (single-threaded frontend). */
+static uint32_t _translate_depth_limit(void) {
+    static uint32_t cached = 0;
+    if (cached) return cached;
+    uint64_t stack_bytes = 0;
+    if (g_smt2_translate_stack_bytes) {
+        stack_bytes = (uint64_t)g_smt2_translate_stack_bytes;
+    } else {
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY
+            && rl.rlim_cur > 0)
+            stack_bytes = (uint64_t)rl.rlim_cur;
+    }
+    uint32_t bound;
+    if (stack_bytes == 0) {
+        /* Unknown / unlimited stack: guard only pathological input (~1.6 GB of
+         * stack at 16 KB/level would be needed to reach this depth anyway). */
+        bound = 100000;
+    } else {
+        uint64_t frames = (stack_bytes / (16u * 1024u)) * 7 / 10;
+        if (frames < 256)     frames = 256;
+        if (frames > 4000000) frames = 4000000;
+        bound = (uint32_t)frames;
+    }
+    cached = bound;
+    return cached;
+}
+
+/* Depth-guarded entry to the expression translator. All recursion funnels
+ * through here (both _translate_expr and the mutual _translate_tagged <->
+ * _translate_list_tagged loop), so one guard makes the whole walk crash-proof:
+ * past the limit we set `incomplete` (the check-sat prints `unknown`) instead
+ * of recursing into a stack overflow. The counter is balanced (increment paired
+ * with decrement on every non-bail path) so it returns to 0 after each
+ * top-level translate. */
+static TaggedExpr _translate_tagged(Smt2Frontend *fe, const Sexpr *s) {
+    if (fe->translate_depth >= _translate_depth_limit()) {
+        fe->incomplete = 1;
+        return TAGGED_NULL;
+    }
+    fe->translate_depth++;
+    TaggedExpr r = _translate_tagged_impl(fe, s);
+    fe->translate_depth--;
+    return r;
+}
 
 static TaggedExpr _flatten_to_var(Smt2Frontend *fe, TaggedExpr tg) {
     /* Arrays pass through; they do not need a scalar variable. */
@@ -479,8 +593,8 @@ static TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
     uint8_t width = sf->return_width ? sf->return_width : 1;
     if (!v) {
         uint32_t var_id = _next_var_id(fe);
-        uint64_t max_val = (width >= 64) ? UINT64_MAX : ((1ULL << width) - 1);
-        builder_add_var(fe->builder, var_id, width, 0, 0, (int64_t)max_val);
+        int64_t max_val = _bv_unsigned_hi(width);
+        builder_add_var(fe->builder, var_id, width, 0, 0, max_val);
         if (_add_var(fe, mangled, (uint32_t)mlen, var_id, width) < 0) {
             fprintf(fe->err, "error: out of memory creating mangled var\n");
             return TAGGED_NULL;
@@ -503,8 +617,8 @@ static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
                 fd->name, fd->n_params, call->list.count - 1);
         return TAGGED_NULL;
     }
-    if (fe->subst_depth + fd->n_params > SMT2_MAX_SUBST) {
-        fprintf(fe->err, "error: substitution stack overflow expanding '%s'\n", fd->name);
+    if (!_subst_reserve(fe, fd->n_params)) {
+        fprintf(fe->err, "error: out of memory expanding '%s'\n", fd->name);
         return TAGGED_NULL;
     }
 
@@ -656,6 +770,56 @@ static ExprRef _signed_divrem_expr(SolveProblemBuilder *b, ExprRef S_, ExprRef T
     return builder_expr_ite(b, msb_s, hi, lo);
 }
 
+/* Signed comparison `a <op>s b`, lowered via the MSB-flip identity
+ *   a <s b  <=>  (a ^ 2^(w-1)) <u (b ^ 2^(w-1))
+ * which maps signed order onto unsigned (offset-binary) order.
+ *
+ * The flipped *variable* side is flattened to a materialised var so its bxor
+ * binding is actually compiled and propagates (without this the compare's
+ * operand is a raw xor-expr; the reifier can't materialise it, and the invert
+ * branch — bvsgt/bvsge — dropped to `unknown`). A *constant* operand has its
+ * flip folded into a plain const (the builder does not fold), so _bool_to_var
+ * sees a clean var-vs-const inequality (it reifies var-vs-const, not var-vs-var).
+ * A signed compare of two vars stays var-vs-var -> uncompiled -> sound `unknown`. */
+static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
+                                        BinOp binop) {
+    if (s->list.count != 3) return TAGGED_NULL;
+    TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+    if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
+    TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+    if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
+    uint16_t sw = a.te.width ? a.te.width : b.te.width;
+    if (sw == 0 || sw > 64) {
+        fprintf(fe->err, "error: signed compare of width %u unsupported\n",
+                (unsigned)sw);
+        return TAGGED_NULL;
+    }
+    int64_t  bias_val = (int64_t)(1ULL << (sw - 1));
+    uint64_t mask     = (sw < 64) ? (((uint64_t)1 << sw) - 1) : ~0ULL;
+    ExprRef  bias     = builder_expr_const(fe->builder, bias_val, 0);
+
+    /* variable side: flip then flatten to a var (materialises the bxor) */
+    ExprRef   af  = builder_expr_binary(fe->builder, BIN_BXOR, a.te.ref, bias);
+    TaggedExpr aff = _flatten_to_var(fe, (TaggedExpr){ { af, sw }, 0, NULL });
+    if (aff.te.ref == EXPR_NULL) return TAGGED_NULL;
+
+    /* rhs: fold the flip when constant, else materialise (var-var -> unknown) */
+    ExprRef bref;
+    const void *bp = builder_ref_ptr(fe->builder, b.te.ref);
+    if (bp && *(const ExprKind *)bp == EXPR_CONST) {
+        int64_t bval = ((const ExprConst *)bp)->value;
+        bref = builder_expr_const(fe->builder,
+                   (int64_t)(((uint64_t)bval ^ (uint64_t)bias_val) & mask), 0);
+    } else {
+        ExprRef bf = builder_expr_binary(fe->builder, BIN_BXOR, b.te.ref, bias);
+        TaggedExpr bff = _flatten_to_var(fe, (TaggedExpr){ { bf, sw }, 0, NULL });
+        if (bff.te.ref == EXPR_NULL) return TAGGED_NULL;
+        bref = bff.te.ref;
+    }
+    ExprRef r = builder_expr_binary(fe->builder, binop, aff.te.ref, bref);
+    return (TaggedExpr){ { r, 1 }, 0, NULL };
+}
+
 static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     if (s->list.count == 0) return TAGGED_NULL;
 
@@ -666,9 +830,16 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (s->list.count < 3) return TAGGED_NULL;
         Sexpr *op = s->list.items[1];
         uint64_t bv_val;
-        if (_parse_bv_sym(op, &bv_val)) {
+        int bv_ovf = 0;
+        if (_parse_bv_sym(op, &bv_val, &bv_ovf)) {
             if (s->list.items[2]->kind != SEXPR_NUMERAL) return TAGGED_NULL;
             uint16_t w = (uint16_t)s->list.items[2]->numval;
+            if (bv_ovf) {
+                /* Constant value needs > 64 bits (W1 stores const values as
+                 * 64-bit): answer `unknown` rather than use a truncated value. */
+                fe->incomplete = 1;
+                return TAGGED_NULL;
+            }
             ExprRef r = builder_expr_const(fe->builder, (int64_t)bv_val, 0);
             return (TaggedExpr){ { r, w }, 2, NULL };
         }
@@ -691,6 +862,14 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             TaggedExpr inner = _translate_tagged(fe, s->list.items[1]);
             if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
             uint16_t new_width = inner.te.width + (uint16_t)ext_n;
+
+            /* The native CDCL compile of `r == sign_extend(a)` bounds a wide
+             * (>=64-bit) unsigned result var with a negative lower bound, which
+             * as an unsigned domain becomes a high sliver -> spurious compile-
+             * time UNSAT (verified: sext(x32)->64 == 5 is wrongly unsat). The
+             * bit-blast engine lowers sign-extend exactly, so force it. */
+            if (sign && new_width >= 64)
+                fe->needs_bitblast = 1;
 
             /* Fold zero-extend of a constant: the value is unchanged, but
              * making it a real EXPR_CONST lets downstream passes (e.g. the
@@ -793,17 +972,25 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return TAGGED_NULL;
         }
         uint32_t n = binds->list.count;
-        if (fe->subst_depth + n > SMT2_MAX_SUBST) {
-            fprintf(fe->err, "error: substitution stack overflow in let (%u bindings)\n", n);
-            return TAGGED_NULL;
-        }
         uint32_t saved = fe->subst_depth;
 
         /* Phase 1: evaluate ALL value expressions in the current (outer) scope
          * before any binding takes effect — true parallel SMT-LIB2 semantics.
-         * Store translated values in a temporary buffer, then push bindings. */
-        TaggedExpr let_vals[SMT2_MAX_SUBST];
-        const Sexpr *let_names[SMT2_MAX_SUBST];
+         * Store translated values in a temporary buffer, then push bindings.
+         * Small lets use an inline buffer; larger ones heap-allocate. Keeping
+         * this off a fixed SMT2_MAX_SUBST-sized stack array is what lets deeply
+         * nested `let` recurse (phase 2) without blowing the C stack. */
+        TaggedExpr    sv[8];
+        const Sexpr  *sn[8];
+        TaggedExpr   *let_vals  = sv;
+        const Sexpr **let_names = sn;
+        int           let_heap  = 0;
+        if (n > 8) {
+            let_vals  = (TaggedExpr *)malloc((size_t)n * sizeof(TaggedExpr));
+            let_names = (const Sexpr **)malloc((size_t)n * sizeof(const Sexpr *));
+            if (!let_vals || !let_names) { free(let_vals); free(let_names); goto let_oom; }
+            let_heap = 1;
+        }
         for (uint32_t i = 0; i < n; i++) {
             const Sexpr *b = binds->list.items[i];
             if (b->kind != SEXPR_LIST || b->list.count != 2) goto let_bad;
@@ -811,7 +998,9 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             if (let_names[i]->kind != SEXPR_SYMBOL) goto let_bad;
             let_vals[i] = _translate_tagged(fe, b->list.items[1]);
         }
-        /* Push all bindings after all values are evaluated */
+        /* Reserve after phase 1 (nested translations may have grown the stack),
+         * then push all bindings now that every value is evaluated. */
+        if (!_subst_reserve(fe, n)) goto let_oom;
         for (uint32_t i = 0; i < n; i++) {
             Smt2Subst *e        = &fe->subst_stack[fe->subst_depth++];
             e->name             = let_names[i]->sym.str;
@@ -822,7 +1011,14 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             e->cached_leaf_kind = let_vals[i].leaf_kind;
             e->cached_array     = let_vals[i].array;
             e->has_cache        = 1;
+            e->expanding        = 0;   /* subst_stack is now heap (realloc'd, not
+                                        * zero-init) — must clear explicitly or a
+                                        * garbage `expanding` byte hides this binding
+                                        * from _subst_lookup ("unknown variable"). */
         }
+        /* Values are copied into the subst stack; release the temp buffers
+         * BEFORE the (possibly very deep) phase-2 recursion. */
+        if (let_heap) { free(let_vals); free(let_names); }
 
         /* Phase 2: translate body with all bindings now in scope. */
         {
@@ -831,7 +1027,12 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return res;
         }
     let_bad:
+        if (let_heap) { free(let_vals); free(let_names); }
         fprintf(fe->err, "error: malformed let binding\n");
+        fe->subst_depth = saved;
+        return TAGGED_NULL;
+    let_oom:
+        fprintf(fe->err, "error: out of memory in let (%u bindings)\n", n);
         fe->subst_depth = saved;
         return TAGGED_NULL;
     }
@@ -884,7 +1085,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             } else if (idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
                        sexpr_is_symbol(idx_s->list.items[0], "_")) {
                 uint64_t bv_val;
-                if (_parse_bv_sym(idx_s->list.items[1], &bv_val)) {
+                if (_parse_bv_sym(idx_s->list.items[1], &bv_val, NULL)) {
                     k = bv_val; is_const = 1;
                 }
             }
@@ -962,7 +1163,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             } else if (idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
                        sexpr_is_symbol(idx_s->list.items[0], "_")) {
                 uint64_t bv_val;
-                if (_parse_bv_sym(idx_s->list.items[1], &bv_val)) {
+                if (_parse_bv_sym(idx_s->list.items[1], &bv_val, NULL)) {
                     k = bv_val; is_const = 1;
                 }
             }
@@ -1009,6 +1210,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
             a.te.ref = builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
         } \
+        _flag_wide_arith(fe, a.te.width); \
         return (TaggedExpr){ { a.te.ref, a.te.width }, 0, NULL }; \
     }
 
@@ -1039,29 +1241,11 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     CMPOP_CASE("bvugt", BIN_GT)
     CMPOP_CASE("bvuge", BIN_GTE)
 
-    /* Signed comparisons via the MSB-flip identity:
-     *   a <s b  <=>  (a ^ 2^(w-1)) <u (b ^ 2^(w-1))
-     * Flipping the sign bit maps signed order onto unsigned (offset-binary)
-     * order, so this lowers to already-supported unsigned compare + xor and
-     * needs no engine changes. Verilator emits these for signed rand vars. */
+    /* Signed comparisons — see _translate_signed_cmp (MSB-flip lowering that
+     * materialises the variable side's xor and folds a constant operand). */
 #define SCMPOP_CASE(name, binop) \
-    if (oplen == sizeof(name)-1 && memcmp(op, name, oplen) == 0) { \
-        if (s->list.count != 3) return TAGGED_NULL; \
-        TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1])); \
-        if (a.te.ref == EXPR_NULL) return TAGGED_NULL; \
-        TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2])); \
-        if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
-        uint16_t sw = a.te.width ? a.te.width : b.te.width; \
-        if (sw == 0 || sw > 64) { \
-            fprintf(fe->err, "error: signed compare of width %u unsupported\n", (unsigned)sw); \
-            return TAGGED_NULL; \
-        } \
-        ExprRef bias = builder_expr_const(fe->builder, (int64_t)(1ULL << (sw - 1)), 0); \
-        ExprRef af = builder_expr_binary(fe->builder, BIN_BXOR, a.te.ref, bias); \
-        ExprRef bf = builder_expr_binary(fe->builder, BIN_BXOR, b.te.ref, bias); \
-        ExprRef r = builder_expr_binary(fe->builder, binop, af, bf); \
-        return (TaggedExpr){ { r, 1 }, 0, NULL }; \
-    }
+    if (oplen == sizeof(name)-1 && memcmp(op, name, oplen) == 0) \
+        return _translate_signed_cmp(fe, s, binop);
 
     SCMPOP_CASE("bvslt", BIN_LT)
     SCMPOP_CASE("bvsle", BIN_LTE)
@@ -1214,6 +1398,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
         ExprRef r = builder_expr_unary(fe->builder, UN_INVERT, a.te.ref);
+        _flag_wide_arith(fe, a.te.width);
         return (TaggedExpr){ { r, a.te.width }, 0, NULL };
     }
     if (oplen == 5 && memcmp(op, "bvneg", 5) == 0) {
@@ -1221,6 +1406,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
         ExprRef r = builder_expr_unary(fe->builder, UN_NEG, a.te.ref);
+        _flag_wide_arith(fe, a.te.width);
         return (TaggedExpr){ { r, a.te.width }, 0, NULL };
     }
 
@@ -1367,6 +1553,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         e = _flatten_to_var(fe, e);
         if (e.te.ref == EXPR_NULL) return TAGGED_NULL;
         ExprRef r = builder_expr_ite(fe->builder, c.te.ref, t.te.ref, e.te.ref);
+        _flag_wide_arith(fe, t.te.width);
         return (TaggedExpr){ { r, t.te.width }, 0, NULL };
     }
 
@@ -1398,7 +1585,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 }
 
 /* Entry points */
-static TaggedExpr _translate_tagged(Smt2Frontend *fe, const Sexpr *s) {
+static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s) {
     switch (s->kind) {
     case SEXPR_SYMBOL:
         return _translate_symbol_tagged(fe, s);
@@ -1407,6 +1594,14 @@ static TaggedExpr _translate_tagged(Smt2Frontend *fe, const Sexpr *s) {
         return (TaggedExpr){ { r, 64 }, 2, NULL };
     }
     case SEXPR_BITVEC: {
+        /* A `#x…`/`#b…` literal wider than 64 bits was truncated to 64 bits at
+         * the lexer (Sexpr.bv.value is uint64), so its true value is
+         * unrecoverable here. W1 answers `unknown` rather than risk a wrong
+         * result; wide-valued literals await the W2 multi-limb literal path. */
+        if (s->bv.width > 64) {
+            fe->incomplete = 1;
+            return TAGGED_NULL;
+        }
         ExprRef r = builder_expr_const(fe->builder, (int64_t)s->bv.value, 0);
         return (TaggedExpr){ { r, (uint16_t)s->bv.width }, 2, NULL };
     }
@@ -1785,16 +1980,16 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
         /* Loud but in-sync: an unsupported sort taints the context so the next
          * (check-sat) is `unknown`, rather than exiting and hanging the driver.
          * The var is not created; asserts referencing it also taint. */
-        fprintf(fe->err, "error: unsupported sort (only BitVec 1-64, Bool, or "
+        fprintf(fe->err, "error: unsupported sort (only BitVec 1-128, Bool, or "
                          "Array) -> result will be unknown\n");
         fe->incomplete = 1;
         return 0;
     }
 
     uint32_t var_id = _next_var_id(fe);
-    uint64_t max_val = (width == 64) ? UINT64_MAX : ((1ULL << width) - 1);
+    int64_t max_val = _bv_unsigned_hi(width);
 
-    builder_add_var(fe->builder, var_id, width, 0, 0, (int64_t)max_val);
+    builder_add_var(fe->builder, var_id, width, 0, 0, max_val);
     if (_add_var(fe, name_s->sym.str, name_s->sym.len, var_id, width) < 0) {
         fprintf(fe->err, "error: out of memory adding variable\n");
         return -1;
@@ -1827,7 +2022,23 @@ static int _cmd_define_fun(Smt2Frontend *fe, const Sexpr *cmd) {
         return -1;
     }
 
+    /* Grow the heap-backed funs table (geometric, clamped to the hard cap). */
+    if (fe->n_funs >= fe->funs_cap) {
+        uint32_t newcap = fe->funs_cap ? fe->funs_cap * 2 : 16;
+        if (newcap > SMT2_MAX_FUNS) newcap = SMT2_MAX_FUNS;
+        Smt2FunDef *tmp = (Smt2FunDef *)realloc(
+            fe->funs, (size_t)newcap * sizeof(Smt2FunDef));
+        if (!tmp) {
+            fprintf(fe->err, "error: out of memory growing define-fun table\n");
+            return -1;
+        }
+        fe->funs = tmp;
+        fe->funs_cap = newcap;
+    }
     Smt2FunDef *fd = &fe->funs[fe->n_funs];
+    /* realloc does not zero; the old inline array was zero-initialized by the
+     * blanket memset, so clear this slot to preserve identical semantics. */
+    memset(fd, 0, sizeof(*fd));
     uint32_t nlen = name_s->sym.len < SMT2_MAX_NAME - 1 ?
                     name_s->sym.len : SMT2_MAX_NAME - 1;
     memcpy(fd->name, name_s->sym.str, nlen);
@@ -2128,6 +2339,56 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
     return rc == ZSP_BB_ERROR ? -1 : 0;
 }
 
+/* True when the cube-and-conquer engine is explicitly selected
+ * (DV_ENGINE=cube). Opt-in only: cube-and-conquer targets single hard QF_BV
+ * instances, so it never auto-engages — the caller asks for it. */
+static int _engine_is_cube(Smt2Frontend *fe) {
+    (void)fe;
+    const char *e = getenv("DV_ENGINE");
+    return e && strcmp(e, "cube") == 0;
+}
+
+/* Cube-and-conquer engine (docs/cube_and_conquer_design.md). Like the bitblast
+ * path it runs directly on fe->problem and keeps fe->bb_solver alive for
+ * subsequent (get-value). Bit-blasts once, then partitions the search space
+ * into cubes solved over the shared instance. Soundness contract is enforced
+ * inside zsp_cube_check (SAT on any cube; UNSAT only on an exhaustive all-UNSAT
+ * partition; otherwise unknown). No Verilator identity cache — cube is for
+ * one-shot hard instances, not the re-randomize loop. */
+static int _check_sat_cube(Smt2Frontend *fe) {
+    if (!fe->problem) {
+        fprintf(fe->out, "unknown\n");
+        fflush(fe->out);
+        return -1;
+    }
+    if (fe->bb_solver) {
+        zsp_bbsolver_free(fe->bb_solver);
+        fe->bb_solver = NULL;
+    }
+    /* Prefer CaDiCaL: cube-and-conquer needs retractable assumptions. Falls
+     * back to kissat (→ single-shot solve) when CaDiCaL is not compiled in. */
+    fe->bb_solver = zsp_bbsolver_new_backend(NULL, fe->problem, /*prefer_cadical=*/1);
+    if (!fe->bb_solver) {
+        fprintf(fe->out, "unknown\n");
+        fflush(fe->out);
+        return -1;
+    }
+    int rc = zsp_cube_check(fe->bb_solver, fe->seed);
+    if (rc == ZSP_BB_SAT) {
+        fprintf(fe->out, "sat\n");
+        fe->last_result = SOLVE_OK;
+        fe->has_result = 1;
+    } else if (rc == ZSP_BB_UNSAT) {
+        fprintf(fe->out, "unsat\n");
+        fe->last_result = SOLVE_UNSAT;
+        fe->has_result = 1;
+    } else {
+        fprintf(fe->out, "unknown\n");
+    }
+    fflush(fe->out);
+    return rc == ZSP_BB_ERROR ? -1 : 0;
+}
+
 /* Pick the solve engine for the current problem.
  *
  *   DV_ENGINE=bitblast / bb  → force bitblast
@@ -2144,6 +2405,12 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
  * under bitblast. The auto-route lifts those out of the timeout bucket
  * without users having to set DV_ENGINE manually. */
 static int _engine_is_bitblast(Smt2Frontend *fe) {
+    /* Audit knob: force CDCL for everything, ignoring needs_bitblast and the
+     * logic-based auto-route. Used to verify CDCL is correct on its own (bitblast
+     * as a pure performance optimizer, not a correctness crutch). Under this
+     * knob a CantCompile construct should yield `unknown` or a correct answer —
+     * never a wrong sat/unsat. */
+    if (getenv("DV_NO_BITBLAST")) return 0;
     /* A problem that lowered a CDCL-unsound construct (e.g. signed div/rem)
      * MUST bitblast — even under an explicit DV_ENGINE=cdcl, since CDCL would
      * return a wrong model here. This overrides the env, deliberately. */
@@ -2169,6 +2436,35 @@ static int64_t _fe_get_var_value(Smt2Frontend *fe, uint32_t var_id) {
     return solver_get_value(fe->ctx, var_id);
 }
 
+/* Read back the full (possibly >64-bit) model value of `var_id` into
+ * little-endian 64-bit limbs. Only meaningful on the bitblast engine, which is
+ * the only path that solves wide (>64-bit) variables; returns 0 on success. */
+static int _fe_get_var_value_wide(Smt2Frontend *fe, uint32_t var_id,
+                                  uint64_t *limbs, uint32_t n_limbs) {
+    for (uint32_t i = 0; i < n_limbs; i++) limbs[i] = 0;
+    if (fe->bb_solver &&
+        zsp_bbsolver_value_wide(fe->bb_solver, var_id, limbs, n_limbs) == 0)
+        return 0;
+    /* Fallback: the low 64 bits from the scalar reader (wide vars never reach
+     * the CDCL engine, so this is only hit if the bbsolver lookup missed). */
+    limbs[0] = (uint64_t)_fe_get_var_value(fe, var_id);
+    return 0;
+}
+
+/* Emit a `#b…` binary literal for a wide value carried in little-endian limbs
+ * (limbs[0] = bits [0,63]). Mirrors _emit_bv_bin_literal but spans all bits. */
+static void _emit_bv_bin_literal_wide(FILE *out, const uint64_t *limbs,
+                                      uint32_t n_limbs, unsigned width) {
+    if (width == 0) width = 1;
+    fputs("#b", out);
+    for (int i = (int)width - 1; i >= 0; i--) {
+        unsigned limb = (unsigned)(i / 64);
+        unsigned bit = (limb < n_limbs)
+            ? (unsigned)((limbs[limb] >> (i % 64)) & 1u) : 0u;
+        fputc(bit ? '1' : '0', out);
+    }
+}
+
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     (void)cmd;
 
@@ -2189,9 +2485,24 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     if (fe->verilator_mode)
         fe->seed = ++fe->div_counter;
 
-    /* Verilator fast path: bit-blast only, so finalize the problem but skip the
-     * unused CDCL context build (and the reset that would free it). */
-    if (fe->verilator_mode && _engine_is_bitblast(fe)) {
+    /* Bit-blast path: finalize the problem but skip the unused CDCL context
+     * build. The bit-blast engine reads fe->problem directly and never touches
+     * fe->ctx, so compiling first is pure waste — and worse, it can report a
+     * spurious compile-time UNSAT for constructs the native CDCL compile lowers
+     * unsoundly (e.g. `r == sign_extend(a)` into a wide unsigned var, which the
+     * compile bounds with a negative lb → empty domain). Skipping the compile
+     * lets bit-blast answer these correctly. (Previously gated on
+     * verilator_mode; now applies to any bit-blast-routed solve.) */
+    if (_engine_is_cube(fe)) {
+        if (_ensure_problem(fe) < 0) {
+            fprintf(fe->out, "unknown\n");
+            fflush(fe->out);
+            return -1;
+        }
+        return _check_sat_cube(fe);
+    }
+
+    if (_engine_is_bitblast(fe)) {
         if (_ensure_problem(fe) < 0) {
             fprintf(fe->out, "unknown\n");
             fflush(fe->out);
@@ -2214,6 +2525,13 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         fflush(fe->out);
         return -1;
     }
+    /* crc > 0 (some constraints uncompiled) is SOUND without special handling:
+     * a CDCL `unsat` is monotone-correct (dropping constraints only loosens the
+     * problem), and a CDCL `sat` is re-checked by the model-validation net below
+     * against the FULL fe->problem (incl. the dropped constraints), downgrading
+     * to unknown on any violation. So the only remaining CDCL soundness risk is
+     * a wrong `unsat`, which validation cannot catch — those are fixed at the
+     * source (e.g. the sign_extend compile no longer conflicts; see zsp_compile). */
 
     if (_engine_is_bitblast(fe)) {
         return _check_sat_bitblast(fe);
@@ -2334,7 +2652,8 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * Guarded on no incremental aux constraints: _check_sat_bitblast solves
      * fe->problem only, so with pending aux it would miss constraints -- there
      * we keep the honest unknown. */
-    if (fe->last_result == SOLVE_TIMEOUT && fe->n_aux_problems == 0) {
+    if (fe->last_result == SOLVE_TIMEOUT && fe->n_aux_problems == 0
+        && !getenv("DV_NO_BITBLAST")) {   /* audit mode: keep pure-CDCL unknown */
         return _check_sat_bitblast(fe);
     }
 
@@ -2405,6 +2724,10 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
     if (!*ok || !s) { *ok = 0; return r; }
 
     if (s->kind == SEXPR_BITVEC) {
+        /* This evaluator carries a 64-bit value; a wider literal was truncated
+         * at the lexer, so refuse to fold it (get-value emits an honest error
+         * placeholder rather than a wrong value). */
+        if (s->bv.width > 64) { *ok = 0; return r; }
         r.value = s->bv.value;
         r.width = (uint16_t)s->bv.width;
         return r;
@@ -2445,6 +2768,7 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
                 val = val * 10 + (uint64_t)(bv->sym.str[i] - '0');
             }
             r.width = (uint16_t)s->list.items[2]->numval;
+            if (r.width > 64) { *ok = 0; return r; }  /* 64-bit eval; don't fold wide */
             r.value = _trunc(val, r.width);
             return r;
         }
@@ -2596,9 +2920,16 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
 
             Smt2Var *v = _find_var(fe, name_s->sym.str, name_s->sym.len);
             if (v) {
-                int64_t val = _fe_get_var_value(fe, v->var_id);
                 fprintf(fe->out, "(%.*s ", (int)name_s->sym.len, name_s->sym.str);
-                _emit_bv_bin_literal(fe->out, (uint64_t)val, (unsigned)v->width);
+                if (v->width > 64) {
+                    uint64_t limbs[(SMT2_MAX_BV_BITS + 63) / 64];
+                    uint32_t nl = (v->width + 63u) / 64u;
+                    _fe_get_var_value_wide(fe, v->var_id, limbs, nl);
+                    _emit_bv_bin_literal_wide(fe->out, limbs, nl, (unsigned)v->width);
+                } else {
+                    int64_t val = _fe_get_var_value(fe, v->var_id);
+                    _emit_bv_bin_literal(fe->out, (uint64_t)val, (unsigned)v->width);
+                }
                 fprintf(fe->out, ")");
                 continue;
             }
@@ -2617,7 +2948,7 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
             if (idx_s && idx_s->kind == SEXPR_BITVEC) { k = idx_s->bv.value; is_const = 1; }
             else if (idx_s && idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
                      sexpr_is_symbol(idx_s->list.items[0], "_")) {
-                uint64_t bv; if (_parse_bv_sym(idx_s->list.items[1], &bv)) { k = bv; is_const = 1; }
+                uint64_t bv; if (_parse_bv_sym(idx_s->list.items[1], &bv, NULL)) { k = bv; is_const = 1; }
             }
             if (av && is_const) {
                 uint8_t dw = av->sort.data_width, aw = av->sort.addr_width;
@@ -3059,6 +3390,8 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     if (fe->block_alloc) zsp_block_alloc_destroy(fe->block_alloc);
     free(fe->ctx_buf);
     free(fe->vars);
+    free(fe->funs);
+    free(fe->subst_stack);
     sexpr_arena_destroy(&fe->persistent_arena);
     /* Free persistent array var allocations (dense elems[] or sparse map) */
     for (uint32_t i = 0; i < fe->n_array_vars; i++) {
@@ -3103,6 +3436,8 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     if (fe->block_alloc) zsp_block_alloc_destroy(fe->block_alloc);
     free(fe->ctx_buf);
     free(fe->vars);
+    free(fe->funs);          /* re-zeroed by the memset below; realloc'd on next define-fun */
+    free(fe->subst_stack);   /* re-zeroed by the memset below; realloc'd on next let */
     for (uint32_t i = 0; i < fe->n_array_vars; i++) {
         if (fe->array_vars[i].value) {
             free(fe->array_vars[i].value->elems);

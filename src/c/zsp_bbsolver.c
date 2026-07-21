@@ -13,6 +13,7 @@
 #include "zsp_bvdom.h"
 #include "zsp_pool.h"
 #include "zsp_sat.h"
+#include "zsp_thread.h"
 
 /* ----------------------------- types -------------------------------------- */
 
@@ -26,6 +27,7 @@ typedef struct {
     int64_t  hi;
     zsp_bv_t bv;        /* lazily filled on first reference */
     int      bv_built;
+    int      bounds_asserted; /* lo<=v<=hi already emitted (incremental reuse) */
 } bb_var_t;
 
 /* Memoization cache entry — one per ExprRef byte offset in the pool. */
@@ -322,22 +324,48 @@ static int try_record_subst(zsp_bbsolver_t *S, ExprRef vref, ExprRef eref) {
  * can be skipped); 0 if any sub-assert remained (root must still be
  * encoded). */
 static int collect_substs_from(zsp_bbsolver_t *S, ExprRef root) {
-    if (root == EXPR_NULL) return 0;
-    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, root);
-    if (!kp) return 0;
-    if (*kp == EXPR_BINARY) {
-        ExprBinary *b = (ExprBinary *)kp;
-        if (b->op == BIN_AND) {
-            int l = collect_substs_from(S, b->lhs);
-            int r = collect_substs_from(S, b->rhs);
-            return l && r;
+    /* Flatten the BIN_AND spine ITERATIVELY. A deep conjunction of equalities
+     * (large graph-colouring / sudoku instances) would otherwise recurse one
+     * C-stack frame per conjunct and overflow the stack (was crash B10, subst
+     * pre-pass site). Leaves are visited LEFT-TO-RIGHT, exactly as the former
+     * recursion, so subst-recording order — hence the cycle-gate outcome in
+     * try_record_subst — is byte-for-byte unchanged. Returns 1 iff EVERY
+     * sub-assert under root was consumed as a substitution (root can be
+     * skipped); every leaf is still visited even after one fails to consume, so
+     * all recordable substitutions are recorded (matching the old `l && r`). */
+    ExprRef *stk = NULL;
+    size_t n = 0, cap = 0;
+    int all_consumed = 1;
+    #define CS_PUSH(R) do {                                                 \
+        if (n == cap) { size_t nc = cap ? cap * 2 : 32;                     \
+            ExprRef *t = (ExprRef *)realloc(stk, nc * sizeof(ExprRef));     \
+            if (!t) { free(stk); return 0; }                               \
+            stk = t; cap = nc; }                                            \
+        stk[n++] = (R);                                                     \
+    } while (0)
+    CS_PUSH(root);
+    while (n > 0) {
+        ExprRef r = stk[--n];
+        if (r == EXPR_NULL) { all_consumed = 0; continue; }
+        ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, r);
+        if (!kp) { all_consumed = 0; continue; }
+        if (*kp == EXPR_BINARY) {
+            ExprBinary *b = (ExprBinary *)kp;
+            if (b->op == BIN_AND) {
+                CS_PUSH(b->rhs);   /* push rhs first so lhs pops (is visited) first */
+                CS_PUSH(b->lhs);
+                continue;
+            }
+            if (b->op == BIN_EQ) {
+                if (try_record_subst(S, b->lhs, b->rhs)) continue;  /* consumed */
+                if (try_record_subst(S, b->rhs, b->lhs)) continue;  /* consumed */
+            }
         }
-        if (b->op == BIN_EQ) {
-            if (try_record_subst(S, b->lhs, b->rhs)) return 1;
-            if (try_record_subst(S, b->rhs, b->lhs)) return 1;
-        }
+        all_consumed = 0;   /* this leaf was not consumable as a substitution */
     }
-    return 0;
+    #undef CS_PUSH
+    free(stk);
+    return all_consumed;
 }
 
 /* Pre-pass: scan all top-level constraints, populate S->subst, mark
@@ -482,17 +510,86 @@ static zsp_bv_t err_bv(zsp_bbsolver_t *S, const char *msg) {
     return empty;
 }
 
-static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, uint16_t hint) {
+/* True iff `rf` is an in-range AND/OR EXPR_BINARY node — i.e. one the iterative
+ * AND/OR evaluator manages on its explicit stack (and memoizes), as opposed to a
+ * leaf operand it blasts directly via bb_predicate. */
+static int bb_is_andor_node(zsp_bbsolver_t *S, ExprRef rf) {
+    if (rf == EXPR_NULL || rf >= S->cache_cap) return 0;
+    ExprKind *kk = (ExprKind *)POOL_PTR(S->problem, rf);
+    return kk && *kk == EXPR_BINARY &&
+           (((const ExprBinary *)kk)->op == BIN_AND ||
+            ((const ExprBinary *)kk)->op == BIN_OR);
+}
+
+static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, ExprRef ref,
+                          uint16_t hint) {
     /* Comparison / logical ops always produce 1-bit; arithmetic / bitwise
      * widen lhs and rhs to a common width = max(lhs, rhs, hint). */
     switch (b->op) {
     case BIN_AND:
     case BIN_OR: {
-        zsp_bv_t a = bb_predicate(S, b->lhs);
-        zsp_bv_t c = bb_predicate(S, b->rhs);
-        if (S->had_error) return a;
-        return (b->op == BIN_AND) ? zsp_bb_and(S->bb, a, c)
-                                  : zsp_bb_or (S->bb, a, c);
+        /* Evaluate the AND/OR expression tree ITERATIVELY with the SAME
+         * memoization as the recursive path, so the produced AIG is
+         * byte-identical (DAG-shared sub-formulas stay shared) while the C stack
+         * stays O(1) on deep spines. A deep (and c1 (and c2 (and c3 ...))) chain
+         * — thousands of conjuncts, as large graph-colouring / edge-matching /
+         * sudoku instances build — otherwise recurses one C-stack frame per
+         * conjunct (bb_binary->bb_predicate->bb_expr->bb_binary) and overflows
+         * the stack (was crash B10). A NAIVE flatten avoids the crash but
+         * dissolves shared sub-conjunctions (they memoize once in the recursive
+         * path), changing the CNF and REGRESSING heavy-tail solves (mcm/70
+         * 40s->timeout) — hence this structure-preserving version instead.
+         *
+         * Only AND/OR nodes go on the explicit stack; non-AND/OR operands are
+         * blasted via bb_predicate (bounded recursion). Each AND/OR node memoizes
+         * into S->cache — the exact slot bb_expr uses — so a shared node is
+         * computed once. Falls back to plain recursion when memoization is off
+         * (DV_BB_NO_MEMO) or the ref is out of cache range (the only path that
+         * can still deep-recurse, both non-default). */
+        int memo = (getenv("DV_BB_NO_MEMO") == NULL) && S->cache != NULL;
+        if (!memo || ref >= S->cache_cap) {
+            zsp_bv_t a = bb_predicate(S, b->lhs);
+            zsp_bv_t c = bb_predicate(S, b->rhs);
+            if (S->had_error) return a;
+            return (b->op == BIN_AND) ? zsp_bb_and(S->bb, a, c)
+                                      : zsp_bb_or (S->bb, a, c);
+        }
+        typedef struct { ExprRef ref; int phase; } bb_fr;
+        bb_fr *stk = NULL; size_t n = 0, cap = 0;
+        #define BB_PUSH(R,P) do {                                              \
+            if (n == cap) { size_t nc = cap ? cap * 2 : 64;                    \
+                bb_fr *t = (bb_fr *)realloc(stk, nc * sizeof(bb_fr));          \
+                if (!t) { free(stk); return err_bv(S, "oom: and/or eval"); }   \
+                stk = t; cap = nc; }                                           \
+            stk[n].ref = (R); stk[n].phase = (P); n++;                         \
+        } while (0)
+        /* operand predicate: cached AND/OR result, else blast the leaf. */
+        #define BB_OPND(RF) ( (bb_is_andor_node(S, (RF)) &&                    \
+            S->cache[(RF)].bv.size != 0) ? S->cache[(RF)].bv                   \
+                                         : bb_predicate(S, (RF)) )
+        BB_PUSH(ref, 0);
+        while (n > 0) {
+            bb_fr it = stk[--n];
+            const ExprBinary *nb =
+                (const ExprBinary *)POOL_PTR(S->problem, it.ref);
+            if (it.phase == 0) {
+                if (S->cache[it.ref].bv.size != 0) continue;   /* shared: done */
+                BB_PUSH(it.ref, 1);                            /* combine later */
+                if (bb_is_andor_node(S, nb->rhs)) BB_PUSH(nb->rhs, 0);
+                if (bb_is_andor_node(S, nb->lhs)) BB_PUSH(nb->lhs, 0); /* lhs 1st */
+            } else {
+                zsp_bv_t a = BB_OPND(nb->lhs);
+                if (S->had_error) { free(stk); return a; }
+                zsp_bv_t c = BB_OPND(nb->rhs);
+                if (S->had_error) { free(stk); return c; }
+                S->cache[it.ref].bv = (nb->op == BIN_AND)
+                    ? zsp_bb_and(S->bb, a, c) : zsp_bb_or(S->bb, a, c);
+            }
+        }
+        #undef BB_PUSH
+        #undef BB_OPND
+        free(stk);
+        return S->cache[ref].bv;
     }
     case BIN_EQ:
     case BIN_NEQ: {
@@ -795,7 +892,7 @@ static zsp_bv_t bb_expr(zsp_bbsolver_t *S, ExprRef ref, uint16_t hint_width) {
     switch (*kp) {
     case EXPR_CONST:    return bb_const(S, (ExprConst *)kp, hint_width);
     case EXPR_VAR:      out = bb_var_expr(S, (ExprVar *)kp); break;
-    case EXPR_BINARY:   out = bb_binary(S, (ExprBinary *)kp, hint_width); break;
+    case EXPR_BINARY:   out = bb_binary(S, (ExprBinary *)kp, ref, hint_width); break;
     case EXPR_UNARY:    out = bb_unary(S, (ExprUnary *)kp, hint_width); break;
     case EXPR_ITE:      out = bb_ite(S, (ExprITE *)kp, hint_width); break;
     case EXPR_IN_RANGE: out = bb_in_range(S, (ExprInRange *)kp); break;
@@ -879,7 +976,34 @@ static int assert_var_bounds(zsp_bbsolver_t *S, uint32_t var_id) {
 
 /* ----------------------------- public API --------------------------------- */
 
-zsp_bbsolver_t *zsp_bbsolver_new(zsp_alloc_t *alloc, SolveProblem *problem) {
+/* Select the SAT backend for a fresh bbsolver. Defaults to KISSAT (the
+ * historical one-shot behavior). DV_SAT_BACKEND=cadical|bb forces the
+ * incremental CaDiCaL backend (audit/benchmark knob, mirroring DV_ENGINE);
+ * =kissat forces kissat. When CaDiCaL is not compiled in, a cadical request
+ * transparently falls back to kissat (see zsp_sat_new_backend). This is the
+ * single creation site; interaction-shape routing (BMC/incremental → cadical)
+ * layers on top of this later. */
+/* prefer_cadical: -1 = env-driven (DV_SAT_BACKEND, default kissat), 0 = force
+ * kissat, 1 = force CaDiCaL. A forced CaDiCaL request still falls back to
+ * kissat transparently when CaDiCaL is not compiled in (see
+ * zsp_sat_new_backend); callers that require incrementality re-check via
+ * zsp_bbsolver_is_incremental. */
+static zsp_sat_t *bb_new_sat(zsp_alloc_t *alloc, int prefer_cadical) {
+    if (prefer_cadical < 0) {
+        const char *e = getenv("DV_SAT_BACKEND");
+        if (e && (strcmp(e, "cadical") == 0 || strcmp(e, "cd") == 0 ||
+                  strcmp(e, "bb") == 0)) {
+            prefer_cadical = 1;
+        } else {
+            prefer_cadical = 0;
+        }
+    }
+    return zsp_sat_new_backend(alloc, prefer_cadical ? ZSP_SAT_BACKEND_CADICAL
+                                                     : ZSP_SAT_BACKEND_KISSAT);
+}
+
+static zsp_bbsolver_t *bbsolver_new_ex(zsp_alloc_t *alloc, SolveProblem *problem,
+                                       int prefer_cadical) {
     if (!problem) return NULL;
     zsp_bbsolver_t *S = (zsp_bbsolver_t *)xalloc(alloc, sizeof(*S));
     if (!S) return NULL;
@@ -887,7 +1011,7 @@ zsp_bbsolver_t *zsp_bbsolver_new(zsp_alloc_t *alloc, SolveProblem *problem) {
     S->alloc = alloc;
     S->problem = problem;
     S->aig = zsp_aig_new(alloc);
-    S->sat = zsp_sat_new(alloc);
+    S->sat = bb_new_sat(alloc, prefer_cadical);
     S->cnf = zsp_aig_cnf_new(alloc, S->aig, S->sat);
     S->bb  = zsp_bitblast_new(alloc, S->aig);
     if (!S->aig || !S->sat || !S->cnf || !S->bb) {
@@ -931,6 +1055,16 @@ zsp_bbsolver_t *zsp_bbsolver_new(zsp_alloc_t *alloc, SolveProblem *problem) {
         if (S->cache) memset(S->cache, 0, S->cache_cap * sizeof(bb_cache_entry_t));
     }
     return S;
+}
+
+zsp_bbsolver_t *zsp_bbsolver_new(zsp_alloc_t *alloc, SolveProblem *problem) {
+    return bbsolver_new_ex(alloc, problem, /*prefer_cadical=*/-1);
+}
+
+zsp_bbsolver_t *zsp_bbsolver_new_backend(zsp_alloc_t *alloc,
+                                         SolveProblem *problem,
+                                         int prefer_cadical) {
+    return bbsolver_new_ex(alloc, problem, prefer_cadical);
 }
 
 void zsp_bbsolver_free(zsp_bbsolver_t *S) {
@@ -1096,14 +1230,16 @@ static void _diversify(zsp_bbsolver_t *S) {
     S->node_val = nv;
 }
 
-int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
-    if (!S || !S->problem) return ZSP_BB_ERROR;
-
-    S->seed = seed;
-    /* Seed kissat's randomness so repeated checks can return different models
-     * (the completeness-fallback's only source of stimulus diversity). */
-    zsp_sat_set_seed(S->sat, seed);
-
+/* Bit-blast + CNF-encode the whole problem (constraints, kept softs, subst
+ * force-builds, variable bounds) WITHOUT solving. Shared by the one-shot
+ * zsp_bbsolver_check and the cube engine's zsp_bbsolver_prepare, which then
+ * drives its own assumption-based solve loop over the same encoded instance.
+ * Returns ZSP_BB_ENCODE_READY when the instance is fully encoded and ready to
+ * solve, or ZSP_BB_UNKNOWN / ZSP_BB_ERROR (with S->last_result set) when a
+ * construct is unsupported or a hard error occurred. NOTE: the "ready" sentinel
+ * is deliberately NOT 0 — ZSP_BB_UNKNOWN is 0, so a 0-means-ready contract would
+ * make a deferral look like success and drop the unsupported hard constraint. */
+static int _bb_encode(zsp_bbsolver_t *S) {
     /* A-4 soundness guard: the bit-blaster does not encode AllDifferent or
      * Source groups. pyvsc never emits these on the dv-solve path (unique
      * lowers to NEQ pairs; no sources), but if one ever appears we must NOT
@@ -1114,10 +1250,7 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
         return ZSP_BB_UNKNOWN;
     }
 
-    int stats_enabled = getenv("DV_BB_STATS") != NULL;
     int subst_enabled = getenv("DV_BB_NO_SUBST") == NULL;
-    struct timespec t0, t1, t2;
-    if (stats_enabled) clock_gettime(CLOCK_MONOTONIC, &t0);
 
     if (subst_enabled) run_subst_pass(S);
     /* run_subst_pass uses S->resolving as a scratch visited bitmap
@@ -1199,12 +1332,280 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
     /* Variable bounds — only for variables that were actually referenced
      * (and therefore had a bv built). Vars never referenced are unconstrained. */
     for (uint32_t i = 0; i < S->n_vars; i++) {
-        if (S->vars[i].defined && S->vars[i].bv_built) {
+        if (S->vars[i].defined && S->vars[i].bv_built && !S->vars[i].bounds_asserted) {
             assert_var_bounds(S, i);
+            S->vars[i].bounds_asserted = 1;
         }
     }
 
+    return ZSP_BB_ENCODE_READY;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Diversified SAT portfolio (B1).
+ *
+ * The per-solve cost on hard single QF_BV instances is a SAT-search HEAVY TAIL,
+ * not an encoding defect: identical-size CNFs solve 30x apart, and the runtime
+ * tails of different backends are ANTI-CORRELATED (kissat wins some, CaDiCaL
+ * others). So the lever is min-of-N over a diverse fleet: replay the recorded
+ * clause DB into N independent solver instances — spread across backends first
+ * (the strongest diversity axis), then seeds — run them concurrently on the
+ * FULL instance, and take the first verdict. A full-instance solve carries no
+ * assumptions, so ANY worker's SAT/UNSAT is authoritative for the whole problem;
+ * the winner's model installs exactly like a cube worker's. Losers are aborted
+ * mid-solve via the terminate hook the instant a peer finishes.
+ *
+ * Opt-in via DV_PORTFOLIO=N (N>=2). Unset/0/1 leaves the single-solve path (and
+ * thus every existing caller) byte-for-byte unchanged.
+ * ------------------------------------------------------------------------- */
+
+/* Golden-ratio odd constant: spreads per-worker seeds so their low bits (hence
+ * kissat/CaDiCaL initial phases) differ. */
+#define BB_PORT_GOLDEN 0x9E3779B97F4A7C15ull
+
+static uint32_t bb_portfolio_workers(void) {
+    const char *e = getenv("DV_PORTFOLIO");
+    if (!e || !*e) return 0;
+    long n = atol(e);
+    if (n < 2) return 0;         /* 0/1 => portfolio off (single solve) */
+    if (n > 256) n = 256;        /* hard cap on the fleet */
+    return (uint32_t)n;
+}
+
+typedef struct bb_port_arg_s {
+    /* shared, read-only after spawn */
+    const int32_t     *db;
+    size_t             db_n;
+    int32_t            max_var;
+    zsp_sat_backend_t  backend;
+    uint64_t           seed;
+    int                verbose;
+    uint32_t           idx;
+    /* peer roster so the winner can interrupt the losers (see bb_port_worker) */
+    struct bb_port_arg_s *all;
+    uint32_t           n_all;
+    /* shared, mutable (guarded by *mtx except *stop which is poll-only) */
+    zsp_mutex_t       *mtx;
+    volatile int      *stop;     /* 1 once any worker has a verdict            */
+    int               *result;   /* ZSP_BB_SAT/UNSAT written by the winner     */
+    zsp_sat_t        **winner;   /* winning instance (model source), or NULL   */
+    /* out: this worker's instance (freed by the driver after model install).
+     * Published under *mtx so a winning peer sees it before interrupting.      */
+    zsp_sat_t         *sat;
+} bb_port_arg;
+
+/* Terminate callback: the losing workers poll the shared stop flag and abort.
+ * A benign lock-free read — the flag only ever transitions 0->1, and a slightly
+ * stale read just means a worker grinds a few more conflicts before quitting. */
+static int bb_port_terminate(void *state) {
+    return *(volatile int *)state;
+}
+
+static void *bb_port_worker(void *arg) {
+    bb_port_arg *w = (bb_port_arg *)arg;
+
+    zsp_sat_t *sat = zsp_sat_new_backend(NULL, w->backend);
+    if (!sat) return NULL;   /* w->sat stays NULL (calloc'd); peers skip us */
+    /* Seed BEFORE any clause is added (CaDiCaL only honors seed/phase at init). */
+    if (w->seed) zsp_sat_set_seed(sat, w->seed);
+    zsp_sat_reserve(sat, (zsp_sat_var_t)w->max_var);
+    for (size_t i = 0; i < w->db_n; i++)
+        zsp_sat_add(sat, (zsp_sat_lit_t)w->db[i]);
+    /* CaDiCaL polls this and aborts on the shared stop flag; kissat stores but
+     * ignores it (interrupted instead via zsp_sat_interrupt below). */
+    zsp_sat_set_terminate(sat, (void *)w->stop, bb_port_terminate);
+
+    /* Publish our instance so a winning peer can interrupt us, and bail if a
+     * peer already won while we were building. */
+    zsp_mutex_lock(w->mtx);
+    w->sat = sat;
+    int already = *w->stop;
+    zsp_mutex_unlock(w->mtx);
+    if (already) return NULL;
+
+    /* Full-instance solve (no assumptions, no conflict limit). */
+    int rc = zsp_sat_solve(sat);
+
+    zsp_mutex_lock(w->mtx);
+    if (!*w->stop && (rc == ZSP_BB_SAT || rc == ZSP_BB_UNSAT)) {
+        *w->result = rc;
+        if (rc == ZSP_BB_SAT) *w->winner = sat;
+        *w->stop = 1;
+        /* Stop the losers now: CaDiCaL peers see the flag via their callback,
+         * kissat peers need the explicit poke. Safe under the mutex — every peer
+         * that could be mid-solve has already published its instance. */
+        for (uint32_t j = 0; j < w->n_all; j++)
+            if (j != w->idx && w->all[j].sat)
+                zsp_sat_interrupt(w->all[j].sat);
+        if (w->verbose)
+            fprintf(stderr, "[bb-port] worker %u (%s seed=%llu) won: %s\n",
+                    w->idx,
+                    w->backend == ZSP_SAT_BACKEND_CADICAL ? "cadical" : "kissat",
+                    (unsigned long long)w->seed,
+                    rc == ZSP_BB_SAT ? "sat" : "unsat");
+    }
+    zsp_mutex_unlock(w->mtx);
+    return NULL;   /* keep `sat` alive; the driver reads the winner then frees. */
+}
+
+/* Assign (backend, seed) to worker `i`. Backend is the primary diversity axis:
+ * worker 0 = kissat, worker 1 = CaDiCaL (the proven anti-correlated pair, both
+ * at the caller's base seed = the field-measured fast configs). Extra workers
+ * alternate backends and take a spread seed. When CaDiCaL is absent everything
+ * runs on kissat, so seed diversity carries all the load (worker 0 keeps the
+ * base seed; the rest are spread). */
+static void bb_port_assign(uint32_t i, uint64_t base_seed, int have_cd,
+                           zsp_sat_backend_t *bk, uint64_t *seed) {
+    /* DV_PORT_BACKENDS overrides the backend mix (E2.3 calibration knob):
+     *   "cadical" -> all workers CaDiCaL (seed diversity only); every worker gets
+     *               a spread seed since there is no backend axis to diversify on.
+     *   "kissat"  -> all workers kissat.
+     *   unset/"mixed" -> the default anti-correlated kissat/CaDiCaL alternation. */
+    const char *mix = getenv("DV_PORT_BACKENDS");
+    if (mix && have_cd && strcmp(mix, "cadical") == 0) {
+        *bk = ZSP_SAT_BACKEND_CADICAL;
+        *seed = (i == 0) ? base_seed : (base_seed ^ ((uint64_t)i * BB_PORT_GOLDEN));
+        return;
+    }
+    if (mix && strcmp(mix, "kissat") == 0) {
+        *bk = ZSP_SAT_BACKEND_KISSAT;
+        *seed = (i == 0) ? base_seed : (base_seed ^ ((uint64_t)i * BB_PORT_GOLDEN));
+        return;
+    }
+    if (have_cd) {
+        *bk = (i & 1u) ? ZSP_SAT_BACKEND_CADICAL : ZSP_SAT_BACKEND_KISSAT;
+        *seed = (i < 2) ? base_seed : (base_seed ^ ((uint64_t)i * BB_PORT_GOLDEN));
+    } else {
+        *bk = ZSP_SAT_BACKEND_KISSAT;
+        *seed = (i == 0) ? base_seed : (base_seed ^ ((uint64_t)i * BB_PORT_GOLDEN));
+    }
+}
+
+/* Run an n-way diversified portfolio over the already-encoded instance. Returns
+ * a ZSP_BB_* verdict, or sets *ran=0 (leaving the caller to fall back to the
+ * single solve) if the DB could not be captured or no worker could start. */
+static int bb_run_portfolio(zsp_bbsolver_t *S, uint32_t n_port, uint64_t seed,
+                            int verbose, int *ran) {
+    *ran = 0;
+
+    size_t db_n = 0;
+    int32_t max_var = 0;
+    const int32_t *db = zsp_bbsolver_clause_db(S, &db_n, &max_var);
+    if (!db || db_n == 0) return ZSP_BB_UNKNOWN;   /* recording off/failed */
+
+    zsp_mutex_t mtx;
+    if (zsp_mutex_init(&mtx) != 0) return ZSP_BB_UNKNOWN;
+
+    volatile int stop = 0;
+    int result = ZSP_BB_UNKNOWN;
+    zsp_sat_t *winner = NULL;
+    int have_cd = zsp_sat_has_cadical();
+
+    bb_port_arg  *wa = (bb_port_arg *)calloc(n_port, sizeof(*wa));
+    zsp_thread_t *th = (zsp_thread_t *)calloc(n_port, sizeof(*th));
+    if (!wa || !th) {
+        free(wa); free(th); zsp_mutex_destroy(&mtx);
+        return ZSP_BB_UNKNOWN;
+    }
+
+    uint32_t spawned = 0;
+    for (uint32_t i = 0; i < n_port; i++) {
+        wa[i].db = db; wa[i].db_n = db_n; wa[i].max_var = max_var;
+        bb_port_assign(i, seed, have_cd, &wa[i].backend, &wa[i].seed);
+        wa[i].verbose = verbose; wa[i].idx = i;
+        wa[i].all = wa; wa[i].n_all = n_port;
+        wa[i].mtx = &mtx; wa[i].stop = &stop;
+        wa[i].result = &result; wa[i].winner = &winner;
+        if (zsp_thread_create(&th[i], bb_port_worker, &wa[i]) == 0) spawned++;
+        else break;
+    }
+
+    if (spawned == 0) {
+        free(wa); free(th); zsp_mutex_destroy(&mtx);
+        return ZSP_BB_UNKNOWN;   /* nothing started: caller falls back */
+    }
+    if (verbose)
+        fprintf(stderr, "[bb-port] %u workers (cadical=%s), %zu db lits\n",
+                spawned, have_cd ? "yes" : "no", db_n);
+
+    for (uint32_t i = 0; i < spawned; i++)
+        zsp_thread_join(&th[i], NULL);
+
+    /* Materialize the winner's model into S before any instance is freed. */
+    if (result == ZSP_BB_SAT && winner) {
+        if (zsp_bbsolver_install_worker_model(S, winner) != 0)
+            result = ZSP_BB_UNKNOWN;   /* couldn't build the model: stays sound */
+    }
+
+    for (uint32_t i = 0; i < spawned; i++)
+        if (wa[i].sat) zsp_sat_free(wa[i].sat);
+    free(wa); free(th); zsp_mutex_destroy(&mtx);
+
+    *ran = 1;
+    return result;
+}
+
+int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
+    if (!S || !S->problem) return ZSP_BB_ERROR;
+
+    S->seed = seed;
+    /* Seed kissat's randomness so repeated checks can return different models
+     * (the completeness-fallback's only source of stimulus diversity). */
+    zsp_sat_set_seed(S->sat, seed);
+
+    /* Diversified portfolio (opt-in, DV_PORTFOLIO>=2). Enable clause recording
+     * BEFORE encoding so the exact literal stream can be replayed into the
+     * worker instances; the recorder is a no-op otherwise. */
+    uint32_t n_port = bb_portfolio_workers();
+    if (n_port >= 2) zsp_bbsolver_record_clauses(S);
+
+    int stats_enabled = getenv("DV_BB_STATS") != NULL;
+    struct timespec t0, t1, t2;
+    if (stats_enabled) clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    int enc = _bb_encode(S);
+    if (enc != ZSP_BB_ENCODE_READY) return enc;   /* UNKNOWN/ERROR: S->last_result already set */
+
     if (stats_enabled) clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    /* Phase-0 instrumentation: emit the CNF size BEFORE solving, so it is
+     * observable even when the solve runs long or never returns (the plain
+     * bitblast path is otherwise uncapped — see DV_BB_MAX_CONFLICTS below). */
+    if (stats_enabled) {
+        double enc_ms = (t1.tv_sec - t0.tv_sec) * 1000.0
+                      + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        fprintf(stderr,
+                "[bb-encode] bb=%.2fms ands=%llu vars=%llu clauses=%llu substs=%llu\n",
+                enc_ms,
+                (unsigned long long)zsp_aig_num_ands(S->aig),
+                (unsigned long long)zsp_aig_cnf_num_vars(S->cnf),
+                (unsigned long long)zsp_aig_cnf_num_clauses(S->cnf),
+                (unsigned long long)S->n_substs);
+        fflush(stderr);
+    }
+
+    /* Diversified portfolio: race N backend/seed-diverse solvers on the full
+     * instance, first verdict wins. On success the winner's model is already
+     * installed in S; return straight away. On a setup miss (ran==0) fall
+     * through to the single solve so the verdict is never worse than bitblast. */
+    if (n_port >= 2) {
+        int ran = 0;
+        int prc = bb_run_portfolio(S, n_port, seed, stats_enabled, &ran);
+        if (ran) {
+            S->last_result = prc;
+            return prc;
+        }
+    }
+
+    /* Optional conflict cap on the bitblast solve (unset/0 = unlimited, the
+     * default so normal runs are unaffected). The CDCL engine's DV_MAX_CONFLICTS
+     * does NOT reach this path, so bounding a bitblast experiment needs its own
+     * knob. On hit, the backend returns ZSP_BB_UNKNOWN (sound: never a verdict). */
+    {
+        const char *mc = getenv("DV_BB_MAX_CONFLICTS");
+        if (mc && *mc) zsp_sat_set_conflict_limit(S->sat, (uint32_t)atoi(mc));
+    }
+
     int rc = zsp_sat_solve(S->sat);
     if (stats_enabled) {
         clock_gettime(CLOCK_MONOTONIC, &t2);
@@ -1227,6 +1628,207 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
     return rc;
 }
 
+/* ---- cube-and-conquer support (see zsp_cube.c, docs/cube_and_conquer_design.md) ---- */
+
+int zsp_bbsolver_prepare(zsp_bbsolver_t *S, uint64_t seed) {
+    if (!S || !S->problem) return ZSP_BB_ERROR;
+    S->seed = seed;
+    zsp_sat_set_seed(S->sat, seed);
+    return _bb_encode(S);   /* ZSP_BB_ENCODE_READY = ready, else ZSP_BB_UNKNOWN/ERROR */
+}
+
+int zsp_bbsolver_is_incremental(const zsp_bbsolver_t *S) {
+    return (S && S->sat) ? zsp_sat_is_incremental(S->sat) : 0;
+}
+
+uint32_t zsp_bbsolver_split_lits(zsp_bbsolver_t *S, int32_t *out, uint32_t cap) {
+    if (!S || !out || cap == 0) return 0;
+    uint32_t n = 0;
+    /* Candidate split literals are the SAT variables backing bits of
+     * referenced (bv_built) problem variables. A var's bit is a genuine AIG
+     * input node (id == SAT var id, 1:1); constant bits are not splittable.
+     * The caller forms the two exhaustive cubes {+v} and {-v} per literal. */
+    for (uint32_t i = 0; i < S->n_vars && n < cap; i++) {
+        bb_var_t *v = &S->vars[i];
+        if (!v->defined || !v->bv_built) continue;
+        for (uint32_t b = 0; b < v->bv.size && n < cap; b++) {
+            zsp_aig_node_t node = v->bv.bits[b];
+            if (node == ZSP_AIG_TRUE || node == ZSP_AIG_FALSE) continue;
+            if (!zsp_aig_is_input(S->aig, node)) continue;
+            int32_t var = node < 0 ? -node : node;
+            out[n++] = var;   /* positive literal; assumes bit = 1 */
+        }
+    }
+    return n;
+}
+
+/* Flatten a BIN_OR chain rooted at `ref` into out[] (up to `cap`), counting
+ * ALL leaves even past `cap` so the caller can detect an over-wide disjunction
+ * that it cannot represent exhaustively. `n` is the running count. */
+static uint32_t bb_flatten_or(zsp_bbsolver_t *S, ExprRef ref,
+                              ExprRef *out, uint32_t cap, uint32_t n) {
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (kp && *kp == EXPR_BINARY && ((ExprBinary *)kp)->op == BIN_OR) {
+        ExprBinary *b = (ExprBinary *)kp;
+        n = bb_flatten_or(S, b->lhs, out, cap, n);
+        n = bb_flatten_or(S, b->rhs, out, cap, n);
+        return n;
+    }
+    if (out && n < cap) out[n] = ref;
+    return n + 1;
+}
+
+uint32_t zsp_bbsolver_or_split_lits(zsp_bbsolver_t *S, int32_t *out, uint32_t cap) {
+    if (!S || !out || cap == 0) return 0;
+
+    /* Pass 1: find the surviving (non-substituted) top-level constraint that is
+     * the WIDEST disjunction. Its `or` is asserted true, so splitting on which
+     * disjunct holds is an exhaustive k-way cover — the most SAT-directed cut. */
+    ExprRef best = EXPR_NULL;
+    uint32_t best_k = 0, idx = 0;
+    for (ExprRef cur = S->problem->constraints_head; cur != EXPR_NULL; idx++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        ExprRef root = cs->root;
+        cur = cs->next;
+        if (S->constraint_skip && S->constraint_skip[idx]) continue;
+        ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, root);
+        if (!kp || *kp != EXPR_BINARY || ((ExprBinary *)kp)->op != BIN_OR) continue;
+        uint32_t k = bb_flatten_or(S, root, NULL, 0, 0);   /* count only */
+        if (k > best_k) { best_k = k; best = root; }
+    }
+    /* Reject a disjunction wider than the caller's buffer: a partial split
+     * would be non-exhaustive and break the UNSAT soundness contract. */
+    if (best == EXPR_NULL || best_k < 2 || best_k > cap) return 0;
+
+    /* Pass 2: materialize one assumption literal per disjunct. Each disjunct is
+     * already in the AIG (the parent `or` was bit-blasted at prepare), so
+     * bb_predicate hits the memo cache; encoding non-top-level guarantees the
+     * disjunct node has a SAT variable to assume on. */
+    ExprRef *ds = (ExprRef *)xalloc(S->alloc, best_k * sizeof(ExprRef));
+    if (!ds) return 0;
+    bb_flatten_or(S, best, ds, best_k, 0);
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < best_k; i++) {
+        zsp_bv_t p = bb_predicate(S, ds[i]);
+        if (S->had_error || S->had_unsupported || p.size == 0) { n = 0; break; }
+        zsp_aig_node_t node = p.bits[0];
+        zsp_aig_cnf_encode(S->cnf, node, /*top_level=*/0);
+        out[n++] = (int32_t)node;   /* literal true ⟺ disjunct i holds */
+    }
+    xfree(S->alloc, ds, best_k * sizeof(ExprRef));
+    return n;
+}
+
+uint32_t zsp_bbsolver_or_groups(zsp_bbsolver_t *S,
+                                int32_t *lits, uint32_t lits_cap,
+                                uint32_t *sizes, uint32_t max_groups,
+                                uint32_t per_group_cap) {
+    if (!S || !lits || !sizes || lits_cap == 0 || max_groups == 0) return 0;
+
+    /* Enumerate EVERY surviving top-level `(or ...)` constraint as a group of
+     * disjunct assumption literals (same per-disjunct encoding as
+     * zsp_bbsolver_or_split_lits, but for all ors, not just the widest). Because
+     * each such `or` is asserted true, every group is individually exhaustive;
+     * the CARTESIAN PRODUCT across groups (built by the cube driver) therefore
+     * remains an exhaustive partition of the search space — all-cubes-UNSAT
+     * still soundly implies UNSAT. We only encode groups whose arity fits
+     * [2, per_group_cap] and that fit the flat `lits` / `max_groups` budgets;
+     * skipped groups just aren't folded into the product (still sound: fewer
+     * splits, never a lost model). Groups are returned in constraint order; the
+     * driver sorts and selects which to fold under its cube-count cap. */
+    uint32_t ngroups = 0, nlits = 0, idx = 0;
+    for (ExprRef cur = S->problem->constraints_head; cur != EXPR_NULL; idx++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        ExprRef root = cs->root;
+        cur = cs->next;
+        if (S->constraint_skip && S->constraint_skip[idx]) continue;
+        ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, root);
+        if (!kp || *kp != EXPR_BINARY || ((ExprBinary *)kp)->op != BIN_OR) continue;
+        uint32_t k = bb_flatten_or(S, root, NULL, 0, 0);   /* count only */
+        if (k < 2 || k > per_group_cap) continue;          /* too small / too wide */
+        if (nlits > lits_cap - k) continue;                /* wouldn't fit flat buf */
+
+        ExprRef *ds = (ExprRef *)xalloc(S->alloc, k * sizeof(ExprRef));
+        if (!ds) break;
+        bb_flatten_or(S, root, ds, k, 0);
+        uint32_t got = 0;
+        for (uint32_t i = 0; i < k; i++) {
+            zsp_bv_t p = bb_predicate(S, ds[i]);
+            if (S->had_error || S->had_unsupported || p.size == 0) { got = 0; break; }
+            zsp_aig_node_t node = p.bits[0];
+            zsp_aig_cnf_encode(S->cnf, node, /*top_level=*/0);
+            lits[nlits + i] = (int32_t)node;   /* literal true ⟺ disjunct i holds */
+            got++;
+        }
+        xfree(S->alloc, ds, k * sizeof(ExprRef));
+        if (got != k) continue;                /* encoding failed: skip this group */
+
+        sizes[ngroups++] = k;
+        nlits += k;
+        if (ngroups >= max_groups) break;
+    }
+    return ngroups;
+}
+
+int zsp_bbsolver_solve_assuming(zsp_bbsolver_t *S, const int32_t *lits,
+                                uint32_t n, uint32_t conflict_limit) {
+    if (!S || !S->sat) return ZSP_BB_ERROR;
+    /* Per-solve assumptions are retracted after each solve on the incremental
+     * backend, so each call solves original ∧ cube in isolation. On a
+     * non-incremental backend only n==0 (a single plain solve) is valid; the
+     * cube driver guards this via zsp_bbsolver_is_incremental. */
+    zsp_sat_set_conflict_limit(S->sat, conflict_limit);
+    for (uint32_t i = 0; i < n; i++)
+        zsp_sat_assume(S->sat, (zsp_sat_lit_t)lits[i]);
+    int rc = zsp_sat_solve(S->sat);
+    S->last_result = rc;
+    if (rc == ZSP_BB_SAT) {
+        /* Fresh model for this cube: drop any stale flip-check valuation and
+         * re-diversify so model read-back reflects THIS solve's assignment. */
+        free(S->node_val);
+        S->node_val = NULL;
+        _diversify(S);
+    }
+    return rc;
+}
+
+/* --- Parallel cube-and-conquer support (P2; see zsp_bbsolver.h, zsp_cube.c). */
+
+void zsp_bbsolver_record_clauses(zsp_bbsolver_t *S) {
+    if (S && S->sat) zsp_sat_record_start(S->sat);
+}
+
+const int32_t *zsp_bbsolver_clause_db(zsp_bbsolver_t *S, size_t *n_lits,
+                                      int32_t *max_var) {
+    if (n_lits) *n_lits = 0;
+    if (max_var) *max_var = 0;
+    if (!S || !S->sat) return NULL;
+    if (max_var) *max_var = (int32_t)zsp_sat_max_var(S->sat);
+    return zsp_sat_recorded(S->sat, n_lits);
+}
+
+int zsp_bbsolver_install_worker_model(zsp_bbsolver_t *S, zsp_sat_t *wsat) {
+    if (!S || !wsat || !S->aig) return -1;
+    uint32_t N = (uint32_t)zsp_aig_num_nodes(S->aig);
+    /* node_val is indexed by AIG node id (0..N); readback prefers it over the
+     * live SAT instance, so installing it here makes THIS solver report the
+     * worker's model without ever solving on its own instance. AIG node id ==
+     * SAT var id (identity), so each node's truth is read straight from the
+     * worker's assignment; the TRUE constant (id 1) is forced, and free/undriven
+     * nodes take whatever the worker assigned (a sound don't-care — they lie
+     * outside every asserted cone). */
+    int8_t *nv = (int8_t *)malloc((size_t)(N + 1));
+    if (!nv) return -1;
+    nv[0] = 0;
+    if (N >= 1) nv[1] = 1;                 /* ZSP_AIG_TRUE */
+    for (uint32_t id = 2; id <= N; id++)
+        nv[id] = (int8_t)(zsp_sat_value(wsat, (zsp_sat_var_t)id) > 0 ? 1 : 0);
+    free(S->node_val);
+    S->node_val = nv;
+    S->last_result = ZSP_BB_SAT;
+    return 0;
+}
+
 int zsp_bbsolver_rediversify(zsp_bbsolver_t *S, uint64_t seed) {
     if (!S || S->last_result != ZSP_BB_SAT) return -1;
     /* Drop the prior flip-check result and re-run the diversity pass over the
@@ -1239,6 +1841,76 @@ int zsp_bbsolver_rediversify(zsp_bbsolver_t *S, uint64_t seed) {
     S->seed = seed;
     _diversify(S);
     return 0;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Incremental extension (Phase 5a/5b foundation).
+ *
+ * Keep ONE live bbsolver instance across successive solves: add constraints and
+ * re-solve without tearing down the AIG/SAT/CNF. On the CaDiCaL backend this
+ * retains learned clauses across solves (true incrementality); on kissat it
+ * still re-solves the accumulated DB correctly, just without cross-solve
+ * learning. Monotonic add ONLY — there is no scoped retraction here. Scoped
+ * push/pop over incrementally added clauses needs selector variables minted in
+ * the AIG id space (AIG node id == SAT var id), which is deliberately out of
+ * this layer; see docs/phase5_incremental_bitblast_scope.md (Gap B, sub-phase
+ * 5c, held). The frontend delta plumbing that would drive these is 5d (held).
+ * ------------------------------------------------------------------------- */
+
+/* Bit-blast one additional predicate (an ExprRef into the live problem's pool)
+ * and assert it as a hard top-level constraint on the running instance,
+ * building and bounding any newly referenced variables. Does not solve — call
+ * zsp_bbsolver_resolve afterward. The predicate is bit-blasted directly (no
+ * substitution pass), so it composes with whatever a prior check already
+ * asserted. Returns 0 on success, ZSP_BB_UNKNOWN for an unsupported construct,
+ * ZSP_BB_ERROR on a hard error. */
+int zsp_bbsolver_assert(zsp_bbsolver_t *S, ExprRef pred_ref) {
+    if (!S || !S->problem || pred_ref == EXPR_NULL) return ZSP_BB_ERROR;
+    /* Adding clauses after a solve is only legal on an incremental backend;
+     * kissat aborts on add-after-solve. Non-incremental callers must free +
+     * rebuild instead (the current frontend behavior). */
+    if (!zsp_sat_is_incremental(S->sat)) return ZSP_BB_ERROR;
+
+    /* bv_for_var uses S->resolving as its recursion guard; clear it (the base
+     * check left it as run_subst_pass scratch). */
+    if (S->resolving) memset(S->resolving, 0, S->n_vars);
+
+    zsp_bv_t pred = bb_predicate(S, pred_ref);
+    if (S->had_error)       { S->last_result = ZSP_BB_ERROR;   return ZSP_BB_ERROR; }
+    if (S->had_unsupported) { S->last_result = ZSP_BB_UNKNOWN; return ZSP_BB_UNKNOWN; }
+    assert_top(S, pred.bits[0]);
+
+    /* Bound any variable this predicate caused to be built for the first time.
+     * bounds_asserted keeps this idempotent across calls and vs. the base
+     * check's bounds pass. */
+    for (uint32_t i = 0; i < S->n_vars; i++) {
+        if (S->vars[i].defined && S->vars[i].bv_built && !S->vars[i].bounds_asserted) {
+            assert_var_bounds(S, i);
+            S->vars[i].bounds_asserted = 1;
+        }
+    }
+    if (S->had_unsupported) { S->last_result = ZSP_BB_UNKNOWN; return ZSP_BB_UNKNOWN; }
+    if (S->had_error)       { S->last_result = ZSP_BB_ERROR;   return ZSP_BB_ERROR; }
+    return 0;
+}
+
+/* Re-solve the live instance, reusing the accumulated clause DB (and, on
+ * CaDiCaL, the retained learned clauses). Mirrors the solve tail of
+ * zsp_bbsolver_check. Returns ZSP_BB_SAT/UNSAT/UNKNOWN/ERROR. */
+int zsp_bbsolver_resolve(zsp_bbsolver_t *S, uint64_t seed) {
+    if (!S || !S->problem) return ZSP_BB_ERROR;
+    /* Re-solving a live instance requires an incremental backend; kissat is
+     * one-shot per lifetime. */
+    if (!zsp_sat_is_incremental(S->sat)) return ZSP_BB_ERROR;
+    S->seed = seed;
+    zsp_sat_set_seed(S->sat, seed);
+    /* Drop the prior solve's flip-check model; the next readback re-derives. */
+    free(S->node_val);
+    S->node_val = NULL;
+    int rc = zsp_sat_solve(S->sat);
+    S->last_result = rc;
+    if (rc == ZSP_BB_SAT) _diversify(S);
+    return rc;
 }
 
 /* ------------------------------------------------------------------------- *

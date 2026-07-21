@@ -1,0 +1,13 @@
+logic,family,name,truth,solver,result,wall_s,bitwuzla_ref,stp_parti_ref
+QF_BV,20221214-p4dfa-XiaoqiChen/StringMatching,string1x16.3._bit8_na6_nr3_paired.smt2,sat,dv-solve-smt2,sat,992.389,sat,sat
+QF_BV,20221214-p4dfa-XiaoqiChen/StringMatching,string1x16.3._bit8_na6_nr3_paired.smt2,sat,dv-solve-smt2-bb,sat,990.608,sat,sat
+QF_BV,asp/EdgeMatching,edge-matching-width=10-height=10-colours=13.smt2,sat,dv-solve-smt2,unknown,561.59,sat,sat
+QF_BV,asp/EdgeMatching,edge-matching-width=10-height=10-colours=13.smt2,sat,dv-solve-smt2-bb,error,570.592,sat,sat
+QF_BV,asp/Labyrinth,laby_18_18_04.lp.smt2,sat,dv-solve-smt2,timeout,1200.112,Timeout,sat
+QF_BV,asp/Labyrinth,laby_18_18_04.lp.smt2,sat,dv-solve-smt2-bb,timeout,1200.043,Timeout,sat
+QF_BV,mcm,140.smt2,sat,dv-solve-smt2,unknown,0.478,sat,sat
+QF_BV,mcm,140.smt2,sat,dv-solve-smt2-bb,timeout,1200.132,sat,sat
+QF_BV,mcm,176.smt2,sat,dv-solve-smt2,unknown,30.286,sat,Timeout
+QF_BV,mcm,176.smt2,sat,dv-solve-smt2-bb,timeout,1200.263,sat,Timeout
+QF_BV,mcm,68.smt2,sat,dv-solve-smt2,timeout,1200.048,sat,sat
+QF_BV,mcm,68.smt2,sat,dv-solve-smt2-bb,sat,1197.664,sat,sat
