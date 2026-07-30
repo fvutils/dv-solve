@@ -16,10 +16,10 @@ package:
       url: https://github.com/dv-flow/pytest-dfm.git
     - name: dv-flow-libhdlsim
       url: https://github.com/dv-flow/dv-flow-libhdlsim.git
-    - name: yosys-bin
+    - name: yosys
       url: https://github.com/edapack/yosys-bin
       src: gh-rls
-    - name: verilator-bin
+    - name: verilator
       url: https://github.com/edapack/verilator-bin
       src: gh-rls
 
