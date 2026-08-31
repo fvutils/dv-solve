@@ -17,8 +17,8 @@ from __future__ import annotations
 from typing import Dict, List, Set, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from zuspec.dataclasses.solver.core.constraint_system import ConstraintSystem
-    from zuspec.dataclasses.solver.core.constraint import Constraint
+    from zuspec.be.py.solver.core.constraint_system import ConstraintSystem
+    from zuspec.be.py.solver.core.constraint import Constraint
 
 
 class _DSU:
@@ -55,7 +55,7 @@ class _DSU:
 
 def _vars_in_constraint(constraint: "Constraint") -> Set[str]:
     """Recursively collect all variable names referenced by *constraint*."""
-    from zuspec.dataclasses.solver.core.variable import Variable
+    from zuspec.be.py.solver.core.variable import Variable
     # The Constraint base class stores variables as a set of Variable objects
     # or variable name strings depending on the version.
     result: Set[str] = set()
