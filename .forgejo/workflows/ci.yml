@@ -1,0 +1,90 @@
+# fvutils/dv-solve -- Forgejo Actions.
+#
+# THIS FILE'S FIRST JOB IS TO EXIST. When .forgejo/workflows/ is absent the
+# Forgejo runner falls back to running .github/workflows/ -- the fallback is
+# DIRECTORY-level and evaluated per commit, so one file here disarms the whole
+# repository. On 2026-08-31 that fallback was dormant for this repo only
+# because its Actions unit was off; a unit toggled on in the web UI is a click,
+# and this file is what makes that click safe.
+#
+# WHY THIS IS A CHECK AND NOT A MIRROR OF THE BUILD. The GitHub build is the
+# one that runs; reproducing it here would mean a second build to keep in step
+# with the first, and a shadow that drifts is worse than no shadow. What is
+# asserted instead is the property the estate depends on -- that nothing in
+# this repository can publish because a mirror moved a ref.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check for internal identifiers in tracked files
+      # This repo is published to git.dvkit.org, so anything committed here is
+      # public. Internal host names, tailnet addresses and CGNAT-range IPs must
+      # not appear in tracked files -- if a build ever needs one it belongs in a
+      # repository secret, which is masked in logs.
+      run: |
+        pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+        if git grep -nIE "$pattern" -- . ':!.forgejo/workflows/ci.yml' ; then
+          echo "::error::internal identifier found in a tracked file (see matches above)"
+          exit 1
+        fi
+        echo "OK: no internal identifiers in tracked files"
+
+    - name: Install PyYAML
+      # Not present in catthehacker/ubuntu:act-22.04 by default. The check below
+      # must read the workflows as YAML rather than by grepping: a gate that is
+      # only true textually is exactly the class of bug being guarded against.
+      # PEP 668 marks this image's interpreter externally-managed on some
+      # rebuilds, hence the escalation.
+      run: |
+        python3 -c 'import yaml' 2>/dev/null && { echo "PyYAML already present"; exit 0; }
+        python3 -m pip install -q pyyaml && exit 0
+        python3 -m pip install -q --break-system-packages pyyaml && exit 0
+        echo "::error::could not install PyYAML"; exit 1
+
+    - name: This repo must not GAIN a publisher
+      run: |
+        python3 - <<'PY'
+        import pathlib, sys, yaml
+
+        # This repo has NO publishing step, and the check's job is to notice if
+        # it ever gains one. Same fragment-assembly reason as the publisher
+        # variant of this file.
+        PUBLISH = tuple(a + b for a, b in (
+            ("twine ", "upload"), ("pypa/gh-action-pypi", "-publish"),
+            ("softprops/action", "-gh-release"), ("actions/create", "-release"),
+            ("actions/upload", "-release-asset"), ("gh release", " create"),
+            ("JamesIves/github", "-pages-deploy-action"),
+            ("peaceiris/actions", "-gh-pages"), ("actions/deploy", "-pages"),
+        ))
+        bad = []
+        for wf in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
+            doc = yaml.safe_load(wf.read_text()) or {}
+            if doc.get("on", doc.get(True)) is None:
+                bad.append(f"{wf}: no `on:` block")
+                continue
+            for name, job in (doc.get("jobs") or {}).items():
+                for step in job.get("steps") or []:
+                    text = (step.get("run") or "") + " " + (step.get("uses") or "")
+                    if any(m in text for m in PUBLISH):
+                        cond = str(step.get("if", "")) + " " + str(job.get("if", ""))
+                        if "refs/tags/v" not in cond or "authority" not in cond:
+                            bad.append(f"{wf}:{name} gained a publishing step that is "
+                                       f"not tag-gated and switch-gated: if={cond.strip()!r}")
+        if bad:
+            for b in bad:
+                print(f"::error::{b}")
+            sys.exit(1)
+        print("OK: no publishing step in .github/workflows, as expected")
+        PY
