@@ -102,3 +102,111 @@ jobs:
         with:
           name: sdist
           path: ./dist/*.tar.gz
+
+  # ------------------------------------------------------------------------ #
+  # The release-authority master switch, resolved in its OWN job because an
+  # `if:` on a job cannot reference a step in that same job -- the value has to
+  # arrive through `needs.<job>.outputs`.
+  #
+  # A consumer that reads needs.gate.outputs WITHOUT declaring `needs: gate`
+  # gets an EMPTY STRING rather than an error, so the publish condition would
+  # be false forever: nothing publishes and nothing goes red. `publish` below
+  # therefore declares `needs: [gate, ...]` explicitly.
+  #
+  # fvutils/dv-solve is not listed in the switch, so it takes the default,
+  # which is "github" -- this file is the release path for this package.
+  # ------------------------------------------------------------------------ #
+  gate:
+    name: Release authority
+    runs-on: ubuntu-latest
+    outputs:
+      authority: ${{ steps.resolve.outputs.authority }}
+    steps:
+      - id: resolve
+        # The python is ONE LINE on purpose: a multi-line `python3 -c` body has
+        # to start at column 0, which terminates the YAML block scalar above it
+        # and silently corrupts the workflow rather than failing to parse.
+        run: |
+          url=https://dvkit.org/.well-known/release-authority.json
+          if ! body=$(curl -fsS --max-time 10 "$url"); then
+            # FAIL CLOSED WHEN A RELEASE COULD ACTUALLY HAPPEN, and quietly
+            # otherwise. A release blocked by a dvkit.org outage is recoverable
+            # in ten minutes; a version published twice from two forges is not,
+            # because PyPI lets a version be yanked but never reused.
+            case "$GITHUB_REF" in
+              refs/tags/v*)
+                echo "::error::release-authority switch unreachable; refusing to publish"
+                exit 1 ;;
+              *)
+                echo "authority=none" >> "$GITHUB_OUTPUT"
+                echo "switch unreachable on a non-tag ref; nothing to release"
+                exit 0 ;;
+            esac
+          fi
+          auth=$(printf '%s' "$body" | python3 -c 'import json,os,sys; d=json.load(sys.stdin); r=os.environ["GITHUB_REPOSITORY"]; print(d["repos"].get(r) or d["orgs"].get(r.split("/")[0]) or d["default"])')
+          echo "release authority for $GITHUB_REPOSITORY: $auth"
+          echo "authority=$auth" >> "$GITHUB_OUTPUT"
+
+  # Releases only. A tag is the deliberate act; ordinary pushes and PRs build
+  # wheels as ARTIFACTS above, which is what makes them reviewable without
+  # being publishable.
+  #
+  # LINUX x86_64 ONLY, deliberately. The build matrix above produces aarch64,
+  # macOS and Windows wheels too, and they keep uploading as artifacts -- but
+  # the first release of this estate ships one platform, because that is the
+  # only one the pssc dependency chain has been validated end-to-end on
+  # (pssparser itself publishes linux-x86_64 wheels and nothing else, so a
+  # dv-solve macOS wheel would have no pssparser to sit beside). Widen this
+  # glob when pssparser's other platforms land; nothing else here changes.
+  publish:
+    name: Publish to PyPI
+    needs: [gate, build_wheels, build_sdist]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && needs.gate.outputs.authority == 'github' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-linux-x86_64-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check the tag matches the package version
+        # Guards against tagging v0.2.0 while __version__.py still says 0.1.0,
+        # which would publish a release under the wrong number -- unfixably,
+        # since PyPI never allows a version to be reused. Same check, and the
+        # same source file, as pssparser's release job.
+        run: |
+          set -eu
+          tag="${GITHUB_REF#refs/tags/v}"
+          base=$(python3 -c 'import re; print(re.search(r"BASE\s*=\s*\"([^\"]+)\"", open("src/dv_solve/__version__.py").read()).group(1))')
+          echo "tag=$tag  BASE=$base"
+          if [ "$tag" != "$base" ]; then
+            echo "::error::tag v$tag does not match BASE $base in src/dv_solve/__version__.py"
+            exit 1
+          fi
+          for whl in dist/*.whl; do
+            case "$(basename "$whl")" in
+              dv_solve-$base-*) ;;
+              *) echo "::error::wheel $(basename "$whl") is not version $base"; exit 1 ;;
+            esac
+          done
+          echo "OK: tag, source version and all wheels agree on ${base}"
+
+      - name: Publish
+        # Plain twine rather than a third-party action: this is the release
+        # path, and it should depend on as little as possible.
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${TWINE_PASSWORD:-}" ]; then
+            echo "::error::PYPI_API_TOKEN is not set for this repository"
+            exit 1
+          fi
+          python3 -m pip install -U twine
+          python3 -m twine check dist/*.whl
+          python3 -m twine upload --non-interactive --skip-existing dist/*.whl
+          echo "published $(ls dist/*.whl | wc -l) wheels"

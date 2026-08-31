@@ -1,7 +1,12 @@
 import os
 import platform
 
-__version__ = '0.0.1'
+# The same file setup.py exec()s to supply the wheel's version, so an
+# installed dv_solve and its distribution metadata cannot disagree. Importing
+# it here is safe: the constraint that ruled out a dynamic attr: is a
+# BUILD-time one (the package is not importable while the wheel is being
+# built), and by the time this runs the package is installed.
+from .__version__ import _pkg_version as __version__
 
 
 def _pkg_dir():

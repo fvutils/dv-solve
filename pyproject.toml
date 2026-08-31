@@ -12,7 +12,11 @@ build-backend = "ivpm_build.backend"
 
 [project]
 name = "dv-solve"
-version = "0.0.1"
+# Declared dynamic and supplied by setup.py, which exec()s
+# src/dv_solve/__version__.py -- the single source of this package's version,
+# in the same shape pssparser uses. See setup.py for why it is not a
+# [tool.setuptools.dynamic] attr: entry.
+dynamic = ["version"]
 description = "Domain-agnostic CLP(FD) constraint solver"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -109,3 +113,4 @@ test-command = "python {project}/tests/wheel_smoke.py"
 manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64"
 manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
 before-all = "dnf -y install cmake"
+
