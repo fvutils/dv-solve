@@ -33,10 +33,41 @@ def get_deps():
 
 
 def get_incdirs():
-    """Directories containing the public dv-solve C headers."""
+    """Directories containing the public dv-solve C headers.
+
+    The wheel case returns BOTH ``share/include`` and ``share/include/dv_solve``
+    because the two trees disagree on layout and only the nested one actually
+    holds headers:
+
+      * source tree -- headers sit FLAT in ``src/c``, so ``#include
+        "zsp_ctx.h"`` resolves;
+      * installed wheel -- CMake puts them in ``include/dv_solve``
+        (CMakeLists.txt: ``DESTINATION include/dv_solve``), so that same
+        unqualified include does NOT resolve against the base directory, and
+        the base directory on its own contains no headers at all.
+
+    Returning only the base therefore described a layout the wheel does not
+    have. A consumer following this API could compile against a checkout and
+    then fail against the released wheel with
+
+        fatal error: zsp_block_alloc.h: No such file or directory
+
+    which is exactly how pssc's generated ``pssc_solve.c`` fails, since it emits
+    unqualified includes.
+
+    NOTE ON THE COLLISION: dv-solve and zuspec-be-sw both ship a ``zsp_alloc.h``
+    and they define ``struct zsp_alloc_s`` incompatibly. That is why these
+    headers are namespaced under ``dv_solve/`` in the install tree, and why a
+    consumer must compile the SOLVER translation unit with these directories and
+    the runtime/component translation units with be-sw's -- not merge both into
+    one ``-I`` set. Adding the nested directory here does not weaken that: it is
+    the per-TU segregation, not the absence of this path, that keeps the two
+    ``zsp_alloc.h`` files apart.
+    """
     inc = os.path.join(_pkg_dir(), "share", "include")
     if os.path.isdir(inc):                                  # installed wheel
-        return [inc]
+        nested = os.path.join(inc, "dv_solve")
+        return [inc, nested] if os.path.isdir(nested) else [inc]
     return [os.path.join(_src_root(), "src", "c")]          # source tree
 
 
