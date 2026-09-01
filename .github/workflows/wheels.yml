@@ -74,10 +74,26 @@ jobs:
 
   # macOS Intel: legacy and slow to schedule, so only on release tags / manual
   # runs, not on every PR.
+  #
+  # runs-on was `macos-13`, which no longer resolves to anything: GitHub has
+  # retired that image, so the job sat queued with an empty runner_name while
+  # every other job in the run picked up a runner within seconds. It does not
+  # fail -- it waits, and the run stays in progress until the job times out.
+  # `macos-15-intel` is the current Intel label.
+  #
+  # timeout-minutes is the belt to that braces. An unschedulable label is
+  # indistinguishable from a slow queue, so if this label is ever retired too,
+  # this job now goes red in 45 minutes instead of hanging for six hours.
+  #
+  # Neither this job nor its artifact gates a release: `publish` needs
+  # [gate, build_wheels, build_sdist] and publishes linux-x86_64 only, so a
+  # macOS Intel failure cannot block or corrupt a release. That is why this is
+  # a hygiene fix rather than a release blocker.
   build_wheels_macos_intel:
     name: macos-x86_64
     if: github.event_name != 'pull_request'
-    runs-on: macos-13
+    runs-on: macos-15-intel
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install cmake/ninja
