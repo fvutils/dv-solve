@@ -55,7 +55,7 @@ def _zdc_bench(
     import pytest
     from zuspec.dataclasses.constraint_parser import extract_rand_fields
     try:
-        from zuspec.dataclasses.solver._core_solve import RandomizationError
+        from zuspec.be.py.solver._core_solve import RandomizationError
     except ImportError:
         RandomizationError = Exception  # type: ignore
 

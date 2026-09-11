@@ -7,10 +7,10 @@ connected-component subproblems.
 from __future__ import annotations
 
 import pytest
-from zuspec.dataclasses.solver.core.variable import Variable, VarKind
-from zuspec.dataclasses.solver.core.domain import IntDomain
-from zuspec.dataclasses.solver.core.constraint_system import ConstraintSystem
-from zuspec.dataclasses.solver.core.constraints import (
+from zuspec.be.py.solver.core.variable import Variable, VarKind
+from zuspec.be.py.solver.core.domain import IntDomain
+from zuspec.be.py.solver.core.constraint_system import ConstraintSystem
+from zuspec.be.py.solver.core.constraints import (
     CompareConstraint,
     VariableRefConstraint,
 )
@@ -108,7 +108,7 @@ class TestPartitioner:
         """Single variable with a self-constraint (like x == const) is constrained."""
         x = _var("x")
         sys = _make_system(x)
-        from zuspec.dataclasses.solver.core.constraints import ConstantConstraint
+        from zuspec.be.py.solver.core.constraints import ConstantConstraint
         # CompareConstraint(x, Eq, const) touches x
         sys.add_constraint(CompareConstraint(
             left=VariableRefConstraint(x),
