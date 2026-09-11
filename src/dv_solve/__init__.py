@@ -23,8 +23,62 @@ def get_libs():
     return ["dv_solve"]
 
 
+def _lib_filename(stem):
+    """The platform's file name for shared library *stem* (no directory)."""
+    system = platform.system()
+    if system == "Windows":
+        return "%s.dll" % stem
+    if system == "Darwin":
+        return "lib%s.dylib" % stem
+    return "lib%s.so" % stem
+
+
+def _lib_search_dirs():
+    """Every directory a dv-solve shared library may live in, best first.
+
+    The two layouts disagree, in the same way ``get_incdirs()`` documents for
+    headers:
+
+      * installed wheel -- the libraries are staged at the package root, next to
+        ``__init__.py`` (pyproject.toml's ``[[tool.ivpm-build.extra-data]]``
+        entries use ``dst = ""``), which is where the ctypes loader looks;
+      * source tree -- CMake writes them to ``build/<libdir>``, where ``<libdir>``
+        is ``lib`` or ``lib64``; that is the very ``{libdir}`` the wheel stages
+        *from*. ``build/`` itself holds the pre-install link output, so a
+        checkout that has been built but not ``cmake --install``-ed resolves too.
+    """
+    src_root = _src_root()
+    return [
+        _pkg_dir(),                                         # installed wheel
+        os.path.join(src_root, "build", "lib"),             # source tree
+        os.path.join(src_root, "build", "lib64"),
+        os.path.join(src_root, "build"),                    # built, not installed
+    ]
+
+
 def get_libdirs():
-    """Directories containing the dv-solve shared libraries."""
+    """Directories containing the dv-solve shared libraries.
+
+    Returning only the package directory described a layout a *source tree* does
+    not have, so a consumer that compiled against a checkout failed to link:
+
+        /usr/bin/ld: cannot find -ldv_solve
+
+    which is how pssc's generated ``libpssc_scenario.so`` failed once dv-solve
+    was installed editable rather than from a wheel. The same reasoning, and the
+    same fix, as ``get_incdirs()`` -- see its docstring.
+
+    Probes for the library rather than the directory: in a source tree
+    ``build/lib`` exists as soon as CMake configures, well before anything is
+    linked into it.
+    """
+    name = _lib_filename("dv_solve")
+    for d in _lib_search_dirs():
+        if os.path.isfile(os.path.join(d, name)):
+            return [d]
+    # Nothing built anywhere. The package directory is the installed-wheel
+    # answer and keeps the failure identical to what a missing wheel library
+    # already produces, rather than naming a build tree that does not exist.
     return [_pkg_dir()]
 
 
@@ -80,12 +134,15 @@ def get_svdirs():
 
 
 def get_dpi_lib():
-    """Absolute path to the DPI shared library for an SV simulator's -sv_lib."""
-    system = platform.system()
-    if system == "Windows":
-        pref, ext = "", ".dll"
-    elif system == "Darwin":
-        pref, ext = "lib", ".dylib"
-    else:
-        pref, ext = "lib", ".so"
-    return os.path.join(_pkg_dir(), "%sdv_solve_dpi%s" % (pref, ext))
+    """Absolute path to the DPI shared library for an SV simulator's -sv_lib.
+
+    Searches the same places as :func:`get_libdirs` -- this library is staged
+    into the wheel alongside ``libdv_solve`` and built into the same
+    ``build/<libdir>`` in a checkout, so it had the same source-tree gap.
+    """
+    name = _lib_filename("dv_solve_dpi")
+    for d in _lib_search_dirs():
+        path = os.path.join(d, name)
+        if os.path.isfile(path):
+            return path
+    return os.path.join(_pkg_dir(), name)
