@@ -1606,6 +1606,23 @@ int zsp_bbsolver_check(zsp_bbsolver_t *S, uint64_t seed) {
         if (mc && *mc) zsp_sat_set_conflict_limit(S->sat, (uint32_t)atoi(mc));
     }
 
+    /* Size-gated light search: kissat's failed-literal probing is pure overhead
+     * on almost everything the one-shot bitblast path sees — the array/BMC class
+     * (refuted by plain CDCL almost immediately) AND the hard QF_BV UNSAT band.
+     * Measured (docs/perf_sweep_medium_band_2026-07-21.md): probe-OFF wins on
+     * deep array-BMC (2-3x), vlsat3_a57 @181k cl (1.46x) and vlsat3_a80 @1.47M cl
+     * (3.8x); it only *loses* on the single 11.6M-clause monster vlsat3_a67
+     * (~1.45x), which genuinely needs the deep implication chains probing finds.
+     * So the gate is a HIGH clause threshold (2M): everything below goes light,
+     * only the >>1M-clause hardest instances keep probing. Toggling probe never
+     * changes sat/unsat — this is a pure schedule/latency lever. */
+    {
+        const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
+        uint64_t thresh = mcl && *mcl ? strtoull(mcl, NULL, 10) : 2000000;
+        uint64_t ncl = zsp_aig_cnf_num_clauses(S->cnf);
+        zsp_sat_set_light_search(S->sat, ncl < thresh);
+    }
+
     int rc = zsp_sat_solve(S->sat);
     if (stats_enabled) {
         clock_gettime(CLOCK_MONOTONIC, &t2);
@@ -1864,12 +1881,68 @@ int zsp_bbsolver_rediversify(zsp_bbsolver_t *S, uint64_t seed) {
  * substitution pass), so it composes with whatever a prior check already
  * asserted. Returns 0 on success, ZSP_BB_UNKNOWN for an unsupported construct,
  * ZSP_BB_ERROR on a hard error. */
+/* Grow S->vars/subst/resolving to cover variables added to S->problem after
+ * construction (e.g. read vars the lazy array loop mints between solves). Safe
+ * to call before any assert; a no-op when no new vars appeared. bv_for_var and
+ * assert's bounds loop both index by var_id < S->n_vars, so this keeps them in
+ * range. The memo cache bounds-checks out-of-range refs itself, so it needs no
+ * growth (new lemma nodes are simply re-blasted without memoization). */
+static void bb_grow_vars(zsp_bbsolver_t *S) {
+    uint32_t max_id = 0; int any = 0;
+    for (ExprRef cur = S->problem->vars_head; cur != EXPR_NULL; ) {
+        VarSpec *vs = (VarSpec *)POOL_PTR(S->problem, cur);
+        if (!any || vs->var_id > max_id) { max_id = vs->var_id; any = 1; }
+        cur = vs->next;
+    }
+    uint32_t need = any ? max_id + 1 : 0;
+    if (need <= S->n_vars) return;
+    uint32_t old = S->n_vars;
+    bb_var_t *nv = (bb_var_t *)xalloc(S->alloc, need * sizeof(bb_var_t));
+    if (!nv) return;   /* OOM: leave as-is; assert's var_id<n_vars guard holds */
+    memset(nv, 0, need * sizeof(bb_var_t));
+    if (S->vars) {
+        memcpy(nv, S->vars, old * sizeof(bb_var_t));
+        xfree(S->alloc, S->vars, old * sizeof(bb_var_t));
+    }
+    S->vars = nv;
+    if (S->subst) {
+        ExprRef *ns = (ExprRef *)xalloc(S->alloc, need * sizeof(ExprRef));
+        if (ns) {
+            memcpy(ns, S->subst, old * sizeof(ExprRef));
+            for (uint32_t i = old; i < need; i++) ns[i] = EXPR_NULL;
+            xfree(S->alloc, S->subst, old * sizeof(ExprRef));
+            S->subst = ns;
+        }
+    }
+    if (S->resolving) {
+        uint8_t *nr = (uint8_t *)xalloc(S->alloc, need * sizeof(uint8_t));
+        if (nr) {
+            memcpy(nr, S->resolving, old * sizeof(uint8_t));
+            memset(nr + old, 0, need - old);
+            xfree(S->alloc, S->resolving, old * sizeof(uint8_t));
+            S->resolving = nr;
+        }
+    }
+    S->n_vars = need;
+    for (ExprRef cur = S->problem->vars_head; cur != EXPR_NULL; ) {
+        VarSpec *vs = (VarSpec *)POOL_PTR(S->problem, cur);
+        if (vs->var_id >= old && vs->var_id < need) {
+            bb_var_t *v = &S->vars[vs->var_id];
+            v->width = vs->width; v->is_signed = vs->is_signed;
+            v->defined = 1; v->lo = vs->lo; v->hi = vs->hi;
+        }
+        cur = vs->next;
+    }
+}
+
 int zsp_bbsolver_assert(zsp_bbsolver_t *S, ExprRef pred_ref) {
     if (!S || !S->problem || pred_ref == EXPR_NULL) return ZSP_BB_ERROR;
     /* Adding clauses after a solve is only legal on an incremental backend;
      * kissat aborts on add-after-solve. Non-incremental callers must free +
      * rebuild instead (the current frontend behavior). */
     if (!zsp_sat_is_incremental(S->sat)) return ZSP_BB_ERROR;
+    /* Cover any vars minted into the problem since construction (lazy arrays). */
+    bb_grow_vars(S);
 
     /* bv_for_var uses S->resolving as its recursion guard; clear it (the base
      * check left it as run_subst_pass scratch). */
@@ -1910,6 +1983,23 @@ int zsp_bbsolver_resolve(zsp_bbsolver_t *S, uint64_t seed) {
     int rc = zsp_sat_solve(S->sat);
     S->last_result = rc;
     if (rc == ZSP_BB_SAT) _diversify(S);
+    return rc;
+}
+
+/* Re-solve WITHOUT the don't-care diversification, reading back the solver's
+ * raw assignment (seed 0 => zsp_bbsolver_value returns the actual SAT model, not
+ * a seeded-random fill of free bits). The lazy array refinement loop must see the
+ * true model: a lazily-unconstrained read var is a don't-care bit that diversify
+ * would randomize, corrupting the array-consistency check into a spurious SAT. */
+int zsp_bbsolver_resolve_raw(zsp_bbsolver_t *S) {
+    if (!S || !S->problem) return ZSP_BB_ERROR;
+    if (!zsp_sat_is_incremental(S->sat)) return ZSP_BB_ERROR;
+    S->seed = 0;
+    zsp_sat_set_seed(S->sat, 0);
+    free(S->node_val);
+    S->node_val = NULL;   /* value readback -> raw cnf model (seed 0) */
+    int rc = zsp_sat_solve(S->sat);
+    S->last_result = rc;
     return rc;
 }
 

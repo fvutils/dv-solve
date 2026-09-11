@@ -342,6 +342,36 @@ static int _classify_or_leaf(SolveProblem *sp, ExprRef ref,
         return 0;
     }
 
+    /* Reification wrapper: ite(P, 1, 0) *is* P. Verilator's __Vbv lifts a
+     * Bool to (_ BitVec 1) exactly this way, so every disjunct of an `inside`
+     * set arrives wrapped in one. Strip it (and the inverted form) so the
+     * underlying comparison can be classified. */
+    if (k == EXPR_ITE) {
+        ExprITE *ei = (ExprITE *)zsp_pool_ptr(&sp->pool, ref);
+        int64_t tc, fc;
+        if (_is_const(sp, ei->then_e, &tc) && _is_const(sp, ei->else_e, &fc)) {
+            if (tc == 1 && fc == 0)
+                return _classify_or_leaf(sp, ei->cond, out, truth_known, truth);
+            if (tc == 0 && fc == 1) {
+                OrClause inner;
+                int it_known = 0, it_truth = 0;
+                int rc = _classify_or_leaf(sp, ei->cond, &inner,
+                                            &it_known, &it_truth);
+                if (it_known) {
+                    *truth_known = 1;
+                    *truth = !it_truth;
+                    return 0;
+                }
+                if (rc == 1) {
+                    *out = inner;
+                    out->op = _flip_cmp(inner.op);
+                    return 1;
+                }
+            }
+        }
+        return 0;
+    }
+
     if (k != EXPR_BINARY) return 0;
     ExprBinary *e = (ExprBinary *)zsp_pool_ptr(&sp->pool, ref);
 
@@ -404,6 +434,24 @@ static int _classify_or_leaf(SolveProblem *sp, ExprRef ref,
     }
 
     return 0;
+}
+
+/* Strip `bvand #b1` identity wrappers. Verilator brackets a reified guard
+ * tree as (bvand #b1 T). When every leaf of T is provably 0/1 -- which the
+ * caller establishes by requiring _flatten_or to accept T -- the mask is the
+ * identity, so this rewrite is value-preserving regardless of declared width. */
+static ExprRef _strip_bool1(SolveProblem *sp, ExprRef ref) {
+    for (;;) {
+        if (ref == EXPR_NULL) return ref;
+        ExprKind k = *(ExprKind *)zsp_pool_ptr(&sp->pool, ref);
+        if (k != EXPR_BINARY) return ref;
+        ExprBinary *e = (ExprBinary *)zsp_pool_ptr(&sp->pool, ref);
+        if (e->op != BIN_AND) return ref;
+        int64_t cv;
+        if (_is_const(sp, e->lhs, &cv) && cv == 1) { ref = e->rhs; continue; }
+        if (_is_const(sp, e->rhs, &cv) && cv == 1) { ref = e->lhs; continue; }
+        return ref;
+    }
 }
 
 /**
@@ -733,6 +781,56 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
 static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
                                ExprRef ref, uint8_t width);
 
+/** Create an AUX variable under the SAME tier policy as a declared variable.
+ *
+ * The reification helpers below materialise a comparison's constant as a
+ * one-value AUX variable. They used _init_tier0 unconditionally, which pins the
+ * variable to int32 bounds no matter how wide the comparison is -- and, worse,
+ * marks it tier-0, which is the signal prop_add_reification_32 uses to decide
+ * it may run its int32 fire function. _fire_reification_32 then compares the
+ * raw `v->lo`/`v->hi` int32 fields, so an unsigned value at or above 2^31 is
+ * read back NEGATIVE: `(= #b1 (__Vbv (bvuge (_ bv2147483648 64) (_ bv1 64))))`
+ * reified to `-2147483648 >= 1`, i.e. false, and the solve returned a wrong
+ * `unsat` on a trivially satisfiable input.
+ *
+ * That is the same shape as B22 one tier down -- a 2^31 cliff instead of a
+ * 2^63 one. B24, found by the fuzzer once the generator started emitting
+ * Verilator's reified `(= #b1 (__Vbv ...))` form.
+ *
+ * Following the declared-variable policy (unsigned 32-bit promotes to tier-1)
+ * makes prop_add_reification_32's existing auto-promote fire, so the 64-bit
+ * template handles these. Tier-2 is declined rather than mis-encoded: the
+ * reification templates cannot represent a >64-bit operand, and leaving the
+ * constraint uncompiled is correct-or-unknown.
+ *
+ * @return 0 on success, -1 if the caller must decline the compile.
+ */
+static int _init_aux_tiered(SolveCtx *ctx, Variable *v, uint16_t width,
+                            uint8_t flags, int64_t lo, int64_t hi) {
+    if (width == 0 || width > 64) return -1;
+
+    /* The value must FIT the declared width, or the variable is a lie and every
+     * propagator that reads it reasons about a different number. This bites via
+     * _value_to_var, which materialises an operand of unknown width at a
+     * default of 32 bits: a 96-bit constant landed in a width-32 variable, the
+     * bounds engine saw an impossible domain, and the solve reported `unsat`
+     * instead of declining. Decline instead -- correct-or-unknown. */
+    if (width < 64) {
+        if (flags & VAR_SIGNED) {
+            int64_t smax = ((int64_t)1 << (width - 1)) - 1;
+            if (lo < -smax - 1 || hi > smax) return -1;
+        } else {
+            int64_t umax = (int64_t)(((uint64_t)1 << width) - 1u);
+            if (lo < 0 || hi > umax) return -1;
+        }
+    }
+    if (width < 32 || (width == 32 && (flags & VAR_SIGNED))) {
+        _init_tier0(v, width, flags, lo, hi);
+        return 0;
+    }
+    return _init_tier1(ctx, v, width, flags, lo, hi);
+}
+
 static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprKind k = *(ExprKind *)zsp_pool_ptr(&sp->pool, ref);
@@ -889,7 +987,9 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
             ctx->n_vars = gid + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[gid] = EXPR_NULL;
             uint32_t cvc_id = ctx->n_vars;
-            _init_tier0(&ctx->vars[cvc_id], cv_w, VAR_AUX, cmp_cv, cmp_cv);
+            if (_init_aux_tiered(ctx, &ctx->vars[cvc_id], cv_w, VAR_AUX,
+                                 cmp_cv, cmp_cv) != 0)
+                return EXPR_NULL;   /* B24 */
             ctx->n_vars = cvc_id + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[cvc_id] = EXPR_NULL;
             prop_add_reification_eq_32(ctx, gid, cmp_vid, cvc_id, 0);
@@ -912,7 +1012,9 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
             ctx->n_vars = geq + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[geq] = EXPR_NULL;
             uint32_t cvc_id = ctx->n_vars;
-            _init_tier0(&ctx->vars[cvc_id], cv_w, VAR_AUX, cmp_cv, cmp_cv);
+            if (_init_aux_tiered(ctx, &ctx->vars[cvc_id], cv_w, VAR_AUX,
+                                 cmp_cv, cmp_cv) != 0)
+                return EXPR_NULL;   /* B24 */
             ctx->n_vars = cvc_id + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[cvc_id] = EXPR_NULL;
             prop_add_reification_eq_32(ctx, geq, cmp_vid, cvc_id, 0);
@@ -933,7 +1035,8 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
 
         if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
         uint32_t cmp_const = ctx->n_vars;
-        _init_tier0(&ctx->vars[cmp_const], cv_w, VAR_AUX, k, k);
+        if (_init_aux_tiered(ctx, &ctx->vars[cmp_const], cv_w, VAR_AUX, k, k) != 0)
+            return EXPR_NULL;   /* B24 */
         ctx->n_vars = cmp_const + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[cmp_const] = EXPR_NULL;
         uint32_t gle = ctx->n_vars;
@@ -994,7 +1097,9 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
         if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
         uint32_t cv_id = ctx->n_vars;
         uint8_t w = width ? width : 32;
-        _init_tier0(&ctx->vars[cv_id], w, VAR_AUX, ec->value, ec->value);
+        if (_init_aux_tiered(ctx, &ctx->vars[cv_id], w, VAR_AUX,
+                             ec->value, ec->value) != 0)
+            return EXPR_NULL;   /* B24 */
         ctx->n_vars = cv_id + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
         return cv_id;
@@ -1037,7 +1142,9 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
                         if (ctx->watcher_heads) ctx->watcher_heads[gid] = EXPR_NULL;
                         /* Const-var for comparison value — VAR_AUX singleton */
                         uint32_t cvc_id = ctx->n_vars;
-                        _init_tier0(&ctx->vars[cvc_id], cv_w, VAR_AUX, cmp_cv, cmp_cv);
+                        if (_init_aux_tiered(ctx, &ctx->vars[cvc_id], cv_w,
+                                             VAR_AUX, cmp_cv, cmp_cv) != 0)
+                            return EXPR_NULL;   /* B24 */
                         ctx->n_vars = cvc_id + 1;
                         if (ctx->watcher_heads) ctx->watcher_heads[cvc_id] = EXPR_NULL;
                         /* guard ↔ (cmp_vid == cmp_cv) */
@@ -1080,7 +1187,8 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
         uint8_t w = width ? width : 32;
         int64_t max_val = (w >= 64) ? (int64_t)UINT64_MAX
                         : (int64_t)((1ULL << w) - 1);
-        _init_tier0(&ctx->vars[r_id], w, VAR_AUX, 0, max_val);
+        if (_init_aux_tiered(ctx, &ctx->vars[r_id], w, VAR_AUX, 0, max_val) != 0)
+            return EXPR_NULL;   /* B24 */
         ctx->n_vars = r_id + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
         prop_add_ite_value_64(ctx, r_id, cond_id, then_id, else_id, 0);
@@ -1095,7 +1203,9 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
         uint32_t r_id = ctx->n_vars;
         int64_t max_val = (out_w >= 64) ? (int64_t)UINT64_MAX
                                         : (int64_t)((1ULL << out_w) - 1);
-        _init_tier0(&ctx->vars[r_id], out_w, VAR_AUX, 0, max_val);
+        if (_init_aux_tiered(ctx, &ctx->vars[r_id], out_w, VAR_AUX,
+                             0, max_val) != 0)
+            return EXPR_NULL;   /* B24 */
         ctx->n_vars = r_id + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
         if (_var_needs_wide(ctx, r_id) || _var_needs_wide(ctx, src_id)) {
@@ -1117,7 +1227,10 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
         if (ee->sign_extend) {
             max_val = ((int64_t)1 << (ee->from_bits - 1)) - 1;
         }
-        _init_tier0(&ctx->vars[r_id], ee->to_bits, VAR_AUX, min_val, max_val);
+        if (_init_aux_tiered(ctx, &ctx->vars[r_id], ee->to_bits,
+                             (uint8_t)(VAR_AUX | (ee->sign_extend ? VAR_SIGNED : 0)),
+                             min_val, max_val) != 0)
+            return EXPR_NULL;   /* B24 */
         ctx->n_vars = r_id + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
         /* Zero-extend: r's value == src's value (since src ∈ [0, 2^from-1]).
@@ -1204,6 +1317,49 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
     if (k == EXPR_CONST) {
         ExprConst *ec = (ExprConst *)zsp_pool_ptr(&sp->pool, root);
         return (ec->value != 0) ? 1 : -1;
+    }
+
+    /* (assert (= #b1 <reified OR tree>)): peel to the plain OR tree.
+     *
+     * Verilator emits `x inside {a,b,c}` as
+     *   (= #b1 (bvand #b1 (bvor (__Vbv (= x a)) (__Vbv (= x b)) ...)))
+     * -- a BITWISE or over reified 1-bit guards, not a Boolean `or`. That root
+     * is BIN_EQ, so it never reached the OR-tree flattener below; it compiled
+     * instead to a chain of ITE guard propagators carrying no bound
+     * information. `t_constraint_dist` therefore left a 32-bit variable at its
+     * full domain and the search enumerated 2^32 values.
+     *
+     * Peeling is sound here because we only take this route when _flatten_or
+     * accepts the tree, which means every leaf is a comparison or a reified
+     * ite(P,1,0) and so is provably 0/1. Under that condition `bvand #b1` is
+     * the identity and `== #b1` is exactly the disjunction, whatever width the
+     * terms were declared at. Shapes the flattener rejects fall through and
+     * keep their existing compilation, so this cannot regress them. */
+    if (k == EXPR_BINARY) {
+        ExprBinary *eq = (ExprBinary *)zsp_pool_ptr(&sp->pool, root);
+        if (eq->op == BIN_EQ) {
+            int64_t cv;
+            ExprRef other = EXPR_NULL;
+            if (_is_const(sp, eq->lhs, &cv) && cv == 1)      other = eq->rhs;
+            else if (_is_const(sp, eq->rhs, &cv) && cv == 1) other = eq->lhs;
+            if (other != EXPR_NULL) {
+                ExprRef body = _strip_bool1(sp, other);
+                if (body != EXPR_NULL && body != root) {
+                    ExprKind bk = *(ExprKind *)zsp_pool_ptr(&sp->pool, body);
+                    if (bk == EXPR_BINARY) {
+                        ExprBinary *bb =
+                            (ExprBinary *)zsp_pool_ptr(&sp->pool, body);
+                        if (bb->op == BIN_OR) {
+                            OrClause probe[MAX_OR_CLAUSES];
+                            int any_true = 0;
+                            if (_flatten_or(sp, body, probe, MAX_OR_CLAUSES,
+                                            &any_true) >= 0)
+                                return _compile_constraint(ctx, sp, body);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /* (assert (not X)): push the negation down so we can compile the
@@ -1588,13 +1744,24 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                     /* For var-const or const-var: create a compile-time
                      * const-variable (domain = [cv, cv]) so the propagator
                      * sees two var IDs. */
+                    /* The const operand must be materialised at the
+                     * OPERAND's width, not a hard-coded 32. A width-48
+                     * `(bvand v #xffffffffffff)` built its mask as a tier-0
+                     * width-32 variable, so the bounds engine saw the mask as
+                     * 2^32-1 and "proved" `(bvugt (bvand v mask) #x800000000000)`
+                     * unsatisfiable -- a wrong UNSAT, reachable in the default
+                     * engine. Operands of a BV binary op share the result's
+                     * width, so that is the width to use. (B25, same family as
+                     * B24: see _init_aux_tiered.) */
+                    uint16_t cv_w = ctx->vars[r_id].width;
                     if (has_var_const && !has_var_var) {
                         /* a_id is set, cv is the constant on the right.
                          * Create a const-var for cv. */
                         if (ctx->n_vars < ctx->n_vars_capacity) {
                             b_id = ctx->n_vars;
                             Variable *cv_var = &ctx->vars[b_id];
-                            _init_tier0(cv_var, 32, 0, cv, cv);
+                            if (_init_aux_tiered(ctx, cv_var, cv_w, 0, cv, cv) != 0)
+                                return 0;   /* leave uncompiled */
                             ctx->n_vars = b_id + 1;
                             if (ctx->watcher_heads)
                                 ctx->watcher_heads[b_id] = EXPR_NULL;
@@ -1606,7 +1773,8 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                         if (ctx->n_vars < ctx->n_vars_capacity) {
                             a_id = ctx->n_vars;
                             Variable *cv_var = &ctx->vars[a_id];
-                            _init_tier0(cv_var, 32, 0, cv, cv);
+                            if (_init_aux_tiered(ctx, cv_var, cv_w, 0, cv, cv) != 0)
+                                return 0;   /* leave uncompiled */
                             ctx->n_vars = a_id + 1;
                             if (ctx->watcher_heads)
                                 ctx->watcher_heads[a_id] = EXPR_NULL;
@@ -1614,6 +1782,30 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                         }
                     }
                     if (has_var_var) {
+                        /* Modular fixed-width ADD/SUB/MUL/SHL first, exactly as
+                         * the primary _compile_binary route does. Without this
+                         * the arithmetic below is plain INTEGER arithmetic, so
+                         * `(= (bvadd v #xffffffff) #x00000000)` -- satisfiable
+                         * at v == 1 by wrapping -- was reported `unsat`. The
+                         * primary route has wrapped since the bv* propagators
+                         * landed; this second route (a comparison whose operand
+                         * is a binary op) was never updated, which is why the
+                         * bug showed only for widths >= 32, where the two
+                         * routes diverge. B27. */
+                        uint16_t rw_mod = ctx->vars[r_id].width;
+                        if (rw_mod >= 1 && rw_mod <= 63) {
+                            switch (binop->op) {
+                            case BIN_ADD:
+                                prop_add_bvadd_64(ctx, r_id, a_id, b_id, (uint8_t)rw_mod, 0); return 1;
+                            case BIN_SUB:
+                                prop_add_bvsub_64(ctx, r_id, a_id, b_id, (uint8_t)rw_mod, 0); return 1;
+                            case BIN_MUL:
+                                prop_add_bvmul_64(ctx, r_id, a_id, b_id, (uint8_t)rw_mod, 0); return 1;
+                            case BIN_LSHIFT:
+                                prop_add_bvshl_64(ctx, r_id, a_id, b_id, (uint8_t)rw_mod, 0); return 1;
+                            default: break;
+                            }
+                        }
                         /* Use 64-bit propagators if any operand is promoted */
                         int wide = _var_needs_wide(ctx, r_id) ||
                                    _var_needs_wide(ctx, a_id) ||
@@ -2447,7 +2639,9 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                             int nc_wide = _var_needs_wide(ctx, lid)
                                           || ctx->vars[lid].width > 32;
                             uint32_t cv_id = ctx->n_vars;
-                            _init_tier0(&ctx->vars[cv_id], nc_wide ? 64 : 32, 0, cv, cv);
+                            if (_init_aux_tiered(ctx, &ctx->vars[cv_id],
+                                                 nc_wide ? 64 : 32, 0, cv, cv) != 0)
+                                return 0;   /* B24: leave uncompiled */
                             ctx->n_vars = cv_id + 1;
                             if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
                             if (nc_wide)
@@ -2925,6 +3119,73 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
                 ctx->var_holes_head[i] = 0;
         } else {
             ctx->var_holes_head = NULL;
+        }
+    }
+
+    /* ---- Exact domains for single-variable equality disjunctions ---- */
+    /*
+     * `x inside {a, b, c}` compiles to a DisjClause of `x == k` disjuncts.
+     * _disj_hull tightens x to [min k, max k], but the GAPS stay in the
+     * domain and the search enumerates them blind. Measured: five 8-bit vars
+     * each restricted to {0x10,0x20,0x30,0x40,0x50} do not solve in 10 s,
+     * while the same five over a contiguous {0x10..0x14} solve in 2 ms -- the
+     * gaps are the entire cost. Punching them out as holes makes the first
+     * decision legal by construction. (t_constraint_unpacked_array.)
+     *
+     * Why this is safe:
+     * - Only UNCONDITIONAL propagators qualify. A DisjClause inside an ITE
+     *   branch or under a soft-constraint assumption carries a guard var, and
+     *   its solution set is only the constant set *when the guard holds*.
+     * - The fact is static -- it depends on the clause constants, not on the
+     *   trail -- so the holes are installed once, at level 0, and never need
+     *   retracting. var_holes_head is re-zeroed by every compile, so nothing
+     *   leaks into a later problem.
+     * - Holes feed value SELECTION, not the bounds/conflict engine, so a hole
+     *   cannot manufacture a conflict. The one bounds-visible effect is
+     *   solver_exclude_value's boundary tightening, which is sound precisely
+     *   because the disjunction is unconditional.
+     *
+     * Width is capped at 32 because solver_exclude_value compares against the
+     * initial domain with bare signed operators; at width >= 64 the bounds are
+     * bit patterns and those compares hit the 2^63 cliff (B22).
+     */
+    if (ctx->var_holes_head && ctx->prop_refs) {
+        const char *hoff_env = getenv("DV_DISJ_HOLES");
+        if (!(hoff_env && hoff_env[0] == '0')) {
+            /* Cap the punch-out so a sparse set over a wide span (`x inside
+             * {1, 1000000}`) cannot turn compile into a linear scan. */
+            const uint64_t max_holes = 4096u;
+            int64_t vals[MAX_DISJ_CLAUSES];
+
+            for (uint32_t pi = 0; pi < ctx->n_props; pi++) {
+                if (ctx->prop_guard_vars &&
+                    pi < ctx->n_prop_refs_capacity &&
+                    ctx->prop_guard_vars[pi] != EXPR_NULL)
+                    continue;   /* conditional: the set only holds under a guard */
+
+                Propagator *p =
+                    (Propagator *)zsp_pool_ptr(&ctx->pool, ctx->prop_refs[pi]);
+                uint32_t vid = 0;
+                uint32_t nv = prop_disj_eq_set(p, &vid, vals, MAX_DISJ_CLAUSES);
+                if (nv == 0 || vid >= ctx->n_vars) continue;
+                if (ctx->vars[vid].width > 32) continue;
+
+                /* Insertion sort -- nv <= MAX_DISJ_CLAUSES (16). */
+                for (uint32_t a = 1; a < nv; a++) {
+                    int64_t k = vals[a];
+                    uint32_t b = a;
+                    while (b > 0 && vals[b - 1] > k) { vals[b] = vals[b - 1]; b--; }
+                    vals[b] = k;
+                }
+
+                uint64_t span = (uint64_t)(vals[nv - 1] - vals[0]) + 1u;
+                if (span <= (uint64_t)nv) continue;  /* contiguous: no gaps */
+                if (span - (uint64_t)nv > max_holes) continue;
+
+                for (uint32_t a = 0; a + 1 < nv; a++)
+                    for (int64_t x = vals[a] + 1; x < vals[a + 1]; x++)
+                        solver_exclude_value(ctx, vid, x);
+            }
         }
     }
 

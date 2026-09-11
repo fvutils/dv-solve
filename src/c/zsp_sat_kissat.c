@@ -101,6 +101,15 @@ static void ki_set_decision_limit(void *impl, uint32_t limit) {
     kissat_impl_t *k = (kissat_impl_t *)impl;
     kissat_set_decision_limit(k->kissat, (unsigned)limit);
 }
+/* Light-search mode: disable failed-literal probing. Profiling showed `probe`
+ * dominates the SAT time on small array/BMC instances (~4x) that a plain CDCL
+ * search refutes almost immediately, while it is load-bearing on large hard
+ * instances. The caller (zsp_bbsolver_check) gates this on clause count so only
+ * small instances go light; large ones keep kissat's full inprocessing. */
+static void ki_set_light_search(void *impl, int on) {
+    kissat_impl_t *k = (kissat_impl_t *)impl;
+    if (k && k->kissat) kissat_set_option(k->kissat, "probe", on ? 0 : 1);
+}
 
 static size_t ki_arena_size_bytes(void *impl) {
     kissat_impl_t *k = (kissat_impl_t *)impl;
@@ -126,6 +135,7 @@ static const zsp_sat_vtbl KISSAT_VTBL = {
     .set_seed           = ki_set_seed,
     .set_conflict_limit = ki_set_conflict_limit,
     .set_decision_limit = ki_set_decision_limit,
+    .set_light_search   = ki_set_light_search,
     .set_terminate      = ki_set_terminate,
     .interrupt          = ki_interrupt,
     .arena_size_bytes     = ki_arena_size_bytes,

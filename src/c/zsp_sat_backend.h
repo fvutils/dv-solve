@@ -52,6 +52,9 @@ typedef struct zsp_sat_vtbl {
     void          (*set_seed)(void *impl, uint64_t seed);
     void          (*set_conflict_limit)(void *impl, uint32_t limit);
     void          (*set_decision_limit)(void *impl, uint32_t limit);
+    /* Optional (may be NULL): enable a lighter inprocessing schedule suited to
+     * small/easy instances (e.g. disable probing). Caller gates on size. */
+    void          (*set_light_search)(void *impl, int on);
 
     /* Register a terminate callback the backend polls during solve; when it
      * returns non-zero the solver aborts and returns ZSP_SAT_UNKNOWN. Optional

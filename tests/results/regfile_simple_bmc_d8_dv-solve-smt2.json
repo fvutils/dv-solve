@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "regfile_simple_bmc_d8",
   "result": "unsat",
-  "solve_time_ms": 17.70612399559468,
-  "peak_memory_kb": 17237248,
+  "solve_time_ms": 2.6984330033883452,
+  "peak_memory_kb": 299300,
   "returncode": 1,
   "stdout": "unsat\n",
   "stderr": ""

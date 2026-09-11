@@ -140,6 +140,11 @@ void zsp_sat_set_conflict_limit(zsp_sat_t *s, uint32_t limit);
 /** Bound the search by decision count. 0 (the default) means unlimited. */
 void zsp_sat_set_decision_limit(zsp_sat_t *s, uint32_t limit);
 
+/** Enable a lighter inprocessing schedule for small/easy instances (kissat:
+ *  disable probing). Optional at the backend level — a no-op if unsupported.
+ *  The bitblast solve gates this on clause count. */
+void zsp_sat_set_light_search(zsp_sat_t *s, int on);
+
 /** Return number of clauses added (units + binary + general). */
 uint64_t zsp_sat_num_clauses(const zsp_sat_t *s);
 

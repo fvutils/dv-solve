@@ -111,6 +111,13 @@ int zsp_bbsolver_rediversify(zsp_bbsolver_t *bb, uint64_t seed);
 int zsp_bbsolver_assert(zsp_bbsolver_t *bb, ExprRef pred_ref);
 int zsp_bbsolver_resolve(zsp_bbsolver_t *bb, uint64_t seed);
 
+/* Like zsp_bbsolver_resolve but WITHOUT don't-care diversification: reads back
+ * the solver's raw SAT assignment (seed 0). Required by the lazy array
+ * refinement loop, whose array-consistency check must see the true model --
+ * diversify randomizes free/don't-care bits, which include lazily-unconstrained
+ * array read vars, and would produce a spurious SAT. */
+int zsp_bbsolver_resolve_raw(zsp_bbsolver_t *bb);
+
 /**
  * Cube-and-conquer support (docs/cube_and_conquer_design.md, zsp_cube.[ch]).
  *

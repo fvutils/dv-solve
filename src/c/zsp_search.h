@@ -36,6 +36,16 @@ typedef struct {
     uint8_t  _dec_pad[6];
 } DecisionRecord;
 
+/* Why a solve returned SOLVE_TIMEOUT. Diagnostic only; never affects the
+ * verdict (SOLVE_TIMEOUT always means "unknown", i.e. correct-or-unknown). */
+#define ZSP_BAIL_NONE          0   /* not a timeout, or reason not recorded  */
+#define ZSP_BAIL_DEADLINE      1   /* wall-clock budget (decision loop)      */
+#define ZSP_BAIL_MAX_DEPTH     2   /* decision_level hit ctx->max_depth      */
+#define ZSP_BAIL_DEADLINE_CONF 3   /* wall-clock budget (conflict loop)      */
+#define ZSP_BAIL_MAX_RESTARTS  4   /* restart budget exhausted               */
+
+const char *solver_bail_reason_str(const SolveCtx *ctx);
+
 /* ------------------------------------------------------------------ */
 /* SolveOpts — tuning knobs                                           */
 /*                                                                     */
@@ -56,6 +66,10 @@ typedef struct {
                                  *       mode for constrained-random stimulus). */
     uint8_t  _pad[1];
     uint32_t max_shave_iters;   /* pre-search bounds shaving budget (0=use default 1000) */
+    uint32_t time_limit_ms;     /* wall-clock budget for THIS solve, ms.
+                                 *   0 = use the DV_CDCL_TIME_LIMIT env default.
+                                 * Lets a caller bound one probe solve without
+                                 * mutating global env state. */
 } SolveOpts;
 
 /* ------------------------------------------------------------------ */

@@ -251,6 +251,10 @@ void zsp_sat_set_decision_limit(zsp_sat_t *s, uint32_t limit) {
     s->vt->set_decision_limit(s->impl, limit);
 }
 
+void zsp_sat_set_light_search(zsp_sat_t *s, int on) {
+    if (s && s->vt->set_light_search) s->vt->set_light_search(s->impl, on);
+}
+
 void zsp_sat_set_seed(zsp_sat_t *s, uint64_t seed) {
     if (!s) return;
     s->vt->set_seed(s->impl, seed);

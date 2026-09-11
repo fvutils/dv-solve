@@ -28,6 +28,30 @@ _BINOPS = ["bvand", "bvor", "bvxor", "bvadd", "bvsub"]
 _CMPS = ["=", "distinct", "bvult", "bvule", "bvugt", "bvuge"]
 
 
+def _split_args(s: str) -> list[str] | None:
+    """Split `(op a b c)` into [a, b, c], respecting nesting. None if malformed."""
+    if not s.startswith("(") or not s.endswith(")"):
+        return None
+    body = s[1:-1]
+    sp = body.find(" ")
+    if sp < 0:
+        return None
+    body = body[sp + 1:]
+    args, depth, start = [], 0, 0
+    for i, ch in enumerate(body):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == " " and depth == 0:
+            if i > start:
+                args.append(body[start:i])
+            start = i + 1
+    if len(body) > start:
+        args.append(body[start:])
+    return args or None
+
+
 class _Gen:
     def __init__(self, rng: random.Random):
         self.rng = rng
@@ -82,6 +106,62 @@ class _Gen:
         hi = lo + width - 1
         return f"((_ extract {hi} {lo}) {self.term(src, depth-1)})"
 
+    def disj_over_var(self, depth: int) -> str:
+        """An OR whose leaves are direct `var op const` / `var op var` compares.
+
+        The generic `or` production below builds disjunctions over arbitrary
+        *terms*, which almost never reduce to the shape `_flatten_or` in
+        zsp_compile.c recognises -- so they route to a Boolean guard and never
+        reach the DisjClause propagator. This production targets that
+        propagator (and its interval-hull pass) head on: it is the `x inside
+        {a, b, c}` family that Verilator emits constantly.
+
+        Deliberately mixes constants with same-width vars so both the var-const
+        arm and the var-var mirror arm of _disj_var_range get exercised.
+        """
+        w = self.rng.choice(_WIDTHS)
+        v = self._var_of(w)
+        n = self.rng.randint(2, 5)
+        parts = []
+        for _ in range(n):
+            op = self.rng.choice(_CMPS)
+            rhs = self._const(w) if self.rng.random() < 0.7 else self._var_of(w)
+            # Put the target var on the right sometimes, to hit the mirror arm.
+            parts.append(f"({op} {rhs} {v})" if self.rng.random() < 0.25
+                         else f"({op} {v} {rhs})")
+        return f"(or {' '.join(parts)})"
+
+    def reify(self, p: str, depth: int) -> str:
+        """Rewrite a Bool predicate into Verilator's reified 1-bit encoding.
+
+        Verilator does not emit Boolean `and`/`or`: it emits
+        `(= #b1 (bvand #b1 (bvor (__Vbv A) (__Vbv B))))`. That is a *different
+        translator path* from the Boolean one -- the reified-bvor normalization
+        and the top-level reified-conjunction assert split both live there and
+        neither is reachable from the plain `(assert (or ...))` shapes above.
+        Fuzzing only the Boolean form leaves them untested.
+
+        Structural rewrite only: `(and ..)` -> bvand, `(or ..)` -> bvor,
+        anything else -> `(__Vbv <pred>)`. Randomly re-inserts the `#b1` masks
+        Verilator sprinkles through the real transcripts.
+        """
+        def mask(s: str) -> str:
+            if self.rng.random() < 0.25:
+                return (f"(bvand #b1 {s})" if self.rng.random() < 0.5
+                        else f"(bvand {s} #b1)")
+            return s
+
+        def walk(s: str, d: int) -> str:
+            if d > 0 and s.startswith("(and ") or d > 0 and s.startswith("(or "):
+                op = "bvand" if s.startswith("(and ") else "bvor"
+                parts = _split_args(s)
+                if parts is not None and len(parts) >= 2:
+                    return mask(f"({op} " + " ".join(walk(a, d - 1)
+                                                     for a in parts) + ")")
+            return mask(f"(__Vbv {s})")
+
+        return f"(= #b1 {walk(p, depth)})"
+
     def pred(self, depth: int) -> str:
         """A Bool-valued predicate."""
         if depth <= 0 or self.rng.random() < 0.4:
@@ -91,7 +171,9 @@ class _Gen:
         c = self.rng.random()
         if c < 0.3:
             return f"(not {self.pred(depth-1)})"
-        op = "and" if c < 0.65 else "or"
+        if c < 0.45:
+            return self.disj_over_var(depth - 1)
+        op = "and" if c < 0.72 else "or"
         n = self.rng.randint(2, 3)
         return f"({op} {' '.join(self.pred(depth-1) for _ in range(n))})"
 
@@ -101,12 +183,15 @@ def generate_problem(seed: int) -> str:
     g = _Gen(rng)
     depth = rng.randint(2, 4)
     n_asserts = rng.randint(1, 3)
-    asserts = [g.pred(depth) for _ in range(n_asserts)]
-    lines = ["(set-logic QF_BV)"]
+    # Each assert is emitted either as a plain Bool predicate or in Verilator's
+    # reified 1-bit form; both translator paths therefore get fuzzed.
+    asserts = [(g.pred(depth), rng.random() < 0.45) for _ in range(n_asserts)]
+    lines = ["(set-logic QF_BV)",
+             "(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))"]
     for name, width in g.vars.items():
         lines.append(f"(declare-const {name} (_ BitVec {width}))")
-    for a in asserts:
-        lines.append(f"(assert {a})")
+    for a, reified in asserts:
+        lines.append(f"(assert {g.reify(a, depth) if reified else a})")
     lines.append("(check-sat)")
     return "\n".join(lines) + "\n"
 

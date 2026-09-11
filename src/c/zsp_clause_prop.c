@@ -40,10 +40,13 @@ static PropResult _check_clause(ClauseDB *db, SolveCtx *ctx,
         Literal unit = lits[last_unresolved];
         if (unit.var_id >= ctx->n_vars) return PROP_OK;
 
-        int64_t cur = unit.is_lb ? var_lo64(ctx, &ctx->vars[unit.var_id])
-                                 : var_hi64(ctx, &ctx->vars[unit.var_id]);
-        int already_tight = unit.is_lb ? (cur >= unit.bound)
-                                       : (cur <= unit.bound);
+        /* Sign-aware, for the same reason literal_is_true/false are: on an
+         * unsigned width-64 var a bare signed compare reads hi == -1 (the
+         * pattern 2^64-1) as below every bound and skips a real tightening. */
+        const Variable *uv = &ctx->vars[unit.var_id];
+        int64_t cur = unit.is_lb ? var_lo64(ctx, uv) : var_hi64(ctx, uv);
+        int already_tight = unit.is_lb ? !var_b_lt(uv, cur, unit.bound)
+                                       : !var_b_gt(uv, cur, unit.bound);
         if (already_tight) return PROP_OK;
 
         /* Stamp clause-reason on the trail entry so lcg_analyze_conflict
@@ -161,13 +164,15 @@ PropResult clause_propagate(ClauseDB *db, SolveCtx *ctx) {
                 Literal unit = lits[last_unresolved];
                 if (unit.var_id >= ctx->n_vars) continue;
                 /* Check if this would actually tighten */
+                const Variable *uv = &ctx->vars[unit.var_id];
                 int64_t cur_bound;
                 if (unit.is_lb)
-                    cur_bound = var_lo64(ctx, &ctx->vars[unit.var_id]);
+                    cur_bound = var_lo64(ctx, uv);
                 else
-                    cur_bound = var_hi64(ctx, &ctx->vars[unit.var_id]);
-                int already_tight = unit.is_lb ? (cur_bound >= unit.bound)
-                                               : (cur_bound <= unit.bound);
+                    cur_bound = var_hi64(ctx, uv);
+                int already_tight = unit.is_lb
+                    ? !var_b_lt(uv, cur_bound, unit.bound)
+                    : !var_b_gt(uv, cur_bound, unit.bound);
                 if (already_tight) continue;
 
                 uint32_t saved_pr   = ctx->current_prop_ref;

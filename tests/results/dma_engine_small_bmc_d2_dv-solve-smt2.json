@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "dma_engine_small_bmc_d2",
   "result": "sat",
-  "solve_time_ms": 3.252767026424408,
-  "peak_memory_kb": 17237248,
+  "solve_time_ms": 1.5269300201907754,
+  "peak_memory_kb": 299300,
   "returncode": 0,
   "stdout": "sat\n",
   "stderr": ""

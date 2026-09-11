@@ -277,8 +277,21 @@ static int64_t _pick_value(SolveCtx *ctx, uint32_t var_id,
 
     /* Phase saving: try the last saved value if still in domain. Sign-aware
      * so an unsigned upper-half saved value is range-checked correctly (a
-     * signed compare could return an out-of-domain value). */
-    if (opts && opts->use_phase_save && ctx->phase_save) {
+     * signed compare could return an out-of-domain value).
+     *
+     * Deliberately DISABLED for a diversity solve (seed != 0) -- see B18. This
+     * shortcut range-checks only against the coarse [lo,hi] bounds and a single
+     * _is_hole() probe; unlike the randomized path below it never runs the
+     * saved value through _pick_avoiding_holes(). On a domain that is a union
+     * of disjoint ranges (`x inside {[10:20],[100:150]}`) or a bit-count
+     * constraint, a value in the gap passes the bounds check and gets returned
+     * as an infeasible decision -- and because the saved phase does not change,
+     * every restart re-picks it, burning the whole wall-clock budget (measured:
+     * 5 s -> unknown, versus 3 ms with this path skipped). Diversity does NOT
+     * depend on this: the _rand_range64 path below is seeded from
+     * ctx->rng_state and yields fully distinct models per seed (verified
+     * 20/20). Seed 0 (BMC/decision) keeps phase saving exactly as before. */
+    if (opts && opts->use_phase_save && opts->seed == 0 && ctx->phase_save) {
         const Variable *v = &ctx->vars[var_id];
         int64_t ps = ctx->phase_save[var_id];
         if (!var_b_lt(v, ps, lo) && !var_b_gt(v, ps, hi)
@@ -313,9 +326,37 @@ static double _now_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+/* SplitMix64 finalizer: avalanche a low-entropy integer into a well-mixed
+ * 64-bit state. Needed because callers hand us *sequential* seeds -- Verilator
+ * mode literally does `seed = ++div_counter`, and any sampling harness does
+ * seeds 1..N -- and xorshift64 started from 1, 2, 3, ... produces strongly
+ * correlated low bits across those streams. The visible symptom was successive
+ * randomize() calls walking an arithmetic progression rather than sampling:
+ * `a + b == 100` handed back a = 65, 130, 195, 4, 69, ... (i.e. +65 mod 256)
+ * instead of 256 independent draws. Scrambling here fixes every consumer of
+ * ctx->rng_state at once. */
+static uint64_t _seed_mix64(uint64_t z) {
+    z += 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+const char *solver_bail_reason_str(const SolveCtx *ctx) {
+    if (!ctx) return "?";
+    switch (ctx->bail_reason) {
+    case ZSP_BAIL_DEADLINE:      return "wall-clock deadline (search)";
+    case ZSP_BAIL_MAX_DEPTH:     return "decision depth limit";
+    case ZSP_BAIL_DEADLINE_CONF: return "wall-clock deadline (conflict analysis)";
+    case ZSP_BAIL_MAX_RESTARTS:  return "restart budget exhausted";
+    default:                     return "no reason recorded";
+    }
+}
+
 static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
-    /* Seed or preserve RNG. */
-    if (opts && opts->seed != 0) ctx->rng_state = opts->seed;
+    ctx->bail_reason = ZSP_BAIL_NONE;
+    /* Seed or preserve RNG. Sequential seeds must be avalanched first. */
+    if (opts && opts->seed != 0) ctx->rng_state = _seed_mix64(opts->seed);
     if (ctx->rng_state == 0)     ctx->rng_state = 0xDEADBEEF12345678ULL;
 
     /* Wall-clock budget (B10). Default 10s; DV_CDCL_TIME_LIMIT overrides
@@ -326,6 +367,9 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
         double tl = 10.0;
         const char *e = getenv("DV_CDCL_TIME_LIMIT");
         if (e && *e) tl = atof(e);
+        /* A per-solve budget wins over the env default: used for the Verilator
+         * CDCL-viability probe, which must be bounded without touching env. */
+        if (opts && opts->time_limit_ms > 0) tl = (double)opts->time_limit_ms / 1000.0;
         if (tl > 0.0) _deadline = _now_sec() + tl;
     }
     uint64_t _tick = 0;   /* cheap gate for the clock_gettime checks */
@@ -355,6 +399,7 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     }
 
     /* Allocate phase_save array on first call (lazily from static pool). */
+    int ps_fresh = 0;
     if (opts && opts->use_phase_save && !ctx->phase_save && ctx->n_vars > 0) {
         /* Size to n_vars_capacity for incremental variable support */
         uint32_t ps_size = ctx->n_vars_capacity > 0
@@ -364,20 +409,23 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                                           (uint32_t)_Alignof(int64_t));
         if (ps_ref != EXPR_NULL) {
             ctx->phase_save = (int64_t *)zsp_pool_ptr(&ctx->pool, ps_ref);
-            /* For a diversity solve (nonzero seed) seed each var's initial phase
-             * to a RANDOM in-domain value rather than its lower bound. Otherwise
-             * _pick_value keeps returning the saved lower bound and an otherwise-
-             * unconstrained (or loosely bounded) rand var never varies across
-             * seeds. The value is still assigned through _pick_value ->
-             * propagation, so coupled constraints stay respected. Seed 0
-             * (BMC/decision) keeps the deterministic lower-bound phase. */
-            int diversify = (opts->seed != 0);
-            for (uint32_t i = 0; i < ctx->n_vars; i++) {
-                int64_t lo = var_lo64(ctx, &ctx->vars[i]);
-                int64_t hi = var_hi64(ctx, &ctx->vars[i]);
-                ctx->phase_save[i] = diversify ? _rand_range64(ctx, lo, hi) : lo;
-            }
+            ps_fresh = 1;
         }
+    }
+
+    /* Initialize the saved phases to each var's lower bound, once, on the solve
+     * that allocated the array. Only the seed-0 (BMC/decision) path consults
+     * them -- a diversity solve (seed != 0) bypasses phase saving entirely so
+     * its value choice goes through the hole-aware randomized path. See B18/B19
+     * in docs/solver_bug_backlog.md for why randomizing these was wrong. */
+    if (ps_fresh && ctx->phase_save && ctx->n_vars > 0) {
+        /* Never write past the allocation: n_vars can grow past the capacity
+         * the array was sized to via the incremental paths. */
+        uint32_t ps_lim = ctx->n_vars_capacity > 0
+                          ? ctx->n_vars_capacity : ctx->n_vars;
+        if (ps_lim > ctx->n_vars) ps_lim = ctx->n_vars;
+        for (uint32_t i = 0; i < ps_lim; i++)
+            ctx->phase_save[i] = var_lo64(ctx, &ctx->vars[i]);
     }
 
     /* Default restart parameters: 100 conflicts per restart,
@@ -427,8 +475,10 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
 
     for (;;) {
         /* Wall-clock budget check (decision loop). */
-        if (_deadline > 0.0 && (++_tick & 0x3FF) == 0 && _now_sec() > _deadline)
+        if (_deadline > 0.0 && (++_tick & 0x3FF) == 0 && _now_sec() > _deadline) {
+            ctx->bail_reason = ZSP_BAIL_DEADLINE;
             return SOLVE_TIMEOUT;
+        }
 
         /* ── Variable selection ── */
         uint32_t x_id = _select_unassigned(ctx);
@@ -458,8 +508,10 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
          * variable, so a problem with more decision variables than that depth
          * would overflow both arrays (out-of-bounds heap write -> crash).
          * Bail with TIMEOUT so the caller defers/escalates cleanly instead. */
-        if (ctx->decision_level >= ctx->max_depth)
+        if (ctx->decision_level >= ctx->max_depth) {
+            ctx->bail_reason = ZSP_BAIL_MAX_DEPTH;
             return SOLVE_TIMEOUT;
+        }
 
         /* ── Record decision ── */
         uint32_t dec_idx = ctx->decision_level;   /* index before push */
@@ -488,8 +540,10 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
              * clause and `continue`s back to itself; a non-progressing
              * learn/propagate cycle would otherwise never reach the outer
              * loop's check, so the deadline must be tested here too. */
-            if (_deadline > 0.0 && (++_tick & 0x3FF) == 0 && _now_sec() > _deadline)
+            if (_deadline > 0.0 && (++_tick & 0x3FF) == 0 && _now_sec() > _deadline) {
+                ctx->bail_reason = ZSP_BAIL_DEADLINE_CONF;
                 return SOLVE_TIMEOUT;
+            }
 
             uint32_t cur = ctx->decision_level;
 
@@ -507,8 +561,10 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                 luby_idx++;
                 luby_limit = _luby(luby_idx) * max_conflicts;
 
-                if (max_restarts > 0 && restart_count >= max_restarts)
+                if (max_restarts > 0 && restart_count >= max_restarts) {
+                    ctx->bail_reason = ZSP_BAIL_MAX_RESTARTS;
                     return SOLVE_TIMEOUT;
+                }
 
                 /* Clause GC: drop clauses with high LBD (literal block
                  * distance — distinct decision levels in the clause).
@@ -630,7 +686,8 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
             if (pr == PROP_OK) {
                 pr = solver_propagate(ctx);
                 /* Save phase if enabled */
-                if (pr == PROP_OK && opts && opts->use_phase_save && ctx->phase_save)
+                if (pr == PROP_OK && opts && opts->use_phase_save
+                        && opts->seed == 0 && ctx->phase_save)
                     ctx->phase_save[dv] = (int32_t)val;
             }
             /* If pr == PROP_CONFLICT, loop continues → backtracks further */

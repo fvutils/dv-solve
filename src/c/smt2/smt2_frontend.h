@@ -2,6 +2,7 @@
 #define SMT2_FRONTEND_H
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include "zsp_builder.h"
 #include "zsp_ctx.h"
@@ -45,6 +46,29 @@ extern size_t g_smt2_translate_stack_bytes;
 #define SMT2_MAX_SPARSE_ELEMS   4096   /* max distinct indices of a sparse array */
 #define SMT2_CMD_ALLOC_MAX       512   /* per-command transient allocations */
 
+/* Taint the context to `unknown`, recording why + where. Every `unknown` that
+ * comes from an unsupported construct should go through this, so the reason is
+ * always recoverable (DV_LOG=1). Never affects soundness -- it only ever turns a
+ * result into `unknown`. */
+/* Emit `unknown` on the result stream, recording WHERE it came from. Phase 0 of
+ * docs/cdcl_verilator_coverage_plan.md: an `unknown` with no explanation costs a
+ * manual delta-debug every time, so every emission site is traceable under
+ * DV_LOG=1. Purely diagnostic. */
+#define SMT2_EMIT_UNKNOWN(fe) do {                                        \
+        if ((fe)->print_stats || getenv("DV_LOG"))                        \
+            fprintf((fe)->err, "unknown-from: smt2_frontend.c:%d%s%s\n",   \
+                    __LINE__,                                             \
+                    (fe)->incomplete_why ? " -- " : "",                   \
+                    (fe)->incomplete_why ? (fe)->incomplete_why : "");    \
+        fprintf((fe)->out, "unknown\n");                                  \
+    } while (0)
+
+#define SMT2_TAINT(fe, why_) do {              \
+        (fe)->incomplete = 1;                  \
+        (fe)->incomplete_why  = (why_);        \
+        (fe)->incomplete_line = __LINE__;      \
+    } while (0)
+
 /* ------------------------------------------------------------------ */
 /* Variable table entry                                                */
 /* ------------------------------------------------------------------ */
@@ -77,12 +101,31 @@ typedef struct {
  * store_val holds the ExprRef of the written value, so that
  * select(store(a,i,v),i) can be rewritten to v without an ITE chain.
  * store_idx_varid == UINT32_MAX means no R1 metadata is available. */
-typedef struct {
+/* Abstract-array node kinds (DV_ARRAY word-level path). See is_abstract. */
+#define SMT2_ANODE_BASE   0   /* free array variable (leaf)              */
+#define SMT2_ANODE_STORE  1   /* store(parent, store_idx_ref, store_val) */
+#define SMT2_ANODE_CONST  2   /* constant array: every read == store_val */
+#define SMT2_ANODE_ITE    3   /* ite(cond_ref, parent, else_node)        */
+
+typedef struct Smt2ArrayValue {
     Smt2ArraySort sort;
     uint32_t      n_elems;        /* always 1 << sort.addr_width (dense only) */
     ExprRef      *elems;          /* n_elems entries; width = sort.data_width */
     uint32_t      store_idx_varid;/* R1: var_id of symbolic store index, or UINT32_MAX */
     ExprRef       store_val;      /* R1: ExprRef of store value, or EXPR_NULL */
+
+    /* Word-level abstract array (DV_ARRAY). When is_abstract=1 this value is a
+     * node in a persistent select/store DAG rather than a dense elems[] vector.
+     * BASE nodes are owned by array_vars[]; STORE/CONST/ITE nodes are created
+     * during translation and owned by the frontend's anodes[] list. Reads are
+     * abstract (fresh vars); read-over-write + congruence axioms are emitted at
+     * check-sat (Phase A eager) or lazily on a model (Phase B). */
+    uint8_t       is_abstract;
+    uint8_t       akind;            /* SMT2_ANODE_* */
+    struct Smt2ArrayValue *parent;  /* STORE parent / ITE then-branch */
+    struct Smt2ArrayValue *else_node; /* ITE else-branch */
+    ExprRef       store_idx_ref;    /* STORE index ExprRef (store_val = value) */
+    ExprRef       cond_ref;         /* ITE condition ExprRef */
 
     /* Sparse mode (is_sparse=1): used when addr_width is too large to expand
      * densely (2^M elements). The array is then materialized lazily as a map
@@ -109,6 +152,31 @@ typedef struct {
     Smt2ArraySort   sort;
     Smt2ArrayValue *value;   /* never NULL after declare */
 } Smt2ArrayVar;
+
+/* One abstract-array read: read_var == select(node, idx). Recorded per symbolic
+ * select on an abstract array (DV_ARRAY), plus the intermediate reads that
+ * read-over-write pushes down the store chain. idx_varid caches the index when
+ * it is a plain variable so distinct ExprRef nodes for the same variable dedup
+ * to one read var. */
+typedef struct Smt2ArrayRead {
+    Smt2ArrayValue *node;
+    ExprRef         idx_ref;
+    uint32_t        idx_varid;   /* var_id of idx if a plain var, else UINT32_MAX */
+    uint32_t        read_varid;
+    uint16_t        width;
+    uint8_t         emitted;     /* lazy loop: one-step defining constraint added */
+} Smt2ArrayRead;
+
+/* One abstract array equality (a == b), reified onto boolean var p_varid.
+ * Consistency (p -> reads equal at every shared index) + a Skolem extensionality
+ * witness (¬p -> read(a,wit) != read(b,wit)) reify p soundly in both polarities.
+ * wit_idx_ref is the witness index ExprRef (a fresh addr-width var). */
+typedef struct Smt2ArrayEq {
+    Smt2ArrayValue *a;
+    Smt2ArrayValue *b;
+    uint32_t        p_varid;
+    ExprRef         wit_idx_ref;
+} Smt2ArrayEq;
 
 /* ------------------------------------------------------------------ */
 /* Sort-typed function (declare-fun with arity >= 1)                  */
@@ -339,9 +407,67 @@ typedef struct {
     int                  compiled;
     int                  has_aux;
 
+    /* Bit-blast incremental state (B14). The bit-blast engine reads fe->problem
+     * directly and, unlike the CDCL path, has no _flush_aux equivalent -- so an
+     * (assert) issued AFTER a (check-sat) used to sit in the builder forever and
+     * never reach the solver, silently producing a wrong `sat`.
+     *
+     *   problem_dirty    -- constraints were added to the builder after
+     *                       fe->problem was finalized; it must be rebuilt.
+     *   builder_retained -- fe->problem was finalized WITHOUT a following
+     *                       builder_reset, so the builder still holds the FULL
+     *                       constraint set and re-finalizing reproduces it.
+     *                       Cleared by any path that resets the builder
+     *                       (_ensure_compiled, _check_sat_array), after which a
+     *                       rebuild would silently lose the earlier constraints
+     *                       -- so we answer `unknown` instead. */
+    int                  problem_dirty;
+    int                  builder_retained;
+
+    /* Verilator randomization routing. CDCL is a near-uniform sampler; the
+     * bitblast path's _diversify (bit-flip repair over one cached model) is
+     * measurably skewed -- so in verilator mode we prefer CDCL and fall back to
+     * bitblast only where CDCL cannot answer. CDCL is correct-or-unknown and
+     * `unknown` escalates to bitblast, so the routing cannot change a verdict.
+     *
+     * The decision is STICKY per constraint set: a randomize() loop re-solves
+     * the same instance thousands of times, so a failed CDCL probe must be paid
+     * once, not once per call.
+     *   verilator_cdcl  -- master enable (DV_VERILATOR_CDCL=0 opts out)
+     *   cdcl_probe_fp   -- problem fingerprint the decision below applies to
+     *   cdcl_route      -- 0 = not yet probed, 1 = use CDCL, 2 = use bitblast */
+    /* Why the context was tainted to `unknown` (diagnostic only). Most taint
+     * sites used to be silent, so a fixture that answered `unknown` gave no
+     * clue which construct was responsible. Reported by (check-sat) under
+     * DV_LOG / --stats. */
+    const char          *incomplete_why;
+    uint32_t             incomplete_line;
+
+    int                  verilator_cdcl;
+    uint64_t             cdcl_probe_fp;
+    uint8_t              cdcl_route;
+
     /* Array variable table (persistent: element vars survive commands) */
     Smt2ArrayVar         array_vars[SMT2_MAX_ARRAY_VARS];
     uint32_t             n_array_vars;
+
+    /* Word-level abstract arrays (DV_ARRAY). array_lazy is set from the env at
+     * init. anodes[] owns the STORE/CONST/ITE DAG nodes created during
+     * translation (BASE nodes are owned by array_vars[]); areads[] is the read
+     * table. Both persist translation->check-sat and are freed at reset/destroy. */
+    int                  array_lazy;   /* DV_ARRAY set: abstract array path */
+    int                  array_eager;  /* DV_ARRAY=eager: one-shot Ackermann oracle */
+    Smt2ArrayValue     **anodes;
+    uint32_t             n_anodes, anodes_cap;
+    Smt2ArrayRead       *areads;
+    uint32_t             n_areads, areads_cap;
+    Smt2ArrayEq         *aeqs;
+    uint32_t             n_aeqs, aeqs_cap;
+    /* Open-addressing index over areads[] keyed by (node, idx): maps a read key
+     * to its areads slot+1 (0 = empty), so find-or-create is O(1) instead of a
+     * linear scan. Rebuilt on grow; NULL => fall back to linear scan (OOM). */
+    uint32_t            *aread_hash;
+    uint32_t             aread_hash_cap;   /* power of two, or 0 */
 
     /* Per-command transient allocation pool.
      * Freed at the start of each top-level command dispatch.
