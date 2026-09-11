@@ -260,18 +260,26 @@ PropResult clause_propagate(ClauseDB *db, SolveCtx *ctx);
 /* Inline implementations (need SolveCtx definition) */
 #include "zsp_ctx.h"
 
+/* Literal evaluation must order bounds the way the VARIABLE's domain does,
+ * not the way int64 does.  For an unsigned width-64 variable the top of the
+ * domain is the bit pattern -1, so a bare signed compare reads a full domain
+ * [0, 2^64-1] as hi < lo and declares literals like "v >= 1" FALSE — which
+ * falsifies a just-learnt clause at level 0 and mints a wrong UNSAT (B26).
+ * var_b_lt/var_b_gt switch to unsigned ordering exactly for that case. */
 static inline int literal_is_true(const SolveCtx *ctx, Literal lit) {
+    const Variable *v = &ctx->vars[lit.var_id];
     if (lit.is_lb)
-        return var_lo64(ctx, &ctx->vars[lit.var_id]) >= lit.bound;
+        return !var_b_lt(v, var_lo64(ctx, v), lit.bound);
     else
-        return var_hi64(ctx, &ctx->vars[lit.var_id]) <= lit.bound;
+        return !var_b_gt(v, var_hi64(ctx, v), lit.bound);
 }
 
 static inline int literal_is_false(const SolveCtx *ctx, Literal lit) {
+    const Variable *v = &ctx->vars[lit.var_id];
     if (lit.is_lb)
-        return var_hi64(ctx, &ctx->vars[lit.var_id]) < lit.bound;
+        return var_b_lt(v, var_hi64(ctx, v), lit.bound);
     else
-        return var_lo64(ctx, &ctx->vars[lit.var_id]) > lit.bound;
+        return var_b_gt(v, var_lo64(ctx, v), lit.bound);
 }
 
 #endif /* ZSP_LCG_H */

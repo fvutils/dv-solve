@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 8))
+(assert (= (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd ((_ zero_extend 3) ((_ extract 0 0) x)) ((_ zero_extend 3) ((_ extract 1 1) x))) ((_ zero_extend 3) ((_ extract 2 2) x))) ((_ zero_extend 3) ((_ extract 3 3) x))) ((_ zero_extend 3) ((_ extract 4 4) x))) ((_ zero_extend 3) ((_ extract 5 5) x))) ((_ zero_extend 3) ((_ extract 6 6) x))) ((_ zero_extend 3) ((_ extract 7 7) x))) (_ bv1 4)))
+(assert (= x (_ bv0 8)))
+(check-sat)

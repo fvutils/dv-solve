@@ -98,6 +98,16 @@ void builder_destroy(SolveProblemBuilder *b);
 SolveProblem *builder_finalize(SolveProblemBuilder *b, size_t *size);
 
 /**
+ * Like builder_finalize, but leaves `extra_bytes` of unused pool capacity
+ * (pool.capacity > pool.used). The in-place expr_ / problem_add_var API can then
+ * append nodes + variables into the slack after finalize -- used by the lazy
+ * array refinement loop to inject read-over-write / congruence lemmas and new
+ * read variables into the live problem. Returns NULL on allocation failure.
+ */
+SolveProblem *builder_finalize_reserve(SolveProblemBuilder *b, size_t *size,
+                                       uint32_t extra_bytes);
+
+/**
  * Free a SolveProblem buffer returned by builder_finalize().
  */
 void builder_free_problem(SolveProblemBuilder *b, SolveProblem *sp, size_t size);

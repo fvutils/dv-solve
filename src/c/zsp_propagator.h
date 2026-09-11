@@ -472,6 +472,21 @@ uint32_t prop_add_disj_clause(SolveCtx *ctx,
                                uint8_t priority,
                                const uint32_t *rhs_var_ids);
 
+/**
+ * If `p` is a DisjClause whose disjuncts are ALL `v == <const>` over the SAME
+ * variable -- i.e. the `x inside {a, b, c}` shape -- report `v` and the
+ * constant set.
+ *
+ * Lets the compiler recognise a disjunction whose solution set is an explicit
+ * finite set, which it can then install as an exact domain rather than the
+ * interval hull _disj_hull derives at propagation time.
+ *
+ * @return number of constants written to out_vals, or 0 if `p` is not a
+ *         DisjClause or does not have that shape.
+ */
+uint32_t prop_disj_eq_set(const Propagator *p, uint32_t *out_var,
+                          int64_t *out_vals, uint32_t max_vals);
+
 /* ------------------------------------------------------------------ */
 /* SumEq: result == var_ids[0] + var_ids[1] + ... + var_ids[n-1]      */
 /*                                                                     */

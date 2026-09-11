@@ -309,9 +309,13 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
     /* Check for empty-domain conflict */
     uint32_t conflict_var = EXPR_NULL;
     for (uint32_t i = 0; i < ctx->n_vars; i++) {
-        int64_t lo = var_lo64(ctx, &ctx->vars[i]);
-        int64_t hi = var_hi64(ctx, &ctx->vars[i]);
-        if (lo > hi) {
+        const Variable *vi = &ctx->vars[i];
+        /* Sign-aware: an unsigned width-64 var's FULL domain is lo=0, hi=-1
+         * (the bit pattern 2^64-1), which a bare `lo > hi` calls empty — this
+         * loop would then pick an unconstrained variable as the conflict var
+         * and explain the conflict from the wrong place. Same 2^63 cliff as
+         * B22/B26; mirrors the guard in solver_solve. */
+        if (var_b_gt(vi, var_lo64(ctx, vi), var_hi64(ctx, vi))) {
             conflict_var = i;
             break;
         }

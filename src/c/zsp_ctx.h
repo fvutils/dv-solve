@@ -72,6 +72,13 @@ typedef struct SolveCtx {
     uint64_t           conflict_count;
     uint64_t           rng_state;
     uint8_t            fair_pick;     /* SolveOpts.fair_pick for this solve */
+    uint8_t            bail_reason;   /* ZSP_BAIL_*: why the last solve returned
+                                       * SOLVE_TIMEOUT. Purely diagnostic -- a
+                                       * silent `unknown` used to give no clue
+                                       * whether CDCL ran out of time, ran out
+                                       * of decision depth, or never compiled
+                                       * the constraint at all. Read it via
+                                       * DV_LOG=1 / --stats. */
     zsp_block_alloc_t *block_alloc;   /* source of dynamic blocks      */
     zsp_stack_t       *dynamic;       /* dynamic stack (trail etc.)    */
     TrailEntry        *trail_top;     /* newest trail entry, or NULL   */

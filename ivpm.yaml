@@ -3,7 +3,10 @@ package:
 
   dep-sets:
   - name: default-dev
-    deps: 
+    deps:
+    - name: cadical
+      url: https://github.com/arminbiere/cadical.git
+      tag: rel-3.0.0
     - name: zuspec-dataclasses
       url: https://github.com/zuspec/zuspec-dataclasses.git
     - name: zuspec-be-fv
@@ -22,5 +25,7 @@ package:
     - name: verilator
       url: https://github.com/edapack/verilator-bin
       src: gh-rls
+    - name: scipy
+      src: pypi
 
 

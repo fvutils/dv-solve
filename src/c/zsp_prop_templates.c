@@ -895,7 +895,23 @@ static PropResult _bit_slice_backward(SolveCtx *ctx, uint32_t aid,
     static int disabled = -1;
     if (disabled < 0) disabled = getenv("DV_NO_BITSLICE_BACKWARD") ? 1 : 0;
     if (disabled) return PROP_OK;
-    if (alo < 0 || ahi < 0 || (uint64_t)alo > (uint64_t)ahi) return PROP_OK;
+    /* alo/ahi are raw 64-bit bound patterns. For an UNSIGNED width>=64 source a
+     * bound above INT64_MAX (e.g. a full-range hi = 2^64-1) reads as negative in
+     * int64 — that is a valid unsigned value, not a malformed bound. The slice
+     * math below is purely unsigned (_slice_min_ge/_max_le take uint64_t), so it
+     * is correct across the full range; only reject a genuinely inverted domain.
+     * For a signed source (or a narrow unsigned var with a negative *intermediate*
+     * bound) a negative pattern is real and the unsigned slice logic doesn't
+     * apply, so bail as before. Fixes B6: `((_ extract 63 63) v) == 1` on a
+     * 64-bit unsigned v used to bail here (ahi = -1) → v never forced to bit 63
+     * → wrong `unsat`. */
+    const Variable *av = &ctx->vars[aid];
+    int wide_unsigned = !(av->flags & VAR_SIGNED) && av->width >= 64;
+    if (wide_unsigned) {
+        if ((uint64_t)alo > (uint64_t)ahi) return PROP_OK;
+    } else {
+        if (alo < 0 || ahi < 0 || (uint64_t)alo > (uint64_t)ahi) return PROP_OK;
+    }
     int ok1, ok2;
     uint64_t nlo = _slice_min_ge((uint64_t)alo, (uint64_t)ahi, lo, hi, v, &ok1);
     uint64_t nhi = _slice_max_le((uint64_t)alo, (uint64_t)ahi, lo, hi, v, &ok2);
@@ -2621,12 +2637,8 @@ static PropResult _fire_bounds_bxor_64(Propagator *self, SolveCtx *ctx) {
      * works correctly when the other operand is also singleton.
      * For non-singleton cases, XOR can scramble bit ordering.
      * Only do backward propagation when both endpoints XOR to valid bounds. */
-    if (alo == ahi && blo == bhi) {
-        /* Already handled above */
-    } else if (alo == ahi) {
+    if (alo == ahi) {
         int64_t k = alo;
-        /* Only safe if b is singleton (already handled) or for backward
-         * propagation when r is singleton */
         int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
         int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
         if (rlo == rhi) {
@@ -2644,6 +2656,38 @@ static PropResult _fire_bounds_bxor_64(Propagator *self, SolveCtx *ctx) {
             int64_t a_exact = rlo ^ k;
             if ((res = ctx_tighten_lb64(ctx, aid, a_exact)) != PROP_OK) return res;
             if ((res = ctx_tighten_ub64(ctx, aid, a_exact)) != PROP_OK) return res;
+        }
+    }
+
+    /* Single-bit constant operand (r = y ^ 2^m): xor flips only bit m, so it is
+     * an order-preserving shift on any range whose values all share the same
+     * bit m (i.e. lie in one 2^m-aligned block: (lo>>m)==(hi>>m)). This is the
+     * signed-compare MSB-flip case (2^(w-1)); without bounds propagation here
+     * the flipped var is only linked to its source at singleton assignment, so
+     * the search loses all bound guidance and blind-enumerates. Propagate both
+     * directions when the block condition holds. Positive powers of two only
+     * (excludes the int64-negative 2^63, i.e. 64-bit sign bit — sound: that
+     * stays `unknown`). */
+    int have_k = 0; int64_t kbit = 0; uint32_t yid = 0;
+    if (blo == bhi && blo > 0 && (blo & (blo - 1)) == 0) { kbit = blo; yid = aid; have_k = 1; }
+    else if (alo == ahi && alo > 0 && (alo & (alo - 1)) == 0) { kbit = alo; yid = bid; have_k = 1; }
+    if (have_k) {
+        int m = __builtin_ctzll((uint64_t)kbit);
+        int64_t ylo = var_lo64(ctx, &ctx->vars[yid]);
+        int64_t yhi = var_hi64(ctx, &ctx->vars[yid]);
+        if (ylo >= 0 && (ylo >> m) == (yhi >> m)) {
+            int64_t r0 = ylo ^ kbit, r1 = yhi ^ kbit;
+            int64_t rmin = r0 < r1 ? r0 : r1, rmax = r0 < r1 ? r1 : r0;
+            if ((res = ctx_tighten_lb64(ctx, rid, rmin)) != PROP_OK) return res;
+            if ((res = ctx_tighten_ub64(ctx, rid, rmax)) != PROP_OK) return res;
+        }
+        int64_t rl = var_lo64(ctx, &ctx->vars[rid]);
+        int64_t rh = var_hi64(ctx, &ctx->vars[rid]);
+        if (rl >= 0 && (rl >> m) == (rh >> m)) {
+            int64_t y0 = rl ^ kbit, y1 = rh ^ kbit;
+            int64_t ymin = y0 < y1 ? y0 : y1, ymax = y0 < y1 ? y1 : y0;
+            if ((res = ctx_tighten_lb64(ctx, yid, ymin)) != PROP_OK) return res;
+            if ((res = ctx_tighten_ub64(ctx, yid, ymax)) != PROP_OK) return res;
         }
     }
 
@@ -2945,19 +2989,58 @@ uint32_t prop_add_bounds_concat_64(SolveCtx *ctx, uint32_t r_id,
 /* When all but one are definitely false, enforce the survivor.       */
 /* ------------------------------------------------------------------ */
 
-/** Is comparison (lo..hi) op constant definitely false? */
+/** Is comparison (lo..hi) op constant definitely false?
+ *
+ * Every comparison here is ORDER-sensitive, so it must go through the
+ * sign-aware var_b_* helpers rather than bare signed operators. For an
+ * unsigned variable of width >= 64 the stored lo/hi are *bit patterns*: a
+ * value above INT64_MAX reads back negative. A width-64 var starts at
+ * hi = 2^64-1, whose pattern is -1, so a bare `hi <= c` said "definitely
+ * false" for every c >= -1 -- i.e. for every constant. Both disjuncts of
+ * `(or (bvult 5 v) (bvuge v 9))` were then falsified at once and the
+ * propagator reported a conflict, minting a wrong UNSAT on a trivially
+ * satisfiable constraint. (The "2^63 cliff" the var_b_* comment in
+ * zsp_ctx.h warns about; this path had not been converted.)
+ */
+/**
+ * Order two bound values drawn from a PAIR of variables.
+ *
+ * var_b_lt takes a single variable, which is all a var-const comparison needs.
+ * A var-var disjunct compares bounds from two different variables, and a bare
+ * signed compare there is the 2^63 cliff again: for an unsigned width-64 var
+ * the full domain is lo=0, hi=-1, so `(or (bvult a b) (bvugt a b))` had BOTH
+ * disjuncts "definitely false" and returned a wrong UNSAT (B29 — the var-var
+ * half of B22, which only fixed the var-const side).
+ *
+ * Unsigned ordering is used only when BOTH operands are unsigned and at least
+ * one is width >= 64 — i.e. exactly when a bound can be a pattern above
+ * INT64_MAX. Anything else keeps signed ordering, which is what makes a
+ * genuinely negative bound (a signed var, or a negative intermediate) still
+ * read as "below the domain" rather than as a huge unsigned value.
+ * Mixed signedness cannot occur for a well-typed BV comparison; if it somehow
+ * does, signed ordering is the conservative choice, since a spurious
+ * "definitely false" is what mints the wrong answer.
+ */
+static inline int _pair_lt(const Variable *lv, const Variable *rv,
+                           int64_t a, int64_t b) {
+    if (!(lv->flags & VAR_SIGNED) && !(rv->flags & VAR_SIGNED) &&
+        (lv->width >= 64 || rv->width >= 64))
+        return (uint64_t)a < (uint64_t)b;
+    return a < b;
+}
+
 static int _clause_definitely_false(Variable *v, SolveCtx *ctx,
                                      uint32_t op, int64_t c) {
     int64_t lo = var_lo64(ctx, v);
     int64_t hi = var_hi64(ctx, v);
     /* Negate the op and check if negation is definitely true */
     switch (op) {
-    case BIN_EQ:   return (lo > c || hi < c);        /* !(lo <= c <= hi) */
+    case BIN_EQ:   return (var_b_gt(v, lo, c) || var_b_lt(v, hi, c));
     case BIN_NEQ:  return (lo == hi && lo == c);      /* singleton == c */
-    case BIN_LT:   return (lo >= c);                  /* all >= c => none < c */
-    case BIN_LTE:  return (lo > c);
-    case BIN_GT:   return (hi <= c);
-    case BIN_GTE:  return (hi < c);
+    case BIN_LT:   return !var_b_lt(v, lo, c);        /* all >= c => none < c */
+    case BIN_LTE:  return var_b_gt(v, lo, c);
+    case BIN_GT:   return !var_b_gt(v, hi, c);
+    case BIN_GTE:  return var_b_lt(v, hi, c);
     default:       return 0;
     }
 }
@@ -2973,23 +3056,186 @@ static PropResult _enforce_clause(SolveCtx *ctx, uint32_t var_id,
     case BIN_NEQ:
         /* Can only tighten if domain is singleton or c is at a bound */
         {
-            int64_t lo = var_lo64(ctx, &ctx->vars[var_id]);
-            int64_t hi = var_hi64(ctx, &ctx->vars[var_id]);
-            if (lo == c) return ctx_tighten_lb64(ctx, var_id, c + 1);
-            if (hi == c) return ctx_tighten_ub64(ctx, var_id, c - 1);
+            Variable *v = &ctx->vars[var_id];
+            int64_t lo = var_lo64(ctx, v);
+            int64_t hi = var_hi64(ctx, v);
+            /* At the representable edge there is nothing to carve off, and
+             * c+1 / c-1 would wrap around the domain. */
+            if (lo == c) {
+                if (c == var_repr_max(v)) return PROP_CONFLICT;
+                return ctx_tighten_lb64(ctx, var_id, c + 1);
+            }
+            if (hi == c) {
+                if (c == var_repr_min(v)) return PROP_CONFLICT;
+                return ctx_tighten_ub64(ctx, var_id, c - 1);
+            }
         }
         return PROP_OK;
-    case BIN_LT:   return ctx_tighten_ub64(ctx, var_id, c - 1);
+    case BIN_LT:
+        /* v < repr_min is unsatisfiable; c-1 would otherwise wrap. */
+        if (c == var_repr_min(&ctx->vars[var_id])) return PROP_CONFLICT;
+        return ctx_tighten_ub64(ctx, var_id, c - 1);
     case BIN_LTE:  return ctx_tighten_ub64(ctx, var_id, c);
-    case BIN_GT:   return ctx_tighten_lb64(ctx, var_id, c + 1);
+    case BIN_GT:
+        if (c == var_repr_max(&ctx->vars[var_id])) return PROP_CONFLICT;
+        return ctx_tighten_lb64(ctx, var_id, c + 1);
     case BIN_GTE:  return ctx_tighten_lb64(ctx, var_id, c);
     default:       return PROP_OK;
     }
 }
 
+/* Saturating helpers, clamped to what the VARIABLE can represent.
+ *
+ * These must be domain-relative, not int64-relative. For an unsigned width-64
+ * var the bounds are bit patterns, so "the largest value" is -1, not
+ * INT64_MAX, and `c - 1` at c == 0 would wrap to the top of the domain rather
+ * than saturate at the bottom. Clamping at var_repr_min/max keeps every
+ * derived endpoint inside the domain and keeps the hull an over-approximation.
+ */
+static inline int64_t _bnd_dec(const Variable *v, int64_t c) {
+    return (c == var_repr_min(v)) ? c : c - 1;
+}
+static inline int64_t _bnd_inc(const Variable *v, int64_t c) {
+    return (c == var_repr_max(v)) ? c : c + 1;
+}
+
+/**
+ * Range of `v` permitted by a single disjunct, as [*lo, *hi].
+ *
+ * Returns 0 if this disjunct does not constrain `v` at all (in which case
+ * the caller must treat the range as unbounded, killing the hull).
+ *
+ * SOUNDNESS: the range must depend ONLY on the disjunct's constants and on
+ * the *other* variable's bounds -- never on `v`'s own current bounds.
+ * explain_disj_clause() reports exactly the other watched vars' bounds as
+ * antecedents, so a hull that also depended on v's own domain would be
+ * asserted with a too-weak (for a var-const disjunction, empty, i.e.
+ * unconditional) reason. That is precisely how a wrong UNSAT is minted.
+ * Hence: unconstrained directions become INT64_MIN/INT64_MAX, and we never
+ * consult var_lo64/var_hi64 of `v` here.
+ */
+static int _disj_var_range(const SolveCtx *ctx, const DisjClause_t *dc,
+                           uint32_t i, uint32_t v,
+                           int64_t *lo, int64_t *hi) {
+    uint32_t lhs = dc->clauses[i].var_id;
+    uint32_t rhs = dc->clauses[i].rhs_var_id;
+    uint32_t op  = dc->clauses[i].op;
+    const Variable *vv = &ctx->vars[v];
+
+    /* "Unbounded" is the variable's representable range, NOT the int64 range:
+     * for an unsigned width-64 var the top of the domain is the pattern -1. */
+    *lo = var_repr_min(vv); *hi = var_repr_max(vv);
+
+    /* Degenerate self-comparison (v op v): claim nothing. */
+    if (lhs == v && rhs == v) return 0;
+
+    if (lhs == v && rhs == UINT32_MAX) {
+        int64_t c = dc->clauses[i].constant;
+        switch (op) {
+        case BIN_EQ:  *lo = c; *hi = c;           return 1;
+        case BIN_LT:  *hi = _bnd_dec(vv, c);      return 1;
+        case BIN_LTE: *hi = c;                    return 1;
+        case BIN_GT:  *lo = _bnd_inc(vv, c);      return 1;
+        case BIN_GTE: *lo = c;                    return 1;
+        default:      return 0;   /* BIN_NEQ and friends: no interval */
+        }
+    }
+
+    if (lhs == v && rhs != UINT32_MAX) {
+        /* v op rhs */
+        int64_t r_lo = var_lo64(ctx, &ctx->vars[rhs]);
+        int64_t r_hi = var_hi64(ctx, &ctx->vars[rhs]);
+        switch (op) {
+        case BIN_EQ:  *lo = r_lo; *hi = r_hi;     return 1;
+        case BIN_LT:  *hi = _bnd_dec(vv, r_hi);   return 1;
+        case BIN_LTE: *hi = r_hi;                 return 1;
+        case BIN_GT:  *lo = _bnd_inc(vv, r_lo);   return 1;
+        case BIN_GTE: *lo = r_lo;                 return 1;
+        default:      return 0;
+        }
+    }
+
+    if (rhs == v && lhs != UINT32_MAX) {
+        /* lhs op v  ->  mirror the operator onto v */
+        int64_t l_lo = var_lo64(ctx, &ctx->vars[lhs]);
+        int64_t l_hi = var_hi64(ctx, &ctx->vars[lhs]);
+        switch (op) {
+        case BIN_EQ:  *lo = l_lo; *hi = l_hi;     return 1;
+        case BIN_LT:  *lo = _bnd_inc(vv, l_lo);   return 1;  /* lhs <  v */
+        case BIN_LTE: *lo = l_lo;                 return 1;  /* lhs <= v */
+        case BIN_GT:  *hi = _bnd_dec(vv, l_hi);   return 1;  /* lhs >  v */
+        case BIN_GTE: *hi = l_hi;                 return 1;  /* lhs >= v */
+        default:      return 0;
+        }
+    }
+
+    return 0;   /* disjunct does not mention v */
+}
+
+/**
+ * Interval-hull propagation for a disjunction.
+ *
+ * The watched-literal rule below only fires once all but one disjunct is
+ * falsified. For `x inside {3,4,5}` over a 32-bit x nothing is ever
+ * falsified, so the domain stays [0, 2^32) and the search enumerates it.
+ * The union of the disjuncts is contained in the hull of their per-disjunct
+ * ranges, so tightening x to that hull is sound.
+ *
+ * Deliberately hulls over ALL disjuncts, including ones currently falsified
+ * by the trail: skipping those would make the result depend on the var's own
+ * domain, which explain_disj_clause() does not report. See _disj_var_range.
+ */
+static PropResult _disj_hull(DisjClause_t *dc, SolveCtx *ctx) {
+    PropWatchSect *ws = PROP_WS(&dc->hdr);
+    uint32_t n = dc->n_clauses;
+
+    for (uint32_t w = 0; w < ws->n_watches; w++) {
+        uint32_t v = ws->var_ids[w];
+        if (v >= ctx->n_vars) continue;
+
+        /* Skip duplicates in the watch list. */
+        int dup = 0;
+        for (uint32_t k = 0; k < w; k++) if (ws->var_ids[k] == v) { dup = 1; break; }
+        if (dup) continue;
+
+        const Variable *vv = &ctx->vars[v];
+        int64_t rmin = var_repr_min(vv), rmax = var_repr_max(vv);
+        int64_t hull_lo = rmax, hull_hi = rmin;
+        int usable = 1;
+        for (uint32_t i = 0; i < n && usable; i++) {
+            int64_t lo, hi;
+            if (!_disj_var_range(ctx, dc, i, v, &lo, &hi)) {
+                usable = 0;      /* this disjunct leaves v free */
+                break;
+            }
+            hull_lo = var_b_min(vv, hull_lo, lo);
+            hull_hi = var_b_max(vv, hull_hi, hi);
+        }
+        if (!usable) continue;
+
+        /* A hull at the representable edge carries no information. */
+        if (hull_lo != rmin &&
+            ctx_tighten_lb64(ctx, v, hull_lo) == PROP_CONFLICT)
+            return PROP_CONFLICT;
+        if (hull_hi != rmax &&
+            ctx_tighten_ub64(ctx, v, hull_hi) == PROP_CONFLICT)
+            return PROP_CONFLICT;
+    }
+    return PROP_OK;
+}
+
 static PropResult _fire_disj_clause(Propagator *self, SolveCtx *ctx) {
     DisjClause_t *dc = (DisjClause_t *)self;
     uint32_t n = dc->n_clauses;
+
+    /* Opt-out kill switch. Cached: this is a hot propagation path, so the
+     * lookup must not happen per fire. */
+    static int hull_off = -1;
+    if (hull_off < 0) {
+        const char *e = getenv("DV_DISJ_HULL");
+        hull_off = (e && e[0] == '0') ? 1 : 0;
+    }
+    if (!hull_off && _disj_hull(dc, ctx) == PROP_CONFLICT) return PROP_CONFLICT;
 
     /* Count how many clauses are definitely false */
     uint32_t n_false = 0;
@@ -3011,11 +3257,12 @@ static PropResult _fire_disj_clause(Propagator *self, SolveCtx *ctx) {
             int64_t r_lo = var_lo64(ctx, rv), r_hi = var_hi64(ctx, rv);
             int def_false = 0;
             switch (dc->clauses[i].op) {
-            case BIN_LT:  def_false = (l_lo >= r_hi); break;
-            case BIN_LTE: def_false = (l_lo > r_hi);  break;
-            case BIN_GT:  def_false = (l_hi <= r_lo); break;
-            case BIN_GTE: def_false = (l_hi < r_lo);  break;
-            case BIN_EQ:  def_false = (l_lo > r_hi || l_hi < r_lo); break;
+            case BIN_LT:  def_false = !_pair_lt(lv, rv, l_lo, r_hi); break;
+            case BIN_LTE: def_false = _pair_lt(lv, rv, r_hi, l_lo);  break;
+            case BIN_GT:  def_false = !_pair_lt(lv, rv, r_lo, l_hi); break;
+            case BIN_GTE: def_false = _pair_lt(lv, rv, l_hi, r_lo);  break;
+            case BIN_EQ:  def_false = (_pair_lt(lv, rv, r_hi, l_lo) ||
+                                       _pair_lt(lv, rv, l_hi, r_lo)); break;
             case BIN_NEQ: def_false = (l_lo == l_hi && r_lo == r_hi && l_lo == r_lo); break;
             default: break;
             }
@@ -3087,6 +3334,18 @@ uint32_t prop_add_disj_clause(SolveCtx *ctx,
             all_vids[n_watch++] = rhs_var_ids[i];
         }
     }
+
+    /* Refuse any variable wider than 64 bits. This whole propagator reasons
+     * through var_lo64/var_hi64, which cannot represent a tier-2 domain -- it
+     * would read some other struct's bytes as the bounds and then "prove"
+     * disjuncts false, i.e. mint a wrong UNSAT (that is exactly what a 65-bit
+     * `(or (bvult 5 v) (bvuge v 9))` did). Declining here leaves the
+     * constraint uncompiled, so the model-validation net downgrades to
+     * `unknown` and the solve escalates -- correct-or-unknown, never wrong. */
+    for (uint32_t i = 0; i < n_watch; i++) {
+        if (all_vids[i] >= ctx->n_vars) return EXPR_NULL;
+        if (ctx->vars[all_vids[i]].width > 64) return EXPR_NULL;
+    }
     uint32_t ref = _alloc_prop(ctx, _fire_disj_clause, priority,
                                 n_watch, all_vids, sizeof(DisjClause_t));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -3100,6 +3359,29 @@ uint32_t prop_add_disj_clause(SolveCtx *ctx,
         dc->clauses[i].rhs_var_id = (rhs_var_ids ? rhs_var_ids[i] : UINT32_MAX);
     }
     return ref;
+}
+
+uint32_t prop_disj_eq_set(const Propagator *p, uint32_t *out_var,
+                          int64_t *out_vals, uint32_t max_vals) {
+    if (!p || p->fire != _fire_disj_clause) return 0;
+
+    const DisjClause_t *dc = (const DisjClause_t *)p;
+    uint32_t n = dc->n_clauses;
+    if (n < 2 || n > max_vals) return 0;
+
+    uint32_t v = dc->clauses[0].var_id;
+    for (uint32_t i = 0; i < n; i++) {
+        /* Every disjunct must pin the SAME variable to a CONSTANT. Anything
+         * else (an inequality, a var-var compare, a second variable) means the
+         * solution set is not the finite set {constants}, and installing it as
+         * one would drop solutions. */
+        if (dc->clauses[i].op != BIN_EQ) return 0;
+        if (dc->clauses[i].rhs_var_id != UINT32_MAX) return 0;
+        if (dc->clauses[i].var_id != v) return 0;
+        out_vals[i] = dc->clauses[i].constant;
+    }
+    *out_var = v;
+    return n;
 }
 
 /* ------------------------------------------------------------------ */

@@ -118,17 +118,20 @@ static void test_declare_array_addr_too_wide(void) {
     Smt2Frontend fe;
     FILE *err_f = tmpfile();
     smt2_frontend_init(&fe, stderr, err_f);
-    /* M=12 > MAX_ARRAY_ADDR_BITS=10: should print an error but continue */
+    /* M=12 > MAX_ARRAY_ADDR_BITS=10 is too large to expand densely (2^12 elems).
+     * Rather than reject it, the frontend registers a SPARSE array: element vars
+     * are created lazily per concrete index. This is sound — concrete-index
+     * selects solve exactly, while stores / symbolic indices taint to `unknown`
+     * (verified differentially vs z3). So the var IS registered, in sparse mode. */
     int rc = _run(&fe,
         "(set-logic QF_AUFBV)"
         "(declare-const big (Array (_ BitVec 12) (_ BitVec 8)))");
-    ASSERT_EQ_INT(rc, 0);    /* session continues */
-    ASSERT_EQ_INT(fe.n_array_vars, 0);  /* var not registered */
-    /* Check error was printed */
-    rewind(err_f);
-    char buf[256] = {0};
-    (void)fread(buf, 1, sizeof(buf)-1, err_f);
-    ASSERT_TRUE(strstr(buf, "exceeds limit") != NULL);
+    ASSERT_EQ_INT(rc, 0);                       /* session continues */
+    ASSERT_EQ_INT(fe.n_array_vars, 1);          /* registered as a sparse array */
+    ASSERT_TRUE(fe.array_vars[0].value != NULL);
+    ASSERT_EQ_INT(fe.array_vars[0].value->is_sparse, 1);
+    ASSERT_EQ_INT(fe.array_vars[0].sort.addr_width, 12);
+    ASSERT_EQ_INT(fe.array_vars[0].sort.data_width, 8);
     fclose(err_f);
     smt2_frontend_destroy(&fe);
 }

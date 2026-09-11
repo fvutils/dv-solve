@@ -1,0 +1,5 @@
+# The formulas (234 MB) and the raw archive are materialized by fetch_archive.sh;
+# only meta/ + scripts are version-controlled.
+smt2/
+results/run.csv
+*.tar.gz

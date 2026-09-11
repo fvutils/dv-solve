@@ -246,6 +246,50 @@ SolveProblem *builder_finalize(SolveProblemBuilder *b, size_t *out_size) {
     return sp;
 }
 
+SolveProblem *builder_finalize_reserve(SolveProblemBuilder *b, size_t *out_size,
+                                       uint32_t extra_bytes) {
+    uint32_t pool_data_size = b->virtual_used;
+    size_t total = sizeof(SolveProblem) + pool_data_size + extra_bytes;
+
+    void *buf = _alloc(b, total);
+    if (!buf) return NULL;
+    memset(buf, 0, total);
+
+    SolveProblem *sp = (SolveProblem *)buf;
+    sp->n_vars           = b->n_vars;
+    sp->n_constraints    = b->n_constraints;
+    sp->n_sources        = b->n_sources;
+    sp->vars_head        = b->vars_head;
+    sp->constraints_head = b->constraints_head;
+    sp->sources_head     = b->sources_head;
+    sp->n_alldiffs       = b->n_alldiffs;
+    sp->allDiff_head     = b->allDiff_head;
+    sp->n_softs          = b->n_softs;
+    sp->softs_head       = b->softs_head;
+    sp->n_dists          = b->n_dists;
+    sp->dists_head       = b->dists_head;
+
+    /* Leave headroom: capacity > used, so the in-place expr_ / problem_add_var
+     * API can append lemma nodes + new vars into the slack after finalize
+     * (the lazy array refinement loop relies on this). */
+    sp->pool.capacity = pool_data_size + extra_bytes;
+    sp->pool.used     = pool_data_size;
+    sp->pool.overflow = 0;
+    sp->pool._pad     = 0;
+
+    uint8_t *pool_base = (uint8_t *)&sp->pool + sizeof(zsp_pool_t);
+    for (BuilderBlock *blk = b->first; blk; blk = blk->next) {
+        if (blk->used > 0) {
+            memcpy(pool_base + blk->base_offset,
+                   BUILDER_BLOCK_DATA(blk),
+                   blk->used);
+        }
+    }
+
+    if (out_size) *out_size = total;
+    return sp;
+}
+
 void builder_free_problem(SolveProblemBuilder *b, SolveProblem *sp, size_t size) {
     if (!sp) return;
     _release(b, sp, size);
