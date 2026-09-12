@@ -39,6 +39,7 @@ not enforced.
 | **G10** | D | the only post-solve safety net was unreachable | fixed — `SolveCtx.validate_model()` |
 | **G11** | D | aggregates unmeasured | measured — cdcl handles all four; bb now *defers* rather than erroring |
 | **G12** | D | a stale `BIN_NEQ` workaround, or an unfound bug | stale — workaround removed |
+| **G13** | B | reified `x ≤ y` propagated only one operand when guard=0 | fixed — both directions (found 2026-09-12, *by* R2) |
 
 Both the expression probe and the feature probe are green row for row, with one
 deliberate exception: W8/W9 (a variable wider than 64 bits) read `UNSUPPORTED` on
@@ -263,6 +264,45 @@ The workaround was also only accidentally correct: `v < 0` is vacuously false fo
 an unsigned variable, which is the only case it was ever exercised on, so the
 pair collapsed to the intended `v > 0`. The helper never declared which
 signedness it assumed.
+
+### G13 — reification propagated only one of its two operands
+
+Found on 2026-09-12, driving the generic-constraints work back through the bc
+path. `k == 3 ; (k<3) || (j < k+2)` reported `NO-SOLUTION` on a problem with five
+models. Severity B, and it was **introduced by R2**: not a new defect so much as
+an old half-implementation that only a var-var reification could reach.
+
+`guard ↔ (x ≤ y)` has two enforcement branches. The guard=1 branch always
+tightened both operands. The guard=0 branch — enforcing `x > y` — tightened only
+`x.lb ≥ y.hi + 1`, never `y.ub ≤ x.lo - 1`, and the header comment said as much:
+*"stub — only one direction"*. That was sufficient while reification only ever
+ran against a **constant**, where the missing side is pinned and carries no
+information. R2 made two-variable reification routine, and `a < b` is encoded as
+`¬(b ≤ a)` — so for `j < k+2` the arithmetic result lands in `x` and **only the
+missing direction can bound `j`**.
+
+Note what was and was not wrong. The encoding was soundly *checked*: pin `j` to
+any legal value and the problem is SAT; pin an illegal one and it is UNSAT. The
+propagator simply deduced nothing, so `j` kept its full 256-value domain and the
+search had to guess a 5-in-256 target. Propagation that is sound but blind
+reports the same thing a genuinely unsat problem does.
+
+Only `<` failed of the six comparisons: `>=` has the same operand order without
+the guard negation, `>` has the negation without the order, and both kept
+working. That is why it needed all six side by side to read as a pattern rather
+than a one-off, and why `tests/unit/test_reification_propagation.py` asserts all
+six plus a signed edge case and an unsat counterweight.
+
+**Why the probes could not have caught this, and what to do about it.** Both
+`expr_coverage_probe.py` and `feature_coverage_probe.py` build every case with
+all variables free and assert that the returned assignment satisfies the
+constraint. For a disjunction that is satisfiable through *either* arm, and the
+arm that still propagates answers first — so the row reads `ok` while half the
+shape is unreachable. A probe row that exercises a reified leaf must **force the
+other arm false**, the way the regression test does. The rows added under R2 do
+not, and were left as they are: they are shape-coverage rows, and the property
+at issue here is propagation strength, which is a different question and now has
+its own file.
 
 ## Still open
 

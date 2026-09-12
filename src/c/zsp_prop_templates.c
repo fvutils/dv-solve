@@ -765,7 +765,7 @@ uint32_t prop_add_implication_32(SolveCtx *ctx,
 }
 
 /* ------------------------------------------------------------------ */
-/* Reification_32:  guard ↔ (x ≤ y)  (stub — only one direction)    */
+/* Reification_32:  guard ↔ (x ≤ y)                                  */
 /* ------------------------------------------------------------------ */
 
 static PropResult _fire_reification_32(Propagator *self, SolveCtx *ctx) {
@@ -783,10 +783,18 @@ static PropResult _fire_reification_32(Propagator *self, SolveCtx *ctx) {
         if ((r = ctx_tighten_ub32(ctx, xid, y->hi)) != PROP_OK) return r;
         if ((r = ctx_tighten_lb32(ctx, yid, x->lo)) != PROP_OK) return r;
     }
-    /* if guard=0, x > y must hold — tighten lb of x above y.hi */
+    /* if guard=0, x > y must hold — in BOTH directions (see the 64-bit twin,
+     * where the missing y direction made a satisfiable `j < k+2` under an OR
+     * report NO-SOLUTION). The edge guards also keep the ±1 from overflowing
+     * int32, which a signed width-32 operand at INT32_MAX/INT32_MIN reaches. */
     if (g->hi == 0) {
         PropResult r;
-        if ((r = ctx_tighten_lb32(ctx, xid, y->hi + 1)) != PROP_OK) return r;
+        if (y->hi < var_repr_max(x)) {
+            if ((r = ctx_tighten_lb32(ctx, xid, y->hi + 1)) != PROP_OK) return r;
+        }
+        if (x->lo > var_repr_min(y)) {
+            if ((r = ctx_tighten_ub32(ctx, yid, x->lo - 1)) != PROP_OK) return r;
+        }
     }
     /* Backward: if domain proves x ≤ y unconditionally, force guard=1.
      * If domain proves x > y unconditionally, force guard=0. */
@@ -2440,13 +2448,26 @@ static PropResult _fire_reification_64(Propagator *self, SolveCtx *ctx) {
         if ((r = ctx_tighten_ub64(ctx, xid, yhi)) != PROP_OK) return r;
         if ((r = ctx_tighten_lb64(ctx, yid, xlo)) != PROP_OK) return r;
     }
-    /* guard=0 -> x > y: tighten lb of x above y.hi (only when y.hi < x's max, so
-     * y.hi+1 cannot overflow the representable range — at the max there is no
-     * information to add and the search/model-validation stays authoritative). */
+    /* guard=0 -> x > y. BOTH directions, or the branch is half a propagator:
+     * x.lb above y.hi, and y.ub below x.lo. Each is edge-guarded (y.hi < x's
+     * representable max, x.lo > y's representable min) so the +1/-1 cannot
+     * overflow — at the edge there is no information to add anyway.
+     *
+     * Tightening only x was enough for `x > c` against a constant, where y is
+     * pinned and the one direction carries everything. It is NOT enough once y
+     * is a variable: the reified `j < k+2` reaches here as ¬(r ≤ j) with x=r
+     * and y=j, and only the y direction can bound j. Without it j stayed at its
+     * full domain, the search had to guess it, and `solve` reported NO-SOLUTION
+     * on a satisfiable problem -- propagation was sound but blind, which reads
+     * to a caller exactly like unsat. */
     if (g->hi == 0) {
+        PropResult r;
         if (var_b_lt(x, yhi, var_repr_max(x))) {
-            PropResult r;
             if ((r = ctx_tighten_lb64(ctx, xid, yhi + 1)) != PROP_OK) return r;
+        }
+        int64_t xlo_now = var_lo64(ctx, x);   /* may have just moved up */
+        if (var_b_gt(y, xlo_now, var_repr_min(y))) {
+            if ((r = ctx_tighten_ub64(ctx, yid, xlo_now - 1)) != PROP_OK) return r;
         }
     }
     /* Backward: if the domains prove x <= y (or x > y) unconditionally, pin g. */
