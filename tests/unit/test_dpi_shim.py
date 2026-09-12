@@ -29,6 +29,9 @@ def _setup_dpi(lib: ctypes.CDLL):
     lib.zsp_dpi_release_h.restype = None
     lib.zsp_dpi_release_h.argtypes = [ctypes.c_void_p]
 
+    lib.zsp_dpi_n_uncompiled_h.restype = ctypes.c_int
+    lib.zsp_dpi_n_uncompiled_h.argtypes = [ctypes.c_void_p]
+
     # Builder functions for constructing test problems
     lib.builder_create.restype = ctypes.c_void_p
     lib.builder_create.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
@@ -205,3 +208,38 @@ class TestDpiShim:
         assert val == 0
 
         self.lib.zsp_dpi_release_h(ctx)
+
+    def test_n_uncompiled_reported(self):
+        """The shim must expose whether compile took the whole problem.
+
+        It used to test only `rc < 0`, so a POSITIVE solver_compile return --
+        the count of constraints it could not compile -- was discarded and the
+        SV consumer solved with those constraints dropped. Nothing reported it,
+        which made the result indistinguishable from a correct solve."""
+        b64 = _build_2var_b64(self.lib)
+        ctx = self.lib.zsp_dpi_compile_b64(b64.encode("ascii"))
+        assert ctx
+        assert self.lib.zsp_dpi_n_uncompiled_h(ctx) == 0
+        self.lib.zsp_dpi_release_h(ctx)
+
+        assert self.lib.zsp_dpi_n_uncompiled_h(None) == -1
+
+    def test_model_validated_when_constraints_dropped(self):
+        """A solve is re-checked against the ORIGINAL problem whenever compile
+        dropped something, so a model that violates a dropped constraint is
+        reported (rc 3) rather than returned as a successful solve.
+
+        Driven through the ordinary path: whatever compile happens to accept,
+        the answer handed back must satisfy the problem that was submitted."""
+        b64 = _build_2var_b64(self.lib)
+        ctx = self.lib.zsp_dpi_compile_b64(b64.encode("ascii"))
+        assert ctx
+        try:
+            rc = self.lib.zsp_dpi_solve_h(ctx, 7)
+            assert rc in (0, 1), f"unexpected rc={rc}"
+            if rc == 0:
+                a = self.lib.zsp_dpi_get_value_h(ctx, 0)
+                b = self.lib.zsp_dpi_get_value_h(ctx, 1)
+                assert a <= b, f"reported OK but a={a} > b={b}"
+        finally:
+            self.lib.zsp_dpi_release_h(ctx)

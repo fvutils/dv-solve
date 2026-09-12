@@ -339,3 +339,26 @@ class SolveCtx:
     def get_value(self, var_id: int) -> int:
         """Return assigned value for var_id after a successful solve."""
         return self._lib.solver_get_value(self._ctx, ctypes.c_uint32(var_id))
+
+    def validate_model(self) -> int:
+        """Re-evaluate every constraint in the problem against the current
+        assignment. Returns the number of violations; 0 means the model
+        satisfies every constraint the evaluator can check.
+
+        This is the post-solve net for the class of bug where a constraint is
+        dropped at compile time and the search then satisfies only what it was
+        given. `SolveCtx` raises `CompileIncompleteError` rather than dropping
+        anything, so a violation here means a *mis*-compiled constraint rather
+        than a missing one -- which is the harder failure to notice, since
+        nothing reports it.
+
+        Constructs the evaluator cannot handle (arrays, sums, countones, clog2,
+        in_set, in_range) are skipped, so a 0 is not a proof of correctness
+        over a problem built from those.
+
+        Call only after a solve that returned SOLVE_OK.
+        """
+        sp_ptr = getattr(self._problem, "_sp", None)
+        if sp_ptr is None:
+            sp_ptr = ctypes.cast(self._problem, ctypes.c_void_p).value
+        return self._lib.solver_validate_model(self._ctx, sp_ptr, None)

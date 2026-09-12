@@ -73,6 +73,7 @@ typedef struct {
     SolveCtx          *ctx;          /* persistent solver context */
     uint32_t           n_vars;
     int                solved;       /* 1 if last solve returned SOLVE_OK */
+    int                n_uncompiled; /* constraints solver_compile could not take */
 } DpiHandle;
 
 /* ------------------------------------------------------------------ */
@@ -129,8 +130,20 @@ void *zsp_dpi_compile_b64(const char *b64_data) {
     h->ctx          = ctx;
     h->n_vars       = ((SolveProblem *)buf)->n_vars;
     h->solved       = 0;
+    /* A POSITIVE solver_compile return is the count of constraints it could not
+     * compile, and this path used to test only `rc < 0` -- so those constraints
+     * were dropped and the SV/DPI consumer solved without them, producing
+     * under-constrained stimulus that looks exactly like a successful solve.
+     * Remember the count; zsp_dpi_solve_h validates the model against the FULL
+     * problem before reporting success when it is non-zero. */
+    h->n_uncompiled = rc;
 
     return (void *)h;
+}
+
+int zsp_dpi_n_uncompiled_h(void *ctx) {
+    if (!ctx) return -1;
+    return ((DpiHandle *)ctx)->n_uncompiled;
 }
 
 int zsp_dpi_solve_h(void *ctx, long long seed) {
@@ -146,6 +159,18 @@ int zsp_dpi_solve_h(void *ctx, long long seed) {
     SolveResult sr = solver_solve(h->ctx, &opts);
 
     if (sr == SOLVE_OK) {
+        /* The post-solve net, and the only one this path has: re-evaluate every
+         * constraint in the original problem against the assignment. It is
+         * needed exactly when compile dropped something -- an assignment that
+         * satisfies the compiled subset says nothing about the constraints that
+         * never reached a propagator. Reporting 3 ("solved, but the model
+         * violates the problem") is the whole point: the alternative is handing
+         * back stimulus that silently ignores a constraint the user wrote. */
+        if (h->n_uncompiled > 0 &&
+            solver_validate_model(h->ctx, (SolveProblem *)h->problem_buf,
+                                  NULL) != 0) {
+            return 3;
+        }
         h->solved = 1;
         return 0;
     } else if (sr == SOLVE_UNSAT) {

@@ -46,11 +46,31 @@ void *zsp_dpi_compile_b64(const char *b64_data);
  * re-solving if you want to try a different seed from the same pinned
  * state.
  *
+ * When compile could not take every constraint (see
+ * zsp_dpi_n_uncompiled_h), a successful search is re-checked against the
+ * ORIGINAL problem before being reported as OK, and a model that violates a
+ * dropped constraint is reported as 3 rather than success. Without that check
+ * the caller receives under-constrained stimulus indistinguishable from a
+ * correct solve.
+ *
  * @param ctx   Handle from zsp_dpi_compile_b64.
  * @param seed  RNG seed.
- * @return  0=OK, 1=UNSAT, 2=TIMEOUT, -1=ERROR
+ * @return  0=OK, 1=UNSAT, 2=TIMEOUT, 3=MODEL INVALID (a constraint was
+ *          dropped at compile and the assignment violates it), -1=ERROR
  */
 int zsp_dpi_solve_h(void *ctx, long long seed);
+
+/**
+ * Number of constraints solver_compile could not compile natively.
+ *
+ * 0 means the compiled context covers the whole problem. A positive value
+ * means the search is running against a SUBSET of the constraints, and
+ * zsp_dpi_solve_h validates each model against the full problem to compensate.
+ *
+ * @param ctx  Handle from zsp_dpi_compile_b64.
+ * @return  Count, or -1 if ctx is NULL.
+ */
+int zsp_dpi_n_uncompiled_h(void *ctx);
 
 /**
  * Pin a variable to a specific value before solving.

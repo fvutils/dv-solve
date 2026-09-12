@@ -179,6 +179,14 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.solver_get_value.restype  = c.c_int64
     lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
 
+    # Post-solve safety net: re-evaluates every constraint in the ORIGINAL
+    # problem against the current assignment. Previously reachable only from
+    # the SMT2 frontend, which left the randomization path with no way to check
+    # that the model it just produced actually satisfies the problem submitted.
+    # Third argument is a FILE* for diagnostics; None means "no output".
+    lib.solver_validate_model.restype  = c.c_int
+    lib.solver_validate_model.argtypes = [c.c_void_p, c.c_void_p, c.c_void_p]
+
     lib.solver_add_constraint.restype  = c.c_int
     lib.solver_add_constraint.argtypes = [c.c_void_p, c.c_void_p]
 
