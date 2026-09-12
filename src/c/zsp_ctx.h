@@ -1,6 +1,7 @@
 #ifndef ZSP_CTX_H
 #define ZSP_CTX_H
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -166,9 +167,28 @@ void solver_destroy(SolveCtx *ctx);
  * The SolveProblem `sp` is consumed but not freed; the caller should
  * reset or free the problem's buffer after this call.
  *
- * @return  0 on success, -1 if the static pool is too small.
+ * @return  A POSITIVE value is the count of constraints that could not be
+ *          compiled natively -- the search then runs against a SUBSET of the
+ *          problem, so the caller must either refuse or validate the model
+ *          (solver_validate_model) before trusting it.
+ *          0 on full success.
+ *          -1 if the static pool is too small.
+ *          -2 if compile-time bound tightening emptied a domain (UNSAT).
+ *          ZSP_COMPILE_UNSUPPORTED_WIDTH if a variable is wider than 64 bits.
  */
 int solver_compile(SolveCtx *ctx, SolveProblem *sp);
+
+/**
+ * solver_compile: a variable wider than 64 bits was declared.
+ *
+ * The bounds/propagator engine cannot search tier-2 variables -- their bounds
+ * cannot be tightened (trail_record_lb/ub refuse them) and the int64 bound
+ * accessors have no tier-2 arm. Rather than return a context that reports
+ * UNSAT on an unconstrained problem, or one that silently fails to enforce
+ * constraints, compile declines. The bit-blasting engine (zsp_bbsolver)
+ * handles these widths; escalate there.
+ */
+#define ZSP_COMPILE_UNSUPPORTED_WIDTH (-3)
 
 /**
  * Add constraints from an auxiliary SolveProblem to an already-compiled context.
@@ -265,11 +285,23 @@ static inline int32_t var_hi32(const Variable *v) {
     return v->hi;
 }
 
+/* These read a TIER-1 WideBounds64 for every non-tier-0 variable. That is
+ * currently exhaustive: solver_compile returns ZSP_COMPILE_UNSUPPORTED_WIDTH
+ * rather than creating a tier-2 variable, so no WideBoundsN reaches here.
+ *
+ * The assert matters because the failure mode without it is silent and
+ * confusing rather than loud: WideBoundsN begins with {uint32_t n_limbs;
+ * uint32_t _pad;}, so reading it as a WideBounds64 returns the LIMB COUNT as
+ * the lower bound. A 65-bit variable with no constraints at all came back with
+ * the domain [2, 0] -- empty -- and the solve reported UNSAT. If tier-2 search
+ * is ever implemented (see _init_tier2), these need a real tier-2 arm; the
+ * assert is what makes that requirement impossible to miss. */
 static inline int64_t var_lo64(const SolveCtx *ctx, const Variable *v) {
     if (VAR_IS_TIER0(v->flags)) {
         return (v->flags & VAR_SIGNED) ? (int64_t)v->lo
                                        : (int64_t)(uint32_t)v->lo;
     }
+    assert(!VAR_IS_TIER2(v->flags) && "tier-2 bounds are WideBoundsN");
     const WideBounds64 *wb =
         (const WideBounds64 *)zsp_pool_ptr(&ctx->pool, v->holes_offset);
     return wb->lo;
@@ -280,6 +312,7 @@ static inline int64_t var_hi64(const SolveCtx *ctx, const Variable *v) {
         return (v->flags & VAR_SIGNED) ? (int64_t)v->hi
                                        : (int64_t)(uint32_t)v->hi;
     }
+    assert(!VAR_IS_TIER2(v->flags) && "tier-2 bounds are WideBoundsN");
     const WideBounds64 *wb =
         (const WideBounds64 *)zsp_pool_ptr(&ctx->pool, v->holes_offset);
     return wb->hi;

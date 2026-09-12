@@ -47,6 +47,10 @@ class _SolveOpts(ctypes.Structure):
     ]
 
 
+# Mirrors ZSP_COMPILE_UNSUPPORTED_WIDTH in zsp_ctx.h.
+_COMPILE_UNSUPPORTED_WIDTH = -3
+
+
 class CompileUnsatError(Exception):
     """Raised when solver_compile detects UNSAT via bound tightening.
 
@@ -60,6 +64,22 @@ class CompileIncompleteError(Exception):
 
     The native back-end catches this and transparently falls back to the
     Python solver so that all constraints are respected.
+    """
+
+
+class CompileUnsupportedError(CompileIncompleteError):
+    """Raised when the problem uses a construct this engine cannot search.
+
+    Today that means a variable wider than 64 bits. The bounds/propagator
+    engine allocates storage for those (tier-2) but cannot tighten them --
+    ``trail_record_lb``/``ub`` refuse tier-2 outright -- so a problem
+    containing one would either report UNSAT with nothing constraining it or,
+    worse, appear to solve while silently enforcing none of its constraints.
+    Compile declines instead.
+
+    Subclasses ``CompileIncompleteError`` so a caller that already escalates
+    to the bit-blasting engine on an incomplete compile keeps working without
+    change; the bit-blaster handles these widths correctly.
     """
 
 
@@ -111,6 +131,14 @@ class SolveCtx:
             lib.zsp_block_alloc_destroy(self._ba)
             self._ba = None
             raise CompileUnsatError("Domain became empty during compile-time bound tightening")
+        if rc == _COMPILE_UNSUPPORTED_WIDTH:
+            lib.zsp_block_alloc_destroy(self._ba)
+            self._ba = None
+            raise CompileUnsupportedError(
+                "problem declares a variable wider than 64 bits, which the "
+                "propagator engine cannot search; use the bit-blasting engine "
+                "(dv_solve.bvsat.BVSatCtx) for this problem"
+            )
         if rc < 0:
             lib.zsp_block_alloc_destroy(self._ba)
             self._ba = None

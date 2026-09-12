@@ -51,12 +51,18 @@ def test_expr_shape(cid, desc, fn, check):
     assert _expr.try_bb(fn, check) == "ok", "bb: %s" % desc
 
 
-# W8/W9 declare a variable wider than 64 bits. The tier-2 path is initialised
-# but the search does not honour it, so the propagator engine reports unsat on a
-# problem with no constraints at all. Tracked as G2 in
-# docs/expr_coverage_gaps_2026-09-11.md; xfail rather than skip so this starts
-# failing (XPASS) the moment G2 is fixed and the rows can be promoted.
-_CDCL_XFAIL = {"W8", "W9"}
+# W8/W9 declare a variable wider than 64 bits. The propagator engine cannot
+# search those: tier-2 storage exists, but trail_record_lb/ub refuse to tighten
+# it, so a constraint on such a variable would compile and go unenforced. It
+# must therefore DECLINE, which is what "UNSUPPORTED" asserts below.
+#
+# That distinction is the whole of G2. These rows used to report NO-SOLUTION:
+# the int64 bound accessors read the WideBoundsN limb-count header as the lower
+# bound, so a 65-bit variable with NO constraints at all had the empty domain
+# [2, 0] and the solve reported UNSAT. A refusal is a worse answer than a
+# correct one and a far better answer than a wrong one -- and the bit-blaster,
+# asserted "ok" for these rows like every other, gives the correct one.
+_CDCL_MUST_DECLINE = {"W8", "W9"}
 
 
 @pytest.mark.parametrize(
@@ -99,9 +105,11 @@ def test_feature_axis(case):
     assert bb == "ok", "bb: %s" % case["desc"]
 
     cdcl = _feat.run_cdcl(case)
-    if case["cid"] in _CDCL_XFAIL:
-        if cdcl == "ok":
-            pytest.fail("G2 appears fixed for %s -- drop it from _CDCL_XFAIL "
-                        "and let this row assert normally" % case["cid"])
-        pytest.xfail("G2: width > 64 unsupported on the cdcl path")
+    if case["cid"] in _CDCL_MUST_DECLINE:
+        assert cdcl == "UNSUPPORTED", (
+            "%s: cdcl must decline a >64-bit variable, not answer %r -- an "
+            "UNSAT here is the G2 regression, and an 'ok' means tier-2 search "
+            "landed and this row should move to the normal assertion"
+            % (case["cid"], cdcl))
+        return
     assert cdcl == "ok", "cdcl: %s" % case["desc"]

@@ -144,11 +144,17 @@ class SolveProblem:
         if not var_ids:
             return EXPR_NULL
         # Build OR over (var_i != 0) terms.
-        # BIN_NEQ has a native solver bug; use (v < 0) OR (v > 0) instead.
+        #
+        # This used to spell each term as `(v < 0) OR (v > 0)`, citing a native
+        # BIN_NEQ bug. Whatever that bug was, it is gone: BIN_NEQ against a
+        # constant is correct here at the constraint root and as an OR leaf,
+        # measured exhaustively over 1..4 variables and every subset pinned to
+        # zero (test_at_least_one_uses_neq). The workaround also only happened
+        # to work for UNSIGNED variables, where `v < 0` is vacuously false --
+        # for a signed variable it was a strictly weaker constraint than the
+        # `!= 0` it stood in for.
         terms = [
-            self.expr_binary(BIN_OR,
-                self.expr_binary(BIN_LT, self.expr_var(v), self.expr_const(0)),
-                self.expr_binary(BIN_GT, self.expr_var(v), self.expr_const(0)))
+            self.expr_binary(BIN_NEQ, self.expr_var(v), self.expr_const(0))
             for v in var_ids
         ]
         root = terms[0]

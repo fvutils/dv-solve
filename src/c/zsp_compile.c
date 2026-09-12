@@ -46,7 +46,17 @@ static int _init_tier1(SolveCtx *ctx, Variable *v, uint16_t width,
     return 0;
 }
 
-/** Initialise a tier-2 Variable (> 64 bits); allocates WideBoundsN. */
+/** Initialise a tier-2 Variable (> 64 bits); allocates WideBoundsN.
+ *
+ * CURRENTLY UNREACHABLE, and kept deliberately. Every caller now returns
+ * ZSP_COMPILE_UNSUPPORTED_WIDTH instead, because the rest of the engine cannot
+ * search what this sets up: trail_record_lb/ub refuse tier-2, and
+ * var_lo64/var_hi64 had no tier-2 arm. This is the storage half of "Phase 6"
+ * and is the right starting point when the search half is written -- the
+ * alternative, deleting it, would lose the limb layout and the sign-extension
+ * rules with it. Do not call it without also making the bound accessors and
+ * the trail handle tier-2, or constraints will compile and go unenforced.
+ */
 static int _init_tier2(SolveCtx *ctx, Variable *v, uint16_t width,
                         uint8_t flags, int64_t lo, int64_t hi) {
     uint32_t n = _n_limbs(width);
@@ -3187,7 +3197,26 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
         } else if (vs->width <= 64) {
             rc = _init_tier1(ctx, v, vs->width, flags, vs->lo, vs->hi);
         } else {
-            rc = _init_tier2(ctx, v, vs->width, flags, vs->lo, vs->hi);
+            /* Tier-2 (> 64 bits) is initialised but NOT searchable, and the
+             * two halves of that fail in opposite directions:
+             *
+             *   - var_lo64/var_hi64 have no tier-2 arm, so they read the
+             *     WideBoundsN header (n_limbs, _pad) as the `lo` field. A
+             *     65-bit variable with no constraints at all came back with
+             *     the domain [2, 0] -- empty -- and the solve reported UNSAT
+             *     on a problem that constrains nothing.
+             *   - trail_record_lb/ub DO refuse tier-2 ("Phase 6"), but
+             *     ctx_tighten_lb64/ub64 ignore that failure, so a tightening
+             *     silently does not happen and PROP_OK is returned anyway.
+             *
+             * Fixing only the reads would trade a false UNSAT for something
+             * worse: constraints on a >64-bit variable would compile, appear
+             * to propagate, and be quietly unenforced. So decline the whole
+             * problem instead, and say which variable and how wide. The
+             * bit-blaster handles these widths correctly, and a caller that
+             * escalates on this code gets a right answer rather than a wrong
+             * one from here. */
+            return ZSP_COMPILE_UNSUPPORTED_WIDTH;
         }
 
         if (rc != 0) return -1;
@@ -3689,7 +3718,8 @@ int solver_add_constraint(SolveCtx *ctx, SolveProblem *aux_sp) {
             } else if (vs->width <= 64) {
                 rc = _init_tier1(ctx, v, vs->width, flags, vs->lo, vs->hi);
             } else {
-                rc = _init_tier2(ctx, v, vs->width, flags, vs->lo, vs->hi);
+                /* Not searchable — see solver_compile's variable loop. */
+                return ZSP_COMPILE_UNSUPPORTED_WIDTH;
             }
             if (rc != 0) return -1;
 
@@ -3756,7 +3786,8 @@ int solver_add_array_vars(SolveCtx *ctx,
         } else if (width <= 64) {
             rc = _init_tier1(ctx, v, width, flags, lo, hi);
         } else {
-            rc = _init_tier2(ctx, v, width, flags, lo, hi);
+            /* Not searchable — see solver_compile's variable loop. */
+            return ZSP_COMPILE_UNSUPPORTED_WIDTH;
         }
         if (rc != 0) return -1;
         if (ctx->watcher_heads) ctx->watcher_heads[i] = EXPR_NULL;

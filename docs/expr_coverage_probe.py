@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from dv_solve.problem import (
     SolveProblem, BIN_ADD, BIN_SUB, BIN_MUL, BIN_MOD, BIN_EQ, BIN_NEQ,
     BIN_LT, BIN_LTE, BIN_GT, BIN_GTE, BIN_AND, BIN_OR)
-from dv_solve.ctx import SolveCtx, CompileIncompleteError, CompileUnsatError
+from dv_solve.ctx import (SolveCtx, CompileIncompleteError, CompileUnsatError,
+                          CompileUnsupportedError)
 from dv_solve import bvsat
 
 M = 256
@@ -42,6 +43,9 @@ def try_cdcl(fn, check):
     try:
         sp = build(fn)
         ctx = SolveCtx(sp)
+    except CompileUnsupportedError:
+        # Ordered before CompileIncompleteError, which it subclasses.
+        return "UNSUPPORTED"
     except CompileIncompleteError:
         return "INCOMPLETE"
     except CompileUnsatError:

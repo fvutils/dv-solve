@@ -30,7 +30,8 @@ from dv_solve.problem import (
     SolveProblem, BIN_ADD, BIN_SUB, BIN_MUL, BIN_DIV, BIN_BAND, BIN_BOR,
     BIN_BXOR, BIN_LSHIFT, BIN_RSHIFT, BIN_EQ, BIN_NEQ, BIN_LT, BIN_LTE,
     BIN_GT, BIN_GTE, BIN_OR)
-from dv_solve.ctx import SolveCtx, CompileIncompleteError, CompileUnsatError
+from dv_solve.ctx import (SolveCtx, CompileIncompleteError, CompileUnsatError,
+                          CompileUnsupportedError)
 from dv_solve import bvsat
 
 UN_NOT = 1
@@ -76,6 +77,9 @@ def _norm(c, vals):
 def run_cdcl(c):
     try:
         ctx = SolveCtx(_mk(c))
+    except CompileUnsupportedError:
+        # Ordered before CompileIncompleteError, which it subclasses.
+        return "UNSUPPORTED"
     except CompileIncompleteError:
         return "INCOMPLETE"
     except CompileUnsatError:
