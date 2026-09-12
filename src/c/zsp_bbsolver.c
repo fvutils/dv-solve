@@ -905,7 +905,25 @@ static zsp_bv_t bb_expr(zsp_bbsolver_t *S, ExprRef ref, uint16_t hint_width) {
     case EXPR_COUNTONES:
     case EXPR_CLOG2:
     case EXPR_ARRAY_SELECT:
-        return err_bv(S, "high-level IR node not yet supported (SUM/COUNTONES/CLOG2/ARRAY_SELECT)");
+        /* UNSUPPORTED, not an error. This used to go through err_bv, so
+         * check() returned ZSP_BB_ERROR and a caller reasonably reads that as
+         * "something went wrong" rather than "ask the other engine". The
+         * distinction is the one this file already draws for signed div/mod
+         * (had_unsupported -> ZSP_BB_UNKNOWN -> the caller defers); err_bv is
+         * for MALFORMED input -- a bad ExprRef, an unknown BinOp -- and these
+         * four nodes are well-formed, just not bit-blasted.
+         *
+         * It matters because the propagator engine handles all four correctly
+         * (measured: docs/aggregate_coverage_probe.py), so a deferral here
+         * reaches an engine that can answer, while an error may not.
+         *
+         * The returned bv is a well-formed 1-bit dummy rather than {NULL, 0}:
+         * intermediate callers check had_error, not had_unsupported, so they
+         * would keep operating on the result. Any gates they build from it are
+         * discarded -- _bb_encode tests had_unsupported before asserting
+         * anything at top level. */
+        S->had_unsupported = 1;
+        return zsp_bb_value_u64(S->bb, 1, 0);
     default:
         return err_bv(S, "unknown ExprKind");
     }
