@@ -831,6 +831,247 @@ static int _init_aux_tiered(SolveCtx *ctx, Variable *v, uint16_t width,
     return _init_tier1(ctx, v, width, flags, lo, hi);
 }
 
+/* Is this a comparison / Boolean-connective operator, i.e. does the node
+ * produce a 0/1 truth value rather than a bit-vector value? */
+static int _is_bool_op(BinOp op) {
+    switch (op) {
+    case BIN_EQ: case BIN_NEQ: case BIN_LT: case BIN_LTE:
+    case BIN_GT: case BIN_GTE: case BIN_AND: case BIN_OR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/** Static bit-width of a value expression, or 0 when it adapts to context.
+ *
+ * Needed by the recursive materialiser (R1): an arithmetic subtree must be
+ * evaluated at the width its operands actually have, or the wrap-around is
+ * wrong. `a + 1` where `a` is `bit[8]` is 8-bit modular arithmetic; computing
+ * it in a default-32-bit aux var makes `a == 255` yield 256 instead of 0, so
+ * `x < a + 1` would be satisfied by assignments the problem forbids.
+ *
+ * A bare constant returns 0 ("no width of its own") so it takes the width of
+ * whatever it is combined with rather than forcing everything to 32.
+ */
+static uint8_t _expr_width(SolveCtx *ctx, SolveProblem *sp, ExprRef ref,
+                            int depth) {
+    if (ref == EXPR_NULL || depth > 32) return 0;
+    ExprKind k = *(ExprKind *)zsp_pool_ptr(&sp->pool, ref);
+    switch (k) {
+    case EXPR_VAR: {
+        ExprVar *ev = (ExprVar *)zsp_pool_ptr(&sp->pool, ref);
+        uint32_t vid = _resolve(ctx, ev->var_id);
+        if (vid >= ctx->n_vars_capacity) return 0;
+        return (uint8_t)ctx->vars[vid].width;
+    }
+    case EXPR_CONST:
+        return 0;   /* adapts to context */
+    case EXPR_EXTEND: {
+        ExprExtend *ee = (ExprExtend *)zsp_pool_ptr(&sp->pool, ref);
+        return (uint8_t)ee->to_bits;
+    }
+    case EXPR_EXTRACT: {
+        ExprExtract *ex = (ExprExtract *)zsp_pool_ptr(&sp->pool, ref);
+        return (uint8_t)(ex->hi_bit - ex->lo_bit + 1);
+    }
+    case EXPR_UNARY: {
+        ExprUnary *eu = (ExprUnary *)zsp_pool_ptr(&sp->pool, ref);
+        return _expr_width(ctx, sp, eu->operand, depth + 1);
+    }
+    case EXPR_ITE: {
+        ExprITE *ei = (ExprITE *)zsp_pool_ptr(&sp->pool, ref);
+        uint8_t tw = _expr_width(ctx, sp, ei->then_e, depth + 1);
+        uint8_t ew = _expr_width(ctx, sp, ei->else_e, depth + 1);
+        return tw > ew ? tw : ew;
+    }
+    case EXPR_BINARY: {
+        ExprBinary *eb = (ExprBinary *)zsp_pool_ptr(&sp->pool, ref);
+        if (_is_bool_op(eb->op)) return 1;
+        /* A shift's result width is the width of the value being shifted;
+         * the shift amount is unrelated and must not widen it. */
+        if (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT)
+            return _expr_width(ctx, sp, eb->lhs, depth + 1);
+        uint8_t lw = _expr_width(ctx, sp, eb->lhs, depth + 1);
+        uint8_t rw = _expr_width(ctx, sp, eb->rhs, depth + 1);
+        return lw > rw ? lw : rw;
+    }
+    default:
+        return 0;
+    }
+}
+
+/** Emit the propagator for `r = a op b` over three already-materialised vars.
+ *
+ * This is the operator switch that `_compile_binexpr_eq_var` and the
+ * comparison-operand path in `_compile_constraint` each had inline; the
+ * recursive materialiser needs the same mapping and must not acquire a third
+ * copy that drifts from the other two. Modular fixed-width ADD/SUB/MUL/SHL
+ * come first (widths 1..63) so results that exceed the result width wrap
+ * mod 2^width rather than being treated as unbounded integer arithmetic.
+ *
+ * @return 1 if a propagator was added, 0 if the operator has no propagator.
+ */
+static int _emit_binop_prop(SolveCtx *ctx, BinOp op,
+                             uint32_t r_id, uint32_t a_id, uint32_t b_id) {
+    uint16_t r_w = ctx->vars[r_id].width;
+    if (r_w >= 1 && r_w <= 63) {
+        switch (op) {
+        case BIN_ADD:    prop_add_bvadd_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case BIN_SUB:    prop_add_bvsub_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case BIN_MUL:    prop_add_bvmul_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case BIN_LSHIFT: prop_add_bvshl_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        default: break;
+        }
+    }
+
+    int wide = _var_needs_wide(ctx, r_id) ||
+               _var_needs_wide(ctx, a_id) ||
+               _var_needs_wide(ctx, b_id);
+    if (!wide) {
+        switch (op) {
+        case BIN_ADD: prop_add_bounds_add_32(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_SUB: prop_add_bounds_add_32(ctx, a_id, r_id, b_id, 0); return 1;
+        case BIN_MUL: prop_add_bounds_mul_32(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_DIV: prop_add_bounds_div_32(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_MOD: prop_add_bounds_mod_32(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_BAND: prop_add_bounds_band_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_BOR:  prop_add_bounds_bor_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_BXOR: prop_add_bounds_bxor_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_LSHIFT: prop_add_bounds_shl_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_RSHIFT: prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
+        default: break;
+        }
+    } else {
+        switch (op) {
+        case BIN_ADD: prop_add_bounds_add_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_SUB: prop_add_bounds_add_64(ctx, a_id, r_id, b_id, 0); return 1;
+        case BIN_MUL: prop_add_bounds_mul_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_DIV: prop_add_bounds_div_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_MOD: prop_add_bounds_mod_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_BAND: prop_add_bounds_band_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_BOR:  prop_add_bounds_bor_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_BXOR: prop_add_bounds_bxor_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_LSHIFT: prop_add_bounds_shl_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_RSHIFT: prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
+        default: break;
+        }
+    }
+    return 0;
+}
+
+/** Allocate a fresh 0/1 guard var. Returns EXPR_NULL if capacity is exhausted. */
+static uint32_t _new_guard(SolveCtx *ctx) {
+    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    uint32_t g = ctx->n_vars;
+    _init_tier0(&ctx->vars[g], 1, VAR_AUX, 0, 1);
+    ctx->n_vars = g + 1;
+    if (ctx->watcher_heads) ctx->watcher_heads[g] = EXPR_NULL;
+    return g;
+}
+
+/** Return a guard holding the logical negation of `g`, as `1 - g`.
+ *
+ * Encoded as `one == ng + g` over a pinned const-1 var, which is the trick the
+ * NOT / invert paths in _bool_to_var each spelled out inline. */
+static uint32_t _invert_guard(SolveCtx *ctx, uint32_t g) {
+    if (g == EXPR_NULL) return EXPR_NULL;
+    uint32_t ng = _new_guard(ctx);
+    if (ng == EXPR_NULL) return EXPR_NULL;
+    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    uint32_t one_id = ctx->n_vars;
+    _init_tier0(&ctx->vars[one_id], 32, VAR_AUX, 1, 1);
+    ctx->n_vars = one_id + 1;
+    if (ctx->watcher_heads) ctx->watcher_heads[one_id] = EXPR_NULL;
+    prop_add_bounds_add_32(ctx, one_id, ng, g, 0);
+    return ng;
+}
+
+/** Allocate a 0/1 var pinned to a constant truth value. */
+static uint32_t _const_guard(SolveCtx *ctx, int val) {
+    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    uint32_t g = ctx->n_vars;
+    _init_tier0(&ctx->vars[g], 1, VAR_AUX, val, val);
+    ctx->n_vars = g + 1;
+    if (ctx->watcher_heads) ctx->watcher_heads[g] = EXPR_NULL;
+    return g;
+}
+
+/** g ↔ (gl ∧ gr), encoded as `ite(gl, gr, 0)`. */
+static uint32_t _and_guards(SolveCtx *ctx, uint32_t gl, uint32_t gr) {
+    if (gl == EXPR_NULL || gr == EXPR_NULL) return EXPR_NULL;
+    uint32_t zero_id = _const_guard(ctx, 0);
+    if (zero_id == EXPR_NULL) return EXPR_NULL;
+    uint32_t g = _new_guard(ctx);
+    if (g == EXPR_NULL) return EXPR_NULL;
+    prop_add_ite_value_64(ctx, g, gl, gr, zero_id, 0);
+    return g;
+}
+
+/** g ↔ (gl ∨ gr), encoded as `ite(gl, 1, gr)`. */
+static uint32_t _or_guards(SolveCtx *ctx, uint32_t gl, uint32_t gr) {
+    if (gl == EXPR_NULL || gr == EXPR_NULL) return EXPR_NULL;
+    uint32_t one_id = _const_guard(ctx, 1);
+    if (one_id == EXPR_NULL) return EXPR_NULL;
+    uint32_t g = _new_guard(ctx);
+    if (g == EXPR_NULL) return EXPR_NULL;
+    prop_add_ite_value_64(ctx, g, gl, one_id, gr, 0);
+    return g;
+}
+
+/** Reify `a op b` over two materialised variables, for all six comparisons.
+ *
+ * R2. The two reification templates speak exactly two relations -- `g ↔ (a==b)`
+ * and `g ↔ (a≤b)` -- so the other four are obtained by swapping the operands
+ * and/or negating the guard, never by offsetting a constant. That matters: the
+ * var-const path reifies `a > c` as `¬(a ≤ c)` and `a ≥ c` as `¬(a ≤ c-1)`, and
+ * the `c-1` is what forces that path to demand a constant in the first place
+ * (and what needs the unsigned-boundary fold above it to stay sound at c==0).
+ * Over two variables there is no constant to offset, so the swap does the work.
+ *
+ * @return the guard var id, or EXPR_NULL if the shape cannot be reified.
+ */
+static uint32_t _reify_cmp_var_var(SolveCtx *ctx, BinOp op,
+                                    uint32_t a_id, uint32_t b_id) {
+    uint32_t g;
+    switch (op) {
+    case BIN_EQ:
+        g = _new_guard(ctx);
+        if (g == EXPR_NULL) return EXPR_NULL;
+        prop_add_reification_eq_32(ctx, g, a_id, b_id, 0);
+        return g;
+    case BIN_NEQ:
+        g = _new_guard(ctx);
+        if (g == EXPR_NULL) return EXPR_NULL;
+        prop_add_reification_eq_32(ctx, g, a_id, b_id, 0);
+        return _invert_guard(ctx, g);
+    case BIN_LTE:
+        g = _new_guard(ctx);
+        if (g == EXPR_NULL) return EXPR_NULL;
+        prop_add_reification_32(ctx, g, a_id, b_id, 0);
+        return g;
+    case BIN_GTE:
+        g = _new_guard(ctx);
+        if (g == EXPR_NULL) return EXPR_NULL;
+        prop_add_reification_32(ctx, g, b_id, a_id, 0);
+        return g;
+    case BIN_LT:
+        /* a < b  ≡  ¬(b ≤ a) */
+        g = _new_guard(ctx);
+        if (g == EXPR_NULL) return EXPR_NULL;
+        prop_add_reification_32(ctx, g, b_id, a_id, 0);
+        return _invert_guard(ctx, g);
+    case BIN_GT:
+        /* a > b  ≡  ¬(a ≤ b) */
+        g = _new_guard(ctx);
+        if (g == EXPR_NULL) return EXPR_NULL;
+        prop_add_reification_32(ctx, g, a_id, b_id, 0);
+        return _invert_guard(ctx, g);
+    default:
+        return EXPR_NULL;
+    }
+}
+
 static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprKind k = *(ExprKind *)zsp_pool_ptr(&sp->pool, ref);
@@ -872,46 +1113,91 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
         }
         return EXPR_NULL;
     }
+
+    /* G8: membership as a REIFIABLE LEAF, not just a constraint root.
+     *
+     * `in_range` / `in_set` compiled fine as a whole constraint -- the root
+     * handlers tighten bounds or add an in_set propagator directly -- but under
+     * an OR, or negated, the expression is routed here instead, and there was
+     * no membership arm, so `x in [a..b] -> …` (a common PSS idiom) was
+     * reported uncompiled. Lower to the comparisons the reification templates
+     * already speak: a range is a conjunction, a set or a union of ranges is a
+     * disjunction over them. */
+    if (k == EXPR_IN_RANGE || k == EXPR_IN_SET || k == EXPR_IN_RANGES) {
+        ExprRef val_ref;
+        if (k == EXPR_IN_RANGE)
+            val_ref = ((ExprInRange *)zsp_pool_ptr(&sp->pool, ref))->value;
+        else if (k == EXPR_IN_SET)
+            val_ref = ((ExprInSet *)zsp_pool_ptr(&sp->pool, ref))->value;
+        else
+            val_ref = ((ExprInRanges *)zsp_pool_ptr(&sp->pool, ref))->value;
+
+        uint8_t w = _expr_width(ctx, sp, val_ref, 0);
+        if (w == 0) w = 32;
+        if (w > 64) return EXPR_NULL;
+        uint32_t v_id = _value_to_var(ctx, sp, val_ref, w);
+        if (v_id == EXPR_NULL) return EXPR_NULL;
+
+        if (k == EXPR_IN_RANGE) {
+            ExprInRange *eir = (ExprInRange *)zsp_pool_ptr(&sp->pool, ref);
+            uint32_t lo_id = _value_to_var(ctx, sp, eir->lo, w);
+            if (lo_id == EXPR_NULL) return EXPR_NULL;
+            uint32_t hi_id = _value_to_var(ctx, sp, eir->hi, w);
+            if (hi_id == EXPR_NULL) return EXPR_NULL;
+            uint32_t g_lo = _reify_cmp_var_var(ctx, BIN_GTE, v_id, lo_id);
+            uint32_t g_hi = _reify_cmp_var_var(ctx, BIN_LTE, v_id, hi_id);
+            return _and_guards(ctx, g_lo, g_hi);
+        }
+        if (k == EXPR_IN_SET) {
+            ExprInSet *eis = (ExprInSet *)zsp_pool_ptr(&sp->pool, ref);
+            uint32_t ne = eis->n_elems;
+            if (ne == 0) return _const_guard(ctx, 0);   /* empty set: never */
+            ExprRef *elems = (ExprRef *)(eis + 1);
+            uint32_t acc = EXPR_NULL;
+            for (uint32_t i = 0; i < ne; i++) {
+                uint32_t e_id = _value_to_var(ctx, sp, elems[i], w);
+                if (e_id == EXPR_NULL) return EXPR_NULL;
+                uint32_t g = _reify_cmp_var_var(ctx, BIN_EQ, v_id, e_id);
+                if (g == EXPR_NULL) return EXPR_NULL;
+                acc = (i == 0) ? g : _or_guards(ctx, acc, g);
+                if (acc == EXPR_NULL) return EXPR_NULL;
+            }
+            return acc;
+        }
+        {
+            ExprInRanges *eir = (ExprInRanges *)zsp_pool_ptr(&sp->pool, ref);
+            uint32_t nr = eir->n_ranges;
+            if (nr == 0) return _const_guard(ctx, 0);   /* empty union: never */
+            ExprRef *los = (ExprRef *)(eir + 1);
+            ExprRef *his = los + nr;
+            uint32_t acc = EXPR_NULL;
+            for (uint32_t i = 0; i < nr; i++) {
+                uint32_t lo_id = _value_to_var(ctx, sp, los[i], w);
+                if (lo_id == EXPR_NULL) return EXPR_NULL;
+                uint32_t hi_id = _value_to_var(ctx, sp, his[i], w);
+                if (hi_id == EXPR_NULL) return EXPR_NULL;
+                uint32_t g = _and_guards(
+                    ctx,
+                    _reify_cmp_var_var(ctx, BIN_GTE, v_id, lo_id),
+                    _reify_cmp_var_var(ctx, BIN_LTE, v_id, hi_id));
+                if (g == EXPR_NULL) return EXPR_NULL;
+                acc = (i == 0) ? g : _or_guards(ctx, acc, g);
+                if (acc == EXPR_NULL) return EXPR_NULL;
+            }
+            return acc;
+        }
+    }
+
     if (k != EXPR_BINARY) return EXPR_NULL;
 
     ExprBinary *eb = (ExprBinary *)zsp_pool_ptr(&sp->pool, ref);
 
-    if (eb->op == BIN_AND) {
-        /* g_and = ite(g_lhs, g_rhs, 0) */
-        uint32_t gl = _bool_to_var(ctx, sp, eb->lhs);
-        if (gl == EXPR_NULL) return EXPR_NULL;
-        uint32_t gr = _bool_to_var(ctx, sp, eb->rhs);
-        if (gr == EXPR_NULL) return EXPR_NULL;
-        if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
-        uint32_t zero_id = ctx->n_vars;
-        _init_tier0(&ctx->vars[zero_id], 1, VAR_AUX, 0, 0);
-        ctx->n_vars = zero_id + 1;
-        if (ctx->watcher_heads) ctx->watcher_heads[zero_id] = EXPR_NULL;
-        uint32_t gid = ctx->n_vars;
-        _init_tier0(&ctx->vars[gid], 1, VAR_AUX, 0, 1);
-        ctx->n_vars = gid + 1;
-        if (ctx->watcher_heads) ctx->watcher_heads[gid] = EXPR_NULL;
-        prop_add_ite_value_64(ctx, gid, gl, gr, zero_id, 0);
-        return gid;
-    }
-    if (eb->op == BIN_OR) {
-        /* g_or = ite(g_lhs, 1, g_rhs) */
-        uint32_t gl = _bool_to_var(ctx, sp, eb->lhs);
-        if (gl == EXPR_NULL) return EXPR_NULL;
-        uint32_t gr = _bool_to_var(ctx, sp, eb->rhs);
-        if (gr == EXPR_NULL) return EXPR_NULL;
-        if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
-        uint32_t one_id = ctx->n_vars;
-        _init_tier0(&ctx->vars[one_id], 1, VAR_AUX, 1, 1);
-        ctx->n_vars = one_id + 1;
-        if (ctx->watcher_heads) ctx->watcher_heads[one_id] = EXPR_NULL;
-        uint32_t gid = ctx->n_vars;
-        _init_tier0(&ctx->vars[gid], 1, VAR_AUX, 0, 1);
-        ctx->n_vars = gid + 1;
-        if (ctx->watcher_heads) ctx->watcher_heads[gid] = EXPR_NULL;
-        prop_add_ite_value_64(ctx, gid, gl, one_id, gr, 0);
-        return gid;
-    }
+    if (eb->op == BIN_AND)
+        return _and_guards(ctx, _bool_to_var(ctx, sp, eb->lhs),
+                                _bool_to_var(ctx, sp, eb->rhs));
+    if (eb->op == BIN_OR)
+        return _or_guards(ctx, _bool_to_var(ctx, sp, eb->lhs),
+                               _bool_to_var(ctx, sp, eb->rhs));
 
     /* Comparison: turn into a reified guard. Supported shapes are
      * (cmp var const), (cmp const var), and (cmp var var). For non-EQ
@@ -1059,20 +1345,31 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
         return gid;
     }
 
-    /* var-var EQ */
-    uint32_t lhs_vid, rhs_vid;
-    if (eb->op == BIN_EQ
-        && _is_var(sp, eb->lhs, &lhs_vid)
-        && _is_var(sp, eb->rhs, &rhs_vid)) {
-        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
-        lhs_vid = _resolve(ctx, lhs_vid);
-        rhs_vid = _resolve(ctx, rhs_vid);
-        uint32_t gid = ctx->n_vars;
-        _init_tier0(&ctx->vars[gid], 1, VAR_AUX, 0, 1);
-        ctx->n_vars = gid + 1;
-        if (ctx->watcher_heads) ctx->watcher_heads[gid] = EXPR_NULL;
-        prop_add_reification_eq_32(ctx, gid, lhs_vid, rhs_vid, 0);
-        return gid;
+    /* R2: neither side is a constant. Materialise BOTH sides and reify the
+     * comparison var-var, for all six operators.
+     *
+     * Previously only var-var BIN_EQ landed here, so a var-var INEQUALITY could
+     * not become a guard at all -- which made `(a < b) ? b : a`, the LRM's own
+     * value-yielding `max`, uncompilable while `(a == b) ? …` and `(a < 10) ? …`
+     * both compiled. Routing through _value_to_var also means either side may
+     * now be an arbitrary value subtree, so an arithmetic leaf under an OR or
+     * an implication reifies too. */
+    switch (eb->op) {
+    case BIN_EQ: case BIN_NEQ: case BIN_LT:
+    case BIN_LTE: case BIN_GT: case BIN_GTE: {
+        uint8_t lw = _expr_width(ctx, sp, eb->lhs, 0);
+        uint8_t rw = _expr_width(ctx, sp, eb->rhs, 0);
+        uint8_t w = lw > rw ? lw : rw;
+        if (w == 0) w = 32;
+        if (w > 64) return EXPR_NULL;   /* tier-2 operands: decline */
+        uint32_t a_id = _value_to_var(ctx, sp, eb->lhs, w);
+        if (a_id == EXPR_NULL) return EXPR_NULL;
+        uint32_t b_id = _value_to_var(ctx, sp, eb->rhs, w);
+        if (b_id == EXPR_NULL) return EXPR_NULL;
+        return _reify_cmp_var_var(ctx, eb->op, a_id, b_id);
+    }
+    default:
+        break;
     }
 
     return EXPR_NULL;
@@ -1238,6 +1535,69 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
         int wide = _var_needs_wide(ctx, r_id) || _var_needs_wide(ctx, src_id);
         if (wide) prop_add_bounds_eq_64(ctx, r_id, src_id, 0);
         else      prop_add_bounds_eq_32(ctx, r_id, src_id, 0);
+        return r_id;
+    }
+    if (k == EXPR_BINARY) {
+        ExprBinary *eb = (ExprBinary *)zsp_pool_ptr(&sp->pool, ref);
+
+        /* A comparison or Boolean connective is a 0/1 value, which is
+         * _bool_to_var's job. Routing it there rather than duplicating the
+         * reification logic keeps the two materialisers from diverging.
+         * This does not recurse: _bool_to_var only calls back into
+         * _value_to_var with a comparison's OPERAND, never the node itself. */
+        if (_is_bool_op(eb->op))
+            return _bool_to_var(ctx, sp, ref);
+
+        /* R1: arithmetic/bitwise subtree. Materialise both operands (which may
+         * themselves be arbitrary subtrees), allocate an aux result var of the
+         * expression's natural width, and wire the matching propagator.
+         *
+         * Before this arm existed, _value_to_var fell off the end for every
+         * EXPR_BINARY, so arithmetic compiled only where _compile_constraint
+         * happened to special-case it inline: one operation, against a bare var
+         * or const, under `==`. Everything else -- nested arithmetic, arithmetic
+         * under `<`, arithmetic in an OR leaf -- reached no propagator and the
+         * constraint was reported uncompiled. */
+        uint8_t w = width;
+        if (w == 0) w = _expr_width(ctx, sp, ref, 0);
+        if (w == 0) w = 32;
+        if (w > 64) return EXPR_NULL;   /* tier-2 operands: decline, don't guess */
+
+        /* Operands of a bit-vector binary op share the result's width -- except
+         * a shift amount, which is an independent value. Passing `w` down is
+         * what materialises a constant operand at the right width. */
+        uint32_t a_id = _value_to_var(ctx, sp, eb->lhs, w);
+        if (a_id == EXPR_NULL) return EXPR_NULL;
+        uint8_t b_w = (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT) ? 0 : w;
+        uint32_t b_id = _value_to_var(ctx, sp, eb->rhs, b_w);
+        if (b_id == EXPR_NULL) return EXPR_NULL;
+
+        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        uint32_t r_id = ctx->n_vars;
+
+        /* Signedness follows the operands: a signed operand means the result
+         * is a signed value, and _init_aux_tiered's range check (and every
+         * propagator that reads the bounds) must agree about which it is. */
+        uint8_t flags = VAR_AUX;
+        if ((ctx->vars[a_id].flags & VAR_SIGNED) ||
+            (ctx->vars[b_id].flags & VAR_SIGNED))
+            flags |= VAR_SIGNED;
+
+        int64_t lo, hi;
+        if (flags & VAR_SIGNED) {
+            if (w >= 64) { lo = INT64_MIN; hi = INT64_MAX; }
+            else { hi = ((int64_t)1 << (w - 1)) - 1; lo = -hi - 1; }
+        } else {
+            lo = 0;
+            hi = (w >= 64) ? (int64_t)UINT64_MAX : (int64_t)((1ULL << w) - 1);
+        }
+        if (_init_aux_tiered(ctx, &ctx->vars[r_id], w, flags, lo, hi) != 0)
+            return EXPR_NULL;
+        ctx->n_vars = r_id + 1;
+        if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
+
+        if (!_emit_binop_prop(ctx, eb->op, r_id, a_id, b_id))
+            return EXPR_NULL;   /* operator with no propagator: leave uncompiled */
         return r_id;
     }
     return EXPR_NULL;
@@ -1845,47 +2205,12 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
             }
         }
 
-        /* BinOp(var, var) op const  — handle the pattern where an arithmetic
-         * expression is compared to a constant (e.g. s012345 + p6 == 200) */
-        {
-            int64_t cv;
-            ExprRef expr_side = EXPR_NULL;
-            BinOp cmp_op = e->op;
-            int flipped = 0;
-            if (e->lhs != EXPR_NULL && _is_const(sp, e->rhs, &cv)) {
-                ExprKind lk = *(ExprKind *)zsp_pool_ptr(&sp->pool, e->lhs);
-                if (lk == EXPR_BINARY) expr_side = e->lhs;
-            } else if (e->rhs != EXPR_NULL && _is_const(sp, e->lhs, &cv)) {
-                ExprKind rk = *(ExprKind *)zsp_pool_ptr(&sp->pool, e->rhs);
-                if (rk == EXPR_BINARY) { expr_side = e->rhs; flipped = 1; }
-            }
-            if (expr_side != EXPR_NULL) {
-                ExprBinary *binop = (ExprBinary *)zsp_pool_ptr(&sp->pool, expr_side);
-                uint32_t a_id, b_id;
-                if (_is_var(sp, binop->lhs, &a_id) && _is_var(sp, binop->rhs, &b_id)) {
-                    if (binop->op == BIN_ADD && (cmp_op == BIN_EQ ||
-                        cmp_op == BIN_LT || cmp_op == BIN_LTE ||
-                        cmp_op == BIN_GT || cmp_op == BIN_GTE)) {
-                        /* (a + b) cmp cv: tighten bounds on a and b */
-                        /* EQ: a+b == cv => a in [cv-b_hi, cv-b_lo], b in [cv-a_hi, cv-a_lo] */
-                        BinOp eff = cmp_op;
-                        if (flipped) {
-                            switch (cmp_op) {
-                            case BIN_LT:  eff = BIN_GT;  break;
-                            case BIN_LTE: eff = BIN_GTE; break;
-                            case BIN_GT:  eff = BIN_LT;  break;
-                            case BIN_GTE: eff = BIN_LTE; break;
-                            default: break;
-                            }
-                        }
-                        /* Create a temporary variable for the sum, set its bounds
-                         * from the comparison, and add an ADD propagator. */
-                        /* For now, use the IR translator to handle this by
-                         * introducing a temp var. See below. */
-                    }
-                }
-            }
-        }
+        /* The generic materialise-both-sides comparison fallback that used to
+         * be sketched here lives at the END of this function instead -- see
+         * "Generic comparison" below. It has to run after the specialised
+         * r == extend/extract/concat/select handlers further down, which give
+         * far tighter bounds for the shapes they recognise; a catch-all placed
+         * here would preempt every one of them. */
     }
     /* ---- EXPR_ITE at constraint root ---- */
     if (k == EXPR_ITE) {
@@ -2685,6 +3010,83 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                     }
                 }
             }
+        }
+    }
+
+    /* ---- Generic comparison: materialise both sides, compare var-var ---- *
+     *
+     * The last resort for a comparison whose operands none of the specialised
+     * shapes above recognised: `x < a + 1`, `j + 1 == k + 2`, arithmetic on
+     * both sides at any depth. It is reachable for arbitrary shapes only
+     * because _value_to_var has an EXPR_BINARY arm (R1); before that, every
+     * such constraint fell through to "uncompiled" and, on the DPI path, was
+     * silently dropped.
+     *
+     * Deliberately LAST. Every handler above encodes a shape it recognises
+     * more tightly than a pair of aux vars and a bounds propagator can -- the
+     * zero-extend handler, for instance, tightens both operands to the source
+     * width at compile time. Running this first would compile those correctly
+     * but far more weakly, which shows up as lost propagation rather than a
+     * wrong answer, and so would not be caught by a solve-level test. */
+    if (k == EXPR_BINARY) {
+        ExprBinary *e_gc = (ExprBinary *)zsp_pool_ptr(&sp->pool, root);
+        switch (e_gc->op) {
+        case BIN_EQ: case BIN_NEQ: case BIN_LT:
+        case BIN_LTE: case BIN_GT: case BIN_GTE: {
+            uint8_t lw = _expr_width(ctx, sp, e_gc->lhs, 0);
+            uint8_t rw = _expr_width(ctx, sp, e_gc->rhs, 0);
+            uint8_t w = lw > rw ? lw : rw;
+            if (w == 0) w = 32;
+            if (w > 64) break;   /* tier-2: decline rather than mis-encode */
+            uint32_t lv = _value_to_var(ctx, sp, e_gc->lhs, w);
+            if (lv == EXPR_NULL) break;
+            uint32_t rv = _value_to_var(ctx, sp, e_gc->rhs, w);
+            if (rv == EXPR_NULL) break;
+            int wide = _var_needs_wide(ctx, lv) || _var_needs_wide(ctx, rv);
+            if (!wide && w <= 32) {
+                switch (e_gc->op) {
+                case BIN_LTE: prop_add_bounds_le_32(ctx, lv, rv, 0); return 1;
+                case BIN_LT:  prop_add_bounds_lt_32(ctx, lv, rv, 0); return 1;
+                case BIN_EQ:  prop_add_bounds_eq_32(ctx, lv, rv, 0); return 1;
+                case BIN_NEQ: prop_add_bounds_ne_32(ctx, lv, rv, 0); return 1;
+                case BIN_GT:  prop_add_bounds_lt_32(ctx, rv, lv, 0); return 1;
+                case BIN_GTE: prop_add_bounds_le_32(ctx, rv, lv, 0); return 1;
+                default: break;
+                }
+            } else {
+                switch (e_gc->op) {
+                case BIN_LTE: prop_add_bounds_le_64(ctx, lv, rv, 0); return 1;
+                case BIN_LT:  prop_add_bounds_lt_64(ctx, lv, rv, 0); return 1;
+                case BIN_EQ:  prop_add_bounds_eq_64(ctx, lv, rv, 0); return 1;
+                case BIN_NEQ: prop_add_bounds_ne_64(ctx, lv, rv, 0); return 1;
+                case BIN_GT:  prop_add_bounds_lt_64(ctx, rv, lv, 0); return 1;
+                case BIN_GTE: prop_add_bounds_le_64(ctx, rv, lv, 0); return 1;
+                default: break;
+                }
+            }
+            break;
+        }
+        default: break;
+        }
+    }
+
+    /* ---- Last resort: reify the whole root and pin the guard true ---- *
+     *
+     * Whatever the root is, if _bool_to_var can turn it into a 0/1 guard then
+     * asserting the constraint is asserting that guard. This is what makes a
+     * NEGATED membership (`!(x in [a..b])`) compile: the UN_NOT handler above
+     * only knows how to flip a comparison operator, so it declines anything
+     * else, and `not` of a range had no other route.
+     *
+     * Like the generic comparison above, this must stay last -- every handler
+     * before it either encodes its shape more tightly or, for the ones that
+     * return 0, has already decided the shape is better left to the complete
+     * engine. */
+    {
+        uint32_t g = _bool_to_var(ctx, sp, root);
+        if (g != EXPR_NULL) {
+            if (ctx_tighten_lb64(ctx, g, 1) == PROP_CONFLICT) return -1;
+            return 1;
         }
     }
 

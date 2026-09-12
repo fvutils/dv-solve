@@ -168,11 +168,13 @@ def test_xor_reduction_via_intermediates_cdcl():
     assert v[1] ^ v[2] ^ v[3] == 0x3C
 
 
-def test_nested_chain_not_native_on_cdcl():
-    """Documents the CDCL limitation: a nested binary chain equated to a result
-    var is not compiled natively (raises CompileIncompleteError). If this ever
-    starts compiling, convert to a positive assertion and drop the intermediate
-    workaround in test_xor_reduction_via_intermediates_cdcl."""
+def test_nested_chain_native_on_cdcl():
+    """A nested binary chain equated to a result var compiles natively and
+    solves. This was the inverse assertion until _value_to_var gained its
+    EXPR_BINARY arm: the chain's inner BXOR was not a plain var or const, so
+    nothing materialised it and the constraint was reported uncompiled. The
+    intermediate-var workaround in test_xor_reduction_via_intermediates_cdcl
+    is kept only as a check that the explicit form still works."""
     def build(b):
         b.add_var(0, 8, False, 0x3C, 0x3C)
         for i in (1, 2, 3):
@@ -180,16 +182,11 @@ def test_nested_chain_not_native_on_cdcl():
         ch = b.expr_binary(BIN_BXOR, b.expr_var(1), b.expr_var(2))
         ch = b.expr_binary(BIN_BXOR, ch, b.expr_var(3))
         b.add_constraint(b.expr_binary(BIN_EQ, b.expr_var(0), ch))
-        return [0]
+        return [0, 1, 2, 3]
 
-    b = SolveProblemBuilder()
-    build(b)
-    buf, _sz = b.finalize()
-    try:
-        with pytest.raises(CompileIncompleteError):
-            SolveCtx(buf)
-    finally:
-        b.destroy()
+    rc, v = _cdcl(build)
+    assert rc == SOLVE_OK
+    assert v[1] ^ v[2] ^ v[3] == 0x3C
 
 
 # ------------------------------------------------------------------ #

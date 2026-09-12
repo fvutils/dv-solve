@@ -26,6 +26,85 @@ static inline uint64_t zsp_mulmod_u64(uint64_t a, uint64_t b, uint64_t m) {
 #endif
 }
 
+/* ------------------------------------------------------------------ *
+ * Overflow-safe interval arithmetic for the width-64 bounds templates.
+ *
+ * The _32 templates compute their intervals in int64 over int32-tier operands,
+ * so nothing can overflow and a negative intermediate (a sum propagator's
+ * `r.lo - b.hi`, say) is correctly read as "below the domain" by the sign-aware
+ * var_b_* comparators. Neither holds at width 64:
+ *
+ *   - `a.hi + b.hi` on two int64 bounds is signed overflow, which is undefined
+ *     behaviour and in practice wraps to a small or negative number;
+ *   - an UNSIGNED width-64 variable stores its bounds as uint64 BIT PATTERNS,
+ *     so var_b_lt compares them unsigned (zsp_ctx.h) -- and a negative
+ *     intermediate like -1 is then read as 2^64-1, i.e. a bound above every
+ *     value in the domain, which empties it.
+ *
+ * Either one fabricates a conflict on a satisfiable problem, and a fabricated
+ * conflict at width 64 reads to a user as "my constraints contradict each
+ * other". The rule below is the conservative one: SKIPPING a tightening is
+ * always sound -- it costs propagation, and the search still has to satisfy
+ * the constraint some other way -- so anything the int64 arithmetic cannot be
+ * trusted to have computed is simply not applied.
+ * ------------------------------------------------------------------ */
+
+/** Does this variable's stored bound denote a value outside int64?
+ *
+ * True only for an unsigned variable of width >= 64 holding a pattern at or
+ * above 2^63. Signed interval arithmetic on such a bound is meaningless. */
+static inline int _bound_beyond_i64(const Variable *v, int64_t b) {
+    return !(v->flags & VAR_SIGNED) && v->width >= 64 && b < 0;
+}
+
+/** Can `v` be stored as a bound of `t` and mean what it says? */
+static inline int _bound_in_repr(const Variable *t, int64_t v) {
+    if (t->flags & VAR_SIGNED)
+        return v >= var_repr_min(t) && v <= var_repr_max(t);
+    if (v < 0) return 0;                 /* negative: below an unsigned domain */
+    if (t->width >= 64) return 1;        /* every non-negative int64 fits */
+    return v <= var_repr_max(t);
+}
+
+/** a + b, reporting whether the true sum fits int64. @return 1 if it does. */
+static inline int _i64_add_chk(int64_t a, int64_t b, int64_t *out) {
+#if defined(__GNUC__) || defined(__clang__)
+    return !__builtin_add_overflow(a, b, out);
+#else
+    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) return 0;
+    *out = a + b;
+    return 1;
+#endif
+}
+
+/** a - b, reporting whether the true difference fits int64. */
+static inline int _i64_sub_chk(int64_t a, int64_t b, int64_t *out) {
+#if defined(__GNUC__) || defined(__clang__)
+    return !__builtin_sub_overflow(a, b, out);
+#else
+    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) return 0;
+    *out = a - b;
+    return 1;
+#endif
+}
+
+/** Apply a computed lower bound, or decline if it cannot be trusted.
+ *  `ok` is the success flag from the _i64_*_chk that produced `v`. */
+static inline PropResult _tighten_lb_safe(SolveCtx *ctx, uint32_t vid,
+                                           int64_t v, int ok) {
+    if (!ok) return PROP_OK;
+    if (!_bound_in_repr(&ctx->vars[vid], v)) return PROP_OK;
+    return ctx_tighten_lb64(ctx, vid, v);
+}
+
+/** Apply a computed upper bound, or decline if it cannot be trusted. */
+static inline PropResult _tighten_ub_safe(SolveCtx *ctx, uint32_t vid,
+                                           int64_t v, int ok) {
+    if (!ok) return PROP_OK;
+    if (!_bound_in_repr(&ctx->vars[vid], v)) return PROP_OK;
+    return ctx_tighten_ub64(ctx, vid, v);
+}
+
 static int32_t i32_min(int32_t a, int32_t b) { return a < b ? a : b; }
 static int32_t i32_max(int32_t a, int32_t b) { return a > b ? a : b; }
 static int64_t i64_min(int64_t a, int64_t b) { return a < b ? a : b; }
@@ -1150,17 +1229,45 @@ static PropResult _fire_bounds_add_64(Propagator *self, SolveCtx *ctx) {
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
     uint32_t       bid = ws->var_ids[2];
-    int64_t rlo = var_lo64(ctx,&ctx->vars[rid]), rhi = var_hi64(ctx,&ctx->vars[rid]);
-    int64_t alo = var_lo64(ctx,&ctx->vars[aid]), ahi = var_hi64(ctx,&ctx->vars[aid]);
-    int64_t blo = var_lo64(ctx,&ctx->vars[bid]), bhi = var_hi64(ctx,&ctx->vars[bid]);
+    const Variable *rv = &ctx->vars[rid];
+    const Variable *av = &ctx->vars[aid];
+    const Variable *bv = &ctx->vars[bid];
+    int64_t rlo = var_lo64(ctx,rv), rhi = var_hi64(ctx,rv);
+    int64_t alo = var_lo64(ctx,av), ahi = var_hi64(ctx,av);
+    int64_t blo = var_lo64(ctx,bv), bhi = var_hi64(ctx,bv);
+
+    /* An operand bound that does not denote an int64 value poisons every
+     * interval it feeds; drop those terms rather than computing from them. */
+    int rlo_u = _bound_beyond_i64(rv, rlo), rhi_u = _bound_beyond_i64(rv, rhi);
+    int alo_u = _bound_beyond_i64(av, alo), ahi_u = _bound_beyond_i64(av, ahi);
+    int blo_u = _bound_beyond_i64(bv, blo), bhi_u = _bound_beyond_i64(bv, bhi);
 
     PropResult r;
-    if ((r = ctx_tighten_lb64(ctx, rid, alo+blo)) != PROP_OK) return r;
-    if ((r = ctx_tighten_ub64(ctx, rid, ahi+bhi)) != PROP_OK) return r;
-    if ((r = ctx_tighten_lb64(ctx, aid, rlo-bhi)) != PROP_OK) return r;
-    if ((r = ctx_tighten_ub64(ctx, aid, rhi-blo)) != PROP_OK) return r;
-    if ((r = ctx_tighten_lb64(ctx, bid, rlo-ahi)) != PROP_OK) return r;
-    if ((r = ctx_tighten_ub64(ctx, bid, rhi-alo)) != PROP_OK) return r;
+    int64_t t;
+    if (!alo_u && !blo_u) {                       /* r.lo >= a.lo + b.lo */
+        int ok = _i64_add_chk(alo, blo, &t);
+        if ((r = _tighten_lb_safe(ctx, rid, t, ok)) != PROP_OK) return r;
+    }
+    if (!ahi_u && !bhi_u) {                       /* r.hi <= a.hi + b.hi */
+        int ok = _i64_add_chk(ahi, bhi, &t);
+        if ((r = _tighten_ub_safe(ctx, rid, t, ok)) != PROP_OK) return r;
+    }
+    if (!rlo_u && !bhi_u) {                       /* a.lo >= r.lo - b.hi */
+        int ok = _i64_sub_chk(rlo, bhi, &t);
+        if ((r = _tighten_lb_safe(ctx, aid, t, ok)) != PROP_OK) return r;
+    }
+    if (!rhi_u && !blo_u) {                       /* a.hi <= r.hi - b.lo */
+        int ok = _i64_sub_chk(rhi, blo, &t);
+        if ((r = _tighten_ub_safe(ctx, aid, t, ok)) != PROP_OK) return r;
+    }
+    if (!rlo_u && !ahi_u) {                       /* b.lo >= r.lo - a.hi */
+        int ok = _i64_sub_chk(rlo, ahi, &t);
+        if ((r = _tighten_lb_safe(ctx, bid, t, ok)) != PROP_OK) return r;
+    }
+    if (!rhi_u && !alo_u) {                       /* b.hi <= r.hi - a.lo */
+        int ok = _i64_sub_chk(rhi, alo, &t);
+        if ((r = _tighten_ub_safe(ctx, bid, t, ok)) != PROP_OK) return r;
+    }
     return PROP_OK;
 }
 /* Explain: r = a + b. Two-literal explanations using current bounds. */

@@ -1018,7 +1018,19 @@ int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
     for (uint32_t i = 0; i < n_solves; i++) {
         solver_reset(ctx);
         opts.seed = base_seed + i;
-        SolveResult r = _solver_solve_core(ctx, &opts);
+        /* solver_solve, NOT _solver_solve_core: the MaxSAT relaxation loop that
+         * makes a soft constraint soft lives in the wrapper, not the core. This
+         * called the core directly, so a soft constraint that needed relaxing
+         * was simply never relaxed -- a hard `x > 200` with a soft `x < 10`
+         * returned ZERO solutions here while the same problem through `solve`
+         * returned hundreds. solve_n is the batch entry point a stimulus
+         * generator uses, so that was the path most likely to hit it.
+         *
+         * The wrapper re-activates the full soft set on entry and solver_reset
+         * above restores the assumption vars from initial_vars, so each solve
+         * in the batch starts from the same state rather than inheriting the
+         * previous iteration's relaxations. */
+        SolveResult r = solver_solve(ctx, &opts);
         if (r == SOLVE_OK) {
             int64_t *row = out + (uint64_t)n_ok * n_vars;
             for (uint32_t j = 0; j < n_vars; j++) {

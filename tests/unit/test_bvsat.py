@@ -380,9 +380,13 @@ def test_guard_unsigned_divmod_not_over_deferred():
     assert_sat(build, expect={0: 42})
 
 
-def test_guard_all_different_defers():
-    """AllDifferent is not encoded by the bit-blaster; it must defer, not drop
-    the (hard) constraint and return a bogus SAT."""
+def test_all_different_encoded():
+    """AllDifferent is encoded as pairwise NEQ, so the bit-blaster answers
+    rather than deferring -- and the answer must actually be all-different.
+
+    This asserted UNKNOWN until the encoding landed. Deferral was sound but it
+    meant a problem combining `unique` with a shape cdcl could not compile got
+    no answer from either engine."""
     b = SolveProblemBuilder()
     for i in range(3):
         b.add_var(i, 8, False, 0, 2)
@@ -390,7 +394,67 @@ def test_guard_all_different_defers():
     buf, _sz = b.finalize()
     bb = BVSatCtx(buf)
     try:
-        assert bb.check() == BVSAT_UNKNOWN
+        assert bb.check() == BVSAT_SAT
+        vals = [bb.value(i) for i in range(3)]
+        assert sorted(vals) == [0, 1, 2], vals
+    finally:
+        bb.destroy()
+        b.destroy()
+
+
+def test_dist_restricts_domain():
+    """`dist` is a domain restriction on this engine, not just a sampling hint,
+    and the bit-blaster must honour it.
+
+    It did not: the dist list was never read, so an unconstrained-looking 8-bit
+    var with a `dist` over {1,2,3} came back as 47. That is the worst class of
+    failure -- a hard constraint dropped with no report at all."""
+    # A fresh ctx per seed: kissat is not incremental, so one ctx serves one
+    # check() (see _solve_with_seed above).
+    for seed in range(8):
+        b = SolveProblemBuilder()
+        b.add_var(0, 8, False, 0, 255)
+        b.add_dist(0, [{"lo": 1, "hi": 3, "weight": 1, "is_per_value": True}])
+        buf, _sz = b.finalize()
+        bb = BVSatCtx(buf)
+        try:
+            assert bb.check(seed=seed) == BVSAT_SAT
+            v = bb.value(0)
+            assert v in (1, 2, 3), "seed %d: got %d" % (seed, v)
+        finally:
+            bb.destroy()
+            b.destroy()
+
+
+def test_dist_zero_weight_range_excluded():
+    """A zero-weight range is never picked by the propagator's value chooser,
+    so the bit-blaster must not treat it as allowed either."""
+    b = SolveProblemBuilder()
+    b.add_var(0, 8, False, 0, 255)
+    b.add_dist(0, [
+        {"lo": 0, "hi": 0, "weight": 0, "is_per_value": True},
+        {"lo": 5, "hi": 5, "weight": 1, "is_per_value": True},
+    ])
+    buf, _sz = b.finalize()
+    bb = BVSatCtx(buf)
+    try:
+        assert bb.check() == BVSAT_SAT
+        assert bb.value(0) == 5
+    finally:
+        bb.destroy()
+        b.destroy()
+
+
+def test_all_different_unsat_when_overconstrained():
+    """Pigeonhole: 3 vars over a 2-value domain cannot be all-different."""
+    b = SolveProblemBuilder()
+    for i in range(3):
+        b.add_var(i, 8, False, 0, 1)
+    b.add_all_different([0, 1, 2])
+    buf, _sz = b.finalize()
+    bb = BVSatCtx(buf)
+    try:
+        assert bb.check() == BVSAT_UNSAT
     finally:
         bb.destroy()
         b.destroy()

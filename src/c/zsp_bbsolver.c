@@ -1239,13 +1239,117 @@ static void _diversify(zsp_bbsolver_t *S) {
  * construct is unsupported or a hard error occurred. NOTE: the "ready" sentinel
  * is deliberately NOT 0 — ZSP_BB_UNKNOWN is 0, so a 0-means-ready contract would
  * make a deferral look like success and drop the unsupported hard constraint. */
+/** Encode every DistSpec as a domain restriction.
+ *
+ * `dist` is not just a sampling hint in this engine: the propagator side's
+ * value picker (_pick_value_dist, zsp_search.c) only ever draws from the
+ * NONZERO-weight ranges that intersect the feasible domain, and the suite
+ * locks that as a hard property (test_dist_domain_restriction,
+ * test_dist_zero_weight_excluded). So the satisfiability content of a dist is
+ * `var ∈ ⋃ {[lo_i, hi_i] : weight_i > 0}`, which is the same shape bb_in_ranges
+ * already encodes -- an OR over per-range conjunctions.
+ *
+ * Weights themselves are deliberately NOT modelled: a SAT solver returns a
+ * witness, not a sample, so the bias has no meaning here. What must not happen
+ * is the previous behaviour, where the dist list was never read at all and the
+ * engine cheerfully returned 47 for a `dist` over {1,2,3} -- a silent wrong
+ * answer, and the one failure mode worse than a refusal.
+ *
+ * Ranges are clipped to the variable's declared domain and a range that does
+ * not overlap it is dropped. If NO nonzero-weight range overlaps, the dist is
+ * left unasserted rather than made unsatisfiable, which matches the picker's
+ * own fallback to a uniform draw over the feasible domain in that case.
+ *
+ * @return 1 on success, 0 if a spec cannot be encoded (caller defers).
+ */
+static int _bb_encode_dists(zsp_bbsolver_t *S) {
+    for (ExprRef dref = S->problem->dists_head; dref != EXPR_NULL; ) {
+        DistSpec *ds = (DistSpec *)POOL_PTR(S->problem, dref);
+        DistEntry *ents = (DistEntry *)(ds + 1);
+        uint32_t vid = ds->var_id;
+        if (vid >= S->n_vars || !S->vars[vid].defined) return 0;
+
+        zsp_bv_t v = bv_for_var(S, vid);
+        if (S->had_error || S->had_unsupported) return 0;
+        int is_signed = S->vars[vid].is_signed;
+        int64_t dlo = S->vars[vid].lo, dhi = S->vars[vid].hi;
+
+        zsp_bv_t acc = { NULL, 0 };
+        for (uint32_t i = 0; i < ds->n_entries; i++) {
+            if (ents[i].weight == 0) continue;          /* never picked */
+            int64_t elo = ents[i].lo < dlo ? dlo : ents[i].lo;
+            int64_t ehi = ents[i].hi > dhi ? dhi : ents[i].hi;
+            if (elo > ehi) continue;                    /* outside the domain */
+
+            zsp_bv_t lo = bb_value_i64(S, v.size, elo, is_signed);
+            zsp_bv_t hi = bb_value_i64(S, v.size, ehi, is_signed);
+            if (S->had_error) return 0;
+            zsp_bv_t v_lt_lo = is_signed ? zsp_bb_slt(S->bb, v, lo)
+                                         : zsp_bb_ult(S->bb, v, lo);
+            zsp_bv_t hi_lt_v = is_signed ? zsp_bb_slt(S->bb, hi, v)
+                                         : zsp_bb_ult(S->bb, hi, v);
+            zsp_bv_t in_i = zsp_bb_and(S->bb, zsp_bb_not(S->bb, v_lt_lo),
+                                              zsp_bb_not(S->bb, hi_lt_v));
+            acc = (acc.size == 0) ? in_i : zsp_bb_or(S->bb, acc, in_i);
+        }
+        if (acc.size != 0) assert_top(S, acc.bits[0]);
+        dref = ds->next;
+    }
+    return 1;
+}
+
+/** Encode every AllDiffSpec as pairwise disequality.
+ *
+ * Pairwise NEQ is the obvious lowering and the one be-bc already falls back to
+ * itself when a group is too large for the global propagator
+ * (lower/constraints.py). It is O(n^2) gates, which is why the propagator side
+ * keeps a dedicated AllDifferent instead -- but here correctness is the point:
+ * bb previously DEFERRED on any all-different group, so a problem that combined
+ * `unique` with a shape cdcl could not compile got INCOMPLETE from one engine
+ * and UNKNOWN from the other, i.e. no answer from either.
+ *
+ * @return 1 on success, 0 if a spec cannot be encoded (caller defers).
+ */
+static int _bb_encode_alldiff(zsp_bbsolver_t *S) {
+    for (ExprRef aref = S->problem->allDiff_head; aref != EXPR_NULL; ) {
+        AllDiffSpec *as = (AllDiffSpec *)POOL_PTR(S->problem, aref);
+        uint32_t *ids = (uint32_t *)(as + 1);
+        uint32_t n = as->n_vars;
+
+        for (uint32_t i = 0; i < n; i++) {
+            if (ids[i] >= S->n_vars || !S->vars[ids[i]].defined) return 0;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            zsp_bv_t a = bv_for_var(S, ids[i]);
+            if (S->had_error || S->had_unsupported) return 0;
+            for (uint32_t j = i + 1; j < n; j++) {
+                zsp_bv_t b = bv_for_var(S, ids[j]);
+                if (S->had_error || S->had_unsupported) return 0;
+                /* Widths can differ across the group; widen to the wider one,
+                 * sign-extending only when the narrower operand is signed. */
+                uint16_t w = max_w(a.size, b.size);
+                zsp_bv_t aw = a, bw = b;
+                if (aw.size < w)
+                    aw = S->vars[ids[i]].is_signed ? sext_to(S, aw, w)
+                                                   : zext_to(S, aw, w);
+                if (bw.size < w)
+                    bw = S->vars[ids[j]].is_signed ? sext_to(S, bw, w)
+                                                   : zext_to(S, bw, w);
+                zsp_bv_t eq = zsp_bb_eq(S->bb, aw, bw);
+                assert_top(S, zsp_bb_not(S->bb, eq).bits[0]);
+            }
+        }
+        aref = as->next;
+    }
+    return 1;
+}
+
 static int _bb_encode(zsp_bbsolver_t *S) {
-    /* A-4 soundness guard: the bit-blaster does not encode AllDifferent or
-     * Source groups. pyvsc never emits these on the dv-solve path (unique
-     * lowers to NEQ pairs; no sources), but if one ever appears we must NOT
-     * silently drop a hard constraint — defer (UNKNOWN) instead. */
-    if (S->problem->allDiff_head != EXPR_NULL ||
-        S->problem->sources_head != EXPR_NULL) {
+    /* A-4 soundness guard: the bit-blaster does not encode Source groups.
+     * pyvsc never emits these on the dv-solve path, but if one ever appears we
+     * must NOT silently drop a hard constraint — defer (UNKNOWN) instead.
+     * AllDifferent used to defer here too; it is encoded below. */
+    if (S->problem->sources_head != EXPR_NULL) {
         S->last_result = ZSP_BB_UNKNOWN;
         return ZSP_BB_UNKNOWN;
     }
@@ -1290,6 +1394,24 @@ static int _bb_encode(zsp_bbsolver_t *S) {
             }
             scur = ss->next;
         }
+    }
+
+    if (S->problem->allDiff_head != EXPR_NULL) {
+        if (!_bb_encode_alldiff(S)) {
+            S->last_result = S->had_error ? ZSP_BB_ERROR : ZSP_BB_UNKNOWN;
+            return S->last_result;
+        }
+    }
+
+    /* Distribution constraints. Placed after the constraint and soft loops so a
+     * dist on a substituted variable sees the substitution already resolved. */
+    if (S->problem->dists_head != EXPR_NULL) {
+        if (!_bb_encode_dists(S)) {
+            S->last_result = S->had_error ? ZSP_BB_ERROR : ZSP_BB_UNKNOWN;
+            return S->last_result;
+        }
+        if (S->had_error) { S->last_result = ZSP_BB_ERROR; return ZSP_BB_ERROR; }
+        if (S->had_unsupported) { S->last_result = ZSP_BB_UNKNOWN; return ZSP_BB_UNKNOWN; }
     }
 
     /* Force-build any substituted variable that no surviving constraint
