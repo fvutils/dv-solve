@@ -6,8 +6,11 @@
 # lightweight, pure-C embeddable build. kissat stays the one-shot / embeddable
 # backend.
 #
-# Source comes from packages/cadical (fetched by `ivpm update`, pinned to
-# rel-3.0.0 in ivpm.yaml). We compile the library sources directly with
+# Source comes from <packages>/cadical (fetched by `ivpm update`, pinned to
+# rel-3.0.0 in ivpm.yaml). The packages directory is only ./packages when
+# dv-solve is the root project; as a dependency inside someone else's
+# workspace it is the *sibling* directory holding dv-solve. See the
+# CADICAL_SRC_ROOT resolution below. We compile the library sources with
 # CaDiCaL's -DNBUILD escape hatch (no ./configure / generated build.hpp;
 # version.cpp falls back to VERSION "3.0.0").
 #
@@ -21,14 +24,17 @@
 # included — become file-local and cannot collide with kissat. This also
 # future-proofs against any other shared-internal-name clashes.
 
-set(CADICAL_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/packages/cadical
-    CACHE PATH "Root of the CaDiCaL source tree (default: ivpm packages/cadical)")
+# PACKAGES_DIR is resolved in the top-level CMakeLists; -DCADICAL_SRC_ROOT
+# overrides it for an out-of-workspace CaDiCaL checkout.
+set(CADICAL_SRC_ROOT ${PACKAGES_DIR}/cadical
+    CACHE PATH "Root of the CaDiCaL source tree (default: <PACKAGES_DIR>/cadical)")
 set(CADICAL_SRC ${CADICAL_SRC_ROOT}/src)
 
 if(NOT EXISTS ${CADICAL_SRC}/ccadical.cpp)
     message(FATAL_ERROR
         "CaDiCaL sources not found at ${CADICAL_SRC}. "
-        "Run `ivpm update` to fetch them, or set -DCADICAL_SRC_ROOT=<path>, "
+        "Run `ivpm update` to fetch them, or set -DCADICAL_SRC_ROOT=<path> "
+        "(or -DPACKAGES_DIR=<ivpm packages dir>), "
         "or configure with -DZSP_WITH_CADICAL=OFF for the pure-C build.")
 endif()
 

@@ -17,6 +17,36 @@ find_package(Threads REQUIRED)
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
 # ------------------------------------------------------------------ #
+# ivpm packages directory                                             #
+# ------------------------------------------------------------------ #
+# Where `ivpm update` put the fetched dependencies (currently just
+# cadical). ./packages is only correct when dv-solve is the root project;
+# as a dependency inside another workspace the packages directory is the
+# *parent* of the dv-solve source tree. Candidates, in priority order:
+#
+#   1. -DPACKAGES_DIR=... — what the ivpm_build PEP 517 backend passes on
+#      the cmake command line (CmakeBuilder.configure). It already resolves
+#      to <proj>/packages for a root project and to the parent directory
+#      otherwise, so it is right in both layouts.
+#   2. $IVPM_PACKAGES — exported by the generated packages.envrc once direnv
+#      has loaded it. Not set by `ivpm update` itself, so it is a fallback.
+#   3. <source>/packages — dv-solve configured standalone as a root project.
+#   4. The directory containing dv-solve — checked out under another
+#      project's packages/ dir and configured by plain cmake with no
+#      -DPACKAGES_DIR.
+if(NOT PACKAGES_DIR)
+    if(DEFINED ENV{IVPM_PACKAGES})
+        set(PACKAGES_DIR $ENV{IVPM_PACKAGES})
+    elseif(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/packages)
+        set(PACKAGES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/packages)
+    else()
+        get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_SOURCE_DIR} DIRECTORY)
+    endif()
+endif()
+set(PACKAGES_DIR ${PACKAGES_DIR} CACHE PATH "ivpm packages (dependency) directory")
+message(STATUS "dv-solve: PACKAGES_DIR=${PACKAGES_DIR}")
+
+# ------------------------------------------------------------------ #
 # Vendored SAT solver (kissat) — Phase B.0                            #
 # ------------------------------------------------------------------ #
 
