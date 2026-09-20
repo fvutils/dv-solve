@@ -366,7 +366,26 @@ class SolveCtx:
 
     def get_value(self, var_id: int) -> int:
         """Return assigned value for var_id after a successful solve."""
-        return self._lib.solver_get_value(self._ctx, ctypes.c_uint32(var_id))
+        # No ctypes.c_uint32(var_id) here: argtypes already declares c_uint32, so
+        # ctypes converts a plain Python int itself. Constructing the wrapper was
+        # ~18% of the cost of this call, which runs once per field per solve.
+        return self._lib.solver_get_value(self._ctx, var_id)
+
+    def get_values(self, ids_arr, out_arr, n: int) -> None:
+        """Bulk readback: write the solved values of ``ids_arr[0:n]`` into
+        ``out_arr[0:n]`` in a single FFI call.
+
+        Both arrays are **caller-owned and caller-allocated** — a ``c_uint32*n``
+        and a ``c_int64*n`` — so a caller that reads back the same var-id list
+        every solve allocates nothing per solve. That is the entire point: the
+        per-element ``get_value`` loop was 28.8% of a warm 128-element
+        randomize().
+
+        Values are only meaningful after a solve that returned ``SOLVE_OK``, and
+        only for variables that fit in an int64 — a >64-bit variable must use the
+        wide reader instead.
+        """
+        self._lib.solver_get_values(self._ctx, n, ids_arr, out_arr)
 
     def validate_model(self) -> int:
         """Re-evaluate every constraint in the problem against the current
