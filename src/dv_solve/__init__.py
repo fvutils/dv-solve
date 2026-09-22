@@ -1,6 +1,8 @@
 import os
 import platform
 
+from . import _resolve
+
 # The same file setup.py exec()s to supply the wheel's version, so an
 # installed dv_solve and its distribution metadata cannot disagree. Importing
 # it here is safe: the constraint that ruled out a dynamic attr: is a
@@ -10,12 +12,15 @@ from .__version__ import _pkg_version as __version__
 
 
 def _pkg_dir():
-    return os.path.dirname(os.path.abspath(__file__))
+    # Delegated so that ``_resolve`` is the ONE place either location is
+    # decided. Keeping a second copy here meant the fallback paths below could
+    # name a different installation than the search itself had considered.
+    return _resolve._pkg_dir()
 
 
 def _src_root():
     # packages/dv-solve/  (up from src/dv_solve/) in a source tree.
-    return os.path.abspath(os.path.join(_pkg_dir(), "..", ".."))
+    return _resolve._src_root()
 
 
 def get_libs():
@@ -25,35 +30,20 @@ def get_libs():
 
 def _lib_filename(stem):
     """The platform's file name for shared library *stem* (no directory)."""
-    system = platform.system()
-    if system == "Windows":
-        return "%s.dll" % stem
-    if system == "Darwin":
-        return "lib%s.dylib" % stem
-    return "lib%s.so" % stem
+    return _resolve.lib_filename(stem)
 
 
 def _lib_search_dirs():
     """Every directory a dv-solve shared library may live in, best first.
 
-    The two layouts disagree, in the same way ``get_incdirs()`` documents for
-    headers:
-
-      * installed wheel -- the libraries are staged at the package root, next to
-        ``__init__.py`` (pyproject.toml's ``[[tool.ivpm-build.extra-data]]``
-        entries use ``dst = ""``), which is where the ctypes loader looks;
-      * source tree -- CMake writes them to ``build/<libdir>``, where ``<libdir>``
-        is ``lib`` or ``lib64``; that is the very ``{libdir}`` the wheel stages
-        *from*. ``build/`` itself holds the pre-install link output, so a
-        checkout that has been built but not ``cmake --install``-ed resolves too.
+    Now just the shared contract in :mod:`dv_solve._resolve`. This list used to
+    be maintained here independently of the ctypes loader's, and the two had
+    drifted: the loader also honoured ``ZSP_SOLVER_PATH``, the package's
+    ``lib/`` subdirectory and three alternate build-directory names, none of
+    which this function knew about. On a host using any of them the solver ran
+    out of one installation and generated C linked against another.
     """
-    src_root = _src_root()
-    return [
-        _pkg_dir(),                                         # installed wheel
-        os.path.join(src_root, "build", "lib"),             # source tree
-        os.path.join(src_root, "build", "lib64"),
-        os.path.join(src_root, "build"),                    # built, not installed
-    ]
+    return _resolve.lib_search_dirs()
 
 
 def get_libdirs():
@@ -71,11 +61,16 @@ def get_libdirs():
     Probes for the library rather than the directory: in a source tree
     ``build/lib`` exists as soon as CMake configures, well before anything is
     linked into it.
+
+    Only the UNVERSIONED library name counts here, because that is the one
+    ``-ldv_solve`` resolves. A directory holding nothing but
+    ``libdv_solve.so.1`` satisfies the ctypes loader and would have satisfied
+    the old probe, but fails at link time -- so the loader and the linker have
+    to apply different acceptance rules to stay on the same installation.
     """
-    name = _lib_filename("dv_solve")
-    for d in _lib_search_dirs():
-        if os.path.isfile(os.path.join(d, name)):
-            return [d]
+    found = _resolve.find_library("dv_solve", linkable=True)
+    if found is not None:
+        return [os.path.dirname(found)]
     # Nothing built anywhere. The package directory is the installed-wheel
     # answer and keeps the failure identical to what a missing wheel library
     # already produces, rather than naming a build tree that does not exist.
@@ -117,20 +112,25 @@ def get_incdirs():
     one ``-I`` set. Adding the nested directory here does not weaken that: it is
     the per-TU segregation, not the absence of this path, that keeps the two
     ``zsp_alloc.h`` files apart.
+
+    Probes for an actual header rather than testing ``isdir``. A staging bug
+    that creates ``share/include`` but populates nothing under it used to pass
+    the directory test and then fail deep inside a consumer's compile.
     """
-    inc = os.path.join(_pkg_dir(), "share", "include")
-    if os.path.isdir(inc):                                  # installed wheel
-        nested = os.path.join(inc, "dv_solve")
-        return [inc, nested] if os.path.isdir(nested) else [inc]
-    return [os.path.join(_src_root(), "src", "c")]          # source tree
+    found = _resolve.find_incdirs()
+    if found is not None:
+        return found
+    # Nothing found: name the installed-wheel location, so the failure is the
+    # same "no headers here" a missing wheel already produces.
+    return [os.path.join(_pkg_dir(), "share", "include")]
 
 
 def get_svdirs():
     """SystemVerilog package search dir (zsp_dpi_pkg.sv, zsp_randomizer_pkg.sv)."""
-    sv = os.path.join(_pkg_dir(), "share", "sv")
-    if os.path.isdir(sv):                                   # installed wheel
-        return [sv]
-    return [os.path.join(_src_root(), "src", "sv")]         # source tree
+    found = _resolve.find_svdirs()
+    if found is not None:
+        return found
+    return [os.path.join(_pkg_dir(), "share", "sv")]
 
 
 def get_dpi_lib():
@@ -139,10 +139,32 @@ def get_dpi_lib():
     Searches the same places as :func:`get_libdirs` -- this library is staged
     into the wheel alongside ``libdv_solve`` and built into the same
     ``build/<libdir>`` in a checkout, so it had the same source-tree gap.
+
+    Resolved by its OWN filename rather than by appending to whatever directory
+    the core library was found in: the two are staged together today, but a
+    ``-sv_lib`` pointed at a path that merely ought to exist fails inside the
+    simulator's elaborator, a long way from anything that names dv-solve.
     """
-    name = _lib_filename("dv_solve_dpi")
-    for d in _lib_search_dirs():
-        path = os.path.join(d, name)
-        if os.path.isfile(path):
-            return path
-    return os.path.join(_pkg_dir(), name)
+    found = _resolve.find_library("dv_solve_dpi")
+    if found is not None:
+        return found
+    return os.path.join(_pkg_dir(), _lib_filename("dv_solve_dpi"))
+
+
+def resolve_report():
+    """What this installation actually resolved to, for diagnostics.
+
+    Deployment problems in this area are all of the form "which installation
+    did it pick?", and answering that from the outside means replicating the
+    search. Returns a dict of plain strings/lists, safe to print or assert on.
+    """
+    return {
+        "package_dir": _pkg_dir(),
+        "override": os.environ.get("ZSP_SOLVER_PATH"),
+        "search_dirs": list(_lib_search_dirs()),
+        "core_lib": _resolve.find_library("dv_solve"),
+        "link_dirs": get_libdirs(),
+        "dpi_lib": _resolve.find_library("dv_solve_dpi"),
+        "incdirs": _resolve.find_incdirs(),
+        "svdirs": _resolve.find_svdirs(),
+    }

@@ -12,6 +12,7 @@ import os
 import pytest
 
 import dv_solve
+from dv_solve import _resolve
 
 
 @pytest.fixture
@@ -21,13 +22,22 @@ def layout(tmp_path, monkeypatch):
     Returns ``(pkg_dir, src_root)``: patching the two private accessors is what
     makes the precedence between them testable at all, since the real ones are
     derived from ``__file__``.
+
+    They now live in ``dv_solve._resolve``, the single search implementation
+    shared with the ctypes loader -- patching them on ``dv_solve`` itself would
+    no longer redirect anything. The environment is cleared for the same
+    reason: that shared resolver honours ``ZSP_SOLVER_PATH`` and (as a last
+    resort) ``LD_LIBRARY_PATH``, so a developer's ambient settings would
+    otherwise decide the result of a test about layout precedence.
     """
     pkg_dir = tmp_path / "site-packages" / "dv_solve"
     src_root = tmp_path / "checkout"
     pkg_dir.mkdir(parents=True)
     src_root.mkdir()
-    monkeypatch.setattr(dv_solve, "_pkg_dir", lambda: str(pkg_dir))
-    monkeypatch.setattr(dv_solve, "_src_root", lambda: str(src_root))
+    monkeypatch.delenv("ZSP_SOLVER_PATH", raising=False)
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    monkeypatch.setattr(_resolve, "_pkg_dir", lambda: str(pkg_dir))
+    monkeypatch.setattr(_resolve, "_src_root", lambda: str(src_root))
     return pkg_dir, src_root
 
 
