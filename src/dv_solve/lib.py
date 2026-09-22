@@ -50,7 +50,16 @@ def _find_library() -> Optional[Path]:
 
 
 def _library_not_found_error() -> RuntimeError:
-    """Build an actionable error for when the native library is unavailable."""
+    """Build an actionable error for when the native library is unavailable.
+
+    When an installation WAS selected (``ZSP_SOLVER_PATH`` set, typically) the
+    error names it, rather than reporting a generic search failure.
+    """
+    if _resolve.select_installation() is not None:
+        try:
+            _resolve.require_library("dv_solve")
+        except RuntimeError as e:
+            return e
     return _resolve.missing_artifact_error(
         "native library (%s)" % " / ".join(_lib_patterns()),
         "The solver is unavailable.")

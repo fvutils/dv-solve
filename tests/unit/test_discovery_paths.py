@@ -99,9 +99,11 @@ def test_libdirs_does_not_report_a_configured_but_unlinked_build_dir(layout):
 
 def test_dpi_lib_follows_the_same_search(layout):
     """The DPI library is staged and built alongside the main one, so it shared
-    the source-tree gap."""
+    the source-tree gap. It comes from the installation the core library
+    does, so the build that holds it must hold the core library too."""
     _pkg_dir, src_root = layout
     name = dv_solve._lib_filename("dv_solve_dpi")
+    _touch(src_root / "build" / "lib", dv_solve._lib_filename("dv_solve"))
     _touch(src_root / "build" / "lib", name)
     assert dv_solve.get_dpi_lib() == str(src_root / "build" / "lib" / name)
 

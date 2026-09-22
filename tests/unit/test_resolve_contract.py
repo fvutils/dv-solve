@@ -282,3 +282,206 @@ def test_loader_and_link_dirs_agree_on_the_real_installation():
     if loaded is None:
         pytest.skip("no dv-solve library on this host")
     assert os.path.dirname(str(loaded)) == dv_solve.get_libdirs()[0]
+
+
+# ------------------------------------------- one installation for everything --
+#
+# Selection picks an INSTALLATION; every artifact then comes from it or is
+# reported missing from it. These pin the cases where the artifact-by-artifact
+# search used to pair a library from one installation with a library, header
+# or DPI shim from another.
+
+
+def _versioned(d, stem="dv_solve", ver=".1"):
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, _resolve.lib_filename(stem) + ver)
+    open(p, "wb").close()
+    return p
+
+
+def test_override_versioned_only_is_not_linked_from_the_package(
+        tmp_path, monkeypatch):
+    """The reproduced split: override holds only ``libdv_solve.so.1``, the
+    package holds ``libdv_solve.so``. The loader took the override and the
+    linker the package. Now the linker reports the override as unlinkable."""
+    import dv_solve
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    _lib(str(pkg))
+    override = tmp_path / "override"
+    loaded = _versioned(str(override))
+    _headers(str(override))
+    monkeypatch.setenv("ZSP_SOLVER_PATH", str(override))
+
+    assert _resolve.find_library("dv_solve") == loaded
+    assert _resolve.find_library("dv_solve", linkable=True) is None
+    with pytest.raises(RuntimeError) as ei:
+        dv_solve.get_libdirs()
+    msg = str(ei.value)
+    assert "ZSP_SOLVER_PATH=%s" % override in msg
+    assert "libdv_solve.so.1" in msg and "ln -s" in msg
+    assert str(pkg) not in msg.split("Fixes:")[0]
+
+
+def test_package_versioned_only_is_not_linked_from_the_checkout(
+        tmp_path, monkeypatch):
+    """Same split without an override: a wheel carrying only the soname, and
+    a built checkout nearby. The package is selected (it is what the loader
+    opens), so the checkout's library must not be offered to the linker."""
+    import dv_solve
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    loaded = _versioned(str(pkg))
+    _lib(str(root / "build" / "lib"))
+
+    assert _resolve.find_library("dv_solve") == loaded
+    assert _resolve.select_installation().kind == "package"
+    assert _resolve.find_library("dv_solve", linkable=True) is None
+    with pytest.raises(RuntimeError, match="package installation"):
+        dv_solve.get_libdirs()
+
+
+def test_loader_prefers_the_linkable_file_within_an_installation(
+        tmp_path, monkeypatch):
+    """A prefix with ``libdv_solve.so.1`` at its root and ``libdv_solve.so`` in
+    ``lib/``: both the loader and the linker must take the ``lib/`` file."""
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    os.makedirs(pkg)
+    prefix = tmp_path / "prefix"
+    _versioned(str(prefix))
+    _lib(str(prefix / "lib"))
+    monkeypatch.setenv("ZSP_SOLVER_PATH", str(prefix))
+    want = str(prefix / "lib" / _resolve.lib_filename("dv_solve"))
+    assert _resolve.find_library("dv_solve") == want
+    assert _resolve.find_library("dv_solve", linkable=True) == want
+
+
+def test_empty_override_is_terminal(tmp_path, monkeypatch):
+    """An explicit override that holds nothing is an error, never a cue to
+    fall back to the package it was presumably set to avoid."""
+    import dv_solve
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    _lib(str(pkg))
+    _headers(str(pkg / "share" / "include" / "dv_solve"))
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("ZSP_SOLVER_PATH", str(empty))
+    assert _resolve.find_library("dv_solve") is None
+    assert _resolve.find_incdirs() is None
+    for helper in (dv_solve.get_libdirs, dv_solve.get_incdirs,
+                   dv_solve.get_dpi_lib, dv_solve.get_svdirs):
+        with pytest.raises(RuntimeError, match="ZSP_SOLVER_PATH"):
+            helper()
+
+
+def test_headers_are_not_borrowed_from_another_installation(
+        tmp_path, monkeypatch):
+    import dv_solve
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    _headers(str(pkg / "share" / "include" / "dv_solve"))
+    override = _lib(str(tmp_path / "override"))
+    monkeypatch.setenv("ZSP_SOLVER_PATH", override)
+    assert _resolve.find_incdirs() is None
+    with pytest.raises(RuntimeError, match="C headers"):
+        dv_solve.get_incdirs()
+
+
+def test_dpi_lib_is_not_borrowed_from_another_installation(
+        tmp_path, monkeypatch):
+    """The DPI shim calls into the core library; pairing the package's core
+    library with a checkout's shim is the same ABI split."""
+    import dv_solve
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    _lib(str(pkg))
+    _lib(str(root / "build" / "lib"), stem="dv_solve_dpi")
+    _lib(str(root / "build" / "lib"))
+    assert _resolve.find_library("dv_solve_dpi") is None
+    with pytest.raises(RuntimeError, match="libdv_solve_dpi"):
+        dv_solve.get_dpi_lib()
+
+
+def test_ld_library_path_installation_supplies_no_headers(
+        tmp_path, monkeypatch):
+    """Selected via ``LD_LIBRARY_PATH``, the library has no headers of its own;
+    a neighbouring checkout's are not a substitute."""
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    os.makedirs(pkg)
+    _headers(str(root / "src" / "c"))
+    stray = _lib(str(tmp_path / "stray"))
+    monkeypatch.setenv("LD_LIBRARY_PATH", stray)
+    assert _resolve.select_installation().kind == "ld_library_path"
+    assert _resolve.find_incdirs() is None
+
+
+def test_headers_still_found_with_no_library_anywhere(tmp_path, monkeypatch):
+    """Nothing is selected, so there is no library to disagree with: a
+    compile-only consumer still gets the checkout's headers."""
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    os.makedirs(pkg)
+    _headers(str(root / "src" / "c"))
+    assert _resolve.select_installation() is None
+    assert _resolve.find_incdirs() == [str(root / "src" / "c")]
+
+
+# -------------------------------------------------- real files, not names --
+
+
+def test_directory_named_like_the_library_is_not_a_library(
+        tmp_path, monkeypatch):
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    os.makedirs(pkg / _resolve.lib_filename("dv_solve"))
+    os.makedirs(pkg / (_resolve.lib_filename("dv_solve") + ".1"))
+    real = _lib(str(root / "build" / "lib"))
+    assert os.path.dirname(_resolve.find_library("dv_solve")) == real
+    assert os.path.dirname(
+        _resolve.find_library("dv_solve", linkable=True)) == real
+
+
+def test_dangling_symlink_is_not_a_library(tmp_path, monkeypatch):
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    os.makedirs(pkg)
+    os.symlink(str(pkg / "gone.so"), str(pkg / _resolve.lib_filename("dv_solve")))
+    assert _resolve.find_library("dv_solve") is None
+    assert _resolve.select_installation() is None
+
+
+def test_valid_unversioned_symlink_is_linkable(tmp_path, monkeypatch):
+    """The usual shape of a real install: ``libdv_solve.so`` -> soname."""
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    target = _versioned(str(pkg), ver=".1.2.0")
+    link = str(pkg / _resolve.lib_filename("dv_solve"))
+    os.symlink(os.path.basename(target), link)
+    assert _resolve.find_library("dv_solve", linkable=True) == link
+    assert _resolve.find_library("dv_solve") == link
+
+
+def test_non_numeric_suffix_is_not_a_versioned_library(tmp_path, monkeypatch):
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    _versioned(str(pkg), ver=".1.debug")
+    _versioned(str(pkg), ver=".bak")
+    assert _resolve.find_library("dv_solve") is None
+
+
+def test_resolve_report_never_raises_and_names_the_problem(
+        tmp_path, monkeypatch):
+    import dv_solve
+    pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
+    _install(monkeypatch, pkg, root)
+    _lib(str(pkg))
+    override = tmp_path / "override"
+    _versioned(str(override))
+    monkeypatch.setenv("ZSP_SOLVER_PATH", str(override))
+    rep = dv_solve.resolve_report()
+    assert rep["installation"] == {"kind": "override", "root": str(override)}
+    assert rep["link_dirs"] is None
+    assert "link_dirs" in rep["errors"]

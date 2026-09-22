@@ -63,14 +63,19 @@ def get_libdirs():
     linked into it.
 
     Only the UNVERSIONED library name counts here, because that is the one
-    ``-ldv_solve`` resolves. A directory holding nothing but
-    ``libdv_solve.so.1`` satisfies the ctypes loader and would have satisfied
-    the old probe, but fails at link time -- so the loader and the linker have
-    to apply different acceptance rules to stay on the same installation.
+    ``-ldv_solve`` resolves. It is sought in the SAME installation the ctypes
+    loader opens (see :mod:`dv_solve._resolve`). If that installation holds
+    only ``libdv_solve.so.1`` -- loadable, not linkable -- this raises
+    ``RuntimeError`` naming it. It used to carry on searching and report a
+    different installation's library, so the Python API ran one solver build
+    while generated C linked another.
+
+    Raises ``RuntimeError`` likewise when ``ZSP_SOLVER_PATH`` is set but holds
+    no library: an explicit override is never silently replaced.
     """
-    found = _resolve.find_library("dv_solve", linkable=True)
-    if found is not None:
-        return [os.path.dirname(found)]
+    if _resolve.select_installation() is not None:
+        return [os.path.dirname(_resolve.require_library("dv_solve",
+                                                         linkable=True))]
     # Nothing built anywhere. The package directory is the installed-wheel
     # answer and keeps the failure identical to what a missing wheel library
     # already produces, rather than naming a build tree that does not exist.
@@ -116,7 +121,13 @@ def get_incdirs():
     Probes for an actual header rather than testing ``isdir``. A staging bug
     that creates ``share/include`` but populates nothing under it used to pass
     the directory test and then fail deep inside a consumer's compile.
+
+    Taken from the installation the solver library is loaded from; raises
+    ``RuntimeError`` if that installation has no headers rather than pairing
+    its library with another installation's headers.
     """
+    if _resolve.select_installation() is not None:
+        return _resolve.require_incdirs()
     found = _resolve.find_incdirs()
     if found is not None:
         return found
@@ -126,7 +137,13 @@ def get_incdirs():
 
 
 def get_svdirs():
-    """SystemVerilog package search dir (zsp_dpi_pkg.sv, zsp_randomizer_pkg.sv)."""
+    """SystemVerilog package search dir (zsp_dpi_pkg.sv, zsp_randomizer_pkg.sv).
+
+    From the selected installation, like :func:`get_incdirs`; raises
+    ``RuntimeError`` if that installation has none.
+    """
+    if _resolve.select_installation() is not None:
+        return _resolve.require_svdirs()
     found = _resolve.find_svdirs()
     if found is not None:
         return found
@@ -144,10 +161,13 @@ def get_dpi_lib():
     the core library was found in: the two are staged together today, but a
     ``-sv_lib`` pointed at a path that merely ought to exist fails inside the
     simulator's elaborator, a long way from anything that names dv-solve.
+
+    Taken from the installation the core library is loaded from, never from
+    another one: the DPI shim calls into the core library and must match it.
+    Raises ``RuntimeError`` if that installation has no DPI library.
     """
-    found = _resolve.find_library("dv_solve_dpi")
-    if found is not None:
-        return found
+    if _resolve.select_installation() is not None:
+        return _resolve.require_library("dv_solve_dpi")
     return os.path.join(_pkg_dir(), _lib_filename("dv_solve_dpi"))
 
 
@@ -157,14 +177,29 @@ def resolve_report():
     Deployment problems in this area are all of the form "which installation
     did it pick?", and answering that from the outside means replicating the
     search. Returns a dict of plain strings/lists, safe to print or assert on.
+
+    Never raises: an artifact the selected installation lacks is ``None``
+    here, with the reason under ``errors``.
     """
+    inst = _resolve.select_installation()
+    errors = {}
+    for key, fn in (("link_dirs", get_libdirs), ("dpi_lib", get_dpi_lib),
+                    ("incdirs", get_incdirs), ("svdirs", get_svdirs)):
+        try:
+            fn()
+        except RuntimeError as e:
+            errors[key] = str(e)
+    link = _resolve.find_library("dv_solve", linkable=True)
     return {
         "package_dir": _pkg_dir(),
         "override": os.environ.get("ZSP_SOLVER_PATH"),
         "search_dirs": list(_lib_search_dirs()),
+        "installation": ({"kind": inst.kind, "root": inst.root}
+                         if inst is not None else None),
         "core_lib": _resolve.find_library("dv_solve"),
-        "link_dirs": get_libdirs(),
+        "link_dirs": [os.path.dirname(link)] if link else None,
         "dpi_lib": _resolve.find_library("dv_solve_dpi"),
         "incdirs": _resolve.find_incdirs(),
         "svdirs": _resolve.find_svdirs(),
+        "errors": errors,
     }
