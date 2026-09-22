@@ -252,6 +252,56 @@ static int _is_var_maybe_extend(SolveProblem *sp, ExprRef ref,
     return 0;
 }
 
+/* Look up a variable's declaration in the problem. Returns 0 if `vid` has no
+ * VarSpec (an aux the compiler minted, which has no declared signedness here). */
+static int _var_decl(SolveProblem *sp, uint32_t vid,
+                     uint8_t *out_width, uint8_t *out_signed) {
+    for (ExprRef cur = sp->vars_head; cur != EXPR_NULL; ) {
+        VarSpec *v = (VarSpec *)zsp_pool_ptr(&sp->pool, cur);
+        if (v->var_id == vid) {
+            *out_width = v->width;
+            *out_signed = v->is_signed;
+            return 1;
+        }
+        cur = v->next;
+    }
+    return 0;
+}
+
+/* An OR-leaf operand that is a variable, possibly under a *value-preserving*
+ * zero-extend wrapper.
+ *
+ * A comparison between two operands of different declared widths arrives here
+ * with the narrower side wrapped: `c == zero_extend(d)`. `_is_var` does not see
+ * through that wrapper, so the var-var leaf below used to be rejected -- which
+ * fails the whole `_flatten_or` and drops the enclosing disjunction onto the
+ * `_bool_to_var` Boolean-guard fallback, whose primary propagation is unsound.
+ * That is how `if (a<b) c<d; else c==d` (2-bit c, 1-bit d) returned models
+ * violating the else branch 63% of the time: only the *else* comparison was
+ * width-mismatched, so only its clause was lost.
+ *
+ * Stripping the wrapper is sound only when it cannot change the operand's
+ * value, hence the two guards: a zero-extend of a *signed* var reinterprets a
+ * negative value as a large positive one, and a `from_bits` below the var's own
+ * width would truncate. Under those conditions the extended value IS the var's
+ * value, so comparing at the wider width is exactly comparing the values --
+ * which is what the DisjClause var-var propagator computes. */
+static int _or_leaf_var(SolveProblem *sp, ExprRef ref, uint32_t *out_vid) {
+    uint32_t vid;
+    uint16_t inner_w;
+    int sign_ext;
+    if (!_is_var_maybe_extend(sp, ref, &vid, &inner_w, &sign_ext)) return 0;
+    if (inner_w > 0) {
+        uint8_t w, sgn;
+        if (sign_ext) return 0;
+        if (!_var_decl(sp, vid, &w, &sgn)) return 0;
+        if (sgn) return 0;
+        if (inner_w < w) return 0;
+    }
+    *out_vid = vid;
+    return 1;
+}
+
 /* Flip a comparison operator (for the `not` case). */
 static uint32_t _flip_cmp(uint32_t op) {
     switch (op) {
@@ -434,8 +484,8 @@ static int _classify_or_leaf(SolveProblem *sp, ExprRef ref,
         return 1;
     }
 
-    /* var-var */
-    if (_is_var(sp, e->lhs, &vid) && _is_var(sp, e->rhs, &vid2)) {
+    /* var-var (either side may carry a value-preserving zero-extend) */
+    if (_or_leaf_var(sp, e->lhs, &vid) && _or_leaf_var(sp, e->rhs, &vid2)) {
         out->var_id = vid;
         out->op = e->op;
         out->constant = 0;
