@@ -61,12 +61,18 @@ def e2e_lib_path(tmp_path_factory):
         return None
 
 
-def _make_native_available(lib_path: Path) -> bool:
-    """Point _load_lib() at the freshly-built .so; reset the cache."""
+def _make_native_available(lib_path: Path, monkeypatch) -> bool:
+    """Point _load_lib() at the freshly-built .so; reset the cache.
+
+    The override is set through *monkeypatch* so it ends with the test. Set
+    directly on ``os.environ`` it outlived this module, and because
+    ``ZSP_SOLVER_PATH`` is terminal, every later test in the session resolved
+    headers, SV sources and the DPI library against this bare build tree.
+    """
     import dv_solve.lib as _lib_mod
     _lib_mod._LOAD_ATTEMPTED = False
     _lib_mod._LIB_CACHE = None
-    os.environ["ZSP_SOLVER_PATH"] = str(lib_path.parent)
+    monkeypatch.setenv("ZSP_SOLVER_PATH", str(lib_path.parent))
     return _lib_mod._load_lib() is not None
 
 
@@ -79,7 +85,8 @@ def backend(request, monkeypatch, e2e_lib_path):
     """Parametrize tests over both solver back-ends."""
     name = request.param
     if name == "native":
-        if e2e_lib_path is None or not _make_native_available(e2e_lib_path):
+        if e2e_lib_path is None or not _make_native_available(e2e_lib_path,
+                                                              monkeypatch):
             pytest.skip("native solver library not available")
     monkeypatch.setenv("ZSP_SOLVER_BACKEND", name)
     yield name
