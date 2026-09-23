@@ -310,6 +310,49 @@ static int64_t _pick_value(SolveCtx *ctx, uint32_t var_id,
     return _pick_avoiding_holes(ctx, var_id, v, lo, hi);
 }
 
+/* Which half of a conflict split to explore first.
+ *
+ * When a plain value decision conflicts and the value is interior, the search
+ * opens a reversible two-way split around it. Always taking the lower half
+ * first biases a *diversity* solve hard toward the domain minimum whenever the
+ * feasible set is sparse and is enforced by a **propagator** rather than by
+ * holes: each conflicting random pick re-restricts the domain to [dlo, val-1],
+ * so the walk descends monotonically and lands on the smallest feasible value
+ * nearly every time. Measured before this fix: `addr` confined to a 4 KB window
+ * with `addr % 64 == 0` (64 legal values) returned the low end ~93% of draws,
+ * and only 57/64 distinct values appeared in 5000 draws.
+ *
+ * (The sibling bias through _pick_avoiding_holes -- domains expressed as holes,
+ * e.g. `inside {0,255}` -- was fixed separately; this is the propagator-enforced
+ * counterpart, which never reaches the hole list at all.)
+ *
+ * Choosing the first half at random, weighted by the two halves' sizes, keeps
+ * the descent unbiased. Seed 0 (BMC/decision) keeps the old deterministic
+ * lower-first order so those solves stay bit-for-bit reproducible. */
+static int _split_random_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("ZSP_SPLIT_RANDOM");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
+static int _split_upper_first(SolveCtx *ctx, const SolveOpts *opts,
+                               int64_t dlo, int64_t val, int64_t dhi) {
+    if (!(opts && opts->seed != 0)) return 0;      /* deterministic mode */
+    if (!_split_random_enabled()) return 0;
+    /* Sizes as unsigned deltas: dlo < val < dhi holds in the variable's own
+     * ordering, so for an unsigned var living in the upper half the bit
+     * patterns still subtract correctly (and a signed subtraction could
+     * overflow). */
+    uint64_t n_lo = (uint64_t)val - (uint64_t)dlo;   /* |[dlo, val-1]| */
+    uint64_t n_hi = (uint64_t)dhi - (uint64_t)val;   /* |[val+1, dhi]| */
+    uint64_t tot  = n_lo + n_hi;
+    if (tot == 0) return 0;
+    return (_rand64(ctx) % tot) >= n_lo;
+}
+
 /* ------------------------------------------------------------------ */
 /* solver_solve                                                        */
 /* ------------------------------------------------------------------ */
@@ -516,9 +559,10 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
         /* ── Record decision ── */
         uint32_t dec_idx = ctx->decision_level;   /* index before push */
         ctx->decisions[dec_idx].var_id      = x_id;
-        ctx->decisions[dec_idx].tried_value = v;
-        ctx->decisions[dec_idx].tried_lower = 0;
-        ctx->decisions[dec_idx].is_split    = 0;  /* plain value decision */
+        ctx->decisions[dec_idx].tried_value  = v;
+        ctx->decisions[dec_idx].is_split     = 0;  /* plain value decision */
+        ctx->decisions[dec_idx].upper_first  = 0;
+        ctx->decisions[dec_idx].second_phase = 0;
 
         /* ── Push level and assign ──
          * The tighten helpers auto-detect singleton pinning (lo == hi
@@ -654,12 +698,13 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
             const Variable *dvv = &ctx->vars[dv];
             int64_t dlo = var_lo64(ctx, dvv);
             int64_t dhi = var_hi64(ctx, dvv);
-            if (d->is_split && d->tried_lower) {
-                /* Lower half [dlo, val-1] exhausted -> explore the upper half
-                 * (val, dhi]. `val` was excluded from the lower half already. */
-                d->tried_lower = 0;
+            if (d->is_split && !d->second_phase) {
+                /* First half exhausted -> explore the other one. `val` itself
+                 * was excluded by the first half's tightening already. */
+                d->second_phase = 1;
                 trail_push_level(ctx);
-                pr = ctx_tighten_lb64(ctx, dv, val + 1);
+                pr = d->upper_first ? ctx_tighten_ub64(ctx, dv, val - 1)
+                                    : ctx_tighten_lb64(ctx, dv, val + 1);
             } else if (d->is_split) {
                 /* Both halves of the split exhausted -> this subtree is UNSAT;
                  * fail up to the parent decision. */
@@ -674,13 +719,19 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                 pr = ctx_tighten_ub64(ctx, dv, dhi - 1);
             } else {
                 /* Interior value: open a reversible split excluding `val`.
-                 * Phase 1 explores [dlo, val-1] at a fresh level; on backtrack
-                 * to this level the branch above flips to [val+1, dhi]. */
-                d->is_split    = 1;
-                d->tried_lower = 1;
+                 * Phase 1 explores one half at a fresh level; on backtrack to
+                 * this level the branch above flips to the other half. Which
+                 * half goes first is randomized (size-weighted) in diversity
+                 * mode -- always starting low made the search converge on the
+                 * domain minimum. See _split_upper_first. */
+                d->is_split     = 1;
+                d->second_phase = 0;
+                d->upper_first  = (uint8_t)_split_upper_first(ctx, opts,
+                                                              dlo, val, dhi);
                 /* d->tried_value stays == val (the excluded pivot). */
                 trail_push_level(ctx);
-                pr = ctx_tighten_ub64(ctx, dv, val - 1);
+                pr = d->upper_first ? ctx_tighten_lb64(ctx, dv, val + 1)
+                                    : ctx_tighten_ub64(ctx, dv, val - 1);
             }
 
             if (pr == PROP_OK) {

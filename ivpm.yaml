@@ -27,5 +27,16 @@ package:
       src: gh-rls
     - name: scipy
       src: pypi
+    # Build-time requirements. pyproject.toml declares these under
+    # build-system.requires / get_requires_for_build_wheel, but ivpm installs
+    # with --no-build-isolation, so PEP 517 never provisions them -- they have
+    # to be in the venv before the editable install of dv-solve runs.
+    #   ivpm-build: the PEP 517 backend itself (build-backend = ivpm_build.backend)
+    #   ninja:      the generator CmakeBuilder defaults to (CMAKE_BUILD_TOOL)
+    - name: ivpm-build
+      src: pypi
+      version: ">=0.2.0.27908268978"
+    - name: ninja
+      src: pypi
 
 

@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "dma_engine_small_bmc_d2",
   "result": "sat",
-  "solve_time_ms": 5.823900923132896,
-  "peak_memory_kb": 299300,
+  "solve_time_ms": 5.0014539156109095,
+  "peak_memory_kb": 302900,
   "returncode": 0,
   "stdout": "sat\n",
   "stderr": ""

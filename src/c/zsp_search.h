@@ -28,12 +28,18 @@ typedef enum {
 typedef struct {
     uint32_t var_id;        /* variable assigned at this decision      */
     int64_t  tried_value;   /* value tried (used on backtrack)         */
-    uint8_t  tried_lower;   /* for a split: 0 = upper half being tried,
-                             *              1 = lower half being tried    */
     uint8_t  is_split;      /* 1 = this level is a reversible domain split
                              *     (two-way branch that excludes tried_value)
                              *     rather than a plain value decision       */
-    uint8_t  _dec_pad[6];
+    uint8_t  upper_first;   /* for a split: 1 = the upper half (tried_value,
+                             *     dhi] was explored first, 0 = the lower half
+                             *     [dlo, tried_value). Chosen at random,
+                             *     size-weighted, in diversity mode so the
+                             *     search does not always descend toward the
+                             *     domain minimum (see _split_upper_first).  */
+    uint8_t  second_phase;  /* for a split: 1 = the first half is exhausted
+                             *     and the second half is being explored     */
+    uint8_t  _dec_pad[5];
 } DecisionRecord;
 
 /* Why a solve returned SOLVE_TIMEOUT. Diagnostic only; never affects the
