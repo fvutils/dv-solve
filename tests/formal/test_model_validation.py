@@ -22,6 +22,7 @@ import pytest
 
 from .harness.dv_solve_smt2_solver import DvSolveSMT2Solver
 from .harness.z3_solver import Z3Solver
+from .harness._subprocess_solver import find_binary
 
 _HERE = Path(__file__).resolve().parent
 _DIRS = [
@@ -114,8 +115,11 @@ def test_model_satisfies(fixture, z3_solver):
     res = _Z3.solve_text(augmented, timeout_s=_TIMEOUT) if hasattr(_Z3, "solve_text") else None
     if res is None:
         # Fall back to a direct z3 subprocess if the harness lacks solve_text.
-        z3_bin = _HERE.parents[1] / "packages" / "python" / "bin" / "z3"
-        proc = subprocess.run([str(z3_bin), "-smt2", "-in"], input=augmented,
+        z3_bin = find_binary(
+            _HERE.parents[1] / "packages" / "python" / "bin" / "z3", "z3")
+        if z3_bin is None:
+            pytest.skip("z3 not available")
+        proc = subprocess.run([z3_bin, "-smt2", "-in"], input=augmented,
                               capture_output=True, text=True, timeout=_TIMEOUT)
         verdict_z3 = proc.stdout.strip().split("\n", 1)[0].strip()
     else:

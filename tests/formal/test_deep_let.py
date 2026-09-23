@@ -26,9 +26,13 @@ from pathlib import Path
 
 import pytest
 
+from .harness._subprocess_solver import find_binary
+
 _ROOT = Path(__file__).resolve().parents[2]
 _BIN = _ROOT / "build" / "dv-solve-smt2"
-_Z3 = _ROOT / "packages" / "python" / "bin" / "z3"
+# The standalone-checkout venv first, then PATH: inside a larger workspace
+# dv-solve has no packages/ of its own and z3 comes from the environment.
+_Z3 = Path(find_binary(_ROOT / "packages" / "python" / "bin" / "z3", "z3") or _ROOT / "packages" / "python" / "bin" / "z3")
 
 # Depths chosen to straddle the 64 realloc boundary and go well past the old
 # ~113 chained-let failure point.

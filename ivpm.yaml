@@ -2,11 +2,13 @@ package:
   name: dv-solve
 
   dep-sets:
-  - name: default-dev
+  - name: use
     deps:
     - name: cadical
       url: https://github.com/arminbiere/cadical.git
       tag: rel-3.0.0
+  - name: dev
+    deps:
     - name: zuspec-dataclasses
       url: https://github.com/zuspec/zuspec-dataclasses.git
     - name: zuspec-be-fv

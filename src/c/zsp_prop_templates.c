@@ -57,6 +57,40 @@ static inline int _bound_beyond_i64(const Variable *v, int64_t b) {
     return !(v->flags & VAR_SIGNED) && v->width >= 64 && b < 0;
 }
 
+/* Exact values of width-64 bounds, for FEASIBILITY checks.
+ *
+ * Declining a tightening (above) is sound only while something still enforces
+ * the relation. For r = a + b nothing else does: once a and b are fixed with a
+ * true sum outside int64, every tightening of r is declined and search is free
+ * to pick any r -- a model that violates the constraint, reported as SOLVE_OK.
+ * The check below closes that: it compares the operand sum interval against r
+ * in exact arithmetic and reports a conflict when they cannot meet. A conflict
+ * computed this way is never fabricated, because nothing is rounded.
+ *
+ * A bound's true value lies in [-2^63, 2^64), and a sum of two in
+ * [-2^64, 2^65), so a 128-bit two's-complement pair holds every case. Kept as
+ * a struct rather than __int128 for MSVC. */
+typedef struct { int64_t hi; uint64_t lo; } ZspI128;
+
+static inline ZspI128 _true_bound(const Variable *v, int64_t b) {
+    ZspI128 r;
+    r.lo = (uint64_t)b;
+    r.hi = (_bound_beyond_i64(v, b) || b >= 0) ? 0 : -1;
+    return r;
+}
+
+static inline ZspI128 _i128_add(ZspI128 a, ZspI128 b) {
+    ZspI128 r;
+    r.lo = a.lo + b.lo;
+    r.hi = (int64_t)((uint64_t)a.hi + (uint64_t)b.hi + (r.lo < a.lo ? 1u : 0u));
+    return r;
+}
+
+/** a < b */
+static inline int _i128_lt(ZspI128 a, ZspI128 b) {
+    return a.hi != b.hi ? a.hi < b.hi : a.lo < b.lo;
+}
+
 /** Can `v` be stored as a bound of `t` and mean what it says? */
 static inline int _bound_in_repr(const Variable *t, int64_t v) {
     if (t->flags & VAR_SIGNED)
@@ -1249,6 +1283,17 @@ static PropResult _fire_bounds_add_64(Propagator *self, SolveCtx *ctx) {
     int rlo_u = _bound_beyond_i64(rv, rlo), rhi_u = _bound_beyond_i64(rv, rhi);
     int alo_u = _bound_beyond_i64(av, alo), ahi_u = _bound_beyond_i64(av, ahi);
     int blo_u = _bound_beyond_i64(bv, blo), bhi_u = _bound_beyond_i64(bv, bhi);
+
+    /* r = a + b is infeasible unless [a.lo+b.lo, a.hi+b.hi] meets [r.lo, r.hi].
+     * Exact, so it also catches a fully-assigned r != a + b whose sum is out
+     * of int64 range -- the case every tightening below declines. */
+    {
+        ZspI128 slo = _i128_add(_true_bound(av, alo), _true_bound(bv, blo));
+        ZspI128 shi = _i128_add(_true_bound(av, ahi), _true_bound(bv, bhi));
+        if (_i128_lt(_true_bound(rv, rhi), slo) ||
+            _i128_lt(shi, _true_bound(rv, rlo)))
+            return PROP_CONFLICT;
+    }
 
     PropResult r;
     int64_t t;

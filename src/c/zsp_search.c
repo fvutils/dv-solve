@@ -48,11 +48,14 @@ static uint64_t _rand64(SolveCtx *ctx) {
 /* Return a random integer in [lo, hi] (inclusive), 64-bit range. */
 static int64_t _rand_range64(SolveCtx *ctx, int64_t lo, int64_t hi) {
     /* `hi - lo` is correct modulo 2^64 for both signed and unsigned bound
-     * patterns. When the domain is the full 64-bit range, span wraps to 0
-     * (2^64 mod 2^64): pick any 64-bit value (and avoid a div-by-zero). */
-    uint64_t span = (uint64_t)(hi - lo) + 1u;
+     * patterns -- computed in uint64, where wrapping is defined. In int64 it
+     * is signed overflow for any span above INT64_MAX (undefined behaviour,
+     * which -O2 exploits). When the domain is the full 64-bit range, span
+     * wraps to 0 (2^64 mod 2^64): pick any 64-bit value (and avoid a
+     * div-by-zero). */
+    uint64_t span = (uint64_t)hi - (uint64_t)lo + 1u;
     if (span == 0u) return (int64_t)_rand64(ctx);
-    return lo + (int64_t)(_rand64(ctx) % span);
+    return (int64_t)((uint64_t)lo + _rand64(ctx) % span);
 }
 
 /* ------------------------------------------------------------------ */
@@ -92,10 +95,15 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
     }
 
     uint32_t best         = EXPR_NULL;
-    int64_t  best_dom     = INT64_MAX;
+    /* Domain sizes are hi - lo as uint64: in int64 a span above INT64_MAX
+     * overflows (undefined) and in practice wraps negative, which made the
+     * WIDEST variable look like the narrowest. A full 64-bit domain has size
+     * UINT64_MAX, equal to the initial best, so the first candidate is taken
+     * by `best == EXPR_NULL` rather than by comparison. */
+    uint64_t best_dom     = UINT64_MAX;
     uint32_t n_best       = 0;       /* # real vars tied at best_dom (reservoir) */
     uint32_t best_aux     = EXPR_NULL;
-    int64_t  best_aux_dom = INT64_MAX;
+    uint64_t best_aux_dom = UINT64_MAX;
 
     /* MRV (minimum remaining values) with a *randomized* tie-break: among the
      * unassigned real variables that share the smallest domain, pick one
@@ -115,13 +123,13 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
             int64_t lo = var_lo64(ctx, v);
             int64_t hi = var_hi64(ctx, v);
             if (lo == hi) continue;  /* singleton -- already assigned */
-            int64_t dom = hi - lo;
+            uint64_t dom = (uint64_t)hi - (uint64_t)lo;
             if (v->flags & VAR_AUX) {
                 /* Aux is a low-priority decision: prefer real vars first. */
-                if (dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
+                if (best_aux == EXPR_NULL || dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
             }
-            if (dom < best_dom) {
+            if (best == EXPR_NULL || dom < best_dom) {
                 best_dom = dom; best = i; n_best = 1;
             } else if (ctx->fair_pick && dom == best_dom) {
                 /* uniform mode: reservoir-sample among smallest-domain vars */
@@ -136,12 +144,12 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
             int64_t lo = var_lo64(ctx, v);
             int64_t hi = var_hi64(ctx, v);
             if (lo == hi) continue;
-            int64_t dom = hi - lo;
+            uint64_t dom = (uint64_t)hi - (uint64_t)lo;
             if (v->flags & VAR_AUX) {
-                if (dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
+                if (best_aux == EXPR_NULL || dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
             }
-            if (dom < best_dom) {
+            if (best == EXPR_NULL || dom < best_dom) {
                 best_dom = dom; best = i; n_best = 1;
             } else if (ctx->fair_pick && dom == best_dom) {
                 /* uniform mode: reservoir-sample among smallest-domain vars */
@@ -251,7 +259,7 @@ static int64_t _pick_avoiding_holes(SolveCtx *ctx, uint32_t var_id,
      * hard toward lo (a {0,255} domain returned 0 ~99% of the time). Count the
      * valid values and select the k-th, advancing through the sorted hole list
      * in O(#holes). */
-    uint64_t n_total = (uint64_t)(hi - lo) + 1;
+    uint64_t n_total = (uint64_t)hi - (uint64_t)lo + 1;
     uint32_t n_holes = _count_holes_in_range(ctx, var_id, lo, hi);
     if ((uint64_t)n_holes >= n_total) return lo;  /* all holes (shouldn't happen) */
     uint64_t k = _rand64(ctx) % (n_total - (uint64_t)n_holes);  /* k-th valid */

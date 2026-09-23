@@ -26,9 +26,13 @@ from pathlib import Path
 
 import pytest
 
+from .harness._subprocess_solver import find_binary
+
 _HERE = Path(__file__).resolve().parent
 _DVSOLVE = _HERE.parents[1] / "build" / "dv-solve-smt2"
-_Z3 = _HERE.parents[1] / "packages" / "python" / "bin" / "z3"
+# The standalone-checkout venv first, then PATH: inside a larger workspace
+# dv-solve has no packages/ of its own and z3 comes from the environment.
+_Z3 = Path(find_binary(_HERE.parents[1] / "packages" / "python" / "bin" / "z3", "z3") or _HERE.parents[1] / "packages" / "python" / "bin" / "z3")
 _FIXDIR = _HERE / "smt2" / "verilator"
 _FILES = sorted(_FIXDIR.glob("*.smt2")) if _FIXDIR.is_dir() else []
 

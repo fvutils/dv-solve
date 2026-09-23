@@ -248,27 +248,25 @@ def test_wide_unsigned_disjunction_is_not_unsat(width, body, why) -> None:
     assert verdict != "unsat", f"wrong UNSAT ({why})"
 
 
-@pytest.mark.xfail(strict=True, reason="B23: tier-2 (>64-bit) comparisons are "
-                                       "wrong-UNSAT under forced pure CDCL")
 @pytest.mark.parametrize("body", [
     "(bvult (_ bv5 65) v)",                              # a single comparison
     "(= v (_ bv5 65))",
     "(or (bvult (_ bv5 65) v) (bvuge v (_ bv9 65)))",    # and inside a disjunction
 ])
-def test_b23_tier2_comparison_wrong_unsat(body) -> None:
-    """B23: forced pure CDCL answers UNSAT to satisfiable >64-bit comparisons.
+def test_b23_tier2_comparison_not_wrong_unsat(body) -> None:
+    """B23: forced pure CDCL must not answer UNSAT to satisfiable >64-bit
+    comparisons.
 
     Found while gating Phase 2, but NOT a disjunction bug and NOT caused by the
-    hull -- a lone `(assert (bvult (_ bv5 65) v))` reproduces it. The CDCL
-    engine reasons through var_lo64/var_hi64, which cannot represent a tier-2
-    domain; instead of declining it computes with truncated bounds.
+    hull -- a lone `(assert (bvult (_ bv5 65) v))` reproduced it. The CDCL
+    engine reasoned through var_lo64/var_hi64, which could not represent a
+    tier-2 domain, and computed with truncated bounds.
 
-    NOT reachable in production today: width > 64 auto-routes to bitblast, so
-    `--engine=cdcl` and `--mode=verilator` both answer `sat` correctly. Only
-    DV_NO_BITBLAST=1, a test-only override, exposes it. It is still a latent
-    wrong-UNSAT in an engine we are actively routing more traffic to, so it is
-    pinned here strict=True: when B23 is fixed this test fails and must be
-    converted into a positive assertion.
+    Fixed by G2 (26e951e): the engine now DECLINES a >64-bit variable, so the
+    answer is `unknown`, which is sound. This was pinned xfail(strict=True)
+    until then; it is now a regression against the wrong UNSAT coming back.
+    Width > 64 still auto-routes to bitblast in production; only
+    DV_NO_BITBLAST=1, a test-only override, reaches this path.
     """
     script = ("(set-logic QF_BV)\n(declare-const v (_ BitVec 65))\n"
               f"(assert {body})\n(check-sat)\n(exit)\n")
@@ -277,7 +275,7 @@ def test_b23_tier2_comparison_wrong_unsat(body) -> None:
                        timeout=60, env={**os.environ, **_PURE})
     verdict = next((l.strip() for l in p.stdout.splitlines()
                     if l.strip() in ("sat", "unsat", "unknown")), "none")
-    assert verdict != "unsat"
+    assert verdict in ("sat", "unknown"), f"B23 wrong answer: {verdict}"
 
 
 # ------------------------------------------------- B29: var-var 2^63 cliff

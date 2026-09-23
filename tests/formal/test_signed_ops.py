@@ -22,9 +22,13 @@ from pathlib import Path
 
 import pytest
 
+from .harness._subprocess_solver import find_binary
+
 _REPO = Path(__file__).resolve().parents[2]
 _DVSOLVE = _REPO / "build" / "dv-solve-smt2"
-_Z3 = _REPO / "packages" / "python" / "bin" / "z3"
+# The standalone-checkout venv first, then PATH: inside a larger workspace
+# dv-solve has no packages/ of its own and z3 comes from the environment.
+_Z3 = Path(find_binary(_REPO / "packages" / "python" / "bin" / "z3", "z3") or _REPO / "packages" / "python" / "bin" / "z3")
 _WIDTH = 4  # exhaustive over all 16x16 (a,b) pairs
 
 

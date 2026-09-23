@@ -338,6 +338,11 @@ target_link_libraries(test_zsp_bvbounds PRIVATE dv_solve)
 target_include_directories(test_zsp_bvbounds PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_zsp_bvbounds COMMAND test_zsp_bvbounds)
 
+add_executable(test_zsp_wide_arith tests/c/test_zsp_wide_arith.c)
+target_link_libraries(test_zsp_wide_arith PRIVATE dv_solve)
+target_include_directories(test_zsp_wide_arith PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_zsp_wide_arith COMMAND test_zsp_wide_arith)
+
 # ------------------------------------------------------------------ #
 # SMT-LIB2 parser test                                                 #
 # ------------------------------------------------------------------ #

@@ -72,7 +72,9 @@ def test_upper_half_search_completeness():
     src = str((__import__("pathlib").Path(__file__).parent.parent.parent / "src"))
     env = dict(os.environ)
     env["DV_NO_BITSLICE_BACKWARD"] = "1"   # force the under-propagating path
-    env["ZSP_SOLVER_PATH"] = str(lib)
+    # The override names a DIRECTORY. This used to pass the library file,
+    # which the resolver silently ignored and fell through past.
+    env["ZSP_SOLVER_PATH"] = str(lib.parent)
     proc = subprocess.run(
         [sys.executable, "-c", _CHILD % {"src": src}],
         env=env, capture_output=True, text=True, timeout=120,

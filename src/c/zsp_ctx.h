@@ -385,7 +385,7 @@ static inline int64_t var_repr_max(const Variable *v) {
     }
     if (w == 64) return (int64_t)UINT64_MAX;  /* 2^64-1 as a uint64 bit pattern */
     if (w > 64)  return INT64_MAX;            /* tier-2: wide path owns the bound */
-    return ((int64_t)1 << w) - 1;
+    return (int64_t)(((uint64_t)1 << w) - 1); /* w == 63: 1 << 63 overflows int64 */
 }
 
 static inline const uint64_t *var_lo_wide(const SolveCtx *ctx,
