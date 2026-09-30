@@ -1730,7 +1730,15 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (s->list.count != 2) return TAGGED_NULL;
         TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-        ExprRef r = builder_expr_unary(fe->builder, UN_NEG, a.te.ref);
+        /* bvneg x is (bvsub 0 x), modulo 2^w. It must NOT lower to UN_NEG:
+         * the CDCL engine (and the model validator) treat UN_NEG as integer
+         * negation with no wrap, so for an unsigned x in [0, 2^w) the result
+         * lands in (-2^w, 0] and `(= (bvneg x) K)` was a spurious `unsat` for
+         * every constant K. Built exactly as BINOP_CASE builds bvsub. */
+        TaggedExpr z = _flatten_to_var(fe, (TaggedExpr){
+            { builder_expr_const(fe->builder, 0, 0), a.te.width }, 2, NULL });
+        if (z.te.ref == EXPR_NULL) return TAGGED_NULL;
+        ExprRef r = builder_expr_binary(fe->builder, BIN_SUB, z.te.ref, a.te.ref);
         _flag_wide_arith(fe, a.te.width);
         return (TaggedExpr){ { r, a.te.width }, 0, NULL };
     }

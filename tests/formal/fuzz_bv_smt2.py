@@ -86,8 +86,12 @@ class _Gen:
         if choice < 0.45:                                   # same-width binop
             op = self.rng.choice(_BINOPS)
             return f"({op} {self.term(width, depth-1)} {self.term(width, depth-1)})"
-        if choice < 0.55:                                   # bvnot
-            return f"(bvnot {self.term(width, depth-1)})"
+        if choice < 0.55:                                   # bvnot / bvneg
+            # bvneg was never generated before 2026-09-30, which hid a CDCL
+            # wrong-`unsat` on every `(= (bvneg x) K)` (it lowered to an
+            # unwrapped integer negation).
+            op = "bvnot" if self.rng.random() < 0.5 else "bvneg"
+            return f"({op} {self.term(width, depth-1)})"
         if choice < 0.70:                                   # ite
             return (f"(ite {self.pred(depth-1)} "
                     f"{self.term(width, depth-1)} {self.term(width, depth-1)})")

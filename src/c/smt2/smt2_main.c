@@ -133,7 +133,10 @@ static int _read_one_sexpr(FILE *f, GrowBuf *g) {
             return 1;
         }
     }
-    return g->len > 0 ? -1 : 0;
+    /* EOF. Only an s-expression that was opened and never closed is an error;
+     * trailing whitespace or comments after the last command (every file ends
+     * in a newline) are a clean end of input. */
+    return started ? -1 : 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -349,12 +352,16 @@ int main(int argc, char **argv) {
             (void)no_incremental;  /* reserved for future enforcement */
             continue;
         }
-        /* --engine=cdcl|bitblast|auto — Phase B.0. Sets DV_ENGINE so the
-         * frontend's check-sat handler dispatches to the bit-blast path. */
+        /* --engine=cdcl|bitblast|auto — sets DV_ENGINE, which the frontend's
+         * check-sat handler reads to pick the engine. cdcl must SET it rather
+         * than clear it: an unset DV_ENGINE means auto, which bit-blasts
+         * QF_UFBV/QF_ABV/QF_AUFBV. */
         if (strncmp(argv[i], "--engine=", 9) == 0) {
             const char *eng = argv[i] + 9;
-            if (strcmp(eng, "cdcl") == 0 || strcmp(eng, "auto") == 0) {
+            if (strcmp(eng, "auto") == 0) {
                 unsetenv("DV_ENGINE");
+            } else if (strcmp(eng, "cdcl") == 0) {
+                setenv("DV_ENGINE", "cdcl", 1);
             } else if (strcmp(eng, "bitblast") == 0 || strcmp(eng, "bb") == 0) {
                 setenv("DV_ENGINE", "bitblast", 1);
             } else {
