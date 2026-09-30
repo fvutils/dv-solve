@@ -1,6 +1,6 @@
 # dv-solve Documentation Site Plan
 
-Status: PLAN (2026-09-30). Comes before `ci_benchmark_publishing_plan.md`:
+Status: D0, D1, D2 DONE and live (2026-09-30); D3 (Python) next. Comes before `ci_benchmark_publishing_plan.md`:
 the benchmark pages become a "Results" section of this site later.
 
 Goal: a user-facing doc set, published at `dvkit.org/fvutils/dv-solve/`, that
