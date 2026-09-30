@@ -117,6 +117,12 @@ typedef struct SolveCtx {
     /* LCG solver fields */
     uint32_t           current_prop_ref;  /* prop being fired (for trail) */
     uint32_t           conflict_prop_ref; /* prop that caused conflict    */
+    uint32_t           conflict_clause_idx; /* learnt clause that went all-
+                                             * false (EXPR_NULL if none); a
+                                             * clause conflict empties no
+                                             * domain, so LCG analysis must
+                                             * seed from it, not from the
+                                             * (stale) conflict_prop_ref. */
     uint32_t           current_trail_flags; /* TRAIL_FLAG_* bits to stamp
                                              * on the next trail entry;
                                              * caller sets, callee resets. */

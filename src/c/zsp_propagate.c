@@ -233,6 +233,9 @@ PropResult ctx_tighten_ub64(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
 /* ------------------------------------------------------------------ */
 
 PropResult solver_propagate(SolveCtx *ctx) {
+    /* A clause conflict recorded by an earlier, unanalysed conflict (e.g. a
+     * shaving probe) must not be mistaken for the source of the next one. */
+    ctx->conflict_clause_idx = EXPR_NULL;
     while (ctx->queue.non_empty_mask) {
         /* Lowest set bit = highest priority level with entries */
         uint32_t lvl = (uint32_t)__builtin_ctz(ctx->queue.non_empty_mask);

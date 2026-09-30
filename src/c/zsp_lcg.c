@@ -543,6 +543,37 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
             if (other_entry->decision_level > bt_level)
                 bt_level = other_entry->decision_level;
         }
+    } else if (ctx->conflict_clause_idx != EXPR_NULL &&
+               ctx->conflict_clause_idx < lcg->clause_db.n_clauses &&
+               lcg->clause_db.clauses[ctx->conflict_clause_idx]) {
+        /* Clause conflict: every literal of a learnt clause went false.
+         * No domain is empty, and conflict_prop_ref is whatever propagator
+         * fired last (or a stale one from an earlier conflict) -- seeding
+         * from it builds the learnt clause from unrelated bounds, which
+         * produced bogus units and wrong `unsat` answers. The conflict's
+         * antecedents are exactly the bounds that falsify the clause:
+         * for each literal (v >= b) the current v.ub (< b), for each
+         * (v <= b) the current v.lb (> b). */
+        Clause  *ccl   = lcg->clause_db.clauses[ctx->conflict_clause_idx];
+        Literal *clits = (Literal *)(ccl + 1);
+        if (_tron())
+            fprintf(stderr, "[lcg-trace] clause-conflict seed from clause %u "
+                    "(%u lits)\n", ctx->conflict_clause_idx, ccl->n_lits);
+        for (uint32_t i = 0; i < ccl->n_lits; i++) {
+            uint32_t vid = clits[i].var_id;
+            if (vid >= ctx->n_vars) { lcg_dbg_bail[3]++; return -1; }
+            Literal a;
+            a.var_id = vid;
+            a.is_lb  = clits[i].is_lb ? 0 : 1;
+            a.bound  = a.is_lb ? var_lo64(ctx, &ctx->vars[vid])
+                               : var_hi64(ctx, &ctx->vars[vid]);
+            a._pad[0] = a._pad[1] = a._pad[2] = 0;
+            ADD_EXPL_LIT(a);
+        }
+        ctx->conflict_clause_idx = EXPR_NULL;
+        if (n_at_cur_level == 0) {
+            lcg_dbg_bail[3]++; return -1;
+        }
     } else if (ctx->conflict_prop_ref != EXPR_NULL) {
         if (_tron()) {
             Propagator *cp_ = (Propagator *)zsp_pool_ptr(
@@ -914,6 +945,68 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
             if (!hit && n_seen < 32) seen_levels[n_seen++] = lvl;
         }
         lbd = n_seen;
+    }
+
+    /* A tautological clause (it holds `v >= a` and `v <= b` with a <= b+1)
+     * excludes nothing: after the backjump the search re-makes the same
+     * decision, hits the same conflict and learns the same clause again --
+     * a livelock that burns the whole CDCL budget. It arises when an
+     * explainer cites a bound that only became true after the propagation
+     * it explains (explainers read CURRENT bounds). Fall back to the
+     * chronological path, which always excludes the failed decision. */
+    for (uint32_t i = 0; i < learnt_idx; i++) {
+        Literal A = lcg->learnt_buf[i];
+        if (!A.is_lb || A.var_id >= ctx->n_vars) continue;
+        const Variable *tv = &ctx->vars[A.var_id];
+        for (uint32_t j = 0; j < learnt_idx; j++) {
+            Literal B = lcg->learnt_buf[j];
+            if (B.var_id != A.var_id || B.is_lb) continue;
+            int64_t a = (int64_t)A.bound, b = (int64_t)B.bound;
+            if (!var_b_gt(tv, a, b) ||
+                (uint64_t)a == (uint64_t)b + 1u) {
+                if (_tron())
+                    fprintf(stderr, "[lcg-trace] tautological learnt clause"
+                            " on v%u -> chronological fallback\n", A.var_id);
+                lcg_dbg_bail[9]++;
+                return -1;
+            }
+        }
+    }
+
+    /* Re-deriving a clause already in the database is the same livelock in
+     * another guise: that clause was already present and still failed to
+     * keep the search out of this conflict, i.e. it is not asserting at the
+     * backjump level (typically a hole `v <= a \/ v >= b` on the decided
+     * variable). Adding it again and backjumping only undoes the progress
+     * the chronological path made. Check the most recent clauses. */
+    {
+        ClauseDB *db = &lcg->clause_db;
+        uint32_t lim = db->n_clauses < 8u ? db->n_clauses : 8u;
+        for (uint32_t k = 0; k < lim; k++) {
+            const Clause *cl = db->clauses[db->n_clauses - 1u - k];
+            if (!cl || cl->n_lits != learnt_idx) continue;
+            const Literal *cls = (const Literal *)(cl + 1);
+            int same = 1;
+            for (uint32_t i = 0; i < learnt_idx && same; i++) {
+                Literal A = lcg->learnt_buf[i];
+                int hit = 0;
+                for (uint32_t j = 0; j < cl->n_lits; j++) {
+                    if (cls[j].var_id == A.var_id && cls[j].is_lb == A.is_lb &&
+                        (int64_t)cls[j].bound == (int64_t)A.bound) {
+                        hit = 1; break;
+                    }
+                }
+                same = hit;
+            }
+            if (same) {
+                if (_tron())
+                    fprintf(stderr, "[lcg-trace] learnt clause duplicates"
+                            " clause %u -> chronological fallback\n",
+                            db->n_clauses - 1u - k);
+                lcg_dbg_bail[10]++;
+                return -1;
+            }
+        }
     }
 
     /* Output */

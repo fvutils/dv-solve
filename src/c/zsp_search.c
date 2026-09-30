@@ -591,8 +591,13 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
             /* Wall-clock budget check (conflict loop). This loop learns a
              * clause and `continue`s back to itself; a non-progressing
              * learn/propagate cycle would otherwise never reach the outer
-             * loop's check, so the deadline must be tested here too. */
-            if (_deadline > 0.0 && (++_tick & 0x3FF) == 0 && _now_sec() > _deadline) {
+             * loop's check, so the deadline must be tested here too.
+             * Every 16th conflict, not every 1024th: one conflict can carry
+             * a long bounds-propagation climb (one value per round across a
+             * 16-bit domain), and at 1024 conflicts per check the 10 s
+             * budget overshot to ~40 s. A clock read per 16 conflict
+             * analyses is noise. */
+            if (_deadline > 0.0 && (++_tick & 0xF) == 0 && _now_sec() > _deadline) {
                 ctx->bail_reason = ZSP_BAIL_DEADLINE_CONF;
                 return SOLVE_TIMEOUT;
             }

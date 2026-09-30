@@ -32,6 +32,7 @@ static PropResult _check_clause(ClauseDB *db, SolveCtx *ctx,
 
     if (n_false == n) {
         db->n_conflicts++;
+        ctx->conflict_clause_idx = ci;
         return PROP_CONFLICT;
     }
 
@@ -156,6 +157,7 @@ PropResult clause_propagate(ClauseDB *db, SolveCtx *ctx) {
 
             if (n_false == n) {
                 db->n_conflicts++;
+                ctx->conflict_clause_idx = ci;
                 return PROP_CONFLICT;
             }
 

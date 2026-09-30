@@ -420,6 +420,18 @@ int explain_all_different(Propagator *self, SolveCtx *ctx,
 
 /* ---- Reification: guard <-> (x <= y) ---- */
 
+/* The guard literal the x/y tightening rests on. */
+static void _explain_guard_lits(SolveCtx *ctx, uint32_t gid, Explanation *out) {
+    out->lits[out->n_lits++] = _mk_lb(gid, var_lo64(ctx, &ctx->vars[gid]));
+    out->lits[out->n_lits++] = _mk_ub(gid, var_hi64(ctx, &ctx->vars[gid]));
+}
+
+/* An x/y tightening depends on the guard AND on the other operand's bound
+ * (g=1: x <= y.hi, y >= x.lo; g=0: x >= y.lo+1, y <= x.hi-1). Citing only the
+ * guard -- as this once did -- makes the learnt clause claim the bound follows
+ * from the guard alone, which is unsound as soon as the operand bound came from
+ * a decision. The operand literal is recovered exactly from new_bound, the same
+ * way explain_bounds_le/lt do. */
 int explain_reification(Propagator *self, SolveCtx *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
@@ -433,22 +445,56 @@ int explain_reification(Propagator *self, SolveCtx *ctx,
         out->lits[out->n_lits++] = _mk_ub(xid, var_hi64(ctx, &ctx->vars[xid]));
         out->lits[out->n_lits++] = _mk_lb(yid, var_lo64(ctx, &ctx->vars[yid]));
         out->lits[out->n_lits++] = _mk_ub(yid, var_hi64(ctx, &ctx->vars[yid]));
-    } else {
-        /* x or y was tightened based on guard value */
-        out->lits[out->n_lits++] = _mk_lb(gid, var_lo64(ctx, &ctx->vars[gid]));
-        out->lits[out->n_lits++] = _mk_ub(gid, var_hi64(ctx, &ctx->vars[gid]));
+        return 0;
     }
-    (void)is_lb; (void)new_bound;
+    _explain_guard_lits(ctx, gid, out);
+    if (var_id == xid && !is_lb)       /* g=1: x <= y.hi   */
+        out->lits[out->n_lits++] = _mk_ub(yid, new_bound);
+    else if (var_id == xid && is_lb)   /* g=0: x >= y.lo+1 */
+        out->lits[out->n_lits++] = _mk_lb(yid, new_bound - 1);
+    else if (var_id == yid && is_lb)   /* g=1: y >= x.lo   */
+        out->lits[out->n_lits++] = _mk_lb(xid, new_bound);
+    else if (var_id == yid && !is_lb)  /* g=0: y <= x.hi-1 */
+        out->lits[out->n_lits++] = _mk_ub(xid, new_bound + 1);
+    else
+        return -1;
     return 0;
 }
 
 /* ---- ReificationEq: guard <-> (x == y) ---- */
 
+/* Same defect as explain_reification had: the x/y tightenings depend on the
+ * other operand, not just the guard. */
 int explain_reification_eq(Propagator *self, SolveCtx *ctx,
                             uint32_t var_id, uint8_t is_lb,
                             int64_t new_bound, Explanation *out) {
-    /* Same structure as reification */
-    return explain_reification(self, ctx, var_id, is_lb, new_bound, out);
+    PropWatchSect *ws = PROP_WS(self);
+    uint32_t gid = ws->var_ids[0], xid = ws->var_ids[1], yid = ws->var_ids[2];
+    out->n_lits = 0;
+
+    if (var_id == gid) {
+        out->lits[out->n_lits++] = _mk_lb(xid, var_lo64(ctx, &ctx->vars[xid]));
+        out->lits[out->n_lits++] = _mk_ub(xid, var_hi64(ctx, &ctx->vars[xid]));
+        out->lits[out->n_lits++] = _mk_lb(yid, var_lo64(ctx, &ctx->vars[yid]));
+        out->lits[out->n_lits++] = _mk_ub(yid, var_hi64(ctx, &ctx->vars[yid]));
+        return 0;
+    }
+    if (var_id != xid && var_id != yid) return -1;
+    uint32_t oid = (var_id == xid) ? yid : xid;
+    _explain_guard_lits(ctx, gid, out);
+    if (var_lo64(ctx, &ctx->vars[gid]) == 1) {
+        /* g=1: bounds intersection; the new bound is the other operand's. */
+        out->lits[out->n_lits++] = is_lb ? _mk_lb(oid, new_bound)
+                                         : _mk_ub(oid, new_bound);
+    } else {
+        /* g=0: a boundary value v was excluded because the other operand is
+         * pinned to v and this var's bound sat at v. */
+        int64_t v = is_lb ? new_bound - 1 : new_bound + 1;
+        out->lits[out->n_lits++] = _mk_lb(oid, v);
+        out->lits[out->n_lits++] = _mk_ub(oid, v);
+        out->lits[out->n_lits++] = is_lb ? _mk_lb(var_id, v) : _mk_ub(var_id, v);
+    }
+    return 0;
 }
 
 /* ---- BitSlice: r = a[hi:lo] ---- */
