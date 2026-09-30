@@ -34,22 +34,17 @@ with SolveCtx(problem) as ctx:
 
 Documentation: <https://dvkit.org/fvutils/dv-solve/>
 
-## Module map
+## Public API
 
 | Module | Purpose |
 |---|---|
-| `dv_solve.lib` | ctypes loader for `libdv_solve.so` |
-| `dv_solve.problem` | `SolveProblem` buffer wrapper and expression constants |
-| `dv_solve.builder` | `SolveProblemBuilder` — build constraint problems |
-| `dv_solve.ctx` | `SolveCtx` — compile and solve problems |
-| `dv_solve.icl` | ICL (Instance Constraint Library) tables |
-| `dv_solve.partitioner` | Decompose a problem into independent subproblems |
-| `dv_solve.structural_solver` | State-chain inference engine |
-| `dv_solve.stream_solver` | Stream-linked constraint merging |
-| `dv_solve.flow_constraint_store` | Flow-based constraint accumulation |
-| `dv_solve.buffer_inference` | Buffer supply inference with ICL lookup and backtracking |
-| `dv_solve.state_graph` | State transition graphs |
-| `dv_solve.scheduling_graph` | Scheduling constraint graphs |
+| `dv_solve.builder` | `SolveProblemBuilder` — declare variables and constraints |
+| `dv_solve.ctx` | `SolveCtx` — compile and solve; status codes and exceptions |
+| `dv_solve.problem` | operator constants (`BIN_*`, `UN_*`) |
+| `dv_solve` | `get_libdirs()`, `get_incdirs()`, `get_svdirs()`, `get_dpi_lib()` for build systems |
+
+Other modules are internal and may change. See the
+[Python API reference](https://dvkit.org/fvutils/dv-solve/reference/python).
 
 ## Zuspec integration
 

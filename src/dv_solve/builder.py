@@ -30,6 +30,16 @@ class SolveProblemBuilder:
     """
 
     def __init__(self, block_size: int = 4096, lib=None) -> None:
+        """Create an empty problem builder.
+
+        Args:
+            block_size: Size of the internal allocation blocks, in bytes.
+            lib: Native library handle. Leave as ``None`` to load it
+                automatically.
+
+        Raises:
+            RuntimeError: The native library could not be found.
+        """
         if lib is None:
             lib = _load_lib()
         if lib is None:
@@ -43,11 +53,14 @@ class SolveProblemBuilder:
         self._finalized_bufs: list = []  # prevent GC of finalized buffers
 
     def reset(self) -> None:
-        """Reset to empty state, reusing block memory."""
+        """Discard everything added so far and start a new problem."""
         self._lib.builder_reset(self._b)
 
     def destroy(self) -> None:
-        """Free all native resources."""
+        """Free the builder's native memory.
+
+        Called automatically when the builder is garbage-collected.
+        """
         if self._b is not None:
             self._lib.builder_destroy(self._b)
             self._b = None
@@ -66,10 +79,13 @@ class SolveProblemBuilder:
     # ------------------------------------------------------------------ #
 
     def finalize(self) -> Tuple[ctypes.Array, int]:
-        """Produce a contiguous SolveProblem buffer.
+        """Pack the problem into a buffer that :class:`~dv_solve.ctx.SolveCtx` compiles.
 
-        Returns (ctypes_buffer, size_bytes).  The buffer contains a valid
-        ``SolveProblem`` that can be passed to ``solver_compile``.
+        The builder is unchanged, so it can be finalized again after more
+        variables or constraints are added.
+
+        Returns:
+            ``(buffer, size)``: the problem buffer and its size in bytes.
         """
         size = ctypes.c_size_t(0)
         sp_ptr = self._lib.builder_finalize(self._b, ctypes.byref(size))
@@ -86,7 +102,7 @@ class SolveProblemBuilder:
         return buf, sz
 
     def finalize_bytes(self) -> bytes:
-        """Produce the SolveProblem buffer as a Python bytes object."""
+        """Like :meth:`finalize`, but return the problem as ``bytes``."""
         buf, sz = self.finalize()
         return bytes(buf)
 
@@ -102,7 +118,20 @@ class SolveProblemBuilder:
         lo: int,
         hi: int,
     ) -> int:
-        """Declare a variable; returns its ExprRef."""
+        """Declare a variable.
+
+        Args:
+            var_id: Identifier you choose for the variable. Expressions and
+                :meth:`SolveCtx.get_value` refer to it by this id.
+            width: Width in bits, 1 to 64.
+            is_signed: Whether the variable holds signed values.
+            lo: Smallest value the variable may take.
+            hi: Largest value the variable may take.
+
+        Returns:
+            A reference to the declaration (rarely needed; use
+            :meth:`expr_var` to refer to the variable in expressions).
+        """
         ref = self._lib.builder_add_var(
             self._b,
             ctypes.c_uint32(var_id),
@@ -116,7 +145,11 @@ class SolveProblemBuilder:
         return ref
 
     def add_constraint(self, root: int) -> int:
-        """Add a constraint expression; returns ConstraintSpec ExprRef."""
+        """Require an expression to hold.
+
+        Args:
+            root: A Boolean-valued expression, such as a comparison.
+        """
         ref = self._lib.builder_add_constraint(
             self._b, ctypes.c_uint32(root)
         )
@@ -136,7 +169,11 @@ class SolveProblemBuilder:
 
 
     def add_all_different(self, var_ids: Sequence[int]) -> int:
-        """Add an AllDifferent constraint over the given variable IDs."""
+        """Require the given variables to take pairwise different values.
+
+        Args:
+            var_ids: Variable ids (not expressions).
+        """
         arr = (ctypes.c_uint32 * len(var_ids))(*var_ids)
         ref = self._lib.builder_add_all_different(
             self._b, ctypes.c_uint32(len(var_ids)), arr
@@ -149,17 +186,31 @@ class SolveProblemBuilder:
     # ------------------------------------------------------------------ #
 
     def expr_const(self, value: int, is_signed: bool = False) -> int:
+        """A constant.
+
+        Args:
+            value: The value. Must fit in a signed 64-bit integer.
+            is_signed: Set for a negative constant.
+        """
         return self._lib.builder_expr_const(
             self._b, ctypes.c_int64(value),
             ctypes.c_uint8(1 if is_signed else 0),
         )
 
     def expr_var(self, var_id: int) -> int:
+        """The value of variable ``var_id``."""
         return self._lib.builder_expr_var(
             self._b, ctypes.c_uint32(var_id)
         )
 
     def expr_binary(self, op: int, lhs: int, rhs: int) -> int:
+        """A binary operation.
+
+        Args:
+            op: One of the ``BIN_*`` constants in :mod:`dv_solve.problem`.
+            lhs: Left operand expression.
+            rhs: Right operand expression.
+        """
         return self._lib.builder_expr_binary(
             self._b,
             ctypes.c_uint32(op),
@@ -168,11 +219,23 @@ class SolveProblemBuilder:
         )
 
     def expr_unary(self, op: int, operand: int) -> int:
+        """A unary operation.
+
+        Args:
+            op: One of the ``UN_*`` constants in :mod:`dv_solve.problem`.
+            operand: Operand expression.
+        """
         return self._lib.builder_expr_unary(
             self._b, ctypes.c_uint32(op), ctypes.c_uint32(operand)
         )
 
     def expr_ite(self, cond: int, then_e: int, else_e: int) -> int:
+        """If-then-else: ``then_e`` when ``cond`` holds, otherwise ``else_e``.
+
+        With Boolean ``then_e`` and ``else_e`` this expresses an implication
+        with an alternative, such as SystemVerilog's ``if (...) ... else ...``
+        inside a constraint.
+        """
         return self._lib.builder_expr_ite(
             self._b,
             ctypes.c_uint32(cond),
@@ -181,6 +244,13 @@ class SolveProblemBuilder:
         )
 
     def expr_in_range(self, value: int, lo: int, hi: int) -> int:
+        """True when ``lo <= value <= hi``.
+
+        Args:
+            value: Expression to test.
+            lo: Lower bound expression (inclusive).
+            hi: Upper bound expression (inclusive).
+        """
         return self._lib.builder_expr_in_range(
             self._b,
             ctypes.c_uint32(value),
@@ -189,6 +259,12 @@ class SolveProblemBuilder:
         )
 
     def expr_in_set(self, value: int, elems: Sequence[int]) -> int:
+        """True when ``value`` equals one of ``elems``.
+
+        Args:
+            value: Expression to test.
+            elems: Candidate expressions, typically constants.
+        """
         arr = (ctypes.c_uint32 * len(elems))(*elems)
         return self._lib.builder_expr_in_set(
             self._b,
@@ -198,9 +274,12 @@ class SolveProblemBuilder:
         )
 
     def expr_in_ranges(self, value: int, ranges) -> int:
-        """Membership over a union of inclusive ranges. ``value`` and each
-        range bound are ExprRefs; ``ranges`` is a sequence of ``(lo_ref,
-        hi_ref)`` pairs."""
+        """True when ``value`` lies in any of several inclusive ranges.
+
+        Args:
+            value: Expression to test.
+            ranges: Sequence of ``(lo, hi)`` pairs of expressions.
+        """
         n = len(ranges)
         los = (ctypes.c_uint32 * n)(*[r[0] for r in ranges])
         his = (ctypes.c_uint32 * n)(*[r[1] for r in ranges])
@@ -219,6 +298,14 @@ class SolveProblemBuilder:
         to_bits: int,
         sign_extend: bool = False,
     ) -> int:
+        """Widen ``operand`` from ``from_bits`` to ``to_bits`` bits.
+
+        Args:
+            operand: Expression to widen.
+            from_bits: Width of ``operand``.
+            to_bits: Width of the result.
+            sign_extend: Replicate the sign bit instead of filling with zeros.
+        """
         return self._lib.builder_expr_extend(
             self._b,
             ctypes.c_uint32(operand),
@@ -228,6 +315,7 @@ class SolveProblemBuilder:
         )
 
     def expr_extract(self, operand: int, hi_bit: int, lo_bit: int) -> int:
+        """Bits ``hi_bit`` down to ``lo_bit`` of ``operand`` (inclusive)."""
         return self._lib.builder_expr_extract(
             self._b,
             ctypes.c_uint32(operand),
@@ -236,6 +324,7 @@ class SolveProblemBuilder:
         )
 
     def expr_concat(self, hi: int, lo: int, lo_width: int) -> int:
+        """Concatenation: ``hi`` in the upper bits, ``lo`` in the lower ``lo_width`` bits."""
         return self._lib.builder_expr_concat(
             self._b,
             ctypes.c_uint32(hi),
@@ -255,7 +344,14 @@ class SolveProblemBuilder:
         )
 
     def expr_sum(self, result: int, var_refs: list) -> int:
-        """Build an N-ary sum expression: result == sum of var_refs[]."""
+        """Constraint: ``result`` equals the sum of ``var_refs``.
+
+        Pass the returned expression to :meth:`add_constraint`.
+
+        Args:
+            result: Expression for the total, typically a variable.
+            var_refs: Expressions to add up.
+        """
         n = len(var_refs)
         arr_t = ctypes.c_uint32 * n
         arr = arr_t(*var_refs)
@@ -265,19 +361,34 @@ class SolveProblemBuilder:
         )
 
     def expr_countones(self, result: int, operand: int) -> int:
-        """Build a countones (popcount) expression."""
+        """Constraint: ``result`` equals the number of 1 bits in ``operand``.
+
+        Pass the returned expression to :meth:`add_constraint`.
+        """
         return self._lib.builder_expr_countones(
             self._b, ctypes.c_uint32(result), ctypes.c_uint32(operand),
         )
 
     def expr_clog2(self, result: int, operand: int) -> int:
-        """Build a clog2 expression."""
+        """Constraint: ``result`` equals the ceiling of log2 of ``operand``.
+
+        Pass the returned expression to :meth:`add_constraint`.
+        """
         return self._lib.builder_expr_clog2(
             self._b, ctypes.c_uint32(result), ctypes.c_uint32(operand),
         )
 
     def add_soft_constraint(self, root: int, priority: int = 0) -> int:
-        """Add a soft (relaxable) constraint with a priority."""
+        """Add a constraint that may be dropped if it conflicts with others.
+
+        Hard constraints always hold. Soft constraints are kept when they can
+        be; when they conflict, the ones with the highest ``priority`` number
+        are dropped first.
+
+        Args:
+            root: A Boolean-valued expression.
+            priority: 0 is the most important.
+        """
         ref = self._lib.builder_add_soft_constraint(
             self._b, ctypes.c_uint32(root), ctypes.c_uint32(priority)
         )
@@ -286,9 +397,16 @@ class SolveProblemBuilder:
         return ref
 
     def add_dist(self, var_id: int, entries) -> int:
-        """Add a distribution constraint on a variable.
+        """Give a variable a weighted distribution, like SystemVerilog's ``dist``.
 
-        Each entry is a dict with keys: lo, hi, weight, is_per_value.
+        Args:
+            var_id: The variable.
+            entries: Sequence of dicts with keys ``lo``, ``hi`` and
+                ``weight``, and optionally ``is_per_value``. The range
+                ``lo``..``hi`` is chosen in proportion to ``weight``. With
+                ``is_per_value`` true (the default, SystemVerilog ``:=``) every
+                value in the range has that weight; false (``:/``) spreads the
+                weight across the range.
         """
         from .problem import DistEntry
         arr = (DistEntry * len(entries))()

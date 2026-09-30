@@ -25,3 +25,19 @@ solution to be about as likely as any other, not a cluster around a few
 values. In Python, pass `fair_pick=True` to `solve()`. It changes how the
 solver breaks ties between equally good choices, so that the values of every
 variable, not just the first one decided, are spread evenly.
+
+## Weighted distributions
+
+`add_dist` gives a variable a weighted distribution, like SystemVerilog's
+`dist`. Each entry is a range with a weight. With `is_per_value` true (the
+default, SystemVerilog `:=`) every value in the range gets the weight; with it
+false (`:/`) the weight is divided across the range.
+
+```python
+# kind is 0 about three times as often as 1
+b.add_dist(KIND, [{"lo": 0, "hi": 0, "weight": 3},
+                  {"lo": 1, "hi": 1, "weight": 1}])
+```
+
+Weights shape the result over many solves with different seeds; any single
+solve returns one value.

@@ -52,41 +52,49 @@ _COMPILE_UNSUPPORTED_WIDTH = -3
 
 
 class CompileUnsatError(Exception):
-    """Raised when solver_compile detects UNSAT via bound tightening.
+    """The constraints were shown to be unsatisfiable while compiling.
 
-    Means the constraint system is provably unsatisfiable without needing
-    to run the search loop.
+    Raised by :class:`SolveCtx` when narrowing the variables' ranges already
+    proves there is no solution, before any search. Treat it like a
+    ``SOLVE_UNSAT`` result.
     """
 
 
 class CompileIncompleteError(Exception):
-    """Raised when solver_compile could not handle one or more constraints.
+    """One or more constraints use a form this engine cannot compile.
 
-    The native back-end catches this and transparently falls back to the
-    Python solver so that all constraints are respected.
+    Raised by :class:`SolveCtx` rather than silently ignoring the constraint.
+    The message says how many constraints were affected. A common cause is
+    ``UN_NEG`` or ``UN_INVERT`` applied to a variable that is then compared
+    with a constant; write ``-x`` as ``BIN_SUB`` of ``0`` and ``x`` instead.
     """
 
 
 class CompileUnsupportedError(CompileIncompleteError):
-    """Raised when the problem uses a construct this engine cannot search.
+    """The problem declares a variable wider than 64 bits.
 
-    Today that means a variable wider than 64 bits. The bounds/propagator
-    engine allocates storage for those (tier-2) but cannot tighten them --
-    ``trail_record_lb``/``ub`` refuse tier-2 outright -- so a problem
-    containing one would either report UNSAT with nothing constraining it or,
-    worse, appear to solve while silently enforcing none of its constraints.
-    Compile declines instead.
-
-    Subclasses ``CompileIncompleteError`` so a caller that already escalates
-    to the bit-blasting engine on an incomplete compile keeps working without
-    change; the bit-blaster handles these widths correctly.
+    The Python API supports variables up to 64 bits wide. Wider bit-vectors
+    are supported through the SMT-LIB2 front end (``dv-solve-smt2``).
     """
 
 
 class SolveCtx:
-    """Thin ctypes wrapper around the C ``SolveCtx`` + block-allocator.
+    """A compiled problem, ready to solve.
 
-    The context is compiled against a ``SolveProblem`` and then solved.
+    Create it from the buffer returned by
+    :meth:`SolveProblemBuilder.finalize() <dv_solve.builder.SolveProblemBuilder.finalize>`,
+    call :meth:`solve`, then read values with :meth:`get_value`. Call
+    :meth:`reset` before solving again. Use it as a context manager (``with``)
+    or call :meth:`destroy` to release its native memory promptly.
+
+    Args:
+        problem: The finalized problem buffer.
+        ctx_buf_size: Initial working-memory size, in bytes.
+
+    Raises:
+        CompileUnsatError: The constraints are provably unsatisfiable.
+        CompileIncompleteError: A constraint could not be compiled.
+        CompileUnsupportedError: A variable is wider than 64 bits.
     """
 
     def __init__(self, problem: "SolveProblem", ctx_buf_size: int = _CTX_BUF_SIZE) -> None:  # noqa: F821
@@ -170,7 +178,7 @@ class SolveCtx:
             pass
 
     def destroy(self) -> None:
-        """Release all native resources."""
+        """Release the native memory. Also called when the context is garbage-collected."""
         if self._ba is not None:
             self._lib.zsp_block_alloc_destroy(self._ba)
             self._ba = None
@@ -188,7 +196,21 @@ class SolveCtx:
         max_shave_iters: int = 0,
         fair_pick: bool = False,
     ) -> int:
-        """Run the search loop; returns SOLVE_OK, SOLVE_UNSAT, or SOLVE_TIMEOUT.
+        """Search for a solution.
+
+        Returns:
+            ``SOLVE_OK`` (a solution was found), ``SOLVE_UNSAT`` (none exists)
+            or ``SOLVE_TIMEOUT`` (the search gave up; the problem may or may
+            not have a solution).
+
+        Args:
+            seed: Selects which solution is returned. The same seed gives the
+                same solution.
+            max_conflicts: Give up after this many conflicts; 0 for no limit.
+            max_restarts: Give up after this many restarts; 0 for no limit.
+            use_phase_save: Search tuning; leave at the default.
+            max_shave_iters: Search tuning; leave at the default.
+            fair_pick: See below.
 
         ``fair_pick`` selects the decision-variable tie-break: ``False`` (fast)
         uses deterministic MRV and finds *a* solution quickly; ``True``
@@ -207,7 +229,7 @@ class SolveCtx:
         return self._lib.solver_solve(self._ctx, ctypes.byref(opts))
 
     def reset(self) -> None:
-        """Reset solver to post-compile state for a fresh solve."""
+        """Clear the previous solution so :meth:`solve` can run again."""
         self._lib.solver_reset(self._ctx)
 
     def solve_n(
@@ -365,7 +387,10 @@ class SolveCtx:
             return best
 
     def get_value(self, var_id: int) -> int:
-        """Return assigned value for var_id after a successful solve."""
+        """The value of variable ``var_id`` in the last solution.
+
+        Only meaningful after :meth:`solve` returned ``SOLVE_OK``.
+        """
         # No ctypes.c_uint32(var_id) here: argtypes already declares c_uint32, so
         # ctypes converts a plain Python int itself. Constructing the wrapper was
         # ~18% of the cost of this call, which runs once per field per solve.

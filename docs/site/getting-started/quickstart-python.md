@@ -43,3 +43,8 @@ Solve
 Read values
 : `get_value(var_id)` returns a variable's value from the last successful
   solve.
+
+## Next steps
+
+- {doc}`../concepts/problem-model` lists everything you can express.
+- {doc}`../reference/python` is the API reference.

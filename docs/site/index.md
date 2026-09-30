@@ -35,9 +35,11 @@ getting-started/quickstart-verilator
 :maxdepth: 2
 :caption: Concepts
 
+concepts/problem-model
+concepts/soft-constraints
+concepts/randomization-seeds
 concepts/soundness
 concepts/engines
-concepts/randomization-seeds
 ```
 
 ```{toctree}
@@ -46,12 +48,14 @@ concepts/randomization-seeds
 
 guides/smt2-solver
 guides/verilator
+guides/packaging
 ```
 
 ```{toctree}
 :maxdepth: 2
 :caption: Reference
 
+reference/python
 reference/cli
 reference/environment
 ```
