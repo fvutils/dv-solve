@@ -290,6 +290,61 @@ SolveProblem *builder_finalize_reserve(SolveProblemBuilder *b, size_t *out_size,
     return sp;
 }
 
+BuilderMark builder_mark(const SolveProblemBuilder *b) {
+    BuilderMark m;
+    m.n_vars        = b->n_vars;
+    m.n_constraints = b->n_constraints;
+    m.n_sources     = b->n_sources;
+    m.n_alldiffs    = b->n_alldiffs;
+    m.n_softs       = b->n_softs;
+    m.n_dists       = b->n_dists;
+    return m;
+}
+
+/* Keep only the first `keep` nodes of a newest-first list inside the copied
+ * problem `sp`, by ending the list after node `keep`. Every spec struct starts
+ * with its `next` ExprRef, so the cut is the same for all six lists. */
+static int _cut_list(SolveProblem *sp, ExprRef *head, uint32_t *count,
+                     uint32_t keep) {
+    if (keep > *count) return -1;
+    *count = keep;
+    if (keep == 0) { *head = EXPR_NULL; return 0; }
+    ExprRef cur = *head;
+    for (uint32_t i = 1; i < keep; i++) {
+        if (cur == EXPR_NULL) return -1;
+        cur = *(ExprRef *)POOL_PTR(sp, cur);
+    }
+    if (cur == EXPR_NULL) return -1;
+    *(ExprRef *)POOL_PTR(sp, cur) = EXPR_NULL;
+    return 0;
+}
+
+SolveProblem *builder_finalize_since(SolveProblemBuilder *b,
+                                     const BuilderMark *m, size_t *out_size) {
+    size_t sz = 0;
+    SolveProblem *sp = builder_finalize(b, &sz);
+    if (!sp) return NULL;
+    /* Lists are newest-first, so the items added since the mark are exactly
+     * the first (current - marked) nodes of each list. */
+    if (m->n_vars > sp->n_vars || m->n_constraints > sp->n_constraints ||
+        m->n_sources > sp->n_sources || m->n_alldiffs > sp->n_alldiffs ||
+        m->n_softs > sp->n_softs || m->n_dists > sp->n_dists ||
+        _cut_list(sp, &sp->vars_head, &sp->n_vars, sp->n_vars - m->n_vars) ||
+        _cut_list(sp, &sp->constraints_head, &sp->n_constraints,
+                  sp->n_constraints - m->n_constraints) ||
+        _cut_list(sp, &sp->sources_head, &sp->n_sources,
+                  sp->n_sources - m->n_sources) ||
+        _cut_list(sp, &sp->allDiff_head, &sp->n_alldiffs,
+                  sp->n_alldiffs - m->n_alldiffs) ||
+        _cut_list(sp, &sp->softs_head, &sp->n_softs, sp->n_softs - m->n_softs) ||
+        _cut_list(sp, &sp->dists_head, &sp->n_dists, sp->n_dists - m->n_dists)) {
+        builder_free_problem(b, sp, sz);
+        return NULL;
+    }
+    if (out_size) *out_size = sz;
+    return sp;
+}
+
 void builder_free_problem(SolveProblemBuilder *b, SolveProblem *sp, size_t size) {
     if (!sp) return;
     _release(b, sp, size);

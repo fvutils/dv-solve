@@ -2796,6 +2796,8 @@ static int _ensure_problem(Smt2Frontend *fe) {
     return 0;
 }
 
+static void _start_cdcl_retention(Smt2Frontend *fe);
+
 static int _ensure_compiled(Smt2Frontend *fe) {
     if (fe->ctx) return 0;
     /* A prior bit-blast-routed solve may have finalized one already (possible
@@ -2829,9 +2831,9 @@ static int _ensure_compiled(Smt2Frontend *fe) {
         int rc = solver_compile(fe->ctx, fe->problem);
         if (rc == 0) {
             fe->compiled = 1;
-            builder_reset(fe->builder);
-            fe->builder_retained = 0;   /* builder no longer holds the full set (B14) */
+            fe->builder_retained = 0;   /* fe->problem can't be rebuilt in place (B14) */
             fe->has_aux = 0;
+            _start_cdcl_retention(fe);
             return 0;
         }
         /* Grow-and-retry only on a genuine pool overflow (not a compile-time
@@ -2847,10 +2849,41 @@ static int _ensure_compiled(Smt2Frontend *fe) {
     }
 }
 
+/* After the CDCL compile, keep the builder (holding every assertion so far) so
+ * a later CDCL `unknown` can escalate to bitblast even after incremental
+ * asserts -- unless it is already too big to keep copying on every hand-off. */
+#define SMT2_RETAIN_MAX_BYTES (16u << 20)
+static void _start_cdcl_retention(Smt2Frontend *fe) {
+    if (builder_virtual_used(fe->builder) <= SMT2_RETAIN_MAX_BYTES) {
+        fe->cdcl_retained = 1;
+        fe->aux_mark = builder_mark(fe->builder);
+    } else {
+        builder_reset(fe->builder);
+        fe->cdcl_retained = 0;
+        memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
+    }
+}
+
+/* The builder's items since aux_mark have been handed to CDCL. */
+static void _aux_handed_off(Smt2Frontend *fe) {
+    if (fe->cdcl_retained &&
+        builder_virtual_used(fe->builder) <= SMT2_RETAIN_MAX_BYTES) {
+        fe->aux_mark = builder_mark(fe->builder);
+    } else {
+        builder_reset(fe->builder);
+        fe->cdcl_retained = 0;
+        memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
+    }
+    fe->builder_retained = 0;
+    fe->has_aux = 0;
+}
+
 static int _flush_aux(Smt2Frontend *fe) {
     if (!fe->compiled || !fe->has_aux) return 0;
     size_t aux_sz = 0;
-    SolveProblem *aux = builder_finalize(fe->builder, &aux_sz);
+    /* Only the items added since the last hand-off: the builder may also hold
+     * everything before it (cdcl_retained), which the ctx already has. */
+    SolveProblem *aux = builder_finalize_since(fe->builder, &fe->aux_mark, &aux_sz);
     if (!aux) return -1;
     int rc = solver_add_constraint(fe->ctx, aux);
     /* Retain the aux SolveProblem (instead of freeing) so the post-solve
@@ -2865,18 +2898,14 @@ static int _flush_aux(Smt2Frontend *fe) {
              * aux). Validation will be incomplete for this run but the
              * solver result is unaffected. */
             free(aux);
-            builder_reset(fe->builder);
-            fe->builder_retained = 0;
-            fe->has_aux = 0;
+            _aux_handed_off(fe);
             return rc;
         }
         fe->aux_problems     = grow;
         fe->aux_problems_cap = new_cap;
     }
     fe->aux_problems[fe->n_aux_problems++] = aux;
-    builder_reset(fe->builder);
-    fe->builder_retained = 0;
-    fe->has_aux = 0;
+    _aux_handed_off(fe);
     return rc;
 }
 
@@ -3412,9 +3441,11 @@ static int _array_refine(Smt2Frontend *fe) {
     return added;
 }
 
+static void _free_bb(Smt2Frontend *fe);
+
 /* Lazy array engine driver. Mirrors _check_sat_bitblast's result reporting. */
 static int _check_sat_array(Smt2Frontend *fe) {
-    if (fe->bb_solver) { zsp_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
+    _free_bb(fe);
     if (fe->problem)   { free(fe->problem); fe->problem = NULL; }
 
     /* Finalize the BV skeleton with pool headroom for in-place lemmas + reads. */
@@ -3424,6 +3455,8 @@ static int _check_sat_array(Smt2Frontend *fe) {
     if (!fe->problem) { SMT2_EMIT_UNKNOWN(fe); fflush(fe->out); return -1; }
     builder_reset(fe->builder);
     fe->builder_retained = 0;
+    fe->cdcl_retained = 0;
+    memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
     fe->has_aux = 0;
 
     /* Incremental CaDiCaL backend is required for assert + resolve. */
@@ -3447,6 +3480,7 @@ static int _check_sat_array(Smt2Frontend *fe) {
         }
     }
 
+    fe->bb_model_valid = (rc == ZSP_BB_SAT);
     if (rc == ZSP_BB_SAT) {
         fprintf(fe->out, "sat\n");
         fe->last_result = SOLVE_OK; fe->has_result = 1;
@@ -3464,8 +3498,35 @@ static int _check_sat_array(Smt2Frontend *fe) {
  * directly on fe->problem. Triggered by DV_ENGINE=bitblast (set by the
  * --engine=bitblast CLI flag). The bbsolver is kept alive on fe->bb_solver
  * so that subsequent (get-value) calls can read back model values. */
+/* Free the bit-blast solver and the problem it was built from, if owned. */
+static void _free_bb(Smt2Frontend *fe) {
+    if (fe->bb_solver)  { zsp_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
+    if (fe->bb_problem) { free(fe->bb_problem); fe->bb_problem = NULL; }
+}
+
+/* Solve `p` with the bit-blast engine. `owned`, if non-NULL, is `p` handed
+ * over by the caller: it becomes fe->bb_problem when a new bb_solver is built
+ * from it, and is freed otherwise. */
+static int _check_sat_bitblast_on(Smt2Frontend *fe, SolveProblem *p,
+                                  SolveProblem *owned);
+static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
+                                    SolveProblem **owned_io);
+
 static int _check_sat_bitblast(Smt2Frontend *fe) {
-    if (!fe->problem) {
+    return _check_sat_bitblast_on(fe, fe->problem, NULL);
+}
+
+static int _check_sat_bitblast_on(Smt2Frontend *fe, SolveProblem *p,
+                                  SolveProblem *owned) {
+    int ret = _check_sat_bitblast_body(fe, p, &owned);
+    free(owned);                            /* NULL once adopted as bb_problem */
+    return ret;
+}
+
+static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
+                                    SolveProblem **owned_io) {
+    SolveProblem *owned = *owned_io;
+    if (!p) {
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
         return -1;
@@ -3479,7 +3540,7 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
      * seed -- the dominant per-randomize cost is kissat, so this is the big win.
      * A periodic full re-solve (reseed_period) refreshes the base model so
      * tightly-coupled fields aren't anchored to a single solution forever. */
-    uint64_t fp = fe->verilator_mode ? _problem_fingerprint(fe->problem) : 0;
+    uint64_t fp = fe->verilator_mode ? _problem_fingerprint(p) : 0;
     if (fe->verilator_mode && fe->cache_valid && fp == fe->cached_fp) {
         int force_resolve = fe->reseed_period &&
                             (fe->div_counter % fe->reseed_period == 0);
@@ -3493,6 +3554,7 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
             }
             if (fe->bb_solver &&
                 zsp_bbsolver_rediversify(fe->bb_solver, fe->seed) == 0) {
+                fe->bb_model_valid = 1;
                 fprintf(fe->out, "sat\n");
                 fflush(fe->out);
                 fe->last_result = SOLVE_OK;
@@ -3503,11 +3565,10 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
     }
 
     /* Cache miss (or forced re-solve): drop any prior bbsolver and solve fresh. */
-    if (fe->bb_solver) {
-        zsp_bbsolver_free(fe->bb_solver);
-        fe->bb_solver = NULL;
-    }
-    fe->bb_solver = zsp_bbsolver_new(NULL, fe->problem);
+    _free_bb(fe);
+    fe->bb_solver  = zsp_bbsolver_new(NULL, p);
+    fe->bb_problem = owned;                 /* lives exactly as long as bb_solver */
+    *owned_io = NULL;
     if (!fe->bb_solver) {
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
@@ -3515,6 +3576,7 @@ static int _check_sat_bitblast(Smt2Frontend *fe) {
         return -1;
     }
     int rc = zsp_bbsolver_check(fe->bb_solver, fe->seed);
+    fe->bb_model_valid = (rc == ZSP_BB_SAT);
     if (fe->verilator_mode && (rc == ZSP_BB_SAT || rc == ZSP_BB_UNSAT)) {
         fe->cached_fp = fp;
         fe->cache_valid = 1;
@@ -3561,10 +3623,7 @@ static int _check_sat_cube(Smt2Frontend *fe) {
         fflush(fe->out);
         return -1;
     }
-    if (fe->bb_solver) {
-        zsp_bbsolver_free(fe->bb_solver);
-        fe->bb_solver = NULL;
-    }
+    _free_bb(fe);
     /* Prefer CaDiCaL: cube-and-conquer needs retractable assumptions. Falls
      * back to kissat (→ single-shot solve) when CaDiCaL is not compiled in. */
     fe->bb_solver = zsp_bbsolver_new_backend(NULL, fe->problem, /*prefer_cadical=*/1);
@@ -3574,6 +3633,7 @@ static int _check_sat_cube(Smt2Frontend *fe) {
         return -1;
     }
     int rc = zsp_cube_check(fe->bb_solver, fe->seed);
+    fe->bb_model_valid = (rc == ZSP_BB_SAT);
     if (rc == ZSP_BB_SAT) {
         fprintf(fe->out, "sat\n");
         fe->last_result = SOLVE_OK;
@@ -3628,7 +3688,7 @@ static int _engine_is_bitblast(Smt2Frontend *fe) {
 /* Route variable value lookup through the bbsolver when it's the active
  * engine; otherwise fall back to the CDCL solver_get_value path. */
 static int64_t _fe_get_var_value(Smt2Frontend *fe, uint32_t var_id) {
-    if (fe->bb_solver) {
+    if (fe->bb_solver && fe->bb_model_valid) {
         int64_t v = 0;
         if (zsp_bbsolver_value(fe->bb_solver, var_id, &v) == 0) return v;
         /* fall through to CDCL on bbsolver miss */
@@ -3642,7 +3702,7 @@ static int64_t _fe_get_var_value(Smt2Frontend *fe, uint32_t var_id) {
 static int _fe_get_var_value_wide(Smt2Frontend *fe, uint32_t var_id,
                                   uint64_t *limbs, uint32_t n_limbs) {
     for (uint32_t i = 0; i < n_limbs; i++) limbs[i] = 0;
-    if (fe->bb_solver &&
+    if (fe->bb_solver && fe->bb_model_valid &&
         zsp_bbsolver_value_wide(fe->bb_solver, var_id, limbs, n_limbs) == 0)
         return 0;
     /* Fallback: the low 64 bits from the scalar reader (wide vars never reach
@@ -3667,6 +3727,8 @@ static void _emit_bv_bin_literal_wide(FILE *out, const uint64_t *limbs,
 
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     (void)cmd;
+    /* A previous answer's bit-blast model is not this answer's (B36). */
+    fe->bb_model_valid = 0;
 
     /* Tainted context (an assert used an unsupported construct): answer honestly
      * with `unknown` rather than solve a problem that is missing constraints. */
@@ -3767,6 +3829,15 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
 
     if (_engine_is_bitblast(fe) && !route_cdcl) {
         int prc = _ensure_problem(fe);
+        if (prc == -2 && fe->cdcl_retained) {
+            /* fe->problem predates asserts made after a CDCL compile, and
+             * belongs to the live ctx so it can't be rebuilt in place. The
+             * retained builder holds every assertion (including any not yet
+             * handed to CDCL): solve a full copy of it instead. */
+            size_t full_sz = 0;
+            SolveProblem *full = builder_finalize(fe->builder, &full_sz);
+            if (full) return _check_sat_bitblast_on(fe, full, full);
+        }
         if (prc < 0) {
             /* -2: stale problem we cannot safely rebuild -> honest `unknown`,
              * not an error, so the driver's protocol stream stays in sync. */
@@ -3976,9 +4047,19 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
                           || fe->last_result == SOLVE_UNSAT) ? 1 : 2;
     }
 
-    if (fe->last_result == SOLVE_TIMEOUT && fe->n_aux_problems == 0
+    if (fe->last_result == SOLVE_TIMEOUT
         && !getenv("DV_NO_BITBLAST")) {   /* audit mode: keep pure-CDCL unknown */
-        return _check_sat_bitblast(fe);
+        if (fe->n_aux_problems == 0)
+            return _check_sat_bitblast(fe);
+        /* Constraints were asserted after the compile, so fe->problem is not
+         * the whole set -- but the retained builder is (see cdcl_retained).
+         * This is Verilator's random XOR-hash asserts after the first
+         * check-sat: without it every such randomize() answered `unknown`. */
+        if (fe->cdcl_retained && !fe->has_aux) {
+            size_t full_sz = 0;
+            SolveProblem *full = builder_finalize(fe->builder, &full_sz);
+            if (full) return _check_sat_bitblast_on(fe, full, full);
+        }
     }
 
     switch (fe->last_result) {
@@ -4481,6 +4562,17 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
 }
 
 static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
+    /* push always compiles and flushes, so anything still pending in the
+     * builder was asserted inside the scope being popped: drop it, or it would
+     * reach the ctx at the next flush -- a retracted assertion still enforced,
+     * i.e. a wrong `unsat` (B37). This also ends CDCL retention: the builder
+     * can no longer stand in for the full, current assertion set. */
+    if (fe->compiled) {
+        builder_reset(fe->builder);
+        fe->cdcl_retained = 0;
+        memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
+        fe->has_aux = 0;
+    }
     uint32_t n = 1;
     if (cmd->list.count == 2 && cmd->list.items[1]->kind == SEXPR_NUMERAL) {
         n = (uint32_t)cmd->list.items[1]->numval;
@@ -4608,6 +4700,10 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
         }
         return _cmd_check_sat(fe, cmd);
     }
+    /* Standard path: this solves afresh, so any earlier bit-blast model is not
+     * this answer's (B36). (The Verilator branch above deliberately re-uses the
+     * previous check-sat's model, so it must NOT clear this.) */
+    fe->bb_model_valid = 0;
 
     if (_ensure_compiled(fe) < 0) {
         SMT2_EMIT_UNKNOWN(fe);
@@ -4744,7 +4840,7 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
 void smt2_frontend_destroy(Smt2Frontend *fe) {
     _truncate_named(fe, 0);
     free(fe->named);
-    if (fe->bb_solver)   { zsp_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
+    _free_bb(fe);
     if (fe->problem)     free(fe->problem);
     for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
         free(fe->aux_problems[i]);
@@ -4796,6 +4892,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     uint64_t div_counter = fe->div_counter;
     uint32_t reseed_period = fe->reseed_period;
     zsp_bbsolver_t *bb = fe->bb_solver;
+    SolveProblem   *bb_problem = fe->bb_problem;   /* backs bb; carried with it */
     uint64_t cached_fp = fe->cached_fp;
     int      cache_valid = fe->cache_valid, cached_result = fe->cached_result;
     int      verilator_cdcl = fe->verilator_cdcl;
@@ -4848,6 +4945,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->div_counter = div_counter;
     fe->reseed_period = reseed_period;
     fe->bb_solver = bb;
+    fe->bb_problem = bb_problem;
     fe->cached_fp = cached_fp;
     fe->cache_valid = cache_valid;
     fe->cached_result = cached_result;

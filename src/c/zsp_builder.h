@@ -108,6 +108,29 @@ SolveProblem *builder_finalize_reserve(SolveProblemBuilder *b, size_t *size,
                                        uint32_t extra_bytes);
 
 /**
+ * A position in the builder's item lists (vars, constraints, sources,
+ * all-different groups, softs, dists), taken with builder_mark().
+ */
+typedef struct {
+    uint32_t n_vars, n_constraints, n_sources, n_alldiffs, n_softs, n_dists;
+} BuilderMark;
+
+/** Record the current end of every item list. */
+BuilderMark builder_mark(const SolveProblemBuilder *b);
+
+/**
+ * Like builder_finalize, but the returned problem lists ONLY the items added
+ * since `mark`. The whole pool is still copied, so every ExprRef stays valid
+ * even though earlier items are no longer reachable from the list heads.
+ *
+ * This lets a caller keep one builder holding the complete constraint set (to
+ * finalize in full later) while handing an incremental consumer just the new
+ * items. Returns NULL on allocation failure or if `mark` is ahead of `b`.
+ */
+SolveProblem *builder_finalize_since(SolveProblemBuilder *b,
+                                     const BuilderMark *mark, size_t *size);
+
+/**
  * Free a SolveProblem buffer returned by builder_finalize().
  */
 void builder_free_problem(SolveProblemBuilder *b, SolveProblem *sp, size_t size);

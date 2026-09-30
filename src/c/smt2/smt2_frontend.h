@@ -262,6 +262,23 @@ typedef struct {
     uint32_t             aux_problems_cap;
     /* Names from `(assert (! t :named N))`, in assertion order, for
      * get-unsat-core. Scoped by push/pop (push_n_named); freed on reset. */
+    /* 1 iff fe->bb_solver holds the model for the CURRENT check-sat result.
+     * bb_solver outlives its answer (the Verilator identity cache carries it
+     * across (reset)), so model readback must not trust it just because it
+     * exists: a later CDCL answer would otherwise report the stale bit-blast
+     * model (B36). Cleared at every check-sat; set by the bit-blast paths. */
+    uint8_t              bb_model_valid;
+    /* Constraints asserted after the CDCL compile reach the ctx as aux
+     * problems. So that a CDCL `unknown` can still escalate to bitblast with
+     * EVERY assertion, the builder is kept (not reset) after compile while
+     * cdcl_retained is set; aux_mark is where the last hand-off to CDCL ended.
+     * Cleared by pop (the builder would still hold retracted assertions) and
+     * when the builder outgrows SMT2_RETAIN_MAX_BYTES. */
+    uint8_t              cdcl_retained;
+    BuilderMark          aux_mark;
+    /* Problem that bb_solver was built from when it is NOT fe->problem (the
+     * escalation's full rebuild). Owned; freed together with bb_solver. */
+    SolveProblem        *bb_problem;
     char               **named;
     uint32_t             n_named;
     uint32_t             named_cap;
