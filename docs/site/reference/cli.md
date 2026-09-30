@@ -24,7 +24,7 @@ With no file, commands are read from standard input.
 : Explain `unknown` results: write the reason to the diagnostic stream.
 
 `--mode=verilator`
-: Behave as Verilator's external constraint solver. See the Verilator guide.
+: Serve Verilator's `randomize()` calls. See {doc}`../guides/verilator`.
 
 `--version`
 : Print the version and exit.
