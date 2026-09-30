@@ -163,7 +163,7 @@ workflow is ignored silently.
 | Phase | Scope | Done when |
 |---|---|---|
 | **D0 — scaffold + publish** | `docs/site/` with `conf.py`, `index`, `install`, `quickstart-python`; `requirements.txt`; `docs.yml` | page live at dvkit.org/fvutils/dv-solve/ |
-| **D1 — SMT-LIB2 front door** | `quickstart-smt2`, `guides/smt2-solver`, `guides/yosys-sby`, `reference/cli`, `reference/environment`, `concepts/soundness`, `concepts/engines` | these are independent of the naming decision, and SMT2 is the most-used surface today |
+| **D1 — SMT-LIB2 front door** | `quickstart-smt2`, `guides/smt2-solver`, `reference/cli`, `reference/environment`, `concepts/soundness`, `concepts/engines`, `concepts/randomization-seeds`. `guides/yosys-sby` is deferred: yosys-smtbmc only drives solvers from a fixed list, so today it needs `tests/formal/sby/smtio_dvsolve.patch` applied to yosys — not publishable as a user guide | these are independent of the naming decision, and SMT2 is the most-used surface today |
 | **D2 — Verilator** | `quickstart-verilator`, `guides/verilator`, `concepts/randomization`; resolve §1.4 against stock Verilator 5.046 | guide's example runs with bundled Verilator |
 | **D3 — Python** | `concepts/problem-model`, `soft-constraints`, `diagnosing-unsat`, `reference/python` (autodoc), `reference/status-codes`, `guides/packaging`, `guides/zuspec` | public-module decision made; docstrings on public classes filled in |
 | **D4 — C + SV** | `reference/c-api`, `reference/sv-api`, `guides/systemverilog-dpi` | after the naming decision and the public-header list |

@@ -16,7 +16,7 @@ rather than guessing.
 | If you are... | Use | Start here |
 |---|---|---|
 | Building constraint problems from Python | the Python API (`dv_solve`) | {doc}`getting-started/quickstart-python` |
-| Running SMT-LIB2 files, or plugging a solver into a tool that speaks SMT-LIB2 | the `dv-solve-smt2` executable | {doc}`getting-started/install` |
+| Running SMT-LIB2 files, or plugging a solver into a tool that speaks SMT-LIB2 | the `dv-solve-smt2` executable | {doc}`getting-started/quickstart-smt2` |
 | Randomizing from SystemVerilog through DPI | the `zsp_dpi_pkg` SystemVerilog package and `libdv_solve_dpi` | {doc}`getting-started/install` |
 | Embedding the solver in a C or C++ program | the C library, `libdv_solve` | {doc}`getting-started/install` |
 
@@ -26,4 +26,29 @@ rather than guessing.
 
 getting-started/install
 getting-started/quickstart-python
+getting-started/quickstart-smt2
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Concepts
+
+concepts/soundness
+concepts/engines
+concepts/randomization-seeds
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Guides
+
+guides/smt2-solver
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Reference
+
+reference/cli
+reference/environment
 ```
