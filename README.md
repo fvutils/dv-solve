@@ -19,17 +19,20 @@ pip install dv-solve[zuspec]
 ```python
 from dv_solve.builder import SolveProblemBuilder
 from dv_solve.ctx import SolveCtx, SOLVE_OK
+from dv_solve.problem import BIN_GT
 
 b = SolveProblemBuilder()
-x = b.add_variable("x", 0, 255, signed=False, bits=8)
-b.add_constraint(b.gt(b.var(x), b.constant(100, 8)))
-prob_bytes, _ = b.finalize()
+X = 0
+b.add_var(X, width=8, is_signed=False, lo=0, hi=255)
+b.add_constraint(b.expr_binary(BIN_GT, b.expr_var(X), b.expr_const(100)))
+problem, _ = b.finalize()
 
-ctx = SolveCtx(prob_bytes)
-ctx.compile()
-assert ctx.solve() == SOLVE_OK
-print("x =", ctx.get_value(x))
+with SolveCtx(problem) as ctx:
+    assert ctx.solve(seed=1, fair_pick=True) == SOLVE_OK
+    print("x =", ctx.get_value(X))
 ```
+
+Documentation: <https://dvkit.org/fvutils/dv-solve/>
 
 ## Module map
 

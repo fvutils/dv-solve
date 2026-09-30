@@ -226,3 +226,6 @@ tests/bench/results/
 # not read as gold). Keep the CSV/MD summaries; ignore the churn-y JSONs.
 tests/formal/results/*.json
 
+
+# Sphinx build output
+docs/site/_build/
