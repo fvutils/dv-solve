@@ -2689,11 +2689,42 @@ static int _try_split_reified_and(Smt2Frontend *fe, const Sexpr *s) {
     return 1;
 }
 
+/* Record the :named label of an `(! t ... :named N ...)` assertion, for
+ * get-unsat-core. Best effort: a name we cannot store is simply not reported,
+ * which only makes the reported core larger-than-needed, never wrong. */
+static void _record_named(Smt2Frontend *fe, const Sexpr *term) {
+    if (!term || term->kind != SEXPR_LIST || term->list.count < 4) return;
+    if (!sexpr_is_symbol(term->list.items[0], "!")) return;
+    for (uint32_t i = 2; i + 1 < term->list.count; i++) {
+        const Sexpr *k = term->list.items[i], *v = term->list.items[i + 1];
+        if (!sexpr_is_keyword(k, ":named") || v->kind != SEXPR_SYMBOL) continue;
+        if (fe->n_named == fe->named_cap) {
+            uint32_t cap = fe->named_cap ? fe->named_cap * 2 : 16;
+            char **g = (char **)realloc(fe->named, cap * sizeof(char *));
+            if (!g) return;
+            fe->named = g;
+            fe->named_cap = cap;
+        }
+        char *nm = (char *)malloc((size_t)v->sym.len + 1);
+        if (!nm) return;
+        memcpy(nm, v->sym.str, v->sym.len);
+        nm[v->sym.len] = '\0';
+        fe->named[fe->n_named++] = nm;
+        return;
+    }
+}
+
+static void _truncate_named(Smt2Frontend *fe, uint32_t n) {
+    for (uint32_t i = n; i < fe->n_named; i++) free(fe->named[i]);
+    if (n < fe->n_named) fe->n_named = n;
+}
+
 static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 2) {
         fprintf(fe->err, "error: assert requires exactly one expression\n");
         return -1;
     }
+    _record_named(fe, cmd->list.items[1]);
     if (_try_split_reified_and(fe, cmd->list.items[1])) return 0;
 
     TypedExpr te;
@@ -4415,6 +4446,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->push_n_vars[fe->push_depth] = fe->n_vars;
             fe->push_n_array_vars[fe->push_depth] = fe->n_array_vars;
             fe->push_n_aux_problems[fe->push_depth] = fe->n_aux_problems;
+            fe->push_n_named[fe->push_depth] = fe->n_named;
             fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
             fe->push_depth++;
         }
@@ -4442,6 +4474,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->push_n_vars[fe->push_depth - 1] = fe->n_vars;
         fe->push_n_array_vars[fe->push_depth - 1] = fe->n_array_vars;
         fe->push_n_aux_problems[fe->push_depth - 1] = fe->n_aux_problems;
+        fe->push_n_named[fe->push_depth - 1] = fe->n_named;
         fe->push_incomplete[fe->push_depth - 1] = (uint8_t)fe->incomplete;
     }
     return 0;
@@ -4502,7 +4535,28 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->aux_problems[i] = NULL;
         }
         fe->n_aux_problems = target_n_aux;
+        _truncate_named(fe, fe->push_n_named[fe->push_depth]);
     }
+    return 0;
+}
+
+/* (get-unsat-core): after `unsat`, report the :named assertions in scope.
+ * The whole set of assertions is unsatisfiable, so all of its names form a
+ * valid -- if not minimal -- unsat core. There is ALWAYS a reply on stdout:
+ * drivers (Verilator's randomize() on an unsat constraint set) block reading
+ * one, and a missing reply hangs them. */
+static int _cmd_get_unsat_core(Smt2Frontend *fe, const Sexpr *cmd) {
+    (void)cmd;
+    if (!fe->has_result || fe->last_result != SOLVE_UNSAT) {
+        fprintf(fe->out, "(error \"get-unsat-core requires a prior unsat result\")\n");
+        fflush(fe->out);
+        return 0;
+    }
+    fputc('(', fe->out);
+    for (uint32_t i = 0; i < fe->n_named; i++)
+        fprintf(fe->out, i ? " %s" : "%s", fe->named[i]);
+    fputs(")\n", fe->out);
+    fflush(fe->out);
     return 0;
 }
 
@@ -4688,6 +4742,8 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
 }
 
 void smt2_frontend_destroy(Smt2Frontend *fe) {
+    _truncate_named(fe, 0);
+    free(fe->named);
     if (fe->bb_solver)   { zsp_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
     if (fe->problem)     free(fe->problem);
     for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
@@ -4774,6 +4830,9 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     free(fe->aeqs);
     _cmd_alloc_reset(fe);
 
+    _truncate_named(fe, 0);
+    free(fe->named);
+
     /* Reset the reused allocations to empty (equivalent to a fresh create). */
     builder_reset(builder);
     sexpr_arena_reset(&parena);
@@ -4838,6 +4897,8 @@ int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
         return _cmd_get_value(fe, cmd);
     if (sexpr_is_symbol(head, "get-model"))
         return _cmd_get_model(fe, cmd);
+    if (sexpr_is_symbol(head, "get-unsat-core"))
+        return _cmd_get_unsat_core(fe, cmd);
     if (sexpr_is_symbol(head, "get-info"))
         return _cmd_get_info(fe, cmd);
     if (sexpr_is_symbol(head, "push"))

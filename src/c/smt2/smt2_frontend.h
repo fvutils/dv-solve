@@ -260,6 +260,11 @@ typedef struct {
     SolveProblem       **aux_problems;
     uint32_t             n_aux_problems;
     uint32_t             aux_problems_cap;
+    /* Names from `(assert (! t :named N))`, in assertion order, for
+     * get-unsat-core. Scoped by push/pop (push_n_named); freed on reset. */
+    char               **named;
+    uint32_t             n_named;
+    uint32_t             named_cap;
     zsp_block_alloc_t   *block_alloc;
     void                *ctx_buf;      /* raw buffer for SolveCtx */
     size_t               ctx_buf_size;
@@ -400,6 +405,7 @@ typedef struct {
     uint32_t             push_n_vars[32];
     uint32_t             push_n_array_vars[32];
     uint32_t             push_n_aux_problems[32];
+    uint32_t             push_n_named[32];
     uint8_t              push_incomplete[32];  /* `incomplete` at each push */
     uint32_t             push_depth;
 
