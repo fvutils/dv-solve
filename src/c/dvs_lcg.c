@@ -591,12 +591,13 @@ int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
          * which says "at least one of these bounds must change". */
         Propagator *cp = (Propagator *)dvs_pool_ptr(
             &ctx->pool, ctx->conflict_prop_ref);
-        PropWatchSect *ws = PROP_WS(cp);
-        if (ws->n_watches == 0) {
+        uint32_t nw;
+        const uint32_t *wv = prop_watched_vars(cp, &nw);
+        if (nw == 0) {
             lcg_dbg_bail[3]++; return -1;
         }
-        for (uint32_t i = 0; i < ws->n_watches; i++) {
-            uint32_t vid = ws->var_ids[i];
+        for (uint32_t i = 0; i < nw; i++) {
+            uint32_t vid = wv[i];
             if (vid >= ctx->n_vars) continue;
             int64_t vlo = var_lo64(ctx, &ctx->vars[vid]);
             int64_t vhi = var_hi64(ctx, &ctx->vars[vid]);

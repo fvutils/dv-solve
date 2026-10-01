@@ -138,8 +138,11 @@ typedef struct {
 #define DVS_COMPILE_NOMEM             (-1)  /* the context buffer is too small */
 #define DVS_COMPILE_UNSAT             (-2)  /* no solution exists              */
 #define DVS_COMPILE_UNSUPPORTED_WIDTH (-3)  /* a variable is wider than 64 bits,
-                                             * or an expression wider than 255
-                                             * bits or nested too deeply     */
+                                             * an expression wider than 255
+                                             * bits or nested too deeply, or
+                                             * an all-different over more
+                                             * than 16 variables or one
+                                             * wider than 32 bits            */
 #define DVS_COMPILE_BAD_VAR           (-4)  /* variable ids are not 0..n-1, each
                                              * declared once, or an expression
                                              * names an undeclared variable  */

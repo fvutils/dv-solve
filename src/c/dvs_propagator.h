@@ -76,6 +76,21 @@ struct Propagator {
     uint8_t     flags;       /* PROP_FLAG_* bits                        */
 };  /* 24 bytes (16 without explain) */
 
+/* The variables propagator `p` watches; `*n` receives the count.
+ *
+ * A propagator watching at most MAX_PROP_WATCHES variables keeps them in the
+ * PropWatchSect after its header. A PROP_FLAG_WIDE_WATCH propagator
+ * (AllDifferent, SumEq, DisjClause, the placement propagators) instead keeps
+ * a count, a capacity, then var_ids[capacity] and watcher_nexts[capacity].
+ * Reading a wide propagator through PropWatchSect is off by one slot: it
+ * takes the capacity for a variable id and misses the last variable, so
+ * anything that walks the watched variables must use this. */
+static inline const uint32_t *prop_watched_vars(const Propagator *p, uint32_t *n) {
+    const uint32_t *w = (const uint32_t *)((const char *)p + sizeof(Propagator));
+    *n = w[0];
+    return (p->flags & PROP_FLAG_WIDE_WATCH) ? w + 2 : w + 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* PropQueue — 16-level priority FIFO                                  */
 /*                                                                     */
@@ -444,17 +459,24 @@ uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
 
 
 /* ------------------------------------------------------------------ */
-/* DisjClause: (v0 op0 c0) OR (v1 op1 c1) OR ... (up to 4 clauses)  */
+/* DisjClause: (v0 op0 c0) OR (v1 op1 c1) OR ... (up to 16 disjuncts) */
 /*                                                                     */
-/* Each clause is var_id op constant.  When all but one clause are    */
-/* falsified by the current bounds, the surviving clause is enforced. */
+/* Each disjunct is `var op constant` or `var op var`. When all but   */
+/* one are falsified by the current bounds, the survivor is enforced. */
 /* Uses uint32_t for op to avoid including dvs_problem.h.             */
+/*                                                                     */
+/* Uses PROP_FLAG_WIDE_WATCH: up to 2 variables per disjunct is more  */
+/* than PropWatchSect holds. The watch list holds each variable once. */
 /* ------------------------------------------------------------------ */
 #define MAX_DISJ_CLAUSES 16u
+#define MAX_DISJ_WATCHES (2u * MAX_DISJ_CLAUSES)
 
 typedef struct {
     Propagator    hdr;
-    PropWatchSect ws;
+    uint32_t      n_vars;      /* distinct watched variables */
+    uint32_t      _capacity;   /* MAX_DISJ_WATCHES */
+    uint32_t      var_ids[MAX_DISJ_WATCHES];
+    uint32_t      watcher_nexts[MAX_DISJ_WATCHES];
     uint32_t      n_clauses;
     struct {
         uint32_t var_id;

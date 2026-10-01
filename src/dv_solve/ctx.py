@@ -28,11 +28,10 @@ _CTX_BUF_SIZE = 1 << 20  # 1 MiB — headroom for propagators + decisions
 
 
 # ------------------------------------------------------------------ #
-# SolveOpts ctypes struct                                              #
-# Layout (must match dvs_solve_opts_t in dv_solve.h):                         #
-#   seed(uint64=8) + max_conflicts(uint32=4) + max_restarts(uint32=4)  #
-#   + use_phase_save(uint8=1) + _pad[3] + max_shave_iters(uint32=4)   #
-#   → total 24 bytes                                                   #
+# SolveOpts ctypes struct. Must match dvs_solve_opts_t in dv_solve.h   #
+# field for field (tests/unit/test_wide_watch.py checks it): the C     #
+# side reads the whole struct, so a missing field is read from          #
+# whatever memory follows.                                             #
 # ------------------------------------------------------------------ #
 class _SolveOpts(ctypes.Structure):
     _fields_ = [
@@ -44,6 +43,7 @@ class _SolveOpts(ctypes.Structure):
         ("fair_pick",      ctypes.c_uint8),
         ("_pad",           ctypes.c_uint8 * 1),
         ("max_shave_iters", ctypes.c_uint32),
+        ("time_limit_ms",  ctypes.c_uint32),
     ]
 
 
@@ -75,7 +75,8 @@ class CompileUnsupportedError(CompileIncompleteError):
     """The problem is larger than the API supports.
 
     The Python API supports variables up to 64 bits wide, expressions up to
-    255 bits wide, and expressions nested up to 20000 deep. Wider bit-vectors
+    255 bits wide, expressions nested up to 20000 deep, and all-different
+    constraints over up to 16 variables of up to 32 bits. Wider bit-vectors
     are supported through the SMT-LIB2 front end (``dv-solve-smt2``).
     """
 
@@ -96,7 +97,7 @@ class SolveCtx:
     Raises:
         CompileUnsatError: The constraints are provably unsatisfiable.
         CompileIncompleteError: A constraint could not be compiled.
-        CompileUnsupportedError: A variable is wider than 64 bits.
+        CompileUnsupportedError: The problem goes beyond a supported limit.
     """
 
     def __init__(self, problem: "SolveProblem", ctx_buf_size: int = _CTX_BUF_SIZE) -> None:  # noqa: F821
@@ -145,9 +146,10 @@ class SolveCtx:
             lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             raise CompileUnsupportedError(
-                "problem declares a variable wider than 64 bits, or builds an "
-                "expression wider than 255 bits or nested more than 20000 "
-                "deep; wider bit-vectors are supported through SMT-LIB2"
+                "problem goes beyond a supported limit: a variable wider than "
+                "64 bits, an expression wider than 255 bits or nested more "
+                "than 20000 deep, or an all-different over more than 16 "
+                "variables or one wider than 32 bits"
             )
         if rc == _COMPILE_BAD_VAR:
             lib.dvs_block_alloc_destroy(self._ba)

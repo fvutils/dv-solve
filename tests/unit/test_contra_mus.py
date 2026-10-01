@@ -168,6 +168,7 @@ def test_mus_is_minimal(libdvs_debug):
             ("use_phase_save", ctypes.c_uint8),
             ("_pad",           ctypes.c_uint8 * 3),
             ("max_shave_iters", ctypes.c_uint32),
+            ("time_limit_ms",   ctypes.c_uint32),
         ]
     lib.dvs_solver_solve.restype  = ctypes.c_int
     lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]

@@ -443,6 +443,7 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
                 ("use_phase_save", ctypes.c_uint8),
                 ("_pad", ctypes.c_uint8 * 3),
                 ("max_shave_iters", ctypes.c_uint32),
+                ("time_limit_ms",   ctypes.c_uint32),
             ]
 
         t0 = time.monotonic()

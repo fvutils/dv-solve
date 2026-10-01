@@ -126,7 +126,8 @@ Require the Boolean expression `root` to hold.
 
 ```{c:function} dvs_expr_t dvs_builder_add_all_different(dvs_builder_t *b, uint32_t n_vars, const uint32_t *var_ids)
 Require the variables to take pairwise different values (SystemVerilog
-`unique`).
+`unique`). Up to 16 variables, each at most 32 bits wide; beyond that,
+compiling returns {c:macro}`DVS_COMPILE_UNSUPPORTED_WIDTH`.
 ```
 
 ```{c:function} dvs_expr_t dvs_builder_add_soft_constraint(dvs_builder_t *b, dvs_expr_t root, uint32_t priority)
@@ -403,9 +404,11 @@ The search gave up before deciding; a solution may or may not exist.
 ```
 
 ```{c:macro} DVS_COMPILE_UNSUPPORTED_WIDTH
-−3: a variable is wider than 64 bits, or an expression is wider than 255
-bits or nested more than 20000 deep. Wider bit-vectors are supported through
-the SMT-LIB2 front end ({doc}`../guides/smt2-solver`).
+−3: the problem goes beyond a supported limit: a variable is wider than
+64 bits, an expression is wider than 255 bits or nested more than 20000 deep,
+or an all-different constraint has more than 16 variables or one wider than
+32 bits. Wider bit-vectors are supported through the SMT-LIB2 front end
+({doc}`../guides/smt2-solver`).
 ```
 
 ```{c:macro} DVS_COMPILE_BAD_VAR

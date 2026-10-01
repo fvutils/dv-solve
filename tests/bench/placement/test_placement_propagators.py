@@ -66,6 +66,7 @@ class _SolveOpts(ctypes.Structure):
         ("use_phase_save", ctypes.c_uint8),
         ("_pad", ctypes.c_uint8 * 3),
         ("max_shave_iters", ctypes.c_uint32),
+        ("time_limit_ms",   ctypes.c_uint32),
     ]
 
 
@@ -352,6 +353,7 @@ class TestOptimize:
                 ("use_phase_save", ctypes.c_uint8),
                 ("_pad", ctypes.c_uint8 * 3),
                 ("max_shave_iters", ctypes.c_uint32),
+                ("time_limit_ms",   ctypes.c_uint32),
             ]
 
         class COptimizeResult(ctypes.Structure):

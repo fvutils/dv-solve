@@ -3575,17 +3575,11 @@ static int _disj_var_range(const dvs_ctx_t *ctx, const DisjClause_t *dc,
  * domain, which explain_disj_clause() does not report. See _disj_var_range.
  */
 static PropResult _disj_hull(DisjClause_t *dc, dvs_ctx_t *ctx) {
-    PropWatchSect *ws = PROP_WS(&dc->hdr);
     uint32_t n = dc->n_clauses;
 
-    for (uint32_t w = 0; w < ws->n_watches; w++) {
-        uint32_t v = ws->var_ids[w];
+    for (uint32_t w = 0; w < dc->n_vars; w++) {     /* each variable once */
+        uint32_t v = dc->var_ids[w];
         if (v >= ctx->n_vars) continue;
-
-        /* Skip duplicates in the watch list. */
-        int dup = 0;
-        for (uint32_t k = 0; k < w; k++) if (ws->var_ids[k] == v) { dup = 1; break; }
-        if (dup) continue;
 
         const Variable *vv = &ctx->vars[v];
         int64_t rmin = var_repr_min(vv), rmax = var_repr_max(vv);
@@ -3714,13 +3708,17 @@ uint32_t prop_add_disj_clause(dvs_ctx_t *ctx,
                                const uint32_t *rhs_var_ids) {
     if (n_clauses == 0 || n_clauses > MAX_DISJ_CLAUSES) return EXPR_NULL;
 
-    /* Collect all watched var IDs (lhs + rhs vars) */
-    uint32_t all_vids[MAX_DISJ_CLAUSES * 2];
+    /* Collect the watched variables (lhs and rhs), each once. */
+    uint32_t all_vids[MAX_DISJ_WATCHES];
     uint32_t n_watch = 0;
     for (uint32_t i = 0; i < n_clauses; i++) {
-        all_vids[n_watch++] = var_ids[i];
-        if (rhs_var_ids && rhs_var_ids[i] != UINT32_MAX) {
-            all_vids[n_watch++] = rhs_var_ids[i];
+        uint32_t cand[2] = { var_ids[i],
+                             rhs_var_ids ? rhs_var_ids[i] : UINT32_MAX };
+        for (uint32_t c = 0; c < 2; c++) {
+            if (cand[c] == UINT32_MAX) continue;
+            uint32_t k = 0;
+            while (k < n_watch && all_vids[k] != cand[c]) k++;
+            if (k == n_watch) all_vids[n_watch++] = cand[c];
         }
     }
 
@@ -3735,11 +3733,26 @@ uint32_t prop_add_disj_clause(dvs_ctx_t *ctx,
         if (all_vids[i] >= ctx->n_vars) return EXPR_NULL;
         if (ctx->vars[all_vids[i]].width > 64) return EXPR_NULL;
     }
-    uint32_t ref = _alloc_prop(ctx, _fire_disj_clause, priority,
-                                n_watch, all_vids, sizeof(DisjClause_t));
+    uint32_t ref = dvs_pool_alloc(&ctx->pool, (uint32_t)sizeof(DisjClause_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     DisjClause_t *dc = (DisjClause_t *)dvs_pool_ptr(&ctx->pool, ref);
+    memset(dc, 0, sizeof(DisjClause_t));
+    dc->hdr.fire       = _fire_disj_clause;
+    dc->hdr.queue_next = EXPR_NULL;
+    dc->hdr.prop_id    = (uint16_t)ctx->n_props++;
+    dc->hdr.priority   = priority;
+    dc->hdr.flags      = PROP_FLAG_WIDE_WATCH;
+    dc->n_vars         = n_watch;
+    dc->_capacity      = MAX_DISJ_WATCHES;
+    for (uint32_t i = 0; i < n_watch; i++) {
+        dc->var_ids[i]          = all_vids[i];
+        dc->watcher_nexts[i]    = ctx->watcher_heads[all_vids[i]];
+        ctx->watcher_heads[all_vids[i]] = ref;
+    }
+    if (ctx->prop_refs && dc->hdr.prop_id < ctx->n_prop_refs_capacity)
+        ctx->prop_refs[dc->hdr.prop_id] = ref;
+
     dc->n_clauses = n_clauses;
     for (uint32_t i = 0; i < n_clauses; i++) {
         dc->clauses[i].var_id   = var_ids[i];
@@ -3747,6 +3760,7 @@ uint32_t prop_add_disj_clause(dvs_ctx_t *ctx,
         dc->clauses[i].constant = constants[i];
         dc->clauses[i].rhs_var_id = (rhs_var_ids ? rhs_var_ids[i] : UINT32_MAX);
     }
+    prop_enqueue(ctx, ref);
     return ref;
 }
 
@@ -4085,6 +4099,15 @@ static PropResult _fire_countones_32(Propagator *self, dvs_ctx_t *ctx) {
     int64_t rlo = var_lo64(ctx, rv);
     int64_t rhi = var_hi64(ctx, rv);
 
+    /* The rules below reason about bit patterns. Values are ordered like
+     * their patterns when the operand is unsigned, or signed with both
+     * bounds of one sign; a signed range spanning zero is not a contiguous
+     * range of patterns. The backward rules also bound the operand's VALUE
+     * by patterns, which is only right when no value is negative. */
+    int is_signed     = (xv->flags & VAR_SIGNED) != 0;
+    int patt_ordered  = !is_signed || xlo >= 0 || xhi < 0;
+    int nonneg_values = !is_signed || xlo >= 0;
+
     PropResult r;
 
     /* Forward: bound result from operand's domain */
@@ -4093,12 +4116,18 @@ static PropResult _fire_countones_32(Propagator *self, dvs_ctx_t *ctx) {
         int pc = _popcount64((uint64_t)xlo & mask);
         if ((r = ctx_tighten_lb64(ctx, rid, pc)) != PROP_OK) return r;
         if ((r = ctx_tighten_ub64(ctx, rid, pc)) != PROP_OK) return r;
+    } else if (patt_ordered) {
+        /* Every pattern in [lo, hi] shares the bits above the highest bit
+         * where lo and hi differ; the bits at and below it are free. (Bits
+         * set in both lo and hi are NOT forced: [3, 7] holds 4 = 0b100.) */
+        uint64_t ulo = (uint64_t)xlo & mask, uhi = (uint64_t)xhi & mask;
+        int top = 63 - __builtin_clzll(ulo ^ uhi);
+        uint64_t free_bits = (top >= 63) ? ~(uint64_t)0
+                                         : (((uint64_t)1 << (top + 1)) - 1);
+        int fixed_pc = _popcount64(ulo & ~free_bits);
+        if ((r = ctx_tighten_lb64(ctx, rid, fixed_pc)) != PROP_OK) return r;
+        if ((r = ctx_tighten_ub64(ctx, rid, fixed_pc + top + 1)) != PROP_OK) return r;
     } else {
-        /* Coarse bounds: min popcount >= popcount(bits that must be 1),
-         * max popcount <= width */
-        uint64_t must_1 = (uint64_t)xlo & (uint64_t)xhi & mask;  /* approximate */
-        int min_pc = _popcount64(must_1);
-        if ((r = ctx_tighten_lb64(ctx, rid, min_pc)) != PROP_OK) return r;
         if ((r = ctx_tighten_ub64(ctx, rid, (int64_t)width)) != PROP_OK) return r;
     }
 
@@ -4109,6 +4138,8 @@ static PropResult _fire_countones_32(Propagator *self, dvs_ctx_t *ctx) {
         if (k == 0) {
             if ((r = ctx_tighten_lb64(ctx, xid, 0)) != PROP_OK) return r;
             if ((r = ctx_tighten_ub64(ctx, xid, 0)) != PROP_OK) return r;
+        } else if (!nonneg_values) {
+            /* a negative operand: the value bounds below don't apply */
         } else if (k == (int64_t)width && bw_safe) {
             if ((r = ctx_tighten_lb64(ctx, xid, (int64_t)mask)) != PROP_OK) return r;
             if ((r = ctx_tighten_ub64(ctx, xid, (int64_t)mask)) != PROP_OK) return r;
@@ -4120,7 +4151,7 @@ static PropResult _fire_countones_32(Propagator *self, dvs_ctx_t *ctx) {
             if ((r = ctx_tighten_lb64(ctx, xid, (int64_t)min_x)) != PROP_OK) return r;
             if ((r = ctx_tighten_ub64(ctx, xid, (int64_t)max_x)) != PROP_OK) return r;
         }
-    } else {
+    } else if (nonneg_values) {
         /* result_lo > 0 means operand cannot be 0 */
         if (rlo > 0) {
             if ((r = ctx_tighten_lb64(ctx, xid, 1)) != PROP_OK) return r;
@@ -4158,12 +4189,17 @@ static int32_t _clog2_64(uint64_t v) {
     return r;
 }
 
-/* result == ceil(log2(operand)); operand is forced > 0.
+/* result == $clog2(operand): the number of bits needed to hold values
+ * 0 .. operand-1, with $clog2(0) == $clog2(1) == 0. As in SystemVerilog the
+ * operand is read as an unsigned bit pattern, so a negative signed value
+ * counts as its two's-complement pattern.
  *
- * Tier-aware (see _fire_countones_32 for the BUG-1 rationale). The backward
- * interval rule is applied only for k < 62 so `1 << k` stays in positive int64;
- * wider results still converge soundly via the forward monotone/singleton
- * rules. */
+ * $clog2 is monotone in the pattern. Patterns are ordered like values when
+ * the operand is unsigned, or signed with both bounds of one sign (see
+ * _fire_countones_32); otherwise only the result's 0..width range is known.
+ * The backward rule bounds the operand's VALUE by patterns, so it applies
+ * only when no value is negative, and only for k < 62 so `1 << k` stays in
+ * positive int64. */
 static PropResult _fire_clog2_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0];  /* result */
@@ -4171,28 +4207,38 @@ static PropResult _fire_clog2_32(Propagator *self, dvs_ctx_t *ctx) {
     Variable *rv = &ctx->vars[rid];
     Variable *xv = &ctx->vars[xid];
 
+    uint16_t width = xv->width;
+    if (width > 64) width = 64;
+    uint64_t mask = (width < 64) ? (((uint64_t)1 << width) - 1) : ~(uint64_t)0;
+    int64_t xlo = var_lo64(ctx, xv);
+    int64_t xhi = var_hi64(ctx, xv);
+    int is_signed     = (xv->flags & VAR_SIGNED) != 0;
+    int patt_ordered  = !is_signed || xlo >= 0 || xhi < 0;
+    int nonneg_values = !is_signed || xlo >= 0;
+
     PropResult r;
 
-    /* Guard: operand must be > 0 for clog2 to be defined */
-    if ((r = ctx_tighten_lb64(ctx, xid, 1)) != PROP_OK) return r;
-
-    /* Forward: clog2 is monotonically non-decreasing */
-    int32_t clog_lo = _clog2_64((uint64_t)var_lo64(ctx, xv));
-    int32_t clog_hi = _clog2_64((uint64_t)var_hi64(ctx, xv));
-    if ((r = ctx_tighten_lb64(ctx, rid, clog_lo)) != PROP_OK) return r;
-    if ((r = ctx_tighten_ub64(ctx, rid, clog_hi)) != PROP_OK) return r;
+    /* Forward */
+    if (patt_ordered) {
+        int32_t clog_lo = _clog2_64((uint64_t)xlo & mask);
+        int32_t clog_hi = _clog2_64((uint64_t)xhi & mask);
+        if ((r = ctx_tighten_lb64(ctx, rid, clog_lo)) != PROP_OK) return r;
+        if ((r = ctx_tighten_ub64(ctx, rid, clog_hi)) != PROP_OK) return r;
+    } else {
+        if ((r = ctx_tighten_lb64(ctx, rid, 0)) != PROP_OK) return r;
+        if ((r = ctx_tighten_ub64(ctx, rid, (int64_t)width)) != PROP_OK) return r;
+    }
 
     /* Backward: if result is singleton k, tighten operand range */
     int64_t rlo = var_lo64(ctx, rv);
     int64_t rhi = var_hi64(ctx, rv);
-    if (rlo == rhi) {
+    if (rlo == rhi && nonneg_values) {
         int64_t k = rlo;
         if (k == 0) {
-            /* clog2(x) == 0 -> x == 1 */
-            if ((r = ctx_tighten_lb64(ctx, xid, 1)) != PROP_OK) return r;
+            /* $clog2(x) == 0 -> x is 0 or 1 */
             if ((r = ctx_tighten_ub64(ctx, xid, 1)) != PROP_OK) return r;
         } else if (k > 0 && k < 62) {
-            /* clog2(x) == k -> x in [(1 << (k-1)) + 1, 1 << k] */
+            /* $clog2(x) == k -> x in [(1 << (k-1)) + 1, 1 << k] */
             int64_t x_lo = ((int64_t)1 << (k - 1)) + 1;
             int64_t x_hi = ((int64_t)1 << k);
             if ((r = ctx_tighten_lb64(ctx, xid, x_lo)) != PROP_OK) return r;

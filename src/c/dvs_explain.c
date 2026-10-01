@@ -369,12 +369,16 @@ int explain_disj_clause(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
     /* When enforcing a survivor, the reason is that all other clauses
-     * are falsified. We use their current bounds as antecedents. */
-    PropWatchSect *ws = PROP_WS(self);
+     * are falsified. We use their current bounds as antecedents. An
+     * explanation that does not fit is refused, never truncated: a
+     * learnt clause missing an antecedent is stronger than the truth. */
+    uint32_t nw;
+    const uint32_t *vids = prop_watched_vars(self, &nw);
     out->n_lits = 0;
-    for (uint32_t i = 0; i < ws->n_watches && out->n_lits < MAX_EXPLAIN_LITS - 2; i++) {
-        uint32_t vid = ws->var_ids[i];
+    for (uint32_t i = 0; i < nw; i++) {
+        uint32_t vid = vids[i];
         if (vid == var_id) continue;
+        if (out->n_lits + 2 > MAX_EXPLAIN_LITS) return -1;
         out->lits[out->n_lits++] = _mk_lb(vid, var_lo64(ctx, &ctx->vars[vid]));
         out->lits[out->n_lits++] = _mk_ub(vid, var_hi64(ctx, &ctx->vars[vid]));
     }
@@ -387,12 +391,15 @@ int explain_disj_clause(Propagator *self, dvs_ctx_t *ctx,
 int explain_sum_eq(Propagator *self, dvs_ctx_t *ctx,
                     uint32_t var_id, uint8_t is_lb,
                     int64_t new_bound, Explanation *out) {
-    /* Generalized Add: all summand bounds are antecedents */
-    PropWatchSect *ws = PROP_WS(self);
+    /* Generalized Add: all summand bounds are antecedents. Refused, not
+     * truncated, when they don't fit (see explain_disj_clause). */
+    uint32_t nw;
+    const uint32_t *vids = prop_watched_vars(self, &nw);
     out->n_lits = 0;
-    for (uint32_t i = 0; i < ws->n_watches && out->n_lits < MAX_EXPLAIN_LITS - 2; i++) {
-        uint32_t vid = ws->var_ids[i];
+    for (uint32_t i = 0; i < nw; i++) {
+        uint32_t vid = vids[i];
         if (vid == var_id) continue;
+        if (out->n_lits + 1 > MAX_EXPLAIN_LITS) return -1;
         if (is_lb)
             out->lits[out->n_lits++] = _mk_lb(vid, var_lo64(ctx, &ctx->vars[vid]));
         else
@@ -407,19 +414,20 @@ int explain_sum_eq(Propagator *self, dvs_ctx_t *ctx,
 int explain_all_different(Propagator *self, dvs_ctx_t *ctx,
                            uint32_t var_id, uint8_t is_lb,
                            int64_t new_bound, Explanation *out) {
-    PropWatchSect *ws = PROP_WS(self);
+    uint32_t nw;
+    const uint32_t *vids = prop_watched_vars(self, &nw);
     out->n_lits = 0;
-    /* The reason for excluding a value is that another var is singleton
-     * at that value. Report all other singleton vars as antecedents. */
-    for (uint32_t i = 0; i < ws->n_watches && out->n_lits < MAX_EXPLAIN_LITS - 2; i++) {
-        uint32_t vid = ws->var_ids[i];
+    /* A value is excluded because another var is singleton at it, but the
+     * pigeonhole and Hall-interval rules also tighten on the bounds of
+     * NON-singleton vars. Citing only singletons would leave those out and
+     * make the learnt clause stronger than the truth, so cite every other
+     * var's bounds. Refuse rather than truncate (see explain_disj_clause). */
+    for (uint32_t i = 0; i < nw; i++) {
+        uint32_t vid = vids[i];
         if (vid == var_id) continue;
-        int64_t lo = var_lo64(ctx, &ctx->vars[vid]);
-        int64_t hi = var_hi64(ctx, &ctx->vars[vid]);
-        if (lo == hi) {
-            out->lits[out->n_lits++] = _mk_lb(vid, lo);
-            out->lits[out->n_lits++] = _mk_ub(vid, hi);
-        }
+        if (out->n_lits + 2 > MAX_EXPLAIN_LITS) return -1;
+        out->lits[out->n_lits++] = _mk_lb(vid, var_lo64(ctx, &ctx->vars[vid]));
+        out->lits[out->n_lits++] = _mk_ub(vid, var_hi64(ctx, &ctx->vars[vid]));
     }
     (void)is_lb; (void)new_bound;
     return 0;

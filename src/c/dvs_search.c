@@ -929,15 +929,21 @@ dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
 /* dvs_solver_get_value                                                    */
 /* ------------------------------------------------------------------ */
 
+/* The variable that stands for var_id. Compile merges the variables of an
+ * `x == y` constraint into one (ctx->var_alias); the others are never
+ * decided or propagated, so anything that reads or restricts a variable by
+ * the caller's id must go through this. */
+static uint32_t _alias_root(const dvs_ctx_t *ctx, uint32_t var_id) {
+    if (ctx->var_alias) {
+        while (ctx->var_alias[var_id] != var_id)
+            var_id = ctx->var_alias[var_id];
+    }
+    return var_id;
+}
+
 int64_t dvs_solver_get_value(const dvs_ctx_t *ctx, uint32_t var_id) {
     if (!ctx || var_id >= ctx->n_vars) return 0;
-    /* Resolve through alias table: aliased vars read from their root */
-    uint32_t resolved = var_id;
-    if (ctx->var_alias) {
-        while (ctx->var_alias[resolved] != resolved)
-            resolved = ctx->var_alias[resolved];
-    }
-    return var_lo64(ctx, &ctx->vars[resolved]);
+    return var_lo64(ctx, &ctx->vars[_alias_root(ctx, var_id)]);
 }
 
 
@@ -1025,6 +1031,7 @@ void dvs_solver_reset(dvs_ctx_t *ctx) {
 
 int dvs_solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx || var_id >= ctx->n_vars) return -1;
+    var_id = _alias_root(ctx, var_id);
 
     PropResult r = ctx_tighten_lb64(ctx, var_id, value);
     if (r == PROP_CONFLICT) return -1;
@@ -1181,6 +1188,7 @@ static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
 
 int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx || var_id >= ctx->n_vars) return -1;
+    var_id = _alias_root(ctx, var_id);
     if (!ctx->var_holes_head) return -1;
 
     /* Already a hole: no-op */

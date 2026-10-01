@@ -4017,9 +4017,25 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     dvs_expr_t adref = sp->allDiff_head;
     while (adref != EXPR_NULL) {
         AllDiffSpec *ad = (AllDiffSpec *)dvs_pool_ptr(&sp->pool, adref);
-        uint32_t *vids = (uint32_t *)(ad + 1);
-        uint32_t pref = prop_add_all_different(ctx, ad->n_vars, vids, 1);
-        if (pref == EXPR_NULL) return -1;
+        const uint32_t *spec_vids = (const uint32_t *)(ad + 1);
+        /* Variables merged by an `x == y` constraint are one variable, so
+         * map each through the alias table; two that map to the same one
+         * can never differ. */
+        uint32_t vids[MAX_ALLDIFF_VARS];
+        /* Refuse what the propagator can't take rather than leave it
+         * uncompiled: model validation does not check all-different, so an
+         * uncompiled one would go unenforced. */
+        if (ad->n_vars > MAX_ALLDIFF_VARS) return DVS_COMPILE_UNSUPPORTED_WIDTH;
+        for (uint32_t i = 0; i < ad->n_vars; i++) {
+            vids[i] = _resolve(ctx, spec_vids[i]);
+            if (vids[i] >= ctx->n_vars) return DVS_COMPILE_BAD_VAR;
+            if (ctx->vars[vids[i]].width > 32) return DVS_COMPILE_UNSUPPORTED_WIDTH;
+            for (uint32_t j = 0; j < i; j++)
+                if (vids[j] == vids[i]) return -2;  /* UNSAT */
+        }
+        if (ad->n_vars >= 2 &&
+            prop_add_all_different(ctx, ad->n_vars, vids, 1) == EXPR_NULL)
+            return DVS_COMPILE_NOMEM;
         adref = ad->next;
     }
 
@@ -4178,7 +4194,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
             dvs_expr_t dref = sp->dists_head;
             while (dref != EXPR_NULL) {
                 DistSpec *ds = (DistSpec *)dvs_pool_ptr(&sp->pool, dref);
-                uint32_t vid = ds->var_id;
+                uint32_t vid = _resolve(ctx, ds->var_id);  /* x == y merged */
                 uint32_t ne = ds->n_entries;
                 dvs_dist_entry_t *src_entries = (dvs_dist_entry_t *)(ds + 1);
 
