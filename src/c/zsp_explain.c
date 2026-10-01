@@ -257,7 +257,14 @@ int explain_bounds_mod(Propagator *self, SolveCtx *ctx,
     out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
     out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
     out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
-    (void)var_id; (void)new_bound; (void)is_lb;
+    /* The backward rule (r and b singletons -> tighten a) reads r's bounds,
+     * so a bound on a (or b) must cite r too. Omitting it produced a learned
+     * clause that did not follow from its antecedents. */
+    if (var_id != rid) {
+        out->lits[out->n_lits++] = _mk_lb(rid, var_lo64(ctx, &ctx->vars[rid]));
+        out->lits[out->n_lits++] = _mk_ub(rid, var_hi64(ctx, &ctx->vars[rid]));
+    }
+    (void)new_bound; (void)is_lb;
     return 0;
 }
 

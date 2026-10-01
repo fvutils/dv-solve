@@ -149,10 +149,21 @@ static int64_t i64_max(int64_t a, int64_t b) { return a > b ? a : b; }
  *   r = a - b*q           (remainder takes the sign of the dividend a)
  * C99's '/' and '%' already truncate toward zero and give r the sign of a,
  * so these are thin wrappers that exist to document intent and to keep the
- * propagator/validator semantics provably identical. INT64_MIN/-1 overflow
- * cannot occur here: operands come from bounded BV domains < 64 bits. */
-static int64_t sv_sdiv64(int64_t a, int64_t b) { return a / b; }
-static int64_t sv_smod64(int64_t a, int64_t b) { return a % b; }
+ * propagator/validator semantics provably identical.
+ *
+ * b == -1 is special-cased: INT64_MIN / -1 (and INT64_MIN % -1) traps with
+ * SIGFPE on x86 -- a signed 64-bit variable whose domain reaches INT64_MIN,
+ * divided by -1, crashed the whole process. The quotient 2^63 is not
+ * representable; it wraps to INT64_MIN (the 64-bit 2's-complement result),
+ * and the remainder is always 0. */
+static int64_t sv_sdiv64(int64_t a, int64_t b) {
+    if (b == -1) return (int64_t)(0u - (uint64_t)a);
+    return a / b;
+}
+static int64_t sv_smod64(int64_t a, int64_t b) {
+    if (b == -1) return 0;
+    return a % b;
+}
 
 /* Wrap a value into a w-bit 2's-complement signed domain. Used for the one
  * overflowing signed-division case (INT_MIN / -1), where the true quotient
@@ -264,6 +275,9 @@ static PropResult _fire_bounds_lt_32(Propagator *self, SolveCtx *ctx) {
     Variable      *y   = &ctx->vars[yid];
 
     PropResult r;
+    /* x < INT32_MIN / INT32_MAX < y are unsatisfiable; `y->hi - 1` and
+     * `x->lo + 1` would wrap to a no-op bound instead of failing. */
+    if (y->hi == INT32_MIN || x->lo == INT32_MAX) return PROP_CONFLICT;
     if ((r = ctx_tighten_ub32(ctx, xid, y->hi - 1)) != PROP_OK) return r;
     if ((r = ctx_tighten_lb32(ctx, yid, x->lo + 1)) != PROP_OK) return r;
 
@@ -322,12 +336,19 @@ static PropResult _fire_bounds_ne_32(Propagator *self, SolveCtx *ctx) {
     Variable      *y   = &ctx->vars[yid];
 
     PropResult r;
+    /* `v + 1` / `v - 1` overflow at the int32 extremes: excluding INT32_MAX
+     * from the bottom of a domain computed a new lower bound of INT32_MIN, a
+     * no-op, so `y != INT32_MAX` with y pinned to INT32_MAX was accepted (a
+     * wrong sat). A domain whose lo is INT32_MAX (or hi is INT32_MIN) is the
+     * singleton {v}, so excluding v empties it. */
     /* if x is singleton, remove from y */
     if (x->lo == x->hi) {
         int32_t v = x->lo;
         if (y->lo == v) {
+            if (v == INT32_MAX) return PROP_CONFLICT;
             if ((r = ctx_tighten_lb32(ctx, yid, v + 1)) != PROP_OK) return r;
         } else if (y->hi == v) {
+            if (v == INT32_MIN) return PROP_CONFLICT;
             if ((r = ctx_tighten_ub32(ctx, yid, v - 1)) != PROP_OK) return r;
         }
     }
@@ -335,8 +356,10 @@ static PropResult _fire_bounds_ne_32(Propagator *self, SolveCtx *ctx) {
     if (y->lo == y->hi) {
         int32_t v = y->lo;
         if (x->lo == v) {
+            if (v == INT32_MAX) return PROP_CONFLICT;
             if ((r = ctx_tighten_lb32(ctx, xid, v + 1)) != PROP_OK) return r;
         } else if (x->hi == v) {
+            if (v == INT32_MIN) return PROP_CONFLICT;
             if ((r = ctx_tighten_ub32(ctx, xid, v - 1)) != PROP_OK) return r;
         }
     }
@@ -482,7 +505,12 @@ static PropResult _fire_bounds_div_32(Propagator *self, SolveCtx *ctx) {
     Variable      *a   = &ctx->vars[aid];
     Variable      *b   = &ctx->vars[bid];
 
-    int signed_op = (r->flags & VAR_SIGNED) != 0;
+    /* Division is TRUNCATING on integer values. The unsigned path below is
+     * only a faster special case for non-negative operands, so the signed
+     * path must be taken whenever ANY operand is signed -- keying it off the
+     * result var alone sent a signed dividend through the unsigned path when
+     * the result was a compile-time pin var (`(x / 3) == c`). */
+    int signed_op = ((r->flags | a->flags | b->flags) & VAR_SIGNED) != 0;
 
     PropResult res;
     if (signed_op) {
@@ -563,7 +591,13 @@ static PropResult _fire_bounds_mod_32(Propagator *self, SolveCtx *ctx) {
     Variable      *a   = &ctx->vars[aid];
     Variable      *b   = &ctx->vars[bid];
 
-    int signed_op = (r->flags & VAR_SIGNED) != 0;
+    /* Signed (truncating, sign-of-dividend) remainder whenever ANY operand is
+     * signed. Keying this off the result var alone was a wrong-answer bug:
+     * `(x % 3) == -2` over a signed x pins the result to an unsigned compile-
+     * time var, the unsigned path then computed the FLOORED remainder
+     * (-8 % 3 -> 1 instead of -2), and the solve returned unsat for -2 and sat
+     * for 1. */
+    int signed_op = ((r->flags | a->flags | b->flags) & VAR_SIGNED) != 0;
 
     PropResult res;
 
@@ -1166,6 +1200,22 @@ static PropResult _fire_bounds_lt_64(Propagator *self, SolveCtx *ctx) {
     uint32_t       yid = ws->var_ids[1];
 
     PropResult r;
+    /* `y.hi - 1` is applied in x's order and `x.lo + 1` in y's. Each wraps
+     * when the operand is the minimum (maximum) of THAT order -- INT64_MIN /
+     * INT64_MAX signed, 0 / UINT64_MAX for an unsigned 64-bit var -- and the
+     * wrapped bound is a no-op where it should be a conflict. */
+    {
+        const Variable *xv = &ctx->vars[xid], *yv = &ctx->vars[yid];
+        int64_t yhi = var_hi64(ctx, yv), xlo = var_lo64(ctx, xv);
+        int xs = (xv->flags & VAR_SIGNED) || xv->width < 64;
+        int ys = (yv->flags & VAR_SIGNED) || yv->width < 64;
+        /* Only when both are read in the same order: across orders the raw
+         * pattern means a different number on each side. */
+        if (xs == ys) {
+            if (yhi == (xs ? INT64_MIN : 0)) return PROP_CONFLICT;
+            if (xlo == (ys ? INT64_MAX : -1)) return PROP_CONFLICT;
+        }
+    }
     if ((r = ctx_tighten_ub64(ctx, xid, var_hi64(ctx, &ctx->vars[yid]) - 1)) != PROP_OK) return r;
     if ((r = ctx_tighten_lb64(ctx, yid, var_lo64(ctx, &ctx->vars[xid]) + 1)) != PROP_OK) return r;
     return PROP_OK;
@@ -1262,6 +1312,11 @@ static PropResult _fire_bounds_ne_64(Propagator *self, SolveCtx *ctx) {
     int64_t ylo = var_lo64(ctx, &ctx->vars[yid]), yhi = var_hi64(ctx, &ctx->vars[yid]);
 
     PropResult r;
+    /* Both pinned to the same value: violated. Handled up front because the
+     * `v+1` / `v-1` exclusion below wraps at the ends of the var's order
+     * (INT64_MAX, or UINT64_MAX for an unsigned 64-bit var) into a no-op
+     * bound. With one side non-singleton the exclusion cannot wrap. */
+    if (xlo == xhi && ylo == yhi && xlo == ylo) return PROP_CONFLICT;
     if (xlo == xhi) {
         int64_t v = xlo;
         if (ylo == v) { if ((r = ctx_tighten_lb64(ctx, yid, v+1)) != PROP_OK) return r; }
@@ -2093,7 +2148,10 @@ static PropResult _fire_bounds_div_64(Propagator *self, SolveCtx *ctx) {
     uint32_t       aid = ws->var_ids[1];
     uint32_t       bid = ws->var_ids[2];
 
-    int signed_op = (ctx->vars[rid].flags & VAR_SIGNED) != 0;
+    /* Truncating signed division whenever ANY operand is signed (see
+     * _fire_bounds_div_32). */
+    int signed_op = ((ctx->vars[rid].flags | ctx->vars[aid].flags |
+                      ctx->vars[bid].flags) & VAR_SIGNED) != 0;
 
     int64_t blo = var_lo64(ctx, &ctx->vars[bid]);
     int64_t bhi = var_hi64(ctx, &ctx->vars[bid]);
@@ -2184,7 +2242,10 @@ static PropResult _fire_bounds_mod_64(Propagator *self, SolveCtx *ctx) {
     uint32_t       aid = ws->var_ids[1];
     uint32_t       bid = ws->var_ids[2];
 
-    int signed_op = (ctx->vars[rid].flags & VAR_SIGNED) != 0;
+    /* Truncating signed remainder whenever ANY operand is signed (see
+     * _fire_bounds_mod_32). */
+    int signed_op = ((ctx->vars[rid].flags | ctx->vars[aid].flags |
+                      ctx->vars[bid].flags) & VAR_SIGNED) != 0;
 
     int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
     int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
@@ -3028,8 +3089,35 @@ uint32_t prop_add_bounds_shl_64(SolveCtx *ctx, uint32_t r_id,
 }
 
 /* ------------------------------------------------------------------ */
-/* BoundsLSHR_64:  r = a >> b  (logical right shift)                  */
+/* BoundsLSHR_64:  r = a >> b                                         */
+/*                                                                    */
+/* Semantics follow the value model of the operand:                   */
+/*   - unsigned a: logical shift (a is a non-negative integer, so     */
+/*     this is floor(a / 2^b)).                                       */
+/*   - SIGNED a: floor(a / 2^b), i.e. an arithmetic shift of the      */
+/*     integer value (Python `>>`, SV `>>>`). The builder API          */
+/*     evaluates expressions over integers, not width-wrapped bit      */
+/*     patterns, and floor division is the only width-independent      */
+/*     meaning of `>>` for a negative integer. This is also what the   */
+/*     model validator (zsp_validate.c) checks.                        */
+/* The previous code shifted a negative singleton LOGICALLY at 64 bits */
+/* ((uint64)-8 >> 1 == 2^63-4) and skipped every other negative-       */
+/* operand case, so `r == x >> 1` with x == -8 was unsat for every r.  */
 /* ------------------------------------------------------------------ */
+
+/* floor(v / 2^s) for 0 <= s <= 63 -- an arithmetic right shift, written
+ * without relying on implementation-defined `>>` of a negative value. */
+static int64_t _ashr64(int64_t v, int64_t s) {
+    if (v >= 0) return v >> s;
+    return (int64_t)~((~(uint64_t)v) >> s);
+}
+
+/* v * 2^s, or 0 (and *ok = 0) if it does not fit an int64. */
+static int64_t _shl_checked(int64_t v, int64_t s, int *ok) {
+    __int128 p = (__int128)v * ((__int128)1 << s);
+    if (p < (__int128)INT64_MIN || p > (__int128)INT64_MAX) { *ok = 0; return 0; }
+    return (int64_t)p;
+}
 
 static PropResult _fire_bounds_lshr_64(Propagator *self, SolveCtx *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
@@ -3041,8 +3129,41 @@ static PropResult _fire_bounds_lshr_64(Propagator *self, SolveCtx *ctx) {
     int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
     int64_t blo = var_lo64(ctx, &ctx->vars[bid]);
     int64_t bhi = var_hi64(ctx, &ctx->vars[bid]);
+    int a_signed = (ctx->vars[aid].flags & VAR_SIGNED) != 0;
 
     PropResult res;
+
+    if (a_signed) {
+        /* Arithmetic (floor) shift. A shift of >= 63 bits already yields
+         * the fixed point (0 or -1), so clamping the amount to 63 is exact
+         * (and avoids C undefined behaviour). */
+        if (blo < 0) blo = 0;
+        if (bhi < 0) bhi = 0;
+        if (blo > 63) blo = 63;
+        if (bhi > 63) bhi = 63;
+        /* floor(a / 2^s) is non-decreasing in a, and moves monotonically
+         * toward 0 / -1 as s grows, so the extremes are at the corners. */
+        int64_t r_lo = alo >= 0 ? _ashr64(alo, bhi) : _ashr64(alo, blo);
+        int64_t r_hi = ahi >= 0 ? _ashr64(ahi, blo) : _ashr64(ahi, bhi);
+        if ((res = ctx_tighten_lb64(ctx, rid, r_lo)) != PROP_OK) return res;
+        if ((res = ctx_tighten_ub64(ctx, rid, r_hi)) != PROP_OK) return res;
+        if (blo == bhi) {
+            /* Backward: floor(a / 2^s) in [rlo, rhi]
+             *   <=>  rlo * 2^s <= a <= (rhi + 1) * 2^s - 1 */
+            int64_t s   = blo;
+            int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
+            int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
+            int ok = 1;
+            int64_t nlo = _shl_checked(rlo, s, &ok);
+            if (ok && (res = ctx_tighten_lb64(ctx, aid, nlo)) != PROP_OK) return res;
+            ok = 1;
+            int64_t nhi = (rhi < INT64_MAX) ? _shl_checked(rhi + 1, s, &ok) : 0;
+            if (rhi < INT64_MAX && ok && nhi > INT64_MIN) {
+                if ((res = ctx_tighten_ub64(ctx, aid, nhi - 1)) != PROP_OK) return res;
+            }
+        }
+        return PROP_OK;
+    }
 
     /* Clamp the shift amount to the operand width: a logical right shift of a
      * w-bit value by >= w bits yields 0. Clamping *both* bounds to w makes
@@ -3073,8 +3194,14 @@ static PropResult _fire_bounds_lshr_64(Propagator *self, SolveCtx *ctx) {
         /* Backward */
         int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
         int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
-        if ((res = ctx_tighten_lb64(ctx, aid, rlo << s)) != PROP_OK) return res;
-        if ((res = ctx_tighten_ub64(ctx, aid, ((rhi + 1) << s) - 1)) != PROP_OK) return res;
+        int ok = 1;
+        int64_t nlo = _shl_checked(rlo, s, &ok);
+        if (ok && (res = ctx_tighten_lb64(ctx, aid, nlo)) != PROP_OK) return res;
+        ok = 1;
+        int64_t nhi = (rhi < INT64_MAX) ? _shl_checked(rhi + 1, s, &ok) : 0;
+        if (rhi < INT64_MAX && ok && nhi > INT64_MIN) {
+            if ((res = ctx_tighten_ub64(ctx, aid, nhi - 1)) != PROP_OK) return res;
+        }
     } else if (alo >= 0 && bhi > 0) {
         /* Variable shift: r_lo = a_lo >> b_hi, r_hi = a_hi >> b_lo */
         if ((res = ctx_tighten_lb64(ctx, rid, alo >> bhi)) != PROP_OK) return res;

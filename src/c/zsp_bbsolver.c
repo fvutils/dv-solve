@@ -643,6 +643,13 @@ static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, ExprRef ref,
     }
     case BIN_LSHIFT:
     case BIN_RSHIFT: {
+        /* `>>` of a SIGNED operand is floor division by 2^b on its integer
+         * value (the CDCL engine and the model validator agree on this). The
+         * blaster below only builds a logical shift at the operand's bit
+         * width, which is a different answer for a negative value, so defer
+         * (ZSP_BB_UNKNOWN) exactly as signed div/mod do. */
+        if (b->op == BIN_RSHIFT && subtree_is_signed(S, b->lhs, 0))
+            S->had_unsupported = 1;
         zsp_bv_t l = bb_expr(S, b->lhs, hint);
         if (S->had_error) return l;
         zsp_bv_t r = bb_expr(S, b->rhs, l.size);

@@ -267,7 +267,9 @@ static EvalVal _eval(const SolveCtx *ctx, const SolveProblem *sp,
             if (sgn) {
                 int64_t sb = _sext(ub, w);
                 if (sb == 0) { *skip = 1; return r; }
-                int64_t q = _sext(ua, w) / sb;
+                /* INT64_MIN / -1 traps (SIGFPE) in C; -a wraps identically. */
+                int64_t q = (sb == -1) ? (int64_t)(0u - (uint64_t)_sext(ua, w))
+                                       : _sext(ua, w) / sb;
                 r.value = (int64_t)((uint64_t)q & mask); r.width = w; r.is_signed = 1; return r;
             }
             if (ub == 0) { *skip = 1; return r; }
@@ -278,7 +280,7 @@ static EvalVal _eval(const SolveCtx *ctx, const SolveProblem *sp,
             if (sgn) {
                 int64_t sb = _sext(ub, w);
                 if (sb == 0) { *skip = 1; return r; }
-                int64_t rem = _sext(ua, w) % sb;
+                int64_t rem = (sb == -1) ? 0 : _sext(ua, w) % sb;  /* see DIV */
                 r.value = (int64_t)((uint64_t)rem & mask); r.width = w; r.is_signed = 1; return r;
             }
             if (ub == 0) { *skip = 1; return r; }
@@ -290,6 +292,18 @@ static EvalVal _eval(const SolveCtx *ctx, const SolveProblem *sp,
             r.value = (ub >= 64) ? 0 : (int64_t)((ua << ub) & mask);
             r.width = w; r.is_signed = a.is_signed; return r;
         case BIN_RSHIFT:
+            /* A SIGNED operand shifts its integer value: floor(a / 2^b), i.e.
+             * an arithmetic shift, which is what the engine implements
+             * (_fire_bounds_lshr_64). An unsigned operand is non-negative, so
+             * the logical shift is the same floor division. */
+            if (a.is_signed) {
+                int64_t sa = _sext(ua, w);
+                uint64_t sh = ub > 63 ? 63 : ub;
+                int64_t q = (sa >= 0) ? (sa >> sh)
+                                      : (int64_t)~((~(uint64_t)sa) >> sh);
+                r.value = (int64_t)((uint64_t)q & mask);
+                r.width = w; r.is_signed = 1; return r;
+            }
             r.value = (ub >= 64) ? 0 : (int64_t)(ua >> ub);
             r.width = w; r.is_signed = a.is_signed; return r;
         /* EQ/NEQ are sign-agnostic: at a common width, equal bit patterns are

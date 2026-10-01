@@ -46,6 +46,35 @@ static int _init_tier1(SolveCtx *ctx, Variable *v, uint16_t width,
     return 0;
 }
 
+/** Initialise a compile-time singleton var holding the integer constant `cv`.
+ *
+ * Used where a constant operand, or the constant side of `binop == const`, is
+ * turned into a pinned variable so a var-var propagator can be reused. The
+ * value is an INTEGER, so the variable must be able to represent it:
+ *   - a negative value is SIGNED. Leaving it unsigned told every propagator
+ *     that reads the flags to use unsigned semantics on a negative number;
+ *     for `(x % 3) == -2` that selected the floored remainder.
+ *   - a value outside int32 cannot live in tier-0 storage (it was silently
+ *     truncated by _init_tier0); it gets a 64-bit tier-1 var instead.
+ *   - `width` is the width of the value the var stands for. Above 32 the var
+ *     is tier-1 at that width (the modular bv* propagators wrap at the result
+ *     var's width, so a narrower pin wraps a wider expression early).
+ * An in-range constant standing for a <= 32-bit value keeps the historical
+ * tier-0 width-32 shape, so propagator selection for it is unchanged.
+ *
+ * @return 0 on success, -1 on pool exhaustion (caller declines the compile).
+ */
+static int _init_const_singleton(SolveCtx *ctx, Variable *v, int64_t cv,
+                                 uint8_t flags, uint16_t width) {
+    if (cv < 0) flags |= VAR_SIGNED;
+    if (width <= 32 && cv >= INT32_MIN && cv <= INT32_MAX) {
+        _init_tier0(v, 32, flags, cv, cv);
+        return 0;
+    }
+    if (width <= 32 || width > 64) width = 64;
+    return _init_tier1(ctx, v, width, flags, cv, cv);
+}
+
 /** Initialise a tier-2 Variable (> 64 bits); allocates WideBoundsN.
  *
  * CURRENTLY UNREACHABLE, and kept deliberately. Every caller now returns
@@ -684,7 +713,7 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
         if (ctx->n_vars < ctx->n_vars_capacity) {
             b_id = ctx->n_vars;
             Variable *cvv = &ctx->vars[b_id];
-            _init_tier0(cvv, 32, 0, cv, cv);
+            if (_init_const_singleton(ctx, cvv, cv, 0, 32) != 0) return 0;
             ctx->n_vars = b_id + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[b_id] = EXPR_NULL;
             has_var_var = 1;
@@ -694,7 +723,7 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
         if (ctx->n_vars < ctx->n_vars_capacity) {
             a_id = ctx->n_vars;
             Variable *cvv = &ctx->vars[a_id];
-            _init_tier0(cvv, 32, 0, cv, cv);
+            if (_init_const_singleton(ctx, cvv, cv, 0, 32) != 0) return 0;
             ctx->n_vars = a_id + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[a_id] = EXPR_NULL;
             has_var_var = 1;
@@ -840,6 +869,9 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
  * for the current materialiser to handle. */
 static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
                                ExprRef ref, uint8_t width);
+static uint32_t _const_to_var_like(SolveCtx *ctx, SolveProblem *sp,
+                                   ExprRef ref, uint8_t width, uint32_t peer,
+                                   int is_cmp);
 
 /** Create an AUX variable under the SAME tier policy as a declared variable.
  *
@@ -955,6 +987,47 @@ static uint8_t _expr_width(SolveCtx *ctx, SolveProblem *sp, ExprRef ref,
         uint8_t lw = _expr_width(ctx, sp, eb->lhs, depth + 1);
         uint8_t rw = _expr_width(ctx, sp, eb->rhs, depth + 1);
         return lw > rw ? lw : rw;
+    }
+    default:
+        return 0;
+    }
+}
+
+/** Does a value expression reference a SIGNED variable (or sign-extend)?
+ *
+ * Used to give a compile-time pin var for `binop == const` the same order as
+ * the value it stands for. Unsigned pins beside a signed operand read a
+ * negative intermediate bound (the signed remainder's `r >= -2`) as a huge
+ * unsigned value at width 64, and `(x % -3) == 0` over a signed 64-bit x
+ * came back unsat. */
+static int _expr_has_signed(SolveCtx *ctx, SolveProblem *sp, ExprRef ref,
+                            int depth) {
+    if (ref == EXPR_NULL || depth > 32) return 0;
+    ExprKind k = *(ExprKind *)zsp_pool_ptr(&sp->pool, ref);
+    switch (k) {
+    case EXPR_VAR: {
+        ExprVar *ev = (ExprVar *)zsp_pool_ptr(&sp->pool, ref);
+        uint32_t vid = _resolve(ctx, ev->var_id);
+        if (vid >= ctx->n_vars_capacity) return 0;
+        return (ctx->vars[vid].flags & VAR_SIGNED) != 0;
+    }
+    case EXPR_EXTEND:
+        return ((ExprExtend *)zsp_pool_ptr(&sp->pool, ref))->sign_extend != 0;
+    case EXPR_UNARY:
+        return _expr_has_signed(ctx, sp,
+            ((ExprUnary *)zsp_pool_ptr(&sp->pool, ref))->operand, depth + 1);
+    case EXPR_ITE: {
+        ExprITE *ei = (ExprITE *)zsp_pool_ptr(&sp->pool, ref);
+        return _expr_has_signed(ctx, sp, ei->then_e, depth + 1) ||
+               _expr_has_signed(ctx, sp, ei->else_e, depth + 1);
+    }
+    case EXPR_BINARY: {
+        ExprBinary *eb = (ExprBinary *)zsp_pool_ptr(&sp->pool, ref);
+        if (_is_bool_op(eb->op)) return 0;
+        if (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT)
+            return _expr_has_signed(ctx, sp, eb->lhs, depth + 1);
+        return _expr_has_signed(ctx, sp, eb->lhs, depth + 1) ||
+               _expr_has_signed(ctx, sp, eb->rhs, depth + 1);
     }
     default:
         return 0;
@@ -1626,11 +1699,30 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
         /* Operands of a bit-vector binary op share the result's width -- except
          * a shift amount, which is an independent value. Passing `w` down is
          * what materialises a constant operand at the right width. */
-        uint32_t a_id = _value_to_var(ctx, sp, eb->lhs, w);
-        if (a_id == EXPR_NULL) return EXPR_NULL;
-        uint8_t b_w = (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT) ? 0 : w;
-        uint32_t b_id = _value_to_var(ctx, sp, eb->rhs, b_w);
-        if (b_id == EXPR_NULL) return EXPR_NULL;
+        /* A constant operand of a value op takes the signedness of the other
+         * operand (see _const_to_var_like): materialised unsigned, a `-7` next
+         * to a signed 64-bit x was the unsigned 2^64-7 to the 64-bit add
+         * propagator, and `x + -7 >= 11` came back unsat. A shift amount is
+         * an independent (non-negative) value and keeps the plain path. */
+        int is_shift = (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT);
+        ExprKind lk_b = *(ExprKind *)zsp_pool_ptr(&sp->pool, eb->lhs);
+        ExprKind rk_b = *(ExprKind *)zsp_pool_ptr(&sp->pool, eb->rhs);
+        uint8_t b_w = is_shift ? 0 : w;
+        uint32_t a_id, b_id;
+        if (!is_shift && lk_b == EXPR_CONST && rk_b != EXPR_CONST) {
+            b_id = _value_to_var(ctx, sp, eb->rhs, b_w);
+            if (b_id == EXPR_NULL) return EXPR_NULL;
+            a_id = _const_to_var_like(ctx, sp, eb->lhs, w, b_id, 0);
+            if (a_id == EXPR_NULL) return EXPR_NULL;
+        } else {
+            a_id = _value_to_var(ctx, sp, eb->lhs, w);
+            if (a_id == EXPR_NULL) return EXPR_NULL;
+            if (!is_shift && rk_b == EXPR_CONST && lk_b != EXPR_CONST)
+                b_id = _const_to_var_like(ctx, sp, eb->rhs, w, a_id, 0);
+            else
+                b_id = _value_to_var(ctx, sp, eb->rhs, b_w);
+            if (b_id == EXPR_NULL) return EXPR_NULL;
+        }
 
         if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
         uint32_t r_id = ctx->n_vars;
@@ -1661,6 +1753,53 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
         return r_id;
     }
     return EXPR_NULL;
+}
+
+/** Materialise the constant `ref` as a singleton var to sit beside `peer`.
+ *
+ * The constant takes `peer`'s signedness, so both sides of an order
+ * propagator (or both operands of an arithmetic one) are read in the same
+ * order. `_value_to_var` alone makes every constant unsigned, and against a
+ * signed 64-bit peer that is a different number: `(x << 4) < 1` pushed the
+ * const's lower bound to INT64_MIN+1 -- a huge unsigned value -- and
+ * `x + -7 >= 11` saw -7 as 2^64-7. Both were wrong unsats.
+ *
+ * `is_cmp`: the constant is a COMPARISON operand. Then it is also signed when
+ * negative, and a value that does not fit `width` bits (200 against a signed
+ * 8-bit peer) is held at 64 bits -- an order propagator does not wrap, so the
+ * width is only storage. For an ARITHMETIC operand neither applies: the
+ * result var inherits the operands' signedness and width and the bv*
+ * propagators wrap there, so a negative constant beside an unsigned peer, or
+ * an out-of-width constant, would compute a different value (`u4 12 + -1`
+ * wrapped to a signed -5). Those decline (EXPR_NULL) exactly as before.
+ */
+static uint32_t _const_to_var_like(SolveCtx *ctx, SolveProblem *sp,
+                                   ExprRef ref, uint8_t width, uint32_t peer,
+                                   int is_cmp) {
+    ExprConst *ec = (ExprConst *)zsp_pool_ptr(&sp->pool, ref);
+    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    uint8_t flags = VAR_AUX;
+    if ((ctx->vars[peer].flags & VAR_SIGNED) || (is_cmp && ec->value < 0))
+        flags |= VAR_SIGNED;
+    uint32_t cv_id = ctx->n_vars;
+    uint8_t w = width ? width : 32;
+    if (_init_aux_tiered(ctx, &ctx->vars[cv_id], w, flags,
+                         ec->value, ec->value) != 0) {
+        int ok = 0;
+        if (is_cmp && (flags & VAR_SIGNED))
+            ok = _init_aux_tiered(ctx, &ctx->vars[cv_id], 64, flags,
+                                  ec->value, ec->value) == 0;
+        /* Otherwise fall back to the historical unsigned materialisation
+         * (e.g. 200 beside a signed 8-bit peer), so nothing that compiled
+         * before now declines. */
+        if (!ok && !(is_cmp && ec->value < 0))
+            ok = _init_aux_tiered(ctx, &ctx->vars[cv_id], w, VAR_AUX,
+                                  ec->value, ec->value) == 0;
+        if (!ok) return EXPR_NULL;
+    }
+    ctx->n_vars = cv_id + 1;
+    if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
+    return cv_id;
 }
 
 /* Compile "the negation of root" as a constraint.  Used by the top-level
@@ -2087,7 +2226,18 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                     if (ctx->n_vars < ctx->n_vars_capacity) {
                         uint32_t r_id = ctx->n_vars;
                         Variable *rv = &ctx->vars[r_id];
-                        _init_tier0(rv, 32, 0, pin_val, pin_val);
+                        /* The pin var IS the result of the binary op, and the
+                         * modular bv* propagators wrap at the RESULT var's
+                         * width. It used to be a fixed width-32 var, so a
+                         * wider expression wrapped at 32 bits: `x + 1 == 0`
+                         * over a 64-bit unsigned x was sat at x == 2^32-1
+                         * (wrong sat), and `(x / -1) == 0` at x == INT64_MIN
+                         * wrapped 2^63 to 0. Give it the expression's width,
+                         * and its signedness (see _expr_has_signed). */
+                        if (_init_const_singleton(ctx, rv, pin_val,
+                                _expr_has_signed(ctx, sp, e->lhs, 0) ? VAR_SIGNED : 0,
+                                _expr_width(ctx, sp, e->lhs, 0)) != 0)
+                            return 0;
                         ctx->n_vars = r_id + 1;
                         if (ctx->watcher_heads)
                             ctx->watcher_heads[r_id] = EXPR_NULL;
@@ -2101,7 +2251,10 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                     if (ctx->n_vars < ctx->n_vars_capacity) {
                         uint32_t r_id = ctx->n_vars;
                         Variable *rv = &ctx->vars[r_id];
-                        _init_tier0(rv, 32, 0, pin_val, pin_val);
+                        if (_init_const_singleton(ctx, rv, pin_val,
+                                _expr_has_signed(ctx, sp, e->rhs, 0) ? VAR_SIGNED : 0,
+                                _expr_width(ctx, sp, e->rhs, 0)) != 0)
+                            return 0;   /* width: see the lhs case above */
                         ctx->n_vars = r_id + 1;
                         if (ctx->watcher_heads)
                             ctx->watcher_heads[r_id] = EXPR_NULL;
@@ -2180,7 +2333,14 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                         if (ctx->n_vars < ctx->n_vars_capacity) {
                             b_id = ctx->n_vars;
                             Variable *cv_var = &ctx->vars[b_id];
-                            if (_init_aux_tiered(ctx, cv_var, cv_w, 0, cv, cv) != 0)
+                            /* Same signedness as the var operand: an unsigned
+                             * INT64_MIN beside a signed 64-bit x is 2^63 to
+                             * the 64-bit propagators (wrong unsat on
+                             * `r == INT64_MIN - x`). Fall back to unsigned
+                             * when the value does not fit signed. */
+                            uint8_t sf = (ctx->vars[_resolve(ctx, a_id)].flags & VAR_SIGNED);
+                            if ((!sf || _init_aux_tiered(ctx, cv_var, cv_w, sf, cv, cv) != 0) &&
+                                _init_aux_tiered(ctx, cv_var, cv_w, 0, cv, cv) != 0)
                                 return 0;   /* leave uncompiled */
                             ctx->n_vars = b_id + 1;
                             if (ctx->watcher_heads)
@@ -2193,8 +2353,10 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                         if (ctx->n_vars < ctx->n_vars_capacity) {
                             a_id = ctx->n_vars;
                             Variable *cv_var = &ctx->vars[a_id];
-                            if (_init_aux_tiered(ctx, cv_var, cv_w, 0, cv, cv) != 0)
-                                return 0;   /* leave uncompiled */
+                            uint8_t sf = (ctx->vars[_resolve(ctx, b_id)].flags & VAR_SIGNED);
+                            if ((!sf || _init_aux_tiered(ctx, cv_var, cv_w, sf, cv, cv) != 0) &&
+                                _init_aux_tiered(ctx, cv_var, cv_w, 0, cv, cv) != 0)
+                                return 0;   /* leave uncompiled (see above) */
                             ctx->n_vars = a_id + 1;
                             if (ctx->watcher_heads)
                                 ctx->watcher_heads[a_id] = EXPR_NULL;
@@ -3098,10 +3260,27 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
             uint8_t w = lw > rw ? lw : rw;
             if (w == 0) w = 32;
             if (w > 64) break;   /* tier-2: decline rather than mis-encode */
-            uint32_t lv = _value_to_var(ctx, sp, e_gc->lhs, w);
-            if (lv == EXPR_NULL) break;
-            uint32_t rv = _value_to_var(ctx, sp, e_gc->rhs, w);
-            if (rv == EXPR_NULL) break;
+            /* A constant side is materialised against the OTHER side's
+             * signedness (see _const_to_var_like). */
+            ExprKind lk_gc = *(ExprKind *)zsp_pool_ptr(&sp->pool, e_gc->lhs);
+            ExprKind rk_gc = *(ExprKind *)zsp_pool_ptr(&sp->pool, e_gc->rhs);
+            uint32_t lv = EXPR_NULL, rv = EXPR_NULL;
+            if (lk_gc == EXPR_CONST && rk_gc != EXPR_CONST) {
+                rv = _value_to_var(ctx, sp, e_gc->rhs, w);
+                if (rv == EXPR_NULL) break;
+                lv = _const_to_var_like(ctx, sp, e_gc->lhs, w, rv, 1);
+                if (lv == EXPR_NULL) break;
+            } else if (rk_gc == EXPR_CONST && lk_gc != EXPR_CONST) {
+                lv = _value_to_var(ctx, sp, e_gc->lhs, w);
+                if (lv == EXPR_NULL) break;
+                rv = _const_to_var_like(ctx, sp, e_gc->rhs, w, lv, 1);
+                if (rv == EXPR_NULL) break;
+            } else {
+                lv = _value_to_var(ctx, sp, e_gc->lhs, w);
+                if (lv == EXPR_NULL) break;
+                rv = _value_to_var(ctx, sp, e_gc->rhs, w);
+                if (rv == EXPR_NULL) break;
+            }
             int wide = _var_needs_wide(ctx, lv) || _var_needs_wide(ctx, rv);
             if (!wide && w <= 32) {
                 switch (e_gc->op) {

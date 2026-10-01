@@ -179,11 +179,11 @@ def test_b27_bvsub_wraps(width) -> None:
         f"B27 wrap-sub w{width}")
 
 
-# ------------------------------------------------------------- still open
+# ------------------------------------------------------------- B28
 
-@pytest.mark.xfail(strict=True, reason="B28: the wrap-aware bv* propagators "
-                                       "cover widths 1..63; width 64 falls "
-                                       "through to non-modular bounds_add_64")
+# B28 (both cases below): no longer reproduce as of fix/signed-mod-shift
+# (2026-10-01) -- both now return sat with a correct model. Kept as
+# regressions.
 def test_b28_bvadd_wraps_at_width_64() -> None:
     got = _solve("(declare-const v (_ BitVec 64))\n"
                  "(assert (= (bvadd v (_ bv18446744073709551615 64))"
@@ -191,9 +191,6 @@ def test_b28_bvadd_wraps_at_width_64() -> None:
     assert got != "unsat", "B28: wrong unsat on a wrapping 64-bit add"
 
 
-@pytest.mark.xfail(strict=True, reason="B28 family: at width 64 the bitwise "
-                                       "propagators read the all-ones mask as "
-                                       "the pattern -1 (the 2^63 cliff)")
 def test_b28_bitwise_all_ones_mask_at_width_64() -> None:
     got = _solve("(declare-const v (_ BitVec 64))\n"
                  "(assert (bvugt (bvand v (_ bv18446744073709551615 64))"
