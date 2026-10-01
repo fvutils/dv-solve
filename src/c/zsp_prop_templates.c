@@ -5,6 +5,7 @@
 #include "zsp_ctx.h"
 #include "zsp_lcg.h"
 #include "zsp_explain.h"
+#include "zsp_i128.h"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -12,19 +13,8 @@
 
 #define PROP_WS(p) ((PropWatchSect *)((char *)(p) + sizeof(Propagator)))
 
-/* (a * b) mod m for a, b < m, computed via a 128-bit intermediate. MSVC lacks
- * __int128, so use the x64 _umul128/_udiv128 intrinsics there (the a,b < m
- * precondition guarantees the 128/64 division does not overflow). */
-static inline uint64_t zsp_mulmod_u64(uint64_t a, uint64_t b, uint64_t m) {
-#if defined(_MSC_VER)
-    unsigned __int64 hi, rem;
-    unsigned __int64 lo = _umul128(a, b, &hi);
-    _udiv128(hi, lo, m, &rem);
-    return rem;
-#else
-    return (uint64_t)((unsigned __int128)a * (unsigned __int128)b % m);
-#endif
-}
+/* (a * b) mod m for a, b < m: zsp_mulmod_u64 in zsp_i128.h (128-bit
+ * intermediate, MSVC x64 intrinsics, or a portable shift-and-add). */
 
 /* ------------------------------------------------------------------ *
  * Overflow-safe interval arithmetic for the width-64 bounds templates.
@@ -1712,7 +1702,7 @@ static ModIv _modiv_add(ModIv x, ModIv y, uint8_t w) {
     uint64_t mask = _bv_mask(w);
     if (x.full || y.full) return _modiv_full();
     uint64_t span;
-    if (__builtin_add_overflow(x.span, y.span, &span) || span >= mask)
+    if (zsp_add_u64_ovf(x.span, y.span, &span) || span >= mask)
         return _modiv_full();
     ModIv r;
     r.start = (x.start + y.start) & mask;
@@ -1740,7 +1730,7 @@ static ModIv _modiv_neg(ModIv x, uint8_t w) {
  * Returns 0 if neither fits an int64. */
 static int _modiv_lift(ModIv x, uint8_t w, int64_t *lo, int64_t *hi) {
     uint64_t end;
-    int u_ok = !__builtin_add_overflow(x.start, x.span, &end) &&
+    int u_ok = !zsp_add_u64_ovf(x.start, x.span, &end) &&
                end <= (uint64_t)INT64_MAX;
     uint64_t half = (uint64_t)1 << (w - 1);
     int s_ok = (x.start >= half);
@@ -1748,7 +1738,8 @@ static int _modiv_lift(ModIv x, uint8_t w, int64_t *lo, int64_t *hi) {
     if (s_ok) {
         uint64_t Mlow = (w >= 64) ? 0 : ((uint64_t)1 << w);
         slo = (int64_t)(x.start - Mlow);        /* start - M, < 0 */
-        if (__builtin_add_overflow(slo, (int64_t)x.span, &shi)) s_ok = 0;
+        if (x.span > (uint64_t)INT64_MAX ||
+            zsp_add_i64_ovf(slo, (int64_t)x.span, &shi)) s_ok = 0;
     }
     if (u_ok && (!s_ok || end <= (uint64_t)0 - (uint64_t)slo)) {
         *lo = (int64_t)x.start; *hi = (int64_t)end; return 1;
@@ -1774,8 +1765,8 @@ static ModIv _modiv_mul(ModIv x, ModIv y, uint8_t w) {
     if (!_modiv_lift(x, w, &xl, &xh) || !_modiv_lift(y, w, &yl, &yh))
         return _modiv_full();
     int64_t p[4];
-    if (__builtin_mul_overflow(xl, yl, &p[0]) | __builtin_mul_overflow(xl, yh, &p[1]) |
-        __builtin_mul_overflow(xh, yl, &p[2]) | __builtin_mul_overflow(xh, yh, &p[3]))
+    if (zsp_mul_i64_ovf(xl, yl, &p[0]) | zsp_mul_i64_ovf(xl, yh, &p[1]) |
+        zsp_mul_i64_ovf(xh, yl, &p[2]) | zsp_mul_i64_ovf(xh, yh, &p[3]))
         return _modiv_full();
     int64_t plo = p[0], phi = p[0];
     for (int i = 1; i < 4; i++) {
@@ -1804,7 +1795,7 @@ static ModIv _modiv_shl(ModIv x, uint64_t s0, uint64_t s1, uint8_t w) {
     int has_zero = (s1 >= w);
     uint64_t eff_hi = (s1 >= w) ? (uint64_t)(w - 1) : s1;
     uint64_t xlo = x.start, xhi;
-    if (__builtin_add_overflow(x.start, x.span, &xhi)) return _modiv_full();
+    if (zsp_add_u64_ovf(x.start, x.span, &xhi)) return _modiv_full();
     /* Representative integer interval over shifts [s0, eff_hi]:
      * min value = xlo << s0, max value = xhi << eff_hi (monotone). */
     if (eff_hi >= 64) return _modiv_full();
@@ -3159,9 +3150,9 @@ static int64_t _ashr64(int64_t v, int64_t s) {
 
 /* v * 2^s, or 0 (and *ok = 0) if it does not fit an int64. */
 static int64_t _shl_checked(int64_t v, int64_t s, int *ok) {
-    __int128 p = (__int128)v * ((__int128)1 << s);
-    if (p < (__int128)INT64_MIN || p > (__int128)INT64_MAX) { *ok = 0; return 0; }
-    return (int64_t)p;
+    int64_t r;
+    if (zsp_shl_i64_ovf(v, s, &r)) { *ok = 0; return 0; }
+    return r;
 }
 
 static PropResult _fire_bounds_lshr_64(Propagator *self, SolveCtx *ctx) {

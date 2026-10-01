@@ -5,6 +5,7 @@
 #include "zsp_propagator.h"
 #include "zsp_problem.h"
 #include "zsp_sv.h"
+#include "zsp_i128.h"
 
 /* ------------------------------------------------------------------ */
 /* Internal helpers                                                    */
@@ -747,72 +748,84 @@ static uint32_t _const_singleton_var(SolveCtx *ctx, SolveProblem *sp,
 }
 
 
+static int _is_bool_op(BinOp op);
+
 /* ------------------------------------------------------------------ */
 /* Is `r = a op b` exactly representable by the propagator we emit?    */
-
-static int _is_bool_op(BinOp op);
 /* ------------------------------------------------------------------ */
 
-/* The current domain of a variable as a true (unwrapped) integer interval. */
-static void _rng128(const SolveCtx *ctx, uint32_t id, __int128 *lo, __int128 *hi) {
+/* The current domain of a variable as an int64 interval. Returns 0 when it
+ * has no honest int64 spelling: an unsigned 64-bit variable whose bounds are
+ * patterns >= 2^63 (stored as negative int64s). */
+static int _rng64(const SolveCtx *ctx, uint32_t id, int64_t *lo, int64_t *hi) {
     const Variable *v = &ctx->vars[id];
-    int64_t l = var_lo64(ctx, v), h = var_hi64(ctx, v);
-    if (!(v->flags & VAR_SIGNED) && v->width >= 64) {
-        *lo = (__int128)(uint64_t)l;
-        *hi = (__int128)(uint64_t)h;
-    } else {
-        *lo = l;
-        *hi = h;
-    }
+    *lo = var_lo64(ctx, v);
+    *hi = var_hi64(ctx, v);
+    if (!(v->flags & VAR_SIGNED) && v->width >= 64 && (*lo < 0 || *hi < 0))
+        return 0;
+    return 1;
 }
 
 /** Can the propagator for `r = a op b` be trusted to produce the SV result?
  *
  * The bv* templates (ADD/SUB/MUL/SHL, result width 1..64) wrap modulo 2^w and
- * are exact. Every other operator is propagated as INTEGER arithmetic on the stored values, which equals the SV
- * (wrapping) result only while the true result stays inside r's range and no
- * value involved is an unsigned 64-bit pattern >= 2^63 (int64 storage reads
- * those as negative). Signed `/` and `%` additionally overflow on MIN / -1.
+ * are exact. Every other operator is propagated as INTEGER arithmetic on the
+ * stored values, which equals the SV (wrapping) result only while the true
+ * result stays inside r's range and no value involved is an unsigned 64-bit
+ * pattern >= 2^63 (int64 storage reads those as negative).
  *
- * When exact, *out_lo/*out_hi receive the result's integer range, which the
- * caller may use as r's initial domain. Domains only shrink, so deciding this
- * at compile time is sound. When not exact the caller must decline: leaving
- * the constraint uncompiled is honest, a non-wrapping propagator is wrong.
+ * When exact and the result range is known, *has_range is set and the range
+ * is returned in out_lo / out_hi, which the caller may use as r's initial
+ * domain. Domains only shrink, so deciding this at compile time is sound.
+ * When not exact the caller must decline: leaving the constraint uncompiled
+ * is honest, a non-wrapping propagator is wrong.
+ *
+ * r's range lies inside int64, so any corner value that overflows int64 is
+ * outside it too: an overflow-checked int64 corner computation decides
+ * exactness exactly, with no wider arithmetic (zsp_i128.h).
  */
 static int _binop_exact(SolveCtx *ctx, BinOp op, uint32_t r_id,
                         uint32_t a_id, uint32_t b_id,
-                        __int128 *out_lo, __int128 *out_hi) {
+                        int64_t *out_lo, int64_t *out_hi, int *has_range) {
     const Variable *rv = &ctx->vars[r_id];
     uint16_t w = rv->width;
     int rs = (rv->flags & VAR_SIGNED) != 0;
     int modular = (op == BIN_ADD || op == BIN_SUB || op == BIN_MUL ||
                    op == BIN_LSHIFT);
-    __int128 alo, ahi, blo, bhi;
-    _rng128(ctx, a_id, &alo, &ahi);
-    _rng128(ctx, b_id, &blo, &bhi);
-    *out_lo = 1; *out_hi = 0;      /* "no range" */
+    *has_range = 0;
+    *out_lo = 0; *out_hi = 0;
     if (w >= 1 && w <= 64 && modular) return 1;
     if (w == 0 || w > 64) return 0;
 
-    __int128 rmin, rmax;
+    int64_t alo, ahi, blo, bhi;
+    /* Every value must have an honest int64 spelling. */
+    if (!_rng64(ctx, a_id, &alo, &ahi) || !_rng64(ctx, b_id, &blo, &bhi))
+        return 0;
+
+    int64_t rmin, rmax;
     if (rs) {
-        rmin = -((__int128)1 << (w - 1));
-        rmax = ((__int128)1 << (w - 1)) - 1;
+        rmin = (w >= 64) ? INT64_MIN : -((int64_t)1 << (w - 1));
+        rmax = (w >= 64) ? INT64_MAX : ((int64_t)1 << (w - 1)) - 1;
     } else {
         rmin = 0;
-        rmax = ((__int128)1 << w) - 1;
-        if (rmax > (__int128)INT64_MAX) rmax = INT64_MAX;   /* int64 storage */
+        rmax = (w >= 63) ? INT64_MAX : (int64_t)(((uint64_t)1 << w) - 1);
     }
-    const __int128 BIG = (__int128)1 << 63;
-    /* Every value must have an honest int64 spelling. */
-    if (alo < -BIG || ahi >= BIG || blo < -BIG || bhi >= BIG) return 0;
 
-    __int128 lo, hi;
+    int64_t lo, hi;
     switch (op) {
-    case BIN_ADD: lo = alo + blo; hi = ahi + bhi; break;
-    case BIN_SUB: lo = alo - bhi; hi = ahi - blo; break;
+    case BIN_ADD:
+        if (zsp_add_i64_ovf(alo, blo, &lo) || zsp_add_i64_ovf(ahi, bhi, &hi))
+            return 0;
+        break;
+    case BIN_SUB:
+        if (zsp_sub_i64_ovf(alo, bhi, &lo) || zsp_sub_i64_ovf(ahi, blo, &hi))
+            return 0;
+        break;
     case BIN_MUL: {
-        __int128 p[4] = { alo * blo, alo * bhi, ahi * blo, ahi * bhi };
+        int64_t p[4];
+        if (zsp_mul_i64_ovf(alo, blo, &p[0]) || zsp_mul_i64_ovf(alo, bhi, &p[1]) ||
+            zsp_mul_i64_ovf(ahi, blo, &p[2]) || zsp_mul_i64_ovf(ahi, bhi, &p[3]))
+            return 0;
         lo = hi = p[0];
         for (int i = 1; i < 4; i++) {
             if (p[i] < lo) lo = p[i];
@@ -826,8 +839,10 @@ static int _binop_exact(SolveCtx *ctx, BinOp op, uint32_t r_id,
             if (alo == 0 && ahi == 0) { lo = hi = 0; break; }
             return 0;
         }
-        __int128 c[4] = { alo << (int)blo, alo << (int)bhi,
-                          ahi << (int)blo, ahi << (int)bhi };
+        int64_t c[4];
+        if (zsp_shl_i64_ovf(alo, blo, &c[0]) || zsp_shl_i64_ovf(alo, bhi, &c[1]) ||
+            zsp_shl_i64_ovf(ahi, blo, &c[2]) || zsp_shl_i64_ovf(ahi, bhi, &c[3]))
+            return 0;
         lo = hi = c[0];
         for (int i = 1; i < 4; i++) {
             if (c[i] < lo) lo = c[i];
@@ -843,7 +858,6 @@ static int _binop_exact(SolveCtx *ctx, BinOp op, uint32_t r_id,
          * themselves (sv_wrap_signed); |a/b| <= |a|, |a%b| <= |a| otherwise.
          * Unsigned: exact while every value has an honest int64 spelling. */
         if (!sgn && (alo < 0 || blo < 0)) return 0;
-        (void)rmin;
         return 1;
     }
     case BIN_BAND: case BIN_BOR: case BIN_BXOR:
@@ -858,7 +872,7 @@ static int _binop_exact(SolveCtx *ctx, BinOp op, uint32_t r_id,
         return 1;
     }
     if (lo < rmin || hi > rmax) return 0;
-    *out_lo = lo; *out_hi = hi;
+    *out_lo = lo; *out_hi = hi; *has_range = 1;
     return 1;
 }
 
@@ -957,8 +971,8 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
 
     /* Arithmetic: only when the propagator computes the SV result exactly. */
     if (!_is_bool_op(binop->op)) {
-        __int128 elo, ehi;
-        if (!_binop_exact(ctx, binop->op, r_id, a_id, b_id, &elo, &ehi))
+        int64_t elo, ehi; int erng;
+        if (!_binop_exact(ctx, binop->op, r_id, a_id, b_id, &elo, &ehi, &erng))
             return 0;
     }
 
@@ -2034,12 +2048,12 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
             /* Integer propagators are exact only without wrap; give r the
              * exact result range when there is one (tighter nested ranges
              * keep the next operator up exact too). */
-            __int128 elo, ehi;
-            if (!_binop_exact(ctx, eb->op, r_id, a_id, b_id, &elo, &ehi))
+            int64_t elo, ehi; int erng;
+            if (!_binop_exact(ctx, eb->op, r_id, a_id, b_id, &elo, &ehi, &erng))
                 return EXPR_NULL;
-            if (elo <= ehi) {
-                if (ctx_tighten_lb64(ctx, r_id, (int64_t)elo) == PROP_CONFLICT ||
-                    ctx_tighten_ub64(ctx, r_id, (int64_t)ehi) == PROP_CONFLICT)
+            if (erng) {
+                if (ctx_tighten_lb64(ctx, r_id, elo) == PROP_CONFLICT ||
+                    ctx_tighten_ub64(ctx, r_id, ehi) == PROP_CONFLICT)
                     return EXPR_NULL;
             }
         }
@@ -2700,9 +2714,9 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                         }
                     }
                     if (has_var_var) {
-                        __int128 elo, ehi;
+                        int64_t elo, ehi; int erng;
                         if (!_binop_exact(ctx, binop->op, r_id, a_id, b_id,
-                                          &elo, &ehi))
+                                          &elo, &ehi, &erng))
                             has_var_var = 0;   /* not exact: generic path */
                     }
                     if (has_var_var) {

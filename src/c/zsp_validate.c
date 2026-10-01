@@ -18,6 +18,7 @@
 #include "zsp_ctx.h"
 #include "zsp_problem.h"
 #include "zsp_sv.h"
+#include "zsp_i128.h"
 
 /* Walk an expression tree and check whether it references any aux var
  * whose current domain is wider than a singleton. Such a constraint may
@@ -89,8 +90,9 @@ static int _has_loose_aux(const SolveCtx *ctx, const SolveProblem *sp,
 
 /* Values are held in the widest integer the compiler offers: 128 bits where
  * available (so a 65..128-bit SMT-LIB constant or context still evaluates),
- * else 64. A type wider than that is SKIPPED. */
-#if defined(__SIZEOF_INT128__)
+ * else 64 (MSVC, or -DZSP_NO_INT128; see zsp_i128.h). A type wider than that
+ * is SKIPPED -- never misreported. */
+#if defined(ZSP_HAVE_INT128)
 typedef __int128          VI;
 typedef unsigned __int128 VU;
 #define V_MAXW 128

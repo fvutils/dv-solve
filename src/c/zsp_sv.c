@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "zsp_sv.h"
+#include "zsp_i128.h"
 
 #define SV_POOL_HDR   ((uint32_t)sizeof(zsp_pool_t))
 #define SV_MAX_W      255u      /* node formats hold widths in a uint8_t */
@@ -638,15 +639,18 @@ static ExprRef _cmp(SvE *E, BinOp op, ExprRef l0, ExprRef r0, ExprRef reuse) {
             SvTy vt = _type(E, var_left ? l : r);
             ExprConst c = *(ExprConst *)_P(E, var_left ? r : l);
             if (vt.w <= 64) {
-                __int128 cv = c.is_signed ? (__int128)c.value
-                                          : (__int128)(uint64_t)c.value;
-                __int128 vmin, vmax;
+                zsp_i128 cv = c.is_signed ? zsp_i128_from_i64(c.value)
+                                          : zsp_i128_from_u64((uint64_t)c.value);
+                zsp_i128 vmin, vmax;
                 if (vt.s) {
-                    vmin = -((__int128)1 << (vt.w - 1));
-                    vmax = ((__int128)1 << (vt.w - 1)) - 1;
+                    vmin = zsp_i128_from_i64(vt.w >= 64 ? INT64_MIN
+                                             : -((int64_t)1 << (vt.w - 1)));
+                    vmax = zsp_i128_from_i64(vt.w >= 64 ? INT64_MAX
+                                             : ((int64_t)1 << (vt.w - 1)) - 1);
                 } else {
-                    vmin = 0;
-                    vmax = ((__int128)1 << vt.w) - 1;
+                    vmin = zsp_i128_from_i64(0);
+                    vmax = zsp_i128_from_u64(vt.w >= 64 ? UINT64_MAX
+                                             : ((uint64_t)1 << vt.w) - 1);
                 }
                 BinOp vop = op;      /* as `var vop const` */
                 if (!var_left) {
@@ -658,14 +662,18 @@ static ExprRef _cmp(SvE *E, BinOp op, ExprRef l0, ExprRef r0, ExprRef reuse) {
                     default: break;
                     }
                 }
+                int below = zsp_i128_lt(cv, vmin);      /* cv <  vmin */
+                int above = zsp_i128_lt(vmax, cv);      /* cv >  vmax */
+                int at_lo = zsp_i128_le(cv, vmin);      /* cv <= vmin */
+                int at_hi = zsp_i128_le(vmax, cv);      /* cv >= vmax */
                 int t = -1;
                 switch (vop) {
-                case BIN_EQ:  if (cv < vmin || cv > vmax) t = 0; break;
-                case BIN_NEQ: if (cv < vmin || cv > vmax) t = 1; break;
-                case BIN_LT:  t = (cv <= vmin) ? 0 : (cv >  vmax ? 1 : -1); break;
-                case BIN_LTE: t = (cv <  vmin) ? 0 : (cv >= vmax ? 1 : -1); break;
-                case BIN_GT:  t = (cv >= vmax) ? 0 : (cv <  vmin ? 1 : -1); break;
-                case BIN_GTE: t = (cv >  vmax) ? 0 : (cv <= vmin ? 1 : -1); break;
+                case BIN_EQ:  if (below || above) t = 0; break;
+                case BIN_NEQ: if (below || above) t = 1; break;
+                case BIN_LT:  t = at_lo ? 0 : (above ? 1 : -1); break;
+                case BIN_LTE: t = below ? 0 : (at_hi ? 1 : -1); break;
+                case BIN_GT:  t = at_hi ? 0 : (below ? 1 : -1); break;
+                case BIN_GTE: t = above ? 0 : (at_lo ? 1 : -1); break;
                 default: break;
                 }
                 if (t >= 0) return _mk_const(E, t, 0, 1);

@@ -95,6 +95,13 @@ endif()
 # The CLI (dv-solve-smt2) and the C unit-test executables are developer tools,
 # not part of any wheel. They also pull in POSIX-only APIs (setenv) and internal
 # data symbols that aren't exported from the DLLs, so skip them on MSVC.
+# Force the portable (no __int128, no GCC overflow builtins) arithmetic path of
+# src/c/zsp_i128.h -- what MSVC builds use -- so it can be tested on Linux.
+option(ZSP_NO_INT128 "Use the portable 64-bit code instead of __int128" OFF)
+if(ZSP_NO_INT128)
+    add_compile_definitions(ZSP_NO_INT128=1)
+endif()
+
 option(DV_SOLVE_BUILD_TOOLS "Build the dv-solve CLI and C test executables" ON)
 if(MSVC)
     set(DV_SOLVE_BUILD_TOOLS OFF)
