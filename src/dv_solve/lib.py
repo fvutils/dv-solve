@@ -163,6 +163,8 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.solver_checkpoint.argtypes = [c.c_void_p]
     lib.solver_restore.restype  = None
     lib.solver_restore.argtypes = [c.c_void_p, c.c_uint32]
+    lib.solver_pin_var.restype  = c.c_int
+    lib.solver_pin_var.argtypes = [c.c_void_p, c.c_uint32, c.c_int64]
 
     lib.solver_propagate_only.restype  = c.c_int
     lib.solver_propagate_only.argtypes = [c.c_void_p]

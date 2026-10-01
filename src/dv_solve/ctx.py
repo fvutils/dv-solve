@@ -270,6 +270,17 @@ class SolveCtx:
             sp_ptr = ctypes.cast(aux_problem, ctypes.c_void_p).value
         return self._lib.solver_add_constraint(self._ctx, sp_ptr)
 
+    def pin(self, var_id: int, value: int) -> bool:
+        """Fix *var_id* to *value* for the next solve, and propagate.
+
+        Returns False if the pin conflicts with what is already known (the
+        value is outside the variable's current domain, or propagation fails).
+        A pin lasts until :meth:`restore` to a checkpoint taken before it, or
+        :meth:`reset`; :meth:`solve` does not clear it. The incremental
+        pattern: ``cp = checkpoint(); pin(...); solve(); ...; restore(cp)``.
+        """
+        return self._lib.solver_pin_var(self._ctx, var_id, value) == 0
+
     def checkpoint(self) -> int:
         """Save solver state; returns checkpoint index."""
         return self._lib.solver_checkpoint(self._ctx)
