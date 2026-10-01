@@ -28,7 +28,7 @@ static RunResult run_test(int n, int canvas, int halo,
 
     size_t sp_sz = 131072;
     void *sp_buf = calloc(1, sp_sz);
-    SolveProblem *sp = solve_problem_init(sp_buf, sp_sz);
+    dvs_problem_t *sp = solve_problem_init(sp_buf, sp_sz);
     if (!sp) { free(sp_buf); return rr; }
 
     for (int i = 0; i < n; i++) {
@@ -46,8 +46,8 @@ static RunResult run_test(int n, int canvas, int halo,
     size_t ctx_sz = 1 << 23;
     void *ctx_buf = calloc(1, ctx_sz);
     dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
-    SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
-    if (solver_compile(ctx, sp) != 0) { rr.result = -2; goto done; }
+    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, ctx_sz, ba);
+    if (dvs_solver_compile(ctx, sp) != 0) { rr.result = -2; goto done; }
 
     RectSpec rects[128];
     for (int i = 0; i < n; i++) {
@@ -60,16 +60,16 @@ static RunResult run_test(int n, int canvas, int halo,
     }
     prop_add_no_overlap_2d(ctx, (uint32_t)n, rects, 2);
 
-    if (use_lcg) solver_enable_lcg(ctx);
+    if (use_lcg) dvs_solver_enable_lcg(ctx);
 
-    SolveOpts sopts = {0};
+    dvs_solve_opts_t sopts = {0};
     sopts.seed = 42;
     sopts.max_conflicts = 200;
     sopts.max_restarts = max_restarts;
     sopts.max_shave_iters = 0;
 
     double t0 = now_sec();
-    rr.result = solver_solve(ctx, &sopts);
+    rr.result = dvs_solver_solve(ctx, &sopts);
     double t1 = now_sec();
     rr.conflicts = ctx->conflict_count;
     rr.time_ms = (t1 - t0) * 1000.0;
@@ -77,7 +77,7 @@ static RunResult run_test(int n, int canvas, int halo,
     if (ctx->lcg_ctx) {
         LCGCtx *lcg = (LCGCtx *)ctx->lcg_ctx;
         rr.clauses = lcg->n_learnt;
-        solver_disable_lcg(ctx);
+        dvs_solver_disable_lcg(ctx);
     }
 
 done:

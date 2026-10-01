@@ -101,16 +101,16 @@ typedef struct {
 /**
  * Analyze why a problem is unsatisfiable.
  *
- * Call after solver_solve() returns SOLVE_UNSAT or SOLVE_TIMEOUT.
- * The SolveProblem sp must still be available (not reset/freed).
+ * Call after dvs_solver_solve() returns DVS_SOLVE_UNSAT or DVS_SOLVE_TIMEOUT.
+ * The dvs_problem_t sp must still be available (not reset/freed).
  *
  * @param ctx    Solver context (post-solve state).
- * @param sp     The original SolveProblem.
+ * @param sp     The original dvs_problem_t.
  * @param opts   Analysis options (NULL for defaults).
  * @param result Output (caller frees via contra_result_free).
  * @return 0 on success, -1 on error.
  */
-int contra_analyze_unsat(SolveCtx *ctx, SolveProblem *sp,
+int contra_analyze_unsat(dvs_ctx_t *ctx, dvs_problem_t *sp,
                           const ContraOpts *opts, ContraResult *result);
 
 /** Free result memory allocated by contra_analyze_unsat(). */
@@ -122,26 +122,26 @@ void contra_result_free(ContraResult *result);
  * Faster than full analysis but core may be larger than minimal.
  *
  * @param ctx     Solver context.
- * @param sp      The original SolveProblem.
+ * @param sp      The original dvs_problem_t.
  * @param out_ids Caller-allocated array to receive constraint IDs.
  * @param out_n   On input: capacity of out_ids. On output: number filled.
  * @return 0 on success, -1 on error.
  */
-int contra_quick_core(SolveCtx *ctx, SolveProblem *sp,
+int contra_quick_core(dvs_ctx_t *ctx, dvs_problem_t *sp,
                        uint32_t *out_ids, uint32_t *out_n);
 
 /**
  * Explain why soft constraints were relaxed.
  *
- * Call after solver_solve() returns SOLVE_OK with relaxed softs.
+ * Call after dvs_solver_solve() returns DVS_SOLVE_OK with relaxed softs.
  *
  * @param ctx    Solver context (post-solve state).
- * @param sp     The original SolveProblem.
+ * @param sp     The original dvs_problem_t.
  * @param opts   Analysis options (NULL for defaults).
  * @param result Output (caller frees via contra_soft_diag_free).
  * @return 0 on success, -1 on error.
  */
-int contra_explain_soft(SolveCtx *ctx, SolveProblem *sp,
+int contra_explain_soft(dvs_ctx_t *ctx, dvs_problem_t *sp,
                          const ContraOpts *opts,
                          ContraSoftDiagResult *result);
 
@@ -152,14 +152,14 @@ void contra_soft_diag_free(ContraSoftDiagResult *result);
  * Compute relaxation suggestions for MUS constraints.
  *
  * @param ctx      Solver context.
- * @param sp       The original SolveProblem.
+ * @param sp       The original dvs_problem_t.
  * @param mus_ids  Constraint IDs in the MUS.
  * @param mus_size Number of MUS constraints.
  * @param opts     Analysis options (NULL for defaults).
  * @param out      Output array (caller-allocated, size >= mus_size).
  * @return 0 on success, -1 on error.
  */
-int contra_compute_relaxations(SolveCtx *ctx, SolveProblem *sp,
+int contra_compute_relaxations(dvs_ctx_t *ctx, dvs_problem_t *sp,
                                 const uint32_t *mus_ids, uint32_t mus_size,
                                 const ContraOpts *opts,
                                 ContraRelaxSuggestion *out);

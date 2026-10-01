@@ -59,10 +59,10 @@ def _setup_lib(lib):
         ("expr_const", c.c_uint32, [c.c_void_p, c.c_int64, c.c_uint8]),
         ("expr_var", c.c_uint32, [c.c_void_p, c.c_uint32]),
         ("expr_binary", c.c_uint32, [c.c_void_p, c.c_int32, c.c_uint32, c.c_uint32]),
-        ("solver_create", c.c_void_p, [c.c_void_p, c.c_size_t, c.c_void_p]),
-        ("solver_compile", c.c_int, [c.c_void_p, c.c_void_p]),
-        ("solver_solve", c.c_int, [c.c_void_p, c.c_void_p]),
-        ("solver_get_value", c.c_int64, [c.c_void_p, c.c_uint32]),
+        ("dvs_solver_create", c.c_void_p, [c.c_void_p, c.c_size_t, c.c_void_p]),
+        ("dvs_solver_compile", c.c_int, [c.c_void_p, c.c_void_p]),
+        ("dvs_solver_solve", c.c_int, [c.c_void_p, c.c_void_p]),
+        ("dvs_solver_get_value", c.c_int64, [c.c_void_p, c.c_uint32]),
     ]:
         getattr(lib, fn).restype = rt
         getattr(lib, fn).argtypes = at
@@ -124,8 +124,8 @@ class TestT1PadConfig:
         # Compile
         ba = lib.dvs_block_alloc_create(None, _CTX_BUF_SIZE)
         ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-        ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-        rc = lib.solver_compile(ctx, sp)
+        ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+        rc = lib.dvs_solver_compile(ctx, sp)
         t1 = time.perf_counter()
         elab_us = (t1 - t0) * 1e6
 
@@ -136,13 +136,13 @@ class TestT1PadConfig:
         # Solve
         t2 = time.perf_counter()
         opts = _SolveOpts(seed=seed)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         t3 = time.perf_counter()
         solve_us = (t3 - t2) * 1e6
 
         values = None
         if result == SOLVE_OK:
-            values = [lib.solver_get_value(ctx, i) for i in range(6)]
+            values = [lib.dvs_solver_get_value(ctx, i) for i in range(6)]
 
         lib.dvs_block_alloc_destroy(ba)
         return elab_us, solve_us, values, result
@@ -332,12 +332,12 @@ class TestT3ThermalChain:
 
             ba = lib.dvs_block_alloc_create(None, _CTX_BUF_SIZE)
             ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-            ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-            lib.solver_compile(ctx, sp)
+            ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+            lib.dvs_solver_compile(ctx, sp)
 
             ts = time.perf_counter()
             opts = _SolveOpts(seed=42)
-            result = lib.solver_solve(ctx, ctypes.byref(opts))
+            result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
             te = time.perf_counter()
             assert result == SOLVE_OK
             solve_times.append((te - ts) * 1e6)

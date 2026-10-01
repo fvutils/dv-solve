@@ -24,8 +24,8 @@
  *   - Each operand is first extended to the context width by ITS OWN
  *     signedness, the operation is done at the context width (2's complement
  *     wrap), and the result is read per the context signedness.
- *   - / and % truncate toward zero when signed. >> (BIN_RSHIFT) is a LOGICAL
- *     shift of the context-width bit pattern; >>> (BIN_ASHR) is an
+ *   - / and % truncate toward zero when signed. >> (DVS_BIN_RSHIFT) is a LOGICAL
+ *     shift of the context-width bit pattern; >>> (DVS_BIN_ASHR) is an
  *     ARITHMETIC shift of it in a signed context and the same as >> in an
  *     unsigned one. A shift amount is the unsigned value of its own pattern.
  *
@@ -74,11 +74,11 @@ typedef int (*dvs_sv_var_type_fn)(void *ud, uint32_t var_id,
  * Returns `sp` itself when nothing needed rewriting (or `sp` is already flagged
  * DVS_PROBLEM_F_EXPLICIT), else a malloc'd copy -- the original pool plus the
  * new nodes, with the roots replaced -- that the caller releases with
- * dvs_sv_release(). Every ExprRef of `sp` is valid in the copy.
+ * dvs_sv_release(). Every dvs_expr_t of `sp` is valid in the copy.
  *
  * On failure (out of memory, a width the node formats cannot hold, a variable
  * of unknown type) returns `sp` unchanged and sets *err non-zero. */
-SolveProblem *dvs_sv_elaborate(SolveProblem *sp, dvs_sv_var_type_fn fn,
+dvs_problem_t *dvs_sv_elaborate(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
                                void *ud, int *err);
 
 /** Incremental use of a private copy from dvs_sv_elaborate(): first sync into
@@ -86,12 +86,12 @@ SolveProblem *dvs_sv_elaborate(SolveProblem *sp, dvs_sv_var_type_fn fn,
  * taken (`*synced_used`, initially orig->pool.used at copy time, tracks that),
  * then elaborate the Boolean `root` of `orig` into the copy. `*elab` may move.
  * Returns 0 and the elaborated root, or -1. */
-int dvs_sv_elaborate_more(SolveProblem **elab, const SolveProblem *orig,
-                          uint32_t *synced_used, ExprRef root,
-                          ExprRef *out_root);
+int dvs_sv_elaborate_more(dvs_problem_t **elab, const dvs_problem_t *orig,
+                          uint32_t *synced_used, dvs_expr_t root,
+                          dvs_expr_t *out_root);
 
 /** Release a problem returned by dvs_sv_elaborate (no-op when it is `orig`). */
-void dvs_sv_release(SolveProblem *orig, SolveProblem *elab);
+void dvs_sv_release(dvs_problem_t *orig, dvs_problem_t *elab);
 
 #ifdef __cplusplus
 }

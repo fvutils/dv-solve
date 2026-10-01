@@ -5,7 +5,7 @@ single-variable equality disjunction to the interval hull [min, max], but the
 GAPS survive, and the search then enumerates them blind. Measured on five 8-bit
 variables each pinned to {0x10,0x20,0x30,0x40,0x50}: >10 s and `unknown`, while
 the same five over a contiguous {0x10..0x14} solve in 2 ms -- the gaps were the
-entire cost (t_constraint_unpacked_array). solver_compile() now punches the
+entire cost (t_constraint_unpacked_array). dvs_solver_compile() now punches the
 gaps out as holes, once, at level 0.
 
 WHY THIS FILE EXISTS SEPARATELY FROM test_disj_hull.py

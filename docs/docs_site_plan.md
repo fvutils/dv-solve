@@ -85,7 +85,7 @@ guides/
   verilator                external-solver setup, --mode=verilator, what it changes,
                            known gaps
   yosys-sby                smtbmc backend (from sby_integration.md)
-  systemverilog-dpi        zsp_dpi_pkg / zsp_randomizer_pkg flow (from dpi_integration.md)
+  systemverilog-dpi        dvs_dpi_pkg / dvs_randomizer_pkg flow (from dpi_integration.md)
   zuspec                   entry-point integration
   packaging                get_libdirs / get_incdirs / get_svdirs / get_dpi_lib /
                            resolve_report, for tools that link or load dv-solve
@@ -179,10 +179,20 @@ benchmark plan's P0 did.
 
 1. **`zsp_` → `dvs_` rename happens before D4.** D0–D3 don't expose C/SV
    symbol names, so they proceed now; the C/SV reference waits for the rename
-   so we never publish names that are about to change.
+   so we never publish names that are about to change. *Done 2026-10-01:*
+   internals, files, CMake options and SV packages are `dvs_`; the public
+   API is namespaced too (`dvs_builder_*`, `dvs_solver_*`, `dvs_ctx_t`,
+   `dvs_expr_t`, `DVS_BIN_*`, `DVS_SOLVE_*`). The override variable is
+   `DVS_SOLVER_PATH`, with `ZSP_SOLVER_PATH` still honoured.
 2. **Public C API = one umbrella header**, `dv_solve/dv_solve.h`, declaring
    exactly the documented surface (builder + solver runtime). Other headers
-   keep installing for now but are internal.
+   keep installing for now but are internal. *Done 2026-10-01:* the header
+   mirrors the public Python surface; `soft_active` is left out (its index
+   runs in reverse add order), as are `add_source`, `expr_array_select`,
+   `solve_n` and the fixed-buffer `solve_problem_*` / `expr_*` API.
+   `tests/c/test_public_api.c` exercises it through that header alone.
+   Follow-up: the library still exports every internal symbol; building
+   with `-fvisibility=hidden` needs the ctypes tests moved off internals.
 3. **Environment variables: expose as few as possible.** Most `DV_*`
    variables are internal diagnostics and stay undocumented. The reference
    page lists only variables a user needs to control behaviour, starting from

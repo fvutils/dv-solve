@@ -16,7 +16,7 @@
 static void test_lns(int n, int canvas, int n_nets, double time_lim) {
     size_t sp_sz = 65536;
     void *sp_buf = calloc(1, sp_sz);
-    SolveProblem *sp = solve_problem_init(sp_buf, sp_sz);
+    dvs_problem_t *sp = solve_problem_init(sp_buf, sp_sz);
 
     int widths[256], heights[256];
     srand(42);
@@ -33,8 +33,8 @@ static void test_lns(int n, int canvas, int n_nets, double time_lim) {
     size_t ctx_sz = 1 << 24;
     void *ctx_buf = calloc(1, ctx_sz);
     dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
-    SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
-    solver_compile(ctx, sp);
+    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, ctx_sz, ba);
+    dvs_solver_compile(ctx, sp);
 
     /* Add NoOverlap2D */
     RectSpec rects[256];
@@ -120,7 +120,7 @@ static void test_lns(int n, int canvas, int n_nets, double time_lim) {
     lopts.subproblem_conflicts = 500;
     lopts.seed = 42;
 
-    int rc = solver_lns_optimize(ctx, &hctx, &lopts, positions, &lr);
+    int rc = dvs_solver_lns_optimize(ctx, &hctx, &lopts, positions, &lr);
 
     if (rc == 0) {
         printf("N=%-3d canvas=%-4d nets=%-4d | greedy=%ld  best=%ld  impr=%.1f%%"

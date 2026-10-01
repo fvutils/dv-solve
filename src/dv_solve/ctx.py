@@ -17,7 +17,7 @@ from typing import Optional
 from .lib import _load_lib, _library_not_found_error
 
 # ------------------------------------------------------------------ #
-# SolveResult constants (must match dvs_search.h)                     #
+# dvs_result_t constants (must match dv_solve.h)                      #
 # ------------------------------------------------------------------ #
 SOLVE_OK      = 0
 SOLVE_UNSAT   = 1
@@ -29,7 +29,7 @@ _CTX_BUF_SIZE = 1 << 20  # 1 MiB — headroom for propagators + decisions
 
 # ------------------------------------------------------------------ #
 # SolveOpts ctypes struct                                              #
-# Layout (must match dvs_search.h exactly):                            #
+# Layout (must match dvs_solve_opts_t in dv_solve.h):                         #
 #   seed(uint64=8) + max_conflicts(uint32=4) + max_restarts(uint32=4)  #
 #   + use_phase_save(uint8=1) + _pad[3] + max_shave_iters(uint32=4)   #
 #   → total 24 bytes                                                   #
@@ -47,7 +47,7 @@ class _SolveOpts(ctypes.Structure):
     ]
 
 
-# Mirrors DVS_COMPILE_UNSUPPORTED_WIDTH in dvs_ctx.h.
+# Mirrors DVS_COMPILE_UNSUPPORTED_WIDTH in dv_solve.h.
 _COMPILE_UNSUPPORTED_WIDTH = -3
 
 
@@ -104,7 +104,7 @@ class SolveCtx:
         self._lib = lib
 
         # Keep the SolveProblem buffer alive for the lifetime of this context.
-        # solver_compile does not fully copy it, so the compiled context (and
+        # dvs_solver_compile does not fully copy it, so the compiled context (and
         # any later reset()+solve()) reads from this buffer. A cached/reused ctx
         # outlives the call that built it, so without this reference the buffer
         # would be collected and the ctx would read freed memory.
@@ -117,11 +117,11 @@ class SolveCtx:
 
         # Context lives inside a caller-managed buffer.
         self._ctx_buf = (ctypes.c_uint8 * ctx_buf_size)()
-        ctx = lib.solver_create(self._ctx_buf, ctx_buf_size, self._ba)
+        ctx = lib.dvs_solver_create(self._ctx_buf, ctx_buf_size, self._ba)
         if ctx is None:
             lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
-            raise RuntimeError("solver_create failed")
+            raise RuntimeError("dvs_solver_create failed")
         self._ctx = ctx  # c_void_p value
 
         # Compile constraints from the problem into this context.
@@ -130,7 +130,7 @@ class SolveCtx:
         if sp_ptr is None:
             # Raw ctypes buffer -- cast to void pointer
             sp_ptr = ctypes.cast(problem, ctypes.c_void_p).value
-        rc = lib.solver_compile(self._ctx, sp_ptr)
+        rc = lib.dvs_solver_compile(self._ctx, sp_ptr)
         # On every error path below, NULL out self._ba after releasing it: the
         # half-constructed SolveCtx still exists (the exception unwinds out of
         # __init__) and will be garbage-collected, at which point __del__ ->
@@ -150,7 +150,7 @@ class SolveCtx:
         if rc < 0:
             lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
-            raise RuntimeError(f"solver_compile failed (rc={rc})")
+            raise RuntimeError(f"dvs_solver_compile failed (rc={rc})")
         if rc > 0:
             lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
@@ -226,11 +226,11 @@ class SolveCtx:
             fair_pick=1 if fair_pick else 0,
             max_shave_iters=max_shave_iters,
         )
-        return self._lib.solver_solve(self._ctx, ctypes.byref(opts))
+        return self._lib.dvs_solver_solve(self._ctx, ctypes.byref(opts))
 
     def reset(self) -> None:
         """Clear the previous solution so :meth:`solve` can run again."""
-        self._lib.solver_reset(self._ctx)
+        self._lib.dvs_solver_reset(self._ctx)
 
     def solve_n(
         self,
@@ -250,7 +250,7 @@ class SolveCtx:
         the SolveProblem and SolveCtx on each iteration.
         """
         out = (ctypes.c_int64 * (n * n_vars))()
-        n_ok = self._lib.solver_solve_n(
+        n_ok = self._lib.dvs_solver_solve_n(
             self._ctx, n, n_vars, var_ids, out,
             base_seed, max_shave_iters,
         )
@@ -268,7 +268,7 @@ class SolveCtx:
         sp_ptr = getattr(aux_problem, "_sp", None)
         if sp_ptr is None:
             sp_ptr = ctypes.cast(aux_problem, ctypes.c_void_p).value
-        return self._lib.solver_add_constraint(self._ctx, sp_ptr)
+        return self._lib.dvs_solver_add_constraint(self._ctx, sp_ptr)
 
     def pin(self, var_id: int, value: int) -> bool:
         """Fix *var_id* to *value* for the next solve, and propagate.
@@ -279,15 +279,15 @@ class SolveCtx:
         :meth:`reset`; :meth:`solve` does not clear it. The incremental
         pattern: ``cp = checkpoint(); pin(...); solve(); ...; restore(cp)``.
         """
-        return self._lib.solver_pin_var(self._ctx, var_id, value) == 0
+        return self._lib.dvs_solver_pin_var(self._ctx, var_id, value) == 0
 
     def checkpoint(self) -> int:
         """Save solver state; returns checkpoint index."""
-        return self._lib.solver_checkpoint(self._ctx)
+        return self._lib.dvs_solver_checkpoint(self._ctx)
 
     def restore(self, cp: int) -> None:
         """Restore solver state to checkpoint *cp*."""
-        self._lib.solver_restore(self._ctx, ctypes.c_uint32(cp))
+        self._lib.dvs_solver_restore(self._ctx, ctypes.c_uint32(cp))
 
     def propagate_only(self) -> int:
         """Run propagation to fixpoint without search.
@@ -295,7 +295,7 @@ class SolveCtx:
         Returns PROP_OK (0) on fixpoint, PROP_CONFLICT (1) if UNSAT.
         Useful for fast feasibility checks without full solve.
         """
-        return self._lib.solver_propagate_only(self._ctx)
+        return self._lib.dvs_solver_propagate_only(self._ctx)
 
     def check_unsat(self) -> bool:
         """Return True iff the current constraint set has no satisfying assignment.
@@ -311,13 +311,13 @@ class SolveCtx:
         region without any CDCL overhead for the common (propagation-decisive)
         case.
         """
-        result = self._lib.solver_propagate_only(self._ctx)
+        result = self._lib.dvs_solver_propagate_only(self._ctx)
         if result == 1:   # PROP_CONFLICT
             return True
         if result == 0:   # PROP_OK / all domains fixed → check if SAT
-            return self._lib.solver_solve(self._ctx, ctypes.byref(_SolveOpts())) == SOLVE_UNSAT
+            return self._lib.dvs_solver_solve(self._ctx, ctypes.byref(_SolveOpts())) == SOLVE_UNSAT
         # Unexpected return code — fall back to solve()
-        return self._lib.solver_solve(self._ctx, ctypes.byref(_SolveOpts())) == SOLVE_UNSAT
+        return self._lib.dvs_solver_solve(self._ctx, ctypes.byref(_SolveOpts())) == SOLVE_UNSAT
 
     def optimize(
         self,
@@ -339,7 +339,7 @@ class SolveCtx:
         """
         # Quick feasibility check first.
         cp = self.checkpoint()
-        test_result = self._lib.solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
+        test_result = self._lib.dvs_solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
         self.restore(cp)
         if test_result == SOLVE_UNSAT:
             return None
@@ -362,7 +362,7 @@ class SolveCtx:
                     self.restore(cp2)
                     lo_cur = mid + 1
                 else:
-                    r = self._lib.solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
+                    r = self._lib.dvs_solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
                     if r == SOLVE_OK:
                         best = self.get_value(obj_var)
                         self.restore(cp2)
@@ -388,7 +388,7 @@ class SolveCtx:
                     self.restore(cp2)
                     hi_cur = mid - 1
                 else:
-                    r = self._lib.solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
+                    r = self._lib.dvs_solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
                     if r == SOLVE_OK:
                         best = self.get_value(obj_var)
                         self.restore(cp2)
@@ -405,7 +405,7 @@ class SolveCtx:
         # No ctypes.c_uint32(var_id) here: argtypes already declares c_uint32, so
         # ctypes converts a plain Python int itself. Constructing the wrapper was
         # ~18% of the cost of this call, which runs once per field per solve.
-        return self._lib.solver_get_value(self._ctx, var_id)
+        return self._lib.dvs_solver_get_value(self._ctx, var_id)
 
     def get_values(self, ids_arr, out_arr, n: int) -> None:
         """Bulk readback: write the solved values of ``ids_arr[0:n]`` into
@@ -421,7 +421,7 @@ class SolveCtx:
         only for variables that fit in an int64 — a >64-bit variable must use the
         wide reader instead.
         """
-        self._lib.solver_get_values(self._ctx, n, ids_arr, out_arr)
+        self._lib.dvs_solver_get_values(self._ctx, n, ids_arr, out_arr)
 
     def validate_model(self) -> int:
         """Re-evaluate every constraint in the problem against the current
@@ -444,4 +444,4 @@ class SolveCtx:
         sp_ptr = getattr(self._problem, "_sp", None)
         if sp_ptr is None:
             sp_ptr = ctypes.cast(self._problem, ctypes.c_void_p).value
-        return self._lib.solver_validate_model(self._ctx, sp_ptr, None)
+        return self._lib.dvs_solver_validate_model(self._ctx, sp_ptr, None)

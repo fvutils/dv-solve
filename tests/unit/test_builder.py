@@ -69,75 +69,75 @@ class SolveOpts(ctypes.Structure):
 def _setup(lib: ctypes.CDLL):
     """Wire argtypes/restype for builder + solver functions."""
     # Builder lifecycle
-    lib.builder_create.restype  = ctypes.c_void_p
-    lib.builder_create.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    lib.dvs_builder_create.restype  = ctypes.c_void_p
+    lib.dvs_builder_create.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
 
-    lib.builder_reset.restype  = None
-    lib.builder_reset.argtypes = [ctypes.c_void_p]
+    lib.dvs_builder_reset.restype  = None
+    lib.dvs_builder_reset.argtypes = [ctypes.c_void_p]
 
-    lib.builder_destroy.restype  = None
-    lib.builder_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_builder_destroy.restype  = None
+    lib.dvs_builder_destroy.argtypes = [ctypes.c_void_p]
 
-    lib.builder_virtual_used.restype  = ctypes.c_uint32
-    lib.builder_virtual_used.argtypes = [ctypes.c_void_p]
+    lib.dvs_builder_virtual_used.restype  = ctypes.c_uint32
+    lib.dvs_builder_virtual_used.argtypes = [ctypes.c_void_p]
 
     # Builder finalize
-    lib.builder_finalize.restype  = ctypes.c_void_p
-    lib.builder_finalize.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t)]
+    lib.dvs_builder_finalize.restype  = ctypes.c_void_p
+    lib.dvs_builder_finalize.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t)]
 
-    lib.builder_free_problem.restype  = None
-    lib.builder_free_problem.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_builder_free_problem.restype  = None
+    lib.dvs_builder_free_problem.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
 
     # Builder allocation
-    lib.builder_alloc.restype  = ctypes.c_uint32
-    lib.builder_alloc.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]
+    lib.dvs_builder_alloc.restype  = ctypes.c_uint32
+    lib.dvs_builder_alloc.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]
 
     # Builder expression builders
-    lib.builder_expr_const.restype  = ctypes.c_uint32
-    lib.builder_expr_const.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_uint8]
+    lib.dvs_builder_expr_const.restype  = ctypes.c_uint32
+    lib.dvs_builder_expr_const.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_uint8]
 
-    lib.builder_expr_var.restype  = ctypes.c_uint32
-    lib.builder_expr_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_builder_expr_var.restype  = ctypes.c_uint32
+    lib.dvs_builder_expr_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.builder_expr_binary.restype  = ctypes.c_uint32
-    lib.builder_expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+    lib.dvs_builder_expr_binary.restype  = ctypes.c_uint32
+    lib.dvs_builder_expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                         ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.builder_expr_unary.restype  = ctypes.c_uint32
-    lib.builder_expr_unary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+    lib.dvs_builder_expr_unary.restype  = ctypes.c_uint32
+    lib.dvs_builder_expr_unary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                        ctypes.c_uint32]
 
-    lib.builder_expr_ite.restype  = ctypes.c_uint32
-    lib.builder_expr_ite.argtypes = [ctypes.c_void_p,
+    lib.dvs_builder_expr_ite.restype  = ctypes.c_uint32
+    lib.dvs_builder_expr_ite.argtypes = [ctypes.c_void_p,
                                      ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.builder_expr_in_range.restype  = ctypes.c_uint32
-    lib.builder_expr_in_range.argtypes = [ctypes.c_void_p,
+    lib.dvs_builder_expr_in_range.restype  = ctypes.c_uint32
+    lib.dvs_builder_expr_in_range.argtypes = [ctypes.c_void_p,
                                           ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.builder_expr_in_set.restype  = ctypes.c_uint32
-    lib.builder_expr_in_set.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+    lib.dvs_builder_expr_in_set.restype  = ctypes.c_uint32
+    lib.dvs_builder_expr_in_set.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                         ctypes.c_uint32, ctypes.c_void_p]
 
-    lib.builder_expr_extend.restype  = ctypes.c_uint32
-    lib.builder_expr_extend.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+    lib.dvs_builder_expr_extend.restype  = ctypes.c_uint32
+    lib.dvs_builder_expr_extend.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                         ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8]
 
-    lib.builder_expr_extract.restype  = ctypes.c_uint32
-    lib.builder_expr_extract.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+    lib.dvs_builder_expr_extract.restype  = ctypes.c_uint32
+    lib.dvs_builder_expr_extract.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                          ctypes.c_uint8, ctypes.c_uint8]
 
     # Builder problem builders
-    lib.builder_add_var.restype  = ctypes.c_uint32
-    lib.builder_add_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+    lib.dvs_builder_add_var.restype  = ctypes.c_uint32
+    lib.dvs_builder_add_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                     ctypes.c_uint8, ctypes.c_uint8,
                                     ctypes.c_int64, ctypes.c_int64]
 
-    lib.builder_add_constraint.restype  = ctypes.c_uint32
-    lib.builder_add_constraint.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_builder_add_constraint.restype  = ctypes.c_uint32
+    lib.dvs_builder_add_constraint.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.builder_add_source.restype  = ctypes.c_uint32
-    lib.builder_add_source.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
+    lib.dvs_builder_add_source.restype  = ctypes.c_uint32
+    lib.dvs_builder_add_source.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
 
     # Existing solver/problem API (for comparison and round-trip tests)
     lib.solve_problem_init.restype  = ctypes.c_void_p
@@ -166,19 +166,19 @@ def _setup(lib: ctypes.CDLL):
     lib.dvs_block_alloc_destroy.restype  = None
     lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 # ------------------------------------------------------------------ #
@@ -190,22 +190,22 @@ def _compile_and_solve(lib, sp_ptr, n_vars, seed=0x1234):
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
     ba = lib.dvs_block_alloc_create(None, 0)
     assert ba
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
 
-    rc = lib.solver_compile(ctx, sp_ptr)
-    assert rc == 0, f"solver_compile failed: {rc}"
+    rc = lib.dvs_solver_compile(ctx, sp_ptr)
+    assert rc == 0, f"dvs_solver_compile failed: {rc}"
 
     opts = SolveOpts(seed=seed, max_conflicts=0, max_restarts=0,
                      use_phase_save=0, max_shave_iters=0)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
-    assert result == SOLVE_OK, f"solver_solve returned {result}"
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
+    assert result == SOLVE_OK, f"dvs_solver_solve returned {result}"
 
     values = []
     for i in range(n_vars):
-        values.append(lib.solver_get_value(ctx, i))
+        values.append(lib.dvs_solver_get_value(ctx, i))
 
-    lib.solver_destroy(ctx)
+    lib.dvs_solver_destroy(ctx)
     lib.dvs_block_alloc_destroy(ba)
     return values
 
@@ -221,8 +221,8 @@ class TestBuilder:
         _setup(self.lib)
 
     def _builder(self, block_size=0):
-        b = self.lib.builder_create(block_size, None)
-        assert b, "builder_create returned NULL"
+        b = self.lib.dvs_builder_create(block_size, None)
+        assert b, "dvs_builder_create returned NULL"
         return b
 
     # -- basic build + finalize ------------------------------------ #
@@ -232,27 +232,27 @@ class TestBuilder:
         b = self._builder()
 
         # Variables: a=[0,255], b=[0,255]
-        self.lib.builder_add_var(b, 0, 8, 0, 0, 255)
-        self.lib.builder_add_var(b, 1, 8, 0, 0, 255)
+        self.lib.dvs_builder_add_var(b, 0, 8, 0, 0, 255)
+        self.lib.dvs_builder_add_var(b, 1, 8, 0, 0, 255)
 
         # Constraints: a <= b, a >= 3, b <= 50
-        v0 = self.lib.builder_expr_var(b, 0)
-        v1 = self.lib.builder_expr_var(b, 1)
-        le_expr = self.lib.builder_expr_binary(b, BIN_LTE, v0, v1)
-        self.lib.builder_add_constraint(b, le_expr)
+        v0 = self.lib.dvs_builder_expr_var(b, 0)
+        v1 = self.lib.dvs_builder_expr_var(b, 1)
+        le_expr = self.lib.dvs_builder_expr_binary(b, BIN_LTE, v0, v1)
+        self.lib.dvs_builder_add_constraint(b, le_expr)
 
-        c3 = self.lib.builder_expr_const(b, 3, 0)
-        ge_expr = self.lib.builder_expr_binary(b, BIN_GTE, v0, c3)
-        self.lib.builder_add_constraint(b, ge_expr)
+        c3 = self.lib.dvs_builder_expr_const(b, 3, 0)
+        ge_expr = self.lib.dvs_builder_expr_binary(b, BIN_GTE, v0, c3)
+        self.lib.dvs_builder_add_constraint(b, ge_expr)
 
-        c50 = self.lib.builder_expr_const(b, 50, 0)
-        le2_expr = self.lib.builder_expr_binary(b, BIN_LTE, v1, c50)
-        self.lib.builder_add_constraint(b, le2_expr)
+        c50 = self.lib.dvs_builder_expr_const(b, 50, 0)
+        le2_expr = self.lib.dvs_builder_expr_binary(b, BIN_LTE, v1, c50)
+        self.lib.dvs_builder_add_constraint(b, le2_expr)
 
         # Finalize
         size = ctypes.c_size_t(0)
-        sp = self.lib.builder_finalize(b, ctypes.byref(size))
-        assert sp, 'builder_finalize returned NULL'
+        sp = self.lib.dvs_builder_finalize(b, ctypes.byref(size))
+        assert sp, 'dvs_builder_finalize returned NULL'
         assert size.value > 0
 
         # Verify header
@@ -266,8 +266,8 @@ class TestBuilder:
         assert 3 <= values[0] <= 255
         assert 0 <= values[1] <= 50
 
-        self.lib.builder_free_problem(b, sp, size.value)
-        self.lib.builder_destroy(b)
+        self.lib.dvs_builder_free_problem(b, sp, size.value)
+        self.lib.dvs_builder_destroy(b)
 
 
     # -- multi-block ----------------------------------------------- #
@@ -279,18 +279,18 @@ class TestBuilder:
         # Build enough data to span 3+ blocks
         n_vars = 10
         for i in range(n_vars):
-            ref = self.lib.builder_add_var(b, i, 8, 0, 0, 100)
+            ref = self.lib.dvs_builder_add_var(b, i, 8, 0, 0, 100)
             assert ref != EXPR_NULL
 
         # Constraint: var[0] <= var[1] (var-op-var, supported by compiler)
-        v0 = self.lib.builder_expr_var(b, 0)
-        v1 = self.lib.builder_expr_var(b, 1)
-        le_expr = self.lib.builder_expr_binary(b, BIN_LTE, v0, v1)
-        self.lib.builder_add_constraint(b, le_expr)
+        v0 = self.lib.dvs_builder_expr_var(b, 0)
+        v1 = self.lib.dvs_builder_expr_var(b, 1)
+        le_expr = self.lib.dvs_builder_expr_binary(b, BIN_LTE, v0, v1)
+        self.lib.dvs_builder_add_constraint(b, le_expr)
 
         # Finalize + solve
         size = ctypes.c_size_t(0)
-        sp = self.lib.builder_finalize(b, ctypes.byref(size))
+        sp = self.lib.dvs_builder_finalize(b, ctypes.byref(size))
         assert sp
 
         head = SolveProblemHead.from_address(sp)
@@ -300,8 +300,8 @@ class TestBuilder:
         values = _compile_and_solve(self.lib, sp, n_vars)
         assert values[0] <= values[1]
 
-        self.lib.builder_free_problem(b, sp, size.value)
-        self.lib.builder_destroy(b)
+        self.lib.dvs_builder_free_problem(b, sp, size.value)
+        self.lib.dvs_builder_destroy(b)
 
 
     # -- alignment ------------------------------------------------- #
@@ -312,14 +312,14 @@ class TestBuilder:
         # Build via builder
         b = self._builder()
         b_refs = []
-        b_refs.append(self.lib.builder_add_var(b, 0, 8, 0, 0, 255))
-        b_refs.append(self.lib.builder_add_var(b, 1, 16, 0, 0, 65535))
-        b_refs.append(self.lib.builder_expr_var(b, 0))
-        b_refs.append(self.lib.builder_expr_var(b, 1))
-        b_refs.append(self.lib.builder_expr_binary(b, BIN_ADD, b_refs[2], b_refs[3]))
-        b_refs.append(self.lib.builder_expr_const(b, 42, 0))
-        b_refs.append(self.lib.builder_expr_binary(b, BIN_EQ, b_refs[4], b_refs[5]))
-        b_refs.append(self.lib.builder_add_constraint(b, b_refs[6]))
+        b_refs.append(self.lib.dvs_builder_add_var(b, 0, 8, 0, 0, 255))
+        b_refs.append(self.lib.dvs_builder_add_var(b, 1, 16, 0, 0, 65535))
+        b_refs.append(self.lib.dvs_builder_expr_var(b, 0))
+        b_refs.append(self.lib.dvs_builder_expr_var(b, 1))
+        b_refs.append(self.lib.dvs_builder_expr_binary(b, BIN_ADD, b_refs[2], b_refs[3]))
+        b_refs.append(self.lib.dvs_builder_expr_const(b, 42, 0))
+        b_refs.append(self.lib.dvs_builder_expr_binary(b, BIN_EQ, b_refs[4], b_refs[5]))
+        b_refs.append(self.lib.dvs_builder_add_constraint(b, b_refs[6]))
 
         # Build via fixed-buffer API
         sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -341,7 +341,7 @@ class TestBuilder:
                 f"ExprRef mismatch at step {i}: builder={br:#x}, fixed={fr:#x}"
             )
 
-        self.lib.builder_destroy(b)
+        self.lib.dvs_builder_destroy(b)
 
     # -- reset + reuse --------------------------------------------- #
 
@@ -350,22 +350,22 @@ class TestBuilder:
         b = self._builder()
 
         # First problem: 1 var
-        self.lib.builder_add_var(b, 0, 8, 0, 0, 100)
+        self.lib.dvs_builder_add_var(b, 0, 8, 0, 0, 100)
         size1 = ctypes.c_size_t(0)
-        sp1 = self.lib.builder_finalize(b, ctypes.byref(size1))
+        sp1 = self.lib.dvs_builder_finalize(b, ctypes.byref(size1))
         assert sp1
         head1 = SolveProblemHead.from_address(sp1)
         assert head1.n_vars == 1
 
         # Reset
-        self.lib.builder_reset(b)
+        self.lib.dvs_builder_reset(b)
 
         # Second problem: 3 vars
-        self.lib.builder_add_var(b, 0, 8, 0, 0, 50)
-        self.lib.builder_add_var(b, 1, 8, 0, 0, 50)
-        self.lib.builder_add_var(b, 2, 8, 0, 0, 50)
+        self.lib.dvs_builder_add_var(b, 0, 8, 0, 0, 50)
+        self.lib.dvs_builder_add_var(b, 1, 8, 0, 0, 50)
+        self.lib.dvs_builder_add_var(b, 2, 8, 0, 0, 50)
         size2 = ctypes.c_size_t(0)
-        sp2 = self.lib.builder_finalize(b, ctypes.byref(size2))
+        sp2 = self.lib.dvs_builder_finalize(b, ctypes.byref(size2))
         assert sp2
         head2 = SolveProblemHead.from_address(sp2)
         assert head2.n_vars == 3
@@ -378,9 +378,9 @@ class TestBuilder:
         for v in vals2:
             assert 0 <= v <= 50
 
-        self.lib.builder_free_problem(b, sp1, size1.value)
-        self.lib.builder_free_problem(b, sp2, size2.value)
-        self.lib.builder_destroy(b)
+        self.lib.dvs_builder_free_problem(b, sp1, size1.value)
+        self.lib.dvs_builder_free_problem(b, sp2, size2.value)
+        self.lib.dvs_builder_destroy(b)
 
     # -- large problem --------------------------------------------- #
 
@@ -392,19 +392,19 @@ class TestBuilder:
         n_constraints = 50
 
         for i in range(n_vars):
-            ref = self.lib.builder_add_var(b, i, 8, 0, 0, 200)
+            ref = self.lib.dvs_builder_add_var(b, i, 8, 0, 0, 200)
             assert ref != EXPR_NULL
 
         # Each constraint: var[i] <= var[i+1]
         for i in range(n_constraints):
-            vi = self.lib.builder_expr_var(b, i)
-            vj = self.lib.builder_expr_var(b, i + 1)
-            le = self.lib.builder_expr_binary(b, BIN_LTE, vi, vj)
-            ref = self.lib.builder_add_constraint(b, le)
+            vi = self.lib.dvs_builder_expr_var(b, i)
+            vj = self.lib.dvs_builder_expr_var(b, i + 1)
+            le = self.lib.dvs_builder_expr_binary(b, BIN_LTE, vi, vj)
+            ref = self.lib.dvs_builder_add_constraint(b, le)
             assert ref != EXPR_NULL
 
         size = ctypes.c_size_t(0)
-        sp = self.lib.builder_finalize(b, ctypes.byref(size))
+        sp = self.lib.dvs_builder_finalize(b, ctypes.byref(size))
         assert sp
 
         head = SolveProblemHead.from_address(sp)
@@ -418,8 +418,8 @@ class TestBuilder:
                 f"Constraint violated: var[{i}]={values[i]} > var[{i+1}]={values[i+1]}"
             )
 
-        self.lib.builder_free_problem(b, sp, size.value)
-        self.lib.builder_destroy(b)
+        self.lib.dvs_builder_free_problem(b, sp, size.value)
+        self.lib.dvs_builder_destroy(b)
 
     # -- large problem multi-block --------------------------------- #
 
@@ -429,12 +429,12 @@ class TestBuilder:
 
         n_vars = 100
         for i in range(n_vars):
-            ref = self.lib.builder_add_var(b, i, 8, 0, 0, 255)
+            ref = self.lib.dvs_builder_add_var(b, i, 8, 0, 0, 255)
             assert ref != EXPR_NULL
 
         # Constraint: sum is unconstrained, just verify roundtrip
         size = ctypes.c_size_t(0)
-        sp = self.lib.builder_finalize(b, ctypes.byref(size))
+        sp = self.lib.dvs_builder_finalize(b, ctypes.byref(size))
         assert sp
 
         head = SolveProblemHead.from_address(sp)
@@ -444,8 +444,8 @@ class TestBuilder:
         for v in values:
             assert 0 <= v <= 255
 
-        self.lib.builder_free_problem(b, sp, size.value)
-        self.lib.builder_destroy(b)
+        self.lib.dvs_builder_free_problem(b, sp, size.value)
+        self.lib.dvs_builder_destroy(b)
 
     # -- source spec ----------------------------------------------- #
 
@@ -453,15 +453,15 @@ class TestBuilder:
         """Add a source group and verify it round-trips through finalize."""
         b = self._builder()
 
-        self.lib.builder_add_var(b, 0, 8, 0, 0, 100)
-        self.lib.builder_add_var(b, 1, 8, 0, 0, 100)
+        self.lib.dvs_builder_add_var(b, 0, 8, 0, 0, 100)
+        self.lib.dvs_builder_add_var(b, 1, 8, 0, 0, 100)
 
         var_ids = (ctypes.c_uint32 * 2)(0, 1)
-        src_ref = self.lib.builder_add_source(b, 2, var_ids)
+        src_ref = self.lib.dvs_builder_add_source(b, 2, var_ids)
         assert src_ref != EXPR_NULL
 
         size = ctypes.c_size_t(0)
-        sp = self.lib.builder_finalize(b, ctypes.byref(size))
+        sp = self.lib.dvs_builder_finalize(b, ctypes.byref(size))
         assert sp
 
         head = SolveProblemHead.from_address(sp)
@@ -473,8 +473,8 @@ class TestBuilder:
         for v in values:
             assert 0 <= v <= 100
 
-        self.lib.builder_free_problem(b, sp, size.value)
-        self.lib.builder_destroy(b)
+        self.lib.dvs_builder_free_problem(b, sp, size.value)
+        self.lib.dvs_builder_destroy(b)
 
     # -- empty problem --------------------------------------------- #
 
@@ -482,28 +482,28 @@ class TestBuilder:
         """Finalize an empty builder produces valid (but trivial) buffer."""
         b = self._builder()
         size = ctypes.c_size_t(0)
-        sp = self.lib.builder_finalize(b, ctypes.byref(size))
+        sp = self.lib.dvs_builder_finalize(b, ctypes.byref(size))
         assert sp
         head = SolveProblemHead.from_address(sp)
         assert head.n_vars == 0
         assert head.n_constraints == 0
         assert head.n_sources == 0
-        self.lib.builder_free_problem(b, sp, size.value)
-        self.lib.builder_destroy(b)
+        self.lib.dvs_builder_free_problem(b, sp, size.value)
+        self.lib.dvs_builder_destroy(b)
 
     # -- virtual_used ---------------------------------------------- #
 
     def test_virtual_used_grows(self):
-        """builder_virtual_used increases as allocations are made."""
+        """dvs_builder_virtual_used increases as allocations are made."""
         b = self._builder()
-        assert self.lib.builder_virtual_used(b) == 0
+        assert self.lib.dvs_builder_virtual_used(b) == 0
 
-        self.lib.builder_add_var(b, 0, 8, 0, 0, 100)
-        used1 = self.lib.builder_virtual_used(b)
+        self.lib.dvs_builder_add_var(b, 0, 8, 0, 0, 100)
+        used1 = self.lib.dvs_builder_virtual_used(b)
         assert used1 > 0
 
-        self.lib.builder_add_var(b, 1, 8, 0, 0, 100)
-        used2 = self.lib.builder_virtual_used(b)
+        self.lib.dvs_builder_add_var(b, 1, 8, 0, 0, 100)
+        used2 = self.lib.dvs_builder_virtual_used(b)
         assert used2 > used1
 
-        self.lib.builder_destroy(b)
+        self.lib.dvs_builder_destroy(b)

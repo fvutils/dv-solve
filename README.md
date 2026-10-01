@@ -59,4 +59,4 @@ cmake --build build
 ```
 
 The shared library (`libdv_solve.so`) is installed alongside the Python package.
-Internal C symbols are prefixed `dvs_`.
+The public C API is declared in `dv_solve/dv_solve.h`; internal symbols are prefixed `dvs_`.

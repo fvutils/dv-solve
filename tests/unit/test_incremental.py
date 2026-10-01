@@ -61,18 +61,18 @@ def _setup_lib(lib):
     lib.expr_binary.restype  = c.c_uint32
     lib.expr_binary.argtypes = [c.c_void_p, c.c_int32, c.c_uint32, c.c_uint32]
 
-    lib.solver_create.restype  = c.c_void_p
-    lib.solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [c.c_void_p]
-    lib.solver_compile.restype  = c.c_int
-    lib.solver_compile.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_add_constraint.restype  = c.c_int
-    lib.solver_add_constraint.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_solve.restype  = c.c_int
-    lib.solver_solve.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_get_value.restype  = c.c_int64
-    lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_solver_create.restype  = c.c_void_p
+    lib.dvs_solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [c.c_void_p]
+    lib.dvs_solver_compile.restype  = c.c_int
+    lib.dvs_solver_compile.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_add_constraint.restype  = c.c_int
+    lib.dvs_solver_add_constraint.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_solve.restype  = c.c_int
+    lib.dvs_solver_solve.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_get_value.restype  = c.c_int64
+    lib.dvs_solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
     lib.dvs_var_lo32.restype  = c.c_int32
     lib.dvs_var_lo32.argtypes = [c.c_void_p, c.c_uint32]
     lib.dvs_var_hi32.restype  = c.c_int32
@@ -90,16 +90,16 @@ def _compile(lib, sp):
     """Compile a SolveProblem; return (ctx, ctx_buf, ba)."""
     ba = lib.dvs_block_alloc_create(None, _CTX_BUF_SIZE)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx is not None
-    rc = lib.solver_compile(ctx, sp)
-    assert rc >= 0, f"solver_compile failed with rc={rc}"
+    rc = lib.dvs_solver_compile(ctx, sp)
+    assert rc >= 0, f"dvs_solver_compile failed with rc={rc}"
     return ctx, ctx_buf, ba
 
 
 def _solve(lib, ctx, seed=42):
     opts = _SolveOpts(seed=seed)
-    return lib.solver_solve(ctx, ctypes.byref(opts))
+    return lib.dvs_solver_solve(ctx, ctypes.byref(opts))
 
 
 class TestIncremental:
@@ -120,8 +120,8 @@ class TestIncremental:
         cref = lib.expr_const(aux_sp, 10, 0)
         lib.problem_add_constraint(aux_sp, lib.expr_binary(aux_sp, BIN_LTE, vref, cref))
 
-        rc = lib.solver_add_constraint(ctx, aux_sp)
-        assert rc >= 0, f"solver_add_constraint failed: {rc}"
+        rc = lib.dvs_solver_add_constraint(ctx, aux_sp)
+        assert rc >= 0, f"dvs_solver_add_constraint failed: {rc}"
 
         # Verify domain tightened
         hi = lib.dvs_var_hi32(ctx, 0)
@@ -129,7 +129,7 @@ class TestIncremental:
 
         result = _solve(lib, ctx)
         assert result == SOLVE_OK
-        val = lib.solver_get_value(ctx, 0)
+        val = lib.dvs_solver_get_value(ctx, 0)
         assert 0 <= val <= 10, f"Expected value in [0,10], got {val}"
         lib.dvs_block_alloc_destroy(ba)
 
@@ -148,7 +148,7 @@ class TestIncremental:
         cref = lib.expr_const(aux_sp, 10, 0)
         lib.problem_add_constraint(aux_sp, lib.expr_binary(aux_sp, BIN_GTE, vref, cref))
 
-        rc = lib.solver_add_constraint(ctx, aux_sp)
+        rc = lib.dvs_solver_add_constraint(ctx, aux_sp)
         assert rc == -2, f"Expected -2 (UNSAT), got {rc}"
         lib.dvs_block_alloc_destroy(ba)
 
@@ -170,12 +170,12 @@ class TestIncremental:
         cref = lib.expr_const(aux_sp, 7, 0)
         lib.problem_add_constraint(aux_sp, lib.expr_binary(aux_sp, BIN_EQ, vref, cref))
 
-        rc = lib.solver_add_constraint(ctx, aux_sp)
-        assert rc >= 0, f"solver_add_constraint failed: {rc}"
+        rc = lib.dvs_solver_add_constraint(ctx, aux_sp)
+        assert rc >= 0, f"dvs_solver_add_constraint failed: {rc}"
 
         result = _solve(lib, ctx)
         assert result == SOLVE_OK
-        val = lib.solver_get_value(ctx, 2)
+        val = lib.dvs_solver_get_value(ctx, 2)
         assert val == 7, f"Expected 7, got {val}"
         lib.dvs_block_alloc_destroy(ba)
 
@@ -193,19 +193,19 @@ class TestIncremental:
         aux1_buf, aux1 = _make_problem(lib)
         lib.problem_add_constraint(aux1, lib.expr_binary(aux1, BIN_GTE,
             lib.expr_var(aux1, 0), lib.expr_const(aux1, 20, 0)))
-        rc = lib.solver_add_constraint(ctx, aux1)
+        rc = lib.dvs_solver_add_constraint(ctx, aux1)
         assert rc >= 0
 
         # Add: x <= 50
         aux2_buf, aux2 = _make_problem(lib)
         lib.problem_add_constraint(aux2, lib.expr_binary(aux2, BIN_LTE,
             lib.expr_var(aux2, 0), lib.expr_const(aux2, 50, 0)))
-        rc = lib.solver_add_constraint(ctx, aux2)
+        rc = lib.dvs_solver_add_constraint(ctx, aux2)
         assert rc >= 0
 
         result = _solve(lib, ctx)
         assert result == SOLVE_OK
-        val = lib.solver_get_value(ctx, 0)
+        val = lib.dvs_solver_get_value(ctx, 0)
         assert 20 <= val <= 50, f"Expected [20,50], got {val}"
         lib.dvs_block_alloc_destroy(ba)
 
@@ -225,12 +225,12 @@ class TestIncremental:
         vids = (ctypes.c_uint32 * 3)(0, 1, 2)
         lib.problem_add_all_different(aux_sp, 3, vids)
 
-        rc = lib.solver_add_constraint(ctx, aux_sp)
+        rc = lib.dvs_solver_add_constraint(ctx, aux_sp)
         assert rc >= 0
 
         result = _solve(lib, ctx)
         assert result == SOLVE_OK
-        vals = [lib.solver_get_value(ctx, i) for i in range(3)]
+        vals = [lib.dvs_solver_get_value(ctx, i) for i in range(3)]
         assert len(set(vals)) == 3, f"Not all distinct: {vals}"
         lib.dvs_block_alloc_destroy(ba)
 
@@ -248,6 +248,6 @@ class TestIncremental:
         aux_buf, aux_sp = _make_problem(lib)
         lib.problem_add_var(aux_sp, 200, 8, 0, 0, 10)
 
-        rc = lib.solver_add_constraint(ctx, aux_sp)
+        rc = lib.dvs_solver_add_constraint(ctx, aux_sp)
         assert rc == -1, f"Expected -1 (capacity overflow), got {rc}"
         lib.dvs_block_alloc_destroy(ba)

@@ -11,7 +11,7 @@
 #include "dvs_ctx.h"
 #include "dvs_trail.h"
 
-PropResult bounds_shave(SolveCtx *ctx, uint32_t max_iters) {
+PropResult bounds_shave(dvs_ctx_t *ctx, uint32_t max_iters) {
     uint32_t total_removed = 0;
     int changed = 1;
 
@@ -29,14 +29,14 @@ PropResult bounds_shave(SolveCtx *ctx, uint32_t max_iters) {
                 trail_push_level(ctx);
                 PropResult pr = ctx_tighten_lb64(ctx, x, hi);
                 if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, hi);
-                if (pr == PROP_OK) pr = solver_propagate(ctx);
+                if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
                 trail_backtrack(ctx, 0);
 
                 if (pr == PROP_CONFLICT) {
                     /* hi is infeasible; permanently exclude it */
                     PropResult er = ctx_tighten_ub64(ctx, x, hi - 1);
                     if (er == PROP_CONFLICT) return PROP_CONFLICT;
-                    if (solver_propagate(ctx) == PROP_CONFLICT)
+                    if (dvs_solver_propagate(ctx) == PROP_CONFLICT)
                         return PROP_CONFLICT;
                     changed = 1;
                     total_removed++;
@@ -54,13 +54,13 @@ PropResult bounds_shave(SolveCtx *ctx, uint32_t max_iters) {
                 trail_push_level(ctx);
                 PropResult pr = ctx_tighten_lb64(ctx, x, lo);
                 if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, lo);
-                if (pr == PROP_OK) pr = solver_propagate(ctx);
+                if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
                 trail_backtrack(ctx, 0);
 
                 if (pr == PROP_CONFLICT) {
                     PropResult er = ctx_tighten_lb64(ctx, x, lo + 1);
                     if (er == PROP_CONFLICT) return PROP_CONFLICT;
-                    if (solver_propagate(ctx) == PROP_CONFLICT)
+                    if (dvs_solver_propagate(ctx) == PROP_CONFLICT)
                         return PROP_CONFLICT;
                     changed = 1;
                     total_removed++;

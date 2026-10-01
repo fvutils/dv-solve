@@ -98,7 +98,7 @@ fail (no regression).
 Rationale for shipping the surface as a stub: `(push)/(pop)` and
 `(check-sat-assuming)` already work end-to-end at the SMT2 frontend
 layer (`_cmd_push`, `_cmd_pop`, `_cmd_check_sat_assuming`) via
-`solver_checkpoint`, which rebuilds the bbsolver on each check-sat —
+`dvs_solver_checkpoint`, which rebuilds the bbsolver on each check-sat —
 correctness is not the gap. Real incremental kissat (trail snapshot,
 learned-clause DB preservation, restart on solve, real assumption
 tracking) is a multi-day refactor that delivers no observable
@@ -153,7 +153,7 @@ dv-solve-side trail entries plus the SAT-side clause arena. A
 
 Concretely: when CDCL backtracks, it currently rolls back its own trail
 only. With this integration, CDCL backtrack participates in the
-dv-solve checkpoint system, and a `solver_restore()` from dv-solve
+dv-solve checkpoint system, and a `dvs_solver_restore()` from dv-solve
 can reach into the SAT layer's clause DB.
 
 This is the foundation for the Phase D "checkpoint-keyed arena marks"

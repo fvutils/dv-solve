@@ -12,7 +12,7 @@ consulted ``LD_LIBRARY_PATH``, the package's ``lib/`` subdirectory, three
 alternate build-directory names and a ``/tmp`` pytest glob that the public
 helpers knew nothing about. A host with any of those set could therefore run
 the solver out of one installation while linking generated C against another,
-and the ABI mismatch surfaces as a crash inside ``solver_compile``, nowhere
+and the ABI mismatch surfaces as a crash inside ``dvs_solver_compile``, nowhere
 near its cause. Hence one resolver, used by both.
 
 THE CONTRACT
@@ -22,7 +22,8 @@ The unit of discovery is an INSTALLATION, not an artifact. An installation is
 one root together with the places its libraries, headers and SV sources live.
 Candidates, best first:
 
-  1. ``DVS_SOLVER_PATH`` -- the explicit override. When set it is the ONLY
+  1. ``DVS_SOLVER_PATH`` (or the legacy ``ZSP_SOLVER_PATH``) -- the explicit
+     override. When set it is the ONLY
      candidate: it is selected whether or not it is usable, and anything it
      lacks is reported as missing from it rather than supplied by a later
      candidate. Accepts a directory holding the artifacts or an install
@@ -91,7 +92,7 @@ _LIB_SUBDIRS = ("lib", "lib64", "")
 
 #: A header that exists in every dv-solve include tree, used to tell a real
 #: include directory from a directory that merely exists.
-_SENTINEL_HEADER = "dvs_problem.h"
+_SENTINEL_HEADER = "dv_solve.h"
 
 #: Likewise for the SystemVerilog resource directory.
 _SENTINEL_SV = "dvs_dpi_pkg.sv"
@@ -150,10 +151,25 @@ class Installation(NamedTuple):
 
     def describe(self) -> str:
         if self.kind == "override":
-            return "DVS_SOLVER_PATH=%s" % self.root
+            return "%s=%s" % (_override_var(), self.root)
         if self.kind == "ld_library_path":
             return "LD_LIBRARY_PATH entry %s" % self.root
         return "%s installation at %s" % (self.kind, self.root)
+
+
+def override_root() -> Optional[str]:
+    """The ``DVS_SOLVER_PATH`` value, or the legacy ``ZSP_SOLVER_PATH`` when
+    only that is set (zuspec-be-sw still sets the old name). ``None`` when
+    neither is set."""
+    return (os.environ.get("DVS_SOLVER_PATH")
+            or os.environ.get("ZSP_SOLVER_PATH") or None)
+
+
+def _override_var() -> str:
+    """The name of the override variable in effect, for messages."""
+    if os.environ.get("DVS_SOLVER_PATH") or not os.environ.get("ZSP_SOLVER_PATH"):
+        return "DVS_SOLVER_PATH"
+    return "ZSP_SOLVER_PATH"
 
 
 def _override() -> Optional[Installation]:
@@ -164,7 +180,7 @@ def _override() -> Optional[Installation]:
     ``include/`` or ``share/`` underneath) also works, because a user who
     points at a CMake install prefix reasonably expects that to be understood.
     """
-    root = os.environ.get("DVS_SOLVER_PATH")
+    root = override_root()
     if not root:
         return None
     j = os.path.join
@@ -354,13 +370,10 @@ def find_incdirs() -> Optional[List[str]]:
     library anywhere) the first candidate holding headers answers, for
     compile-only consumers.
 
-    NOTE ON THE COLLISION: dv-solve and zuspec-be-sw both ship a
-    ``dvs_alloc.h`` and define ``struct dvs_alloc_s`` incompatibly. These
-    directories are the include set for the SOLVER translation unit ONLY, and
-    must never be merged into one ``-I`` list with the backend's. Namespacing
-    the install under ``dv_solve/`` does not by itself protect against this,
-    because the nested directory has to be on the include path for unqualified
-    includes to work -- it is the per-TU segregation that keeps them apart.
+    The public API is ``dv_solve/dv_solve.h`` (or ``dv_solve.h`` through the
+    nested directory); the other headers are internal. They are prefixed
+    ``dvs_``, but are still kept out of the backend's include set: these
+    directories are for the SOLVER translation unit only.
     """
     inst = select_installation()
     if inst is not None:

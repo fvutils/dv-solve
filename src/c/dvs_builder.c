@@ -9,13 +9,13 @@
 /* Internal helpers                                                    */
 /* ------------------------------------------------------------------ */
 
-static void *_alloc(SolveProblemBuilder *b, size_t sz) {
+static void *_alloc(dvs_builder_t *b, size_t sz) {
     if (b->alloc)
         return DVS_ALLOC(b->alloc, sz);
     return malloc(sz);
 }
 
-static void _release(SolveProblemBuilder *b, void *ptr, size_t sz) {
+static void _release(dvs_builder_t *b, void *ptr, size_t sz) {
     if (b->alloc) {
         DVS_RELEASE(b->alloc, ptr, sz);
     } else {
@@ -30,7 +30,7 @@ static uint32_t _align_up(uint32_t val, uint32_t align) {
 }
 
 /** Allocate a new BuilderBlock with the given data capacity. */
-static BuilderBlock *_new_block(SolveProblemBuilder *b, uint32_t capacity) {
+static BuilderBlock *_new_block(dvs_builder_t *b, uint32_t capacity) {
     size_t total = sizeof(BuilderBlock) + capacity;
     BuilderBlock *blk = (BuilderBlock *)_alloc(b, total);
     if (!blk) return NULL;
@@ -43,7 +43,7 @@ static BuilderBlock *_new_block(SolveProblemBuilder *b, uint32_t capacity) {
 }
 
 /** Free all blocks starting from blk. */
-static void _free_blocks(SolveProblemBuilder *b, BuilderBlock *blk) {
+static void _free_blocks(dvs_builder_t *b, BuilderBlock *blk) {
     while (blk) {
         BuilderBlock *next = blk->next;
         size_t total = sizeof(BuilderBlock) + blk->capacity;
@@ -64,14 +64,14 @@ static void *_block_ptr_at(BuilderBlock *blk, uint32_t local_off) {
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
 
-SolveProblemBuilder *builder_create(uint32_t block_size, dvs_alloc_t *alloc) {
+dvs_builder_t *dvs_builder_create(uint32_t block_size, dvs_alloc_t *alloc) {
     if (block_size == 0) block_size = DEFAULT_BLOCK_SIZE;
 
-    SolveProblemBuilder *b;
+    dvs_builder_t *b;
     if (alloc)
-        b = (SolveProblemBuilder *)DVS_ALLOC(alloc, sizeof(*b));
+        b = (dvs_builder_t *)DVS_ALLOC(alloc, sizeof(*b));
     else
-        b = (SolveProblemBuilder *)malloc(sizeof(*b));
+        b = (dvs_builder_t *)malloc(sizeof(*b));
     if (!b) return NULL;
 
     memset(b, 0, sizeof(*b));
@@ -97,7 +97,7 @@ SolveProblemBuilder *builder_create(uint32_t block_size, dvs_alloc_t *alloc) {
     return b;
 }
 
-void builder_reset(SolveProblemBuilder *b) {
+void dvs_builder_reset(dvs_builder_t *b) {
     if (!b) return;
 
     /* Keep the first block, free the rest */
@@ -123,7 +123,7 @@ void builder_reset(SolveProblemBuilder *b) {
     b->dists_head       = EXPR_NULL;
 }
 
-void builder_destroy(SolveProblemBuilder *b) {
+void dvs_builder_destroy(dvs_builder_t *b) {
     if (!b) return;
     _free_blocks(b, b->first);
     _release(b, b, sizeof(*b));
@@ -133,7 +133,7 @@ void builder_destroy(SolveProblemBuilder *b) {
 /* Allocation                                                          */
 /* ------------------------------------------------------------------ */
 
-ExprRef builder_alloc(SolveProblemBuilder *b, uint32_t bytes, uint32_t align) {
+dvs_expr_t dvs_builder_alloc(dvs_builder_t *b, uint32_t bytes, uint32_t align) {
     if (align < 1) align = 1;
 
     uint32_t aligned = _align_up(b->virtual_used, align);
@@ -182,11 +182,11 @@ ExprRef builder_alloc(SolveProblemBuilder *b, uint32_t bytes, uint32_t align) {
     return POOL_HEADER_SZ + aligned;
 }
 
-uint32_t builder_virtual_used(const SolveProblemBuilder *b) {
+uint32_t dvs_builder_virtual_used(const dvs_builder_t *b) {
     return b->virtual_used;
 }
 
-void *builder_ref_ptr(const SolveProblemBuilder *b, ExprRef ref) {
+void *dvs_builder_ref_ptr(const dvs_builder_t *b, dvs_expr_t ref) {
     if (ref == EXPR_NULL) return NULL;
     uint32_t voff = ref - POOL_HEADER_SZ;
     for (BuilderBlock *blk = b->first; blk; blk = blk->next) {
@@ -202,15 +202,15 @@ void *builder_ref_ptr(const SolveProblemBuilder *b, ExprRef ref) {
 /* Finalize                                                            */
 /* ------------------------------------------------------------------ */
 
-SolveProblem *builder_finalize(SolveProblemBuilder *b, size_t *out_size) {
+dvs_problem_t *dvs_builder_finalize(dvs_builder_t *b, size_t *out_size) {
     uint32_t pool_data_size = b->virtual_used;
-    size_t total = sizeof(SolveProblem) + pool_data_size;
+    size_t total = sizeof(dvs_problem_t) + pool_data_size;
 
     void *buf = _alloc(b, total);
     if (!buf) return NULL;
     memset(buf, 0, total);
 
-    SolveProblem *sp = (SolveProblem *)buf;
+    dvs_problem_t *sp = (dvs_problem_t *)buf;
 
     /* Copy header fields */
     sp->n_vars           = b->n_vars;
@@ -246,16 +246,16 @@ SolveProblem *builder_finalize(SolveProblemBuilder *b, size_t *out_size) {
     return sp;
 }
 
-SolveProblem *builder_finalize_reserve(SolveProblemBuilder *b, size_t *out_size,
+dvs_problem_t *dvs_builder_finalize_reserve(dvs_builder_t *b, size_t *out_size,
                                        uint32_t extra_bytes) {
     uint32_t pool_data_size = b->virtual_used;
-    size_t total = sizeof(SolveProblem) + pool_data_size + extra_bytes;
+    size_t total = sizeof(dvs_problem_t) + pool_data_size + extra_bytes;
 
     void *buf = _alloc(b, total);
     if (!buf) return NULL;
     memset(buf, 0, total);
 
-    SolveProblem *sp = (SolveProblem *)buf;
+    dvs_problem_t *sp = (dvs_problem_t *)buf;
     sp->n_vars           = b->n_vars;
     sp->n_constraints    = b->n_constraints;
     sp->n_sources        = b->n_sources;
@@ -290,8 +290,8 @@ SolveProblem *builder_finalize_reserve(SolveProblemBuilder *b, size_t *out_size,
     return sp;
 }
 
-BuilderMark builder_mark(const SolveProblemBuilder *b) {
-    BuilderMark m;
+dvs_builder_mark_t dvs_builder_mark(const dvs_builder_t *b) {
+    dvs_builder_mark_t m;
     m.n_vars        = b->n_vars;
     m.n_constraints = b->n_constraints;
     m.n_sources     = b->n_sources;
@@ -303,26 +303,26 @@ BuilderMark builder_mark(const SolveProblemBuilder *b) {
 
 /* Keep only the first `keep` nodes of a newest-first list inside the copied
  * problem `sp`, by ending the list after node `keep`. Every spec struct starts
- * with its `next` ExprRef, so the cut is the same for all six lists. */
-static int _cut_list(SolveProblem *sp, ExprRef *head, uint32_t *count,
+ * with its `next` dvs_expr_t, so the cut is the same for all six lists. */
+static int _cut_list(dvs_problem_t *sp, dvs_expr_t *head, uint32_t *count,
                      uint32_t keep) {
     if (keep > *count) return -1;
     *count = keep;
     if (keep == 0) { *head = EXPR_NULL; return 0; }
-    ExprRef cur = *head;
+    dvs_expr_t cur = *head;
     for (uint32_t i = 1; i < keep; i++) {
         if (cur == EXPR_NULL) return -1;
-        cur = *(ExprRef *)POOL_PTR(sp, cur);
+        cur = *(dvs_expr_t *)POOL_PTR(sp, cur);
     }
     if (cur == EXPR_NULL) return -1;
-    *(ExprRef *)POOL_PTR(sp, cur) = EXPR_NULL;
+    *(dvs_expr_t *)POOL_PTR(sp, cur) = EXPR_NULL;
     return 0;
 }
 
-SolveProblem *builder_finalize_since(SolveProblemBuilder *b,
-                                     const BuilderMark *m, size_t *out_size) {
+dvs_problem_t *dvs_builder_finalize_since(dvs_builder_t *b,
+                                     const dvs_builder_mark_t *m, size_t *out_size) {
     size_t sz = 0;
-    SolveProblem *sp = builder_finalize(b, &sz);
+    dvs_problem_t *sp = dvs_builder_finalize(b, &sz);
     if (!sp) return NULL;
     /* Lists are newest-first, so the items added since the mark are exactly
      * the first (current - marked) nodes of each list. */
@@ -338,14 +338,14 @@ SolveProblem *builder_finalize_since(SolveProblemBuilder *b,
                   sp->n_alldiffs - m->n_alldiffs) ||
         _cut_list(sp, &sp->softs_head, &sp->n_softs, sp->n_softs - m->n_softs) ||
         _cut_list(sp, &sp->dists_head, &sp->n_dists, sp->n_dists - m->n_dists)) {
-        builder_free_problem(b, sp, sz);
+        dvs_builder_free_problem(b, sp, sz);
         return NULL;
     }
     if (out_size) *out_size = sz;
     return sp;
 }
 
-void builder_free_problem(SolveProblemBuilder *b, SolveProblem *sp, size_t size) {
+void dvs_builder_free_problem(dvs_builder_t *b, dvs_problem_t *sp, size_t size) {
     if (!sp) return;
     _release(b, sp, size);
 }
@@ -354,9 +354,9 @@ void builder_free_problem(SolveProblemBuilder *b, SolveProblem *sp, size_t size)
 /* Expression builders                                                 */
 /* ------------------------------------------------------------------ */
 
-ExprRef builder_expr_const_sized(SolveProblemBuilder *b, int64_t value,
+dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value,
                                  uint8_t is_signed, uint8_t width) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprConst),
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprConst),
                                 (uint32_t)_Alignof(ExprConst));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -372,13 +372,13 @@ ExprRef builder_expr_const_sized(SolveProblemBuilder *b, int64_t value,
     return ref;
 }
 
-ExprRef builder_expr_const(SolveProblemBuilder *b, int64_t value,
+dvs_expr_t dvs_builder_expr_const(dvs_builder_t *b, int64_t value,
                            uint8_t is_signed) {
-    return builder_expr_const_sized(b, value, is_signed, 0);
+    return dvs_builder_expr_const_sized(b, value, is_signed, 0);
 }
 
-ExprRef builder_expr_var(SolveProblemBuilder *b, uint32_t var_id) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprVar),
+dvs_expr_t dvs_builder_expr_var(dvs_builder_t *b, uint32_t var_id) {
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprVar),
                                 (uint32_t)_Alignof(ExprVar));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -390,9 +390,9 @@ ExprRef builder_expr_var(SolveProblemBuilder *b, uint32_t var_id) {
     return ref;
 }
 
-ExprRef builder_expr_binary(SolveProblemBuilder *b, BinOp op,
-                            ExprRef lhs, ExprRef rhs) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprBinary),
+dvs_expr_t dvs_builder_expr_binary(dvs_builder_t *b, dvs_binop_t op,
+                            dvs_expr_t lhs, dvs_expr_t rhs) {
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprBinary),
                                 (uint32_t)_Alignof(ExprBinary));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -406,9 +406,9 @@ ExprRef builder_expr_binary(SolveProblemBuilder *b, BinOp op,
     return ref;
 }
 
-ExprRef builder_expr_unary(SolveProblemBuilder *b, UnaryOp op,
-                           ExprRef operand) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprUnary),
+dvs_expr_t dvs_builder_expr_unary(dvs_builder_t *b, dvs_unop_t op,
+                           dvs_expr_t operand) {
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprUnary),
                                 (uint32_t)_Alignof(ExprUnary));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -421,9 +421,9 @@ ExprRef builder_expr_unary(SolveProblemBuilder *b, UnaryOp op,
     return ref;
 }
 
-ExprRef builder_expr_ite(SolveProblemBuilder *b,
-                         ExprRef cond, ExprRef then_e, ExprRef else_e) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprITE),
+dvs_expr_t dvs_builder_expr_ite(dvs_builder_t *b,
+                         dvs_expr_t cond, dvs_expr_t then_e, dvs_expr_t else_e) {
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprITE),
                                 (uint32_t)_Alignof(ExprITE));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -437,9 +437,9 @@ ExprRef builder_expr_ite(SolveProblemBuilder *b,
     return ref;
 }
 
-ExprRef builder_expr_in_range(SolveProblemBuilder *b,
-                              ExprRef value, ExprRef lo, ExprRef hi) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprInRange),
+dvs_expr_t dvs_builder_expr_in_range(dvs_builder_t *b,
+                              dvs_expr_t value, dvs_expr_t lo, dvs_expr_t hi) {
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprInRange),
                                 (uint32_t)_Alignof(ExprInRange));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -453,11 +453,11 @@ ExprRef builder_expr_in_range(SolveProblemBuilder *b,
     return ref;
 }
 
-ExprRef builder_expr_in_set(SolveProblemBuilder *b, ExprRef value,
-                            uint32_t n_elems, const ExprRef *elems) {
+dvs_expr_t dvs_builder_expr_in_set(dvs_builder_t *b, dvs_expr_t value,
+                            uint32_t n_elems, const dvs_expr_t *elems) {
     uint32_t total = (uint32_t)sizeof(ExprInSet) +
-                     n_elems * (uint32_t)sizeof(ExprRef);
-    ExprRef ref = builder_alloc(b, total, (uint32_t)_Alignof(ExprInSet));
+                     n_elems * (uint32_t)sizeof(dvs_expr_t);
+    dvs_expr_t ref = dvs_builder_alloc(b, total, (uint32_t)_Alignof(ExprInSet));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     uint32_t voff = ref - POOL_HEADER_SZ;
@@ -466,18 +466,18 @@ ExprRef builder_expr_in_set(SolveProblemBuilder *b, ExprRef value,
     n->kind    = EXPR_IN_SET;
     n->value   = value;
     n->n_elems = n_elems;
-    ExprRef *dst = (ExprRef *)(n + 1);
+    dvs_expr_t *dst = (dvs_expr_t *)(n + 1);
     for (uint32_t i = 0; i < n_elems; i++)
         dst[i] = elems[i];
     return ref;
 }
 
-ExprRef builder_expr_in_ranges(SolveProblemBuilder *b, ExprRef value,
-                               uint32_t n_ranges, const ExprRef *los,
-                               const ExprRef *his) {
+dvs_expr_t dvs_builder_expr_in_ranges(dvs_builder_t *b, dvs_expr_t value,
+                               uint32_t n_ranges, const dvs_expr_t *los,
+                               const dvs_expr_t *his) {
     uint32_t total = (uint32_t)sizeof(ExprInRanges) +
-                     2u * n_ranges * (uint32_t)sizeof(ExprRef);
-    ExprRef ref = builder_alloc(b, total, (uint32_t)_Alignof(ExprInRanges));
+                     2u * n_ranges * (uint32_t)sizeof(dvs_expr_t);
+    dvs_expr_t ref = dvs_builder_alloc(b, total, (uint32_t)_Alignof(ExprInRanges));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     uint32_t voff = ref - POOL_HEADER_SZ;
@@ -486,8 +486,8 @@ ExprRef builder_expr_in_ranges(SolveProblemBuilder *b, ExprRef value,
     n->kind     = EXPR_IN_RANGES;
     n->value    = value;
     n->n_ranges = n_ranges;
-    ExprRef *lo_dst = (ExprRef *)(n + 1);
-    ExprRef *hi_dst = lo_dst + n_ranges;
+    dvs_expr_t *lo_dst = (dvs_expr_t *)(n + 1);
+    dvs_expr_t *hi_dst = lo_dst + n_ranges;
     for (uint32_t i = 0; i < n_ranges; i++) {
         lo_dst[i] = los[i];
         hi_dst[i] = his[i];
@@ -495,10 +495,10 @@ ExprRef builder_expr_in_ranges(SolveProblemBuilder *b, ExprRef value,
     return ref;
 }
 
-ExprRef builder_expr_extend(SolveProblemBuilder *b, ExprRef operand,
+dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
                             uint8_t from_bits, uint8_t to_bits,
                             uint8_t sign_extend) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprExtend),
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprExtend),
                                 (uint32_t)_Alignof(ExprExtend));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -514,10 +514,10 @@ ExprRef builder_expr_extend(SolveProblemBuilder *b, ExprRef operand,
     return ref;
 }
 
-ExprRef builder_expr_sv_cast(SolveProblemBuilder *b, ExprRef operand,
+dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
                              uint8_t from_bits, uint8_t to_bits,
                              uint8_t sign_extend, uint8_t dst_signed) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprSvCast),
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprSvCast),
                                 (uint32_t)_Alignof(ExprSvCast));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -533,9 +533,9 @@ ExprRef builder_expr_sv_cast(SolveProblemBuilder *b, ExprRef operand,
     return ref;
 }
 
-ExprRef builder_expr_extract(SolveProblemBuilder *b, ExprRef operand,
+dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand,
                              uint8_t hi_bit, uint8_t lo_bit) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprExtract),
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprExtract),
                                 (uint32_t)_Alignof(ExprExtract));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -550,9 +550,9 @@ ExprRef builder_expr_extract(SolveProblemBuilder *b, ExprRef operand,
     return ref;
 }
 
-ExprRef builder_expr_concat(SolveProblemBuilder *b, ExprRef hi,
-                            ExprRef lo, uint8_t lo_width) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprConcat),
+dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi,
+                            dvs_expr_t lo, uint8_t lo_width) {
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprConcat),
                                 (uint32_t)_Alignof(ExprConcat));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -567,9 +567,9 @@ ExprRef builder_expr_concat(SolveProblemBuilder *b, ExprRef hi,
     return ref;
 }
 
-ExprRef builder_expr_array_select(SolveProblemBuilder *b, uint32_t base_var_id,
-                                   uint32_t n_elems, ExprRef result, ExprRef index) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprArraySelect),
+dvs_expr_t dvs_builder_expr_array_select(dvs_builder_t *b, uint32_t base_var_id,
+                                   uint32_t n_elems, dvs_expr_t result, dvs_expr_t index) {
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprArraySelect),
                                 (uint32_t)_Alignof(ExprArraySelect));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -584,10 +584,10 @@ ExprRef builder_expr_array_select(SolveProblemBuilder *b, uint32_t base_var_id,
     return ref;
 }
 
-ExprRef builder_expr_sum(SolveProblemBuilder *b, ExprRef result,
-                         uint32_t n_vars, const ExprRef *var_refs) {
-    uint32_t total = (uint32_t)sizeof(ExprSum) + n_vars * (uint32_t)sizeof(ExprRef);
-    ExprRef ref = builder_alloc(b, total, (uint32_t)_Alignof(ExprSum));
+dvs_expr_t dvs_builder_expr_sum(dvs_builder_t *b, dvs_expr_t result,
+                         uint32_t n_vars, const dvs_expr_t *var_refs) {
+    uint32_t total = (uint32_t)sizeof(ExprSum) + n_vars * (uint32_t)sizeof(dvs_expr_t);
+    dvs_expr_t ref = dvs_builder_alloc(b, total, (uint32_t)_Alignof(ExprSum));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     uint32_t voff = ref - POOL_HEADER_SZ;
@@ -596,15 +596,15 @@ ExprRef builder_expr_sum(SolveProblemBuilder *b, ExprRef result,
     n->kind   = EXPR_SUM;
     n->result = result;
     n->n_vars = n_vars;
-    ExprRef *dst = (ExprRef *)((char *)n + sizeof(ExprSum));
+    dvs_expr_t *dst = (dvs_expr_t *)((char *)n + sizeof(ExprSum));
     for (uint32_t i = 0; i < n_vars; i++)
         dst[i] = var_refs[i];
     return ref;
 }
 
-ExprRef builder_expr_countones(SolveProblemBuilder *b, ExprRef result,
-                                ExprRef operand) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprCountones),
+dvs_expr_t dvs_builder_expr_countones(dvs_builder_t *b, dvs_expr_t result,
+                                dvs_expr_t operand) {
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprCountones),
                                 (uint32_t)_Alignof(ExprCountones));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -617,9 +617,9 @@ ExprRef builder_expr_countones(SolveProblemBuilder *b, ExprRef result,
     return ref;
 }
 
-ExprRef builder_expr_clog2(SolveProblemBuilder *b, ExprRef result,
-                            ExprRef operand) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprClog2),
+dvs_expr_t dvs_builder_expr_clog2(dvs_builder_t *b, dvs_expr_t result,
+                            dvs_expr_t operand) {
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprClog2),
                                 (uint32_t)_Alignof(ExprClog2));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -636,10 +636,10 @@ ExprRef builder_expr_clog2(SolveProblemBuilder *b, ExprRef result,
 /* Problem builders                                                    */
 /* ------------------------------------------------------------------ */
 
-ExprRef builder_add_var(SolveProblemBuilder *b, uint32_t var_id,
+dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id,
                         uint8_t width, uint8_t is_signed,
                         int64_t lo, int64_t hi) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(VarSpec),
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(VarSpec),
                                 (uint32_t)_Alignof(VarSpec));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -659,14 +659,14 @@ ExprRef builder_add_var(SolveProblemBuilder *b, uint32_t var_id,
     return ref;
 }
 
-void builder_mark_var_aux(SolveProblemBuilder *b, ExprRef var_ref) {
+void dvs_builder_mark_var_aux(dvs_builder_t *b, dvs_expr_t var_ref) {
     if (var_ref == EXPR_NULL) return;
-    VarSpec *v = (VarSpec *)builder_ref_ptr(b, var_ref);
+    VarSpec *v = (VarSpec *)dvs_builder_ref_ptr(b, var_ref);
     if (v) v->is_aux = 1;
 }
 
-ExprRef builder_add_constraint(SolveProblemBuilder *b, ExprRef root) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ConstraintSpec),
+dvs_expr_t dvs_builder_add_constraint(dvs_builder_t *b, dvs_expr_t root) {
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ConstraintSpec),
                                 (uint32_t)_Alignof(ConstraintSpec));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -680,11 +680,11 @@ ExprRef builder_add_constraint(SolveProblemBuilder *b, ExprRef root) {
     return ref;
 }
 
-ExprRef builder_add_source(SolveProblemBuilder *b,
+dvs_expr_t dvs_builder_add_source(dvs_builder_t *b,
                            uint32_t n_vars, const uint32_t *var_ids) {
     uint32_t total = (uint32_t)sizeof(SourceSpec) +
                      n_vars * (uint32_t)sizeof(uint32_t);
-    ExprRef ref = builder_alloc(b, total, (uint32_t)_Alignof(SourceSpec));
+    dvs_expr_t ref = dvs_builder_alloc(b, total, (uint32_t)_Alignof(SourceSpec));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     uint32_t voff = ref - POOL_HEADER_SZ;
@@ -700,11 +700,11 @@ ExprRef builder_add_source(SolveProblemBuilder *b,
     return ref;
 }
 
-ExprRef builder_add_all_different(SolveProblemBuilder *b,
+dvs_expr_t dvs_builder_add_all_different(dvs_builder_t *b,
                                   uint32_t n_vars, const uint32_t *var_ids) {
     uint32_t total = (uint32_t)sizeof(AllDiffSpec) +
                      n_vars * (uint32_t)sizeof(uint32_t);
-    ExprRef ref = builder_alloc(b, total, (uint32_t)_Alignof(AllDiffSpec));
+    dvs_expr_t ref = dvs_builder_alloc(b, total, (uint32_t)_Alignof(AllDiffSpec));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     uint32_t voff = ref - POOL_HEADER_SZ;
@@ -720,9 +720,9 @@ ExprRef builder_add_all_different(SolveProblemBuilder *b,
     return ref;
 }
 
-ExprRef builder_add_soft_constraint(SolveProblemBuilder *b, ExprRef root,
+dvs_expr_t dvs_builder_add_soft_constraint(dvs_builder_t *b, dvs_expr_t root,
                                     uint32_t priority) {
-    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(SoftSpec),
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(SoftSpec),
                                 (uint32_t)_Alignof(SoftSpec));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -737,11 +737,11 @@ ExprRef builder_add_soft_constraint(SolveProblemBuilder *b, ExprRef root,
     return ref;
 }
 
-ExprRef builder_add_dist(SolveProblemBuilder *b, uint32_t var_id,
-                         uint32_t n_entries, const DistEntry *entries) {
+dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,
+                         uint32_t n_entries, const dvs_dist_entry_t *entries) {
     uint32_t total = (uint32_t)sizeof(DistSpec) +
-                     n_entries * (uint32_t)sizeof(DistEntry);
-    ExprRef ref = builder_alloc(b, total, (uint32_t)_Alignof(DistSpec));
+                     n_entries * (uint32_t)sizeof(dvs_dist_entry_t);
+    dvs_expr_t ref = dvs_builder_alloc(b, total, (uint32_t)_Alignof(DistSpec));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     uint32_t voff = ref - POOL_HEADER_SZ;
@@ -750,7 +750,7 @@ ExprRef builder_add_dist(SolveProblemBuilder *b, uint32_t var_id,
     ds->next      = b->dists_head;
     ds->var_id    = var_id;
     ds->n_entries = n_entries;
-    DistEntry *dst = (DistEntry *)(ds + 1);
+    dvs_dist_entry_t *dst = (dvs_dist_entry_t *)(ds + 1);
     for (uint32_t i = 0; i < n_entries; i++)
         dst[i] = entries[i];
     b->dists_head = ref;

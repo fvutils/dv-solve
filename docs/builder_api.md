@@ -8,10 +8,10 @@ front.  On overflow, `dvs_pool_alloc` returns `EXPR_NULL` silently.
 that never overflows and produces exact-sized buffers on `finalize()`.
 
 The builder is the write-side API; `SolveProblem` remains the read-only
-wire format consumed by `solver_compile`.
+wire format consumed by `dvs_solver_compile`.
 
 ```
-Builder (write)  -->  finalize()  -->  SolveProblem bytes (read)  -->  solver_compile
+Builder (write)  -->  finalize()  -->  SolveProblem bytes (read)  -->  dvs_solver_compile
 ```
 
 ## C API
@@ -21,16 +21,16 @@ Builder (write)  -->  finalize()  -->  SolveProblem bytes (read)  -->  solver_co
 ```c
 // Create a builder.  block_size=0 uses the default (4096 bytes).
 // alloc=NULL uses malloc.
-SolveProblemBuilder *builder_create(uint32_t block_size, dvs_alloc_t *alloc);
+SolveProblemBuilder *dvs_builder_create(uint32_t block_size, dvs_alloc_t *alloc);
 
 // Reset to empty state, reusing allocated blocks.
-void builder_reset(SolveProblemBuilder *b);
+void dvs_builder_reset(SolveProblemBuilder *b);
 
 // Free all resources.
-void builder_destroy(SolveProblemBuilder *b);
+void dvs_builder_destroy(SolveProblemBuilder *b);
 
 // Current bytes allocated in the virtual address space.
-uint32_t builder_virtual_used(SolveProblemBuilder *b);
+uint32_t dvs_builder_virtual_used(SolveProblemBuilder *b);
 ```
 
 ### Building Expressions
@@ -39,27 +39,27 @@ All functions mirror the existing `SolveProblem` API but never return
 `EXPR_NULL` due to overflow.
 
 ```c
-ExprRef builder_add_var(SolveProblemBuilder *b, uint32_t var_id,
+ExprRef dvs_builder_add_var(SolveProblemBuilder *b, uint32_t var_id,
                         uint8_t width, uint8_t is_signed,
                         int64_t lo, int64_t hi);
 
-ExprRef builder_expr_const(SolveProblemBuilder *b, int64_t value, uint8_t is_signed);
-ExprRef builder_expr_var(SolveProblemBuilder *b, uint32_t var_id);
-ExprRef builder_expr_binary(SolveProblemBuilder *b, uint32_t op,
+ExprRef dvs_builder_expr_const(SolveProblemBuilder *b, int64_t value, uint8_t is_signed);
+ExprRef dvs_builder_expr_var(SolveProblemBuilder *b, uint32_t var_id);
+ExprRef dvs_builder_expr_binary(SolveProblemBuilder *b, uint32_t op,
                             ExprRef lhs, ExprRef rhs);
-ExprRef builder_expr_unary(SolveProblemBuilder *b, uint32_t op, ExprRef operand);
-ExprRef builder_expr_ite(SolveProblemBuilder *b,
+ExprRef dvs_builder_expr_unary(SolveProblemBuilder *b, uint32_t op, ExprRef operand);
+ExprRef dvs_builder_expr_ite(SolveProblemBuilder *b,
                          ExprRef cond, ExprRef then_e, ExprRef else_e);
-ExprRef builder_expr_in_range(SolveProblemBuilder *b,
+ExprRef dvs_builder_expr_in_range(SolveProblemBuilder *b,
                               ExprRef value, ExprRef lo, ExprRef hi);
-ExprRef builder_expr_in_set(SolveProblemBuilder *b, ExprRef value,
+ExprRef dvs_builder_expr_in_set(SolveProblemBuilder *b, ExprRef value,
                             uint32_t n_elems, ExprRef *elems);
-ExprRef builder_expr_extend(SolveProblemBuilder *b, ExprRef operand,
+ExprRef dvs_builder_expr_extend(SolveProblemBuilder *b, ExprRef operand,
                             uint8_t from, uint8_t to, uint8_t sign);
-ExprRef builder_expr_extract(SolveProblemBuilder *b, ExprRef operand,
+ExprRef dvs_builder_expr_extract(SolveProblemBuilder *b, ExprRef operand,
                              uint8_t hi, uint8_t lo);
-ExprRef builder_add_constraint(SolveProblemBuilder *b, ExprRef root);
-ExprRef builder_add_source(SolveProblemBuilder *b, uint32_t n_vars,
+ExprRef dvs_builder_add_constraint(SolveProblemBuilder *b, ExprRef root);
+ExprRef dvs_builder_add_source(SolveProblemBuilder *b, uint32_t n_vars,
                            uint32_t *var_ids);
 ```
 
@@ -71,12 +71,12 @@ ExprRef builder_add_source(SolveProblemBuilder *b, uint32_t n_vars,
 
 ```c
 // Produce a contiguous SolveProblem buffer.
-// Returns a malloc'd buffer; caller frees with builder_free_problem().
+// Returns a malloc'd buffer; caller frees with dvs_builder_free_problem().
 // *out_size receives the buffer size in bytes.
-SolveProblem *builder_finalize(SolveProblemBuilder *b, size_t *out_size);
+SolveProblem *dvs_builder_finalize(SolveProblemBuilder *b, size_t *out_size);
 
-// Free a buffer returned by builder_finalize.
-void builder_free_problem(SolveProblemBuilder *b, void *buf, size_t size);
+// Free a buffer returned by dvs_builder_finalize.
+void dvs_builder_free_problem(SolveProblemBuilder *b, void *buf, size_t size);
 ```
 
 ## Python API

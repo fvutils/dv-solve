@@ -54,43 +54,43 @@ def _setup_lib(lib):
     lib.expr_in_set.argtypes = [c.c_void_p, c.c_uint32,
                                 c.c_uint32, c.c_void_p]
 
-    lib.solver_create.restype  = c.c_void_p
-    lib.solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [c.c_void_p]
-    lib.solver_compile.restype  = c.c_int
-    lib.solver_compile.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_solve.restype  = c.c_int
-    lib.solver_solve.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_get_value.restype  = c.c_int64
-    lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_solver_create.restype  = c.c_void_p
+    lib.dvs_solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [c.c_void_p]
+    lib.dvs_solver_compile.restype  = c.c_int
+    lib.dvs_solver_compile.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_solve.restype  = c.c_int
+    lib.dvs_solver_solve.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_get_value.restype  = c.c_int64
+    lib.dvs_solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
 
     # Builder
-    lib.builder_create.restype  = c.c_void_p
-    lib.builder_create.argtypes = [c.c_uint32, c.c_void_p]
-    lib.builder_destroy.restype  = None
-    lib.builder_destroy.argtypes = [c.c_void_p]
-    lib.builder_finalize.restype  = c.c_void_p
-    lib.builder_finalize.argtypes = [c.c_void_p, c.POINTER(c.c_size_t)]
-    lib.builder_free_problem.restype  = None
-    lib.builder_free_problem.argtypes = [c.c_void_p, c.c_void_p, c.c_size_t]
-    lib.builder_add_var.restype  = c.c_uint32
-    lib.builder_add_var.argtypes = [c.c_void_p, c.c_uint32,
+    lib.dvs_builder_create.restype  = c.c_void_p
+    lib.dvs_builder_create.argtypes = [c.c_uint32, c.c_void_p]
+    lib.dvs_builder_destroy.restype  = None
+    lib.dvs_builder_destroy.argtypes = [c.c_void_p]
+    lib.dvs_builder_finalize.restype  = c.c_void_p
+    lib.dvs_builder_finalize.argtypes = [c.c_void_p, c.POINTER(c.c_size_t)]
+    lib.dvs_builder_free_problem.restype  = None
+    lib.dvs_builder_free_problem.argtypes = [c.c_void_p, c.c_void_p, c.c_size_t]
+    lib.dvs_builder_add_var.restype  = c.c_uint32
+    lib.dvs_builder_add_var.argtypes = [c.c_void_p, c.c_uint32,
                                     c.c_uint8, c.c_uint8,
                                     c.c_int64, c.c_int64]
-    lib.builder_add_constraint.restype  = c.c_uint32
-    lib.builder_add_constraint.argtypes = [c.c_void_p, c.c_uint32]
-    lib.builder_add_all_different.restype  = c.c_uint32
-    lib.builder_add_all_different.argtypes = [c.c_void_p, c.c_uint32, c.c_void_p]
-    lib.builder_expr_const.restype  = c.c_uint32
-    lib.builder_expr_const.argtypes = [c.c_void_p, c.c_int64, c.c_uint8]
-    lib.builder_expr_var.restype  = c.c_uint32
-    lib.builder_expr_var.argtypes = [c.c_void_p, c.c_uint32]
-    lib.builder_expr_binary.restype  = c.c_uint32
-    lib.builder_expr_binary.argtypes = [c.c_void_p, c.c_uint32,
+    lib.dvs_builder_add_constraint.restype  = c.c_uint32
+    lib.dvs_builder_add_constraint.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_builder_add_all_different.restype  = c.c_uint32
+    lib.dvs_builder_add_all_different.argtypes = [c.c_void_p, c.c_uint32, c.c_void_p]
+    lib.dvs_builder_expr_const.restype  = c.c_uint32
+    lib.dvs_builder_expr_const.argtypes = [c.c_void_p, c.c_int64, c.c_uint8]
+    lib.dvs_builder_expr_var.restype  = c.c_uint32
+    lib.dvs_builder_expr_var.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_builder_expr_binary.restype  = c.c_uint32
+    lib.dvs_builder_expr_binary.argtypes = [c.c_void_p, c.c_uint32,
                                         c.c_uint32, c.c_uint32]
-    lib.builder_expr_in_set.restype  = c.c_uint32
-    lib.builder_expr_in_set.argtypes = [c.c_void_p, c.c_uint32,
+    lib.dvs_builder_expr_in_set.restype  = c.c_uint32
+    lib.dvs_builder_expr_in_set.argtypes = [c.c_void_p, c.c_uint32,
                                         c.c_uint32, c.c_void_p]
 
 
@@ -116,14 +116,14 @@ def _solve(lib, sp, seed=42):
     """Compile + solve a SolveProblem; return (result, ctx, ctx_buf, ba)."""
     ba = lib.dvs_block_alloc_create(None, _CTX_BUF_SIZE)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx is not None
 
-    rc = lib.solver_compile(ctx, sp)
-    assert rc >= 0, f"solver_compile failed with rc={rc}"
+    rc = lib.dvs_solver_compile(ctx, sp)
+    assert rc >= 0, f"dvs_solver_compile failed with rc={rc}"
 
     opts = _SolveOpts(seed=seed)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     return result, ctx, ctx_buf, ba
 
 
@@ -154,7 +154,7 @@ class TestAllDifferent:
         result, ctx, _, ba = _solve(lib, sp, seed=1)
         assert result == SOLVE_OK
 
-        vals = [lib.solver_get_value(ctx, i) for i in range(3)]
+        vals = [lib.dvs_solver_get_value(ctx, i) for i in range(3)]
         assert len(set(vals)) == 3, f"Not all distinct: {vals}"
         assert all(0 <= v <= 2 for v in vals)
         _cleanup(lib, ba)
@@ -175,7 +175,7 @@ class TestAllDifferent:
             result, ctx, _, ba = _solve(lib, sp, seed=seed)
             assert result == SOLVE_OK
 
-            vals = [lib.solver_get_value(ctx, i) for i in range(3)]
+            vals = [lib.dvs_solver_get_value(ctx, i) for i in range(3)]
             assert len(set(vals)) == 3, f"seed={seed}: not all distinct: {vals}"
             _cleanup(lib, ba)
 
@@ -211,8 +211,8 @@ class TestAllDifferent:
         result, ctx, _, ba = _solve(lib, sp, seed=7)
         assert result == SOLVE_OK
 
-        v0 = lib.solver_get_value(ctx, 0)
-        v1 = lib.solver_get_value(ctx, 1)
+        v0 = lib.dvs_solver_get_value(ctx, 0)
+        v1 = lib.dvs_solver_get_value(ctx, 1)
         assert v0 != v1, f"Values are equal: {v0}"
         assert 1 <= v0 <= 3
         assert 1 <= v1 <= 3
@@ -234,9 +234,9 @@ class TestAllDifferent:
         result, ctx, _, ba = _solve(lib, sp, seed=42)
         assert result == SOLVE_OK
 
-        v0 = lib.solver_get_value(ctx, 0)
-        v1 = lib.solver_get_value(ctx, 1)
-        v2 = lib.solver_get_value(ctx, 2)
+        v0 = lib.dvs_solver_get_value(ctx, 0)
+        v1 = lib.dvs_solver_get_value(ctx, 1)
+        v2 = lib.dvs_solver_get_value(ctx, 2)
         assert v0 == 5
         assert v1 != 5 and v2 != 5, f"Singleton exclusion failed: v1={v1}, v2={v2}"
         assert v1 != v2, f"v1 == v2 == {v1}"
@@ -257,7 +257,7 @@ class TestAllDifferent:
         result, ctx, _, ba = _solve(lib, sp, seed=123)
         assert result == SOLVE_OK
 
-        vals = [lib.solver_get_value(ctx, i) for i in range(8)]
+        vals = [lib.dvs_solver_get_value(ctx, i) for i in range(8)]
         assert sorted(vals) == list(range(8)), f"Not a permutation: {vals}"
         _cleanup(lib, ba)
 
@@ -266,30 +266,30 @@ class TestAllDifferent:
         lib = libdvs
         _setup_lib(lib)
 
-        b = lib.builder_create(4096, None)
+        b = lib.dvs_builder_create(4096, None)
         assert b is not None
 
         for i in range(4):
-            lib.builder_add_var(b, i, 8, 0, 0, 3)
+            lib.dvs_builder_add_var(b, i, 8, 0, 0, 3)
 
         vids = (ctypes.c_uint32 * 4)(*range(4))
-        ref = lib.builder_add_all_different(b, 4, vids)
+        ref = lib.dvs_builder_add_all_different(b, 4, vids)
         assert ref != EXPR_NULL
 
         sz = ctypes.c_size_t(0)
-        sp_ptr = lib.builder_finalize(b, ctypes.byref(sz))
+        sp_ptr = lib.dvs_builder_finalize(b, ctypes.byref(sz))
         assert sp_ptr is not None
 
         # Copy to Python-owned buffer
         buf = (ctypes.c_uint8 * sz.value)()
         ctypes.memmove(buf, sp_ptr, sz.value)
-        lib.builder_free_problem(b, sp_ptr, sz.value)
-        lib.builder_destroy(b)
+        lib.dvs_builder_free_problem(b, sp_ptr, sz.value)
+        lib.dvs_builder_destroy(b)
 
         sp = ctypes.cast(buf, ctypes.c_void_p).value
         result, ctx, _, ba = _solve(lib, sp, seed=55)
         assert result == SOLVE_OK
 
-        vals = [lib.solver_get_value(ctx, i) for i in range(4)]
+        vals = [lib.dvs_solver_get_value(ctx, i) for i in range(4)]
         assert sorted(vals) == list(range(4)), f"Not a permutation: {vals}"
         _cleanup(lib, ba)

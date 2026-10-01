@@ -18,7 +18,7 @@
  *  one level per decided variable, so this also caps the number of decision
  *  variables a single solve can carry natively — e.g. a symbolic array select
  *  frees every array element as a decision var, so a very large indexed array
- *  can exceed this. `_solver_solve_core` bails with SOLVE_TIMEOUT (clean defer)
+ *  can exceed this. `_solver_solve_core` bails with DVS_SOLVE_TIMEOUT (clean defer)
  *  rather than overflowing the fixed decisions/level_marks arrays beyond this,
  *  so exceeding it degrades gracefully instead of an out-of-bounds write. */
 #define MAX_DECISION_DEPTH  256u
@@ -28,10 +28,10 @@ extern "C" {
 #endif
 
 /* ------------------------------------------------------------------ */
-/* SolveCtx — the top-level solver context                            */
+/* dvs_ctx_t — the top-level solver context                            */
 /*                                                                     */
 /* Memory layout:                                                      */
-/*   [ SolveCtx header | dvs_pool_t header | static pool data ... ]   */
+/*   [ dvs_ctx_t header | dvs_pool_t header | static pool data ... ]   */
 /*                      ^-- &ctx->pool                                */
 /*                                                                     */
 /* The static pool is used for:                                        */
@@ -64,7 +64,7 @@ typedef struct {
     size_t           sat_arena_top;
 } CheckpointMark;
 
-typedef struct SolveCtx {
+typedef struct dvs_ctx_s {
     Variable          *vars;          /* pointer into static pool      */
     uint32_t           n_vars;        /* number of compiled variables  */
     uint32_t           n_vars_capacity; /* allocated size of vars array */
@@ -72,9 +72,9 @@ typedef struct SolveCtx {
     uint64_t           trail_count;
     uint64_t           conflict_count;
     uint64_t           rng_state;
-    uint8_t            fair_pick;     /* SolveOpts.fair_pick for this solve */
+    uint8_t            fair_pick;     /* dvs_solve_opts_t.fair_pick for this solve */
     uint8_t            bail_reason;   /* DVS_BAIL_*: why the last solve returned
-                                       * SOLVE_TIMEOUT. Purely diagnostic -- a
+                                       * DVS_SOLVE_TIMEOUT. Purely diagnostic -- a
                                        * silent `unknown` used to give no clue
                                        * whether CDCL ran out of time, ran out
                                        * of decision depth, or never compiled
@@ -127,65 +127,25 @@ typedef struct SolveCtx {
                                              * on the next trail entry;
                                              * caller sets, callee resets. */
     /* CDCL: heap-allocated LCG context, NULL when use_lcg=0. Lazily
-     * created on first solve with use_lcg=1; freed in solver_destroy. */
+     * created on first solve with use_lcg=1; freed in dvs_solver_destroy. */
     void              *lcg;               /* LCGCtx* (opaque to avoid header dep) */
     /* Custom value selector hook (for cost-guided search) */
-    int64_t          (*value_selector_fn)(struct SolveCtx *, uint32_t, void *);
+    int64_t          (*value_selector_fn)(struct dvs_ctx_s *, uint32_t, void *);
     void              *value_selector_data;
     dvs_pool_t         pool;          /* MUST be last field            */
     /* static pool data region follows immediately                      */
-} SolveCtx;
+} dvs_ctx_t;
 
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
-
-/**
- * Create a solver context in a caller-supplied static buffer.
- *
- * @param static_buf   Buffer for the static segment (variables, propagators…).
- *                     Must be suitably aligned.
- * @param static_size  Size of static_buf in bytes.
- * @param block_alloc  Block allocator for the dynamic stack.  Must outlive
- *                     the context.  May be NULL (dynamic stack disabled).
- * @return  Pointer to the initialised context (== static_buf), or NULL.
- */
-SolveCtx *solver_create(void *static_buf, size_t static_size,
-                         dvs_block_alloc_t *block_alloc);
-
-/**
- * Destroy the context: tear down the dynamic stack and zero the struct.
- * The static buffer is caller-managed; solver_destroy does not free it.
- */
-void solver_destroy(SolveCtx *ctx);
 
 /* ------------------------------------------------------------------ */
 /* Compilation                                                         */
 /* ------------------------------------------------------------------ */
 
 /**
- * Compile a SolveProblem into the context's static pool.
- *
- * Walks the VarSpec linked list in `sp`, allocates Variable[] in the
- * static pool, and initialises each variable's domain according to its
- * tier (0/1/2).
- *
- * The SolveProblem `sp` is consumed but not freed; the caller should
- * reset or free the problem's buffer after this call.
- *
- * @return  A POSITIVE value is the count of constraints that could not be
- *          compiled natively -- the search then runs against a SUBSET of the
- *          problem, so the caller must either refuse or validate the model
- *          (solver_validate_model) before trusting it.
- *          0 on full success.
- *          -1 if the static pool is too small.
- *          -2 if compile-time bound tightening emptied a domain (UNSAT).
- *          DVS_COMPILE_UNSUPPORTED_WIDTH if a variable is wider than 64 bits.
- */
-int solver_compile(SolveCtx *ctx, SolveProblem *sp);
-
-/**
- * solver_compile: a variable wider than 64 bits was declared.
+ * dvs_solver_compile: a variable wider than 64 bits was declared.
  *
  * The bounds/propagator engine cannot search tier-2 variables -- their bounds
  * cannot be tightened (trail_record_lb/ub refuse them) and the int64 bound
@@ -194,52 +154,15 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp);
  * constraints, compile declines. The bit-blasting engine (dvs_bbsolver)
  * handles these widths; escalate there.
  */
-#define DVS_COMPILE_UNSUPPORTED_WIDTH (-3)
-
-/**
- * Add constraints from an auxiliary SolveProblem to an already-compiled context.
- *
- * @return 0 on success, -1 if a new variable exceeds capacity,
- *         -2 if UNSAT detected during propagation.
- */
-int solver_add_constraint(SolveCtx *ctx, SolveProblem *aux_sp);
-
-/**
- * Validate that the current variable assignment satisfies every
- * top-level constraint in `sp`. Intended to be called after solver_solve
- * returns SOLVE_OK as a sanity check against silently-dropped or
- * incorrectly-compiled constraints.
- *
- * Evaluates each ConstraintSpec root expression under the assignment;
- * a 0 value is treated as a violation. Constraints involving constructs
- * the evaluator can't handle (arrays, sums, countones, clog2, in_set,
- * in_range) are skipped — they don't count as violations or successes.
- *
- * @return 0 if every evaluated constraint was satisfied; positive count
- *         of violations otherwise. Diagnostic messages for each violation
- *         are written to `err` (skipped when err is NULL).
- */
-int solver_validate_model(SolveCtx *ctx, SolveProblem *sp, FILE *err);
-
-/**
- * Save a checkpoint of the current solver state.
- * @return Checkpoint index (0-based), or -1 if MAX_CHECKPOINTS exceeded.
- */
-int solver_checkpoint(SolveCtx *ctx);
-
-/**
- * Restore solver state to a previously saved checkpoint.
- * Undoes domain changes, deactivates propagators added after checkpoint.
- */
-void solver_restore(SolveCtx *ctx, uint32_t cp);
+/* DVS_COMPILE_UNSUPPORTED_WIDTH is defined in dv_solve.h. */
 
 /**
  * Install a custom value-selection callback (e.g. the cost-guided selector).
  * Passing fn=NULL restores the default selection order. (Defined in dvs_ctx.c;
  * called from dvs_costguided.c.)
  */
-void solver_set_value_selector(SolveCtx *ctx,
-                               int64_t (*fn)(SolveCtx *, uint32_t, void *),
+void dvs_solver_set_value_selector(dvs_ctx_t *ctx,
+                               int64_t (*fn)(dvs_ctx_t *, uint32_t, void *),
                                void *data);
 
 /* ------------------------------------------------------------------ */
@@ -249,37 +172,37 @@ void solver_set_value_selector(SolveCtx *ctx,
 /* ------------------------------------------------------------------ */
 
 /** Return the lower bound of a tier-0 variable as int32_t. */
-int32_t  dvs_var_lo32(const SolveCtx *ctx, uint32_t var_id);
+int32_t  dvs_var_lo32(const dvs_ctx_t *ctx, uint32_t var_id);
 
 /** Return the upper bound of a tier-0 variable as int32_t. */
-int32_t  dvs_var_hi32(const SolveCtx *ctx, uint32_t var_id);
+int32_t  dvs_var_hi32(const dvs_ctx_t *ctx, uint32_t var_id);
 
 /** Return the lower bound of a tier-0 or tier-1 variable as int64_t. */
-int64_t  dvs_var_lo64(const SolveCtx *ctx, uint32_t var_id);
+int64_t  dvs_var_lo64(const dvs_ctx_t *ctx, uint32_t var_id);
 
 /** Return the upper bound of a tier-0 or tier-1 variable as int64_t. */
-int64_t  dvs_var_hi64(const SolveCtx *ctx, uint32_t var_id);
+int64_t  dvs_var_hi64(const dvs_ctx_t *ctx, uint32_t var_id);
 
 /** Return a pointer to the Variable struct for var_id (for tests). */
-Variable *solver_get_var(const SolveCtx *ctx, uint32_t var_id);
+Variable *dvs_solver_get_var(const dvs_ctx_t *ctx, uint32_t var_id);
 
 /** Return bytes used in the static pool. */
-uint32_t  dvs_ctx_pool_used(const SolveCtx *ctx);
+uint32_t  dvs_ctx_pool_used(const dvs_ctx_t *ctx);
 
 /** Return the current decision level. */
-uint32_t  dvs_ctx_decision_level(const SolveCtx *ctx);
+uint32_t  dvs_ctx_decision_level(const dvs_ctx_t *ctx);
 
 /** Return the total trail entry count. */
-uint64_t  dvs_ctx_trail_count(const SolveCtx *ctx);
+uint64_t  dvs_ctx_trail_count(const dvs_ctx_t *ctx);
 
 /** Return the constraint_id for propagator prop_idx, or 0 if unknown/out-of-range. */
-uint32_t  dvs_prop_constraint_id(const SolveCtx *ctx, uint32_t prop_idx);
+uint32_t  dvs_prop_constraint_id(const dvs_ctx_t *ctx, uint32_t prop_idx);
 
 /* ------------------------------------------------------------------ */
 /* Inline accessors for use in C propagator code                      */
 /* ------------------------------------------------------------------ */
 
-static inline Variable *_ctx_var(const SolveCtx *ctx, uint32_t var_id) {
+static inline Variable *_ctx_var(const dvs_ctx_t *ctx, uint32_t var_id) {
     return &ctx->vars[var_id];
 }
 
@@ -292,7 +215,7 @@ static inline int32_t var_hi32(const Variable *v) {
 }
 
 /* These read a TIER-1 WideBounds64 for every non-tier-0 variable. That is
- * currently exhaustive: solver_compile returns DVS_COMPILE_UNSUPPORTED_WIDTH
+ * currently exhaustive: dvs_solver_compile returns DVS_COMPILE_UNSUPPORTED_WIDTH
  * rather than creating a tier-2 variable, so no WideBoundsN reaches here.
  *
  * The assert matters because the failure mode without it is silent and
@@ -302,7 +225,7 @@ static inline int32_t var_hi32(const Variable *v) {
  * the domain [2, 0] -- empty -- and the solve reported UNSAT. If tier-2 search
  * is ever implemented (see _init_tier2), these need a real tier-2 arm; the
  * assert is what makes that requirement impossible to miss. */
-static inline int64_t var_lo64(const SolveCtx *ctx, const Variable *v) {
+static inline int64_t var_lo64(const dvs_ctx_t *ctx, const Variable *v) {
     if (VAR_IS_TIER0(v->flags)) {
         return (v->flags & VAR_SIGNED) ? (int64_t)v->lo
                                        : (int64_t)(uint32_t)v->lo;
@@ -313,7 +236,7 @@ static inline int64_t var_lo64(const SolveCtx *ctx, const Variable *v) {
     return wb->lo;
 }
 
-static inline int64_t var_hi64(const SolveCtx *ctx, const Variable *v) {
+static inline int64_t var_hi64(const dvs_ctx_t *ctx, const Variable *v) {
     if (VAR_IS_TIER0(v->flags)) {
         return (v->flags & VAR_SIGNED) ? (int64_t)v->hi
                                        : (int64_t)(uint32_t)v->hi;
@@ -394,14 +317,14 @@ static inline int64_t var_repr_max(const Variable *v) {
     return (int64_t)(((uint64_t)1 << w) - 1); /* w == 63: 1 << 63 overflows int64 */
 }
 
-static inline const uint64_t *var_lo_wide(const SolveCtx *ctx,
+static inline const uint64_t *var_lo_wide(const dvs_ctx_t *ctx,
                                            const Variable *v) {
     const WideBoundsN *wn =
         (const WideBoundsN *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
     return (const uint64_t *)(wn + 1);
 }
 
-static inline const uint64_t *var_hi_wide(const SolveCtx *ctx,
+static inline const uint64_t *var_hi_wide(const dvs_ctx_t *ctx,
                                            const Variable *v) {
     const WideBoundsN *wn =
         (const WideBoundsN *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
@@ -417,7 +340,7 @@ static inline const uint64_t *var_hi_wide(const SolveCtx *ctx,
  * useful lower-level dependency is found.  See dvs_conflict.c for the
  * algorithm.
  */
-uint32_t analyze_conflict(SolveCtx *ctx);
+uint32_t analyze_conflict(dvs_ctx_t *ctx);
 
 #ifdef __cplusplus
 }

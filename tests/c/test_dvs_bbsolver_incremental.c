@@ -24,30 +24,30 @@ static int failures = 0;
 
 /* Build: vars x,y in [0,255]; base constraint x+y==10; plus two *unasserted*
  * predicates in the pool (x<3 and x>=3) for incremental assertion. */
-static SolveProblem *build_problem(SolveProblemBuilder *b, size_t *sz,
-                                   ExprRef *xlt3, ExprRef *xge3) {
-    builder_add_var(b, 0, 8, 0, 0, 255);
-    builder_add_var(b, 1, 8, 0, 0, 255);
-    ExprRef x   = builder_expr_var(b, 0);
-    ExprRef y   = builder_expr_var(b, 1);
-    ExprRef k10 = builder_expr_const(b, 10, 0);
-    ExprRef k3  = builder_expr_const(b, 3, 0);
-    ExprRef sum = builder_expr_binary(b, BIN_ADD, x, y);
-    builder_add_constraint(b, builder_expr_binary(b, BIN_EQ, sum, k10));
+static dvs_problem_t *build_problem(dvs_builder_t *b, size_t *sz,
+                                   dvs_expr_t *xlt3, dvs_expr_t *xge3) {
+    dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 1, 8, 0, 0, 255);
+    dvs_expr_t x   = dvs_builder_expr_var(b, 0);
+    dvs_expr_t y   = dvs_builder_expr_var(b, 1);
+    dvs_expr_t k10 = dvs_builder_expr_const(b, 10, 0);
+    dvs_expr_t k3  = dvs_builder_expr_const(b, 3, 0);
+    dvs_expr_t sum = dvs_builder_expr_binary(b, DVS_BIN_ADD, x, y);
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ, sum, k10));
     /* Predicates left unasserted — asserted incrementally below. They still
      * live in the finalized pool (finalize copies the whole builder pool). */
-    *xlt3 = builder_expr_binary(b, BIN_LT,  x, k3);
-    *xge3 = builder_expr_binary(b, BIN_GTE, x, k3);
-    return builder_finalize(b, sz);
+    *xlt3 = dvs_builder_expr_binary(b, DVS_BIN_LT,  x, k3);
+    *xge3 = dvs_builder_expr_binary(b, DVS_BIN_GTE, x, k3);
+    return dvs_builder_finalize(b, sz);
 }
 
 /* Full incremental flow — requires an incremental backend (CaDiCaL). */
 static void run_incremental_scenario(const char *tag) {
     char label[128];
-    SolveProblemBuilder *b = builder_create(4096, NULL);
+    dvs_builder_t *b = dvs_builder_create(4096, NULL);
     size_t sz;
-    ExprRef xlt3, xge3;
-    SolveProblem *p = build_problem(b, &sz, &xlt3, &xge3);
+    dvs_expr_t xlt3, xge3;
+    dvs_problem_t *p = build_problem(b, &sz, &xlt3, &xge3);
 
     dvs_bbsolver_t *S = dvs_bbsolver_new(NULL, p);
 
@@ -80,41 +80,41 @@ static void run_incremental_scenario(const char *tag) {
     CHECK(dvs_bbsolver_resolve(S, 0) == DVS_BB_UNSAT, label);
 
     dvs_bbsolver_free(S);
-    builder_free_problem(b, p, sz);
-    builder_destroy(b);
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
 }
 
 /* Differential: the incremental result must match a fresh monolithic build of
  * the same accumulated constraint set. */
 static void test_matches_fresh_build(void) {
     /* Fresh build of {x+y==10, x<3}: expect SAT. */
-    SolveProblemBuilder *b = builder_create(4096, NULL);
-    builder_add_var(b, 0, 8, 0, 0, 255);
-    builder_add_var(b, 1, 8, 0, 0, 255);
-    ExprRef x   = builder_expr_var(b, 0);
-    ExprRef y   = builder_expr_var(b, 1);
-    ExprRef k10 = builder_expr_const(b, 10, 0);
-    ExprRef k3  = builder_expr_const(b, 3, 0);
-    ExprRef sum = builder_expr_binary(b, BIN_ADD, x, y);
-    builder_add_constraint(b, builder_expr_binary(b, BIN_EQ, sum, k10));
-    builder_add_constraint(b, builder_expr_binary(b, BIN_LT, x, k3));
+    dvs_builder_t *b = dvs_builder_create(4096, NULL);
+    dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 1, 8, 0, 0, 255);
+    dvs_expr_t x   = dvs_builder_expr_var(b, 0);
+    dvs_expr_t y   = dvs_builder_expr_var(b, 1);
+    dvs_expr_t k10 = dvs_builder_expr_const(b, 10, 0);
+    dvs_expr_t k3  = dvs_builder_expr_const(b, 3, 0);
+    dvs_expr_t sum = dvs_builder_expr_binary(b, DVS_BIN_ADD, x, y);
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ, sum, k10));
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_LT, x, k3));
     size_t sz;
-    SolveProblem *p = builder_finalize(b, &sz);
+    dvs_problem_t *p = dvs_builder_finalize(b, &sz);
     dvs_bbsolver_t *S = dvs_bbsolver_new(NULL, p);
     CHECK(dvs_bbsolver_check(S, 0) == DVS_BB_SAT,
           "fresh {x+y==10, x<3} SAT (matches incremental)");
     dvs_bbsolver_free(S);
-    builder_free_problem(b, p, sz);
-    builder_destroy(b);
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
 }
 
 /* On a non-incremental backend (kissat) assert/resolve must refuse cleanly
  * (DVS_BB_ERROR) rather than crash — the caller is expected to free+rebuild. */
 static void test_noninc_refuses(void) {
-    SolveProblemBuilder *b = builder_create(4096, NULL);
+    dvs_builder_t *b = dvs_builder_create(4096, NULL);
     size_t sz;
-    ExprRef xlt3, xge3;
-    SolveProblem *p = build_problem(b, &sz, &xlt3, &xge3);
+    dvs_expr_t xlt3, xge3;
+    dvs_problem_t *p = build_problem(b, &sz, &xlt3, &xge3);
     dvs_bbsolver_t *S = dvs_bbsolver_new(NULL, p);
 
     CHECK(dvs_bbsolver_check(S, 0) == DVS_BB_SAT, "[kissat] base SAT");
@@ -124,8 +124,8 @@ static void test_noninc_refuses(void) {
           "[kissat] resolve refused on non-incremental backend");
 
     dvs_bbsolver_free(S);
-    builder_free_problem(b, p, sz);
-    builder_destroy(b);
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
 }
 
 int main(void) {

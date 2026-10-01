@@ -30,21 +30,21 @@ def _setup(lib: ctypes.CDLL):
                                     ctypes.c_uint8, ctypes.c_uint8,
                                     ctypes.c_int64, ctypes.c_int64]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.dvs_var_lo64.restype  = ctypes.c_int64
     lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.dvs_var_hi64.restype  = ctypes.c_int64
     lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
     lib.ctx_tighten_lb64.restype  = ctypes.c_int
     lib.ctx_tighten_lb64.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
@@ -90,10 +90,10 @@ def _make_ctx_64(lib, var_specs):
 
     ba  = lib.dvs_block_alloc_create(None, 0)
     assert ba
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
 
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     return sp_buf, ctx_buf, ba, sp, ctx
@@ -133,7 +133,7 @@ def test_mul_64_basic(libdvs):
     _fix64(lib, ctx, 1, 3)
     _fix64(lib, ctx, 2, 4)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 12
@@ -155,7 +155,7 @@ def test_mul_64_range(libdvs):
 
     lib.prop_add_bounds_mul_64(ctx, 0, 1, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # With singleton specialization only, the mul propagator won't tighten
@@ -182,7 +182,7 @@ def test_mul_64_backward(libdvs):
     _fix64(lib, ctx, 1, 5)    # a = 5
     _fix64(lib, ctx, 0, 15)   # r = 15
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 2) == 3
@@ -205,7 +205,7 @@ def test_mul_64_zero(libdvs):
     lib.prop_add_bounds_mul_64(ctx, 0, 1, 2, 0)
     _fix64(lib, ctx, 1, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 0
@@ -233,7 +233,7 @@ def test_div_64_basic(libdvs):
     _fix64(lib, ctx, 1, 12)
     _fix64(lib, ctx, 2, 3)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 4
@@ -256,7 +256,7 @@ def test_div_64_range(libdvs):
     lib.prop_add_bounds_div_64(ctx, 0, 1, 2, 0)
     _fix64(lib, ctx, 2, 5)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) >= 2
@@ -278,7 +278,7 @@ def test_div_64_positive_range_divisor(libdvs):
 
     lib.prop_add_bounds_div_64(ctx, 0, 1, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) >= 10   # 100/10
@@ -305,7 +305,7 @@ def test_mod_64_basic(libdvs):
     lib.prop_add_bounds_mod_64(ctx, 0, 1, 2, 0)
     _fix64(lib, ctx, 2, 5)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) >= 0
@@ -327,7 +327,7 @@ def test_mod_64_range_divisor(libdvs):
 
     lib.prop_add_bounds_mod_64(ctx, 0, 1, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) >= 0

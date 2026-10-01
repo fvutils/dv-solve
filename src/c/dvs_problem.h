@@ -3,17 +3,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "dv_solve.h"  /* public types: dvs_expr_t, dvs_binop_t, ... */
 #include "dvs_pool.h"   /* dvs_pool_t, EXPR_NULL */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ------------------------------------------------------------------ */
-/* ExprRef — 32-bit offset into the SolveProblem's embedded pool.      */
-/* EXPR_NULL (0xFFFFFFFF) is the null/overflow sentinel (from pool.h). */
-/* ------------------------------------------------------------------ */
-typedef uint32_t ExprRef;
 
 /* ------------------------------------------------------------------ */
 /* ExprKind — discriminates expression node types                      */
@@ -38,31 +34,12 @@ typedef enum {
                          * produced only by SV elaboration (dvs_sv.h) */
 } ExprKind;
 
-/* ------------------------------------------------------------------ */
-/* BinOp — binary operator codes                                       */
-/* ------------------------------------------------------------------ */
-typedef enum {
-    BIN_ADD = 0, BIN_SUB,  BIN_MUL,  BIN_DIV,  BIN_MOD,
-    BIN_BAND,    BIN_BOR,  BIN_BXOR, BIN_LSHIFT, BIN_RSHIFT,
-    BIN_EQ,      BIN_NEQ,  BIN_LT,   BIN_LTE,
-    BIN_GT,      BIN_GTE,
-    BIN_AND,     BIN_OR,
-    BIN_ASHR,    /* SV `>>>`: arithmetic in a signed context, else as `>>` */
-} BinOp;
 
-/* ------------------------------------------------------------------ */
-/* UnaryOp — unary operator codes                                      */
-/* ------------------------------------------------------------------ */
-typedef enum {
-    UN_NEG    = 0,  /* arithmetic negation   */
-    UN_NOT    = 1,  /* logical NOT           */
-    UN_INVERT = 2,  /* bitwise invert (~)    */
-} UnaryOp;
 
 /* ------------------------------------------------------------------ */
 /* Expression node structs                                             */
 /*                                                                     */
-/* Every node begins with `ExprKind kind` so any ExprRef can be cast  */
+/* Every node begins with `ExprKind kind` so any dvs_expr_t can be cast  */
 /* to `ExprKind *` to read its type before casting to the specific     */
 /* struct.                                                             */
 /* ------------------------------------------------------------------ */
@@ -95,56 +72,56 @@ typedef struct {
 /** Binary operation */
 typedef struct {
     ExprKind kind;  /* EXPR_BINARY */
-    BinOp    op;
-    ExprRef  lhs;
-    ExprRef  rhs;
+    dvs_binop_t    op;
+    dvs_expr_t  lhs;
+    dvs_expr_t  rhs;
 } ExprBinary;
 
 /** Unary operation */
 typedef struct {
     ExprKind kind;    /* EXPR_UNARY */
-    UnaryOp  op;
-    ExprRef  operand;
+    dvs_unop_t  op;
+    dvs_expr_t  operand;
 } ExprUnary;
 
 /** If-then-else */
 typedef struct {
     ExprKind kind;    /* EXPR_ITE */
-    ExprRef  cond;
-    ExprRef  then_e;
-    ExprRef  else_e;
+    dvs_expr_t  cond;
+    dvs_expr_t  then_e;
+    dvs_expr_t  else_e;
 } ExprITE;
 
 /** Range membership: value in [lo, hi] */
 typedef struct {
     ExprKind kind;    /* EXPR_IN_RANGE */
-    ExprRef  value;
-    ExprRef  lo;
-    ExprRef  hi;
+    dvs_expr_t  value;
+    dvs_expr_t  lo;
+    dvs_expr_t  hi;
 } ExprInRange;
 
 /**
  * Set membership: value in {elems[0], elems[1], ..., elems[n_elems-1]}.
  *
- * n_elems ExprRef values are stored immediately after this struct in pool
+ * n_elems dvs_expr_t values are stored immediately after this struct in pool
  * memory.  Use expr_in_set_elems() to obtain the pointer.
  */
 typedef struct {
     ExprKind kind;     /* EXPR_IN_SET */
-    ExprRef  value;
+    dvs_expr_t  value;
     uint32_t n_elems;
 } ExprInSet;
 
 /**
  * Multi-range membership: value in [lo0,hi0] U [lo1,hi1] U ... U [lo{n-1},hi{n-1}].
  *
- * 2*n_ranges ExprRef values follow this struct in pool memory: the lo refs
+ * 2*n_ranges dvs_expr_t values follow this struct in pool memory: the lo refs
  * (n_ranges of them) then the hi refs (n_ranges of them). Use
  * expr_in_ranges_los()/expr_in_ranges_his() to obtain the pointers.
  */
 typedef struct {
     ExprKind kind;     /* EXPR_IN_RANGES */
-    ExprRef  value;
+    dvs_expr_t  value;
     uint32_t n_ranges;
 } ExprInRanges;
 
@@ -155,7 +132,7 @@ typedef struct {
     uint8_t  from_bits;   /* source width     */
     uint8_t  to_bits;     /* destination width */
     uint8_t  _pad;
-    ExprRef  operand;
+    dvs_expr_t  operand;
 } ExprExtend;
 
 /** INTERNAL explicit conversion (EXPR_SV_CAST), never built by a front end.
@@ -172,7 +149,7 @@ typedef struct {
     uint8_t  from_bits;   /* source width     */
     uint8_t  to_bits;     /* destination width */
     uint8_t  dst_signed;  /* result signedness */
-    ExprRef  operand;
+    dvs_expr_t  operand;
 } ExprSvCast;
 
 /** Bit-slice extract: result = operand[hi_bit:lo_bit] */
@@ -181,7 +158,7 @@ typedef struct {
     uint8_t  hi_bit;
     uint8_t  lo_bit;
     uint8_t  _pad[2];
-    ExprRef  operand;
+    dvs_expr_t  operand;
 } ExprExtract;
 
 
@@ -191,15 +168,15 @@ typedef struct {
     ExprKind kind;       /* EXPR_CONCAT  */
     uint8_t  lo_width;   /* width of lo operand in bits */
     uint8_t  _pad[3];
-    ExprRef  hi;
-    ExprRef  lo;
+    dvs_expr_t  hi;
+    dvs_expr_t  lo;
 } ExprConcat;
 
 /** N-ary sum: result == var_ids[0] + var_ids[1] + ... + var_ids[n-1].
  *  n_vars uint32_t var_ids follow immediately after this struct in pool. */
 typedef struct {
     ExprKind kind;       /* EXPR_SUM */
-    ExprRef  result;     /* result variable ExprRef   */
+    dvs_expr_t  result;     /* result variable dvs_expr_t   */
     uint32_t n_vars;     /* number of summand variables */
     /* uint32_t var_ids[n_vars] follow in pool */
 } ExprSum;
@@ -207,15 +184,15 @@ typedef struct {
 /** Popcount: result == number of 1-bits in operand. */
 typedef struct {
     ExprKind kind;       /* EXPR_COUNTONES */
-    ExprRef  result;     /* result variable ExprRef  */
-    ExprRef  operand;    /* input variable ExprRef   */
+    dvs_expr_t  result;     /* result variable dvs_expr_t  */
+    dvs_expr_t  operand;    /* input variable dvs_expr_t   */
 } ExprCountones;
 
 /** Ceil-log2: result == ceil(log2(operand)). operand must be > 0. */
 typedef struct {
     ExprKind kind;       /* EXPR_CLOG2   */
-    ExprRef  result;     /* result variable ExprRef  */
-    ExprRef  operand;    /* input variable ExprRef   */
+    dvs_expr_t  result;     /* result variable dvs_expr_t  */
+    dvs_expr_t  operand;    /* input variable dvs_expr_t   */
 } ExprClog2;
 
 /** Array element select: result = base_var[index].
@@ -225,8 +202,8 @@ typedef struct {
     ExprKind kind;          /* EXPR_ARRAY_SELECT         */
     uint32_t base_var_id;   /* first element variable ID */
     uint32_t n_elems;       /* number of elements        */
-    ExprRef  result;        /* result variable ExprRef   */
-    ExprRef  index;         /* index expression ExprRef  */
+    dvs_expr_t  result;        /* result variable dvs_expr_t   */
+    dvs_expr_t  index;         /* index expression dvs_expr_t  */
 } ExprArraySelect;
 
 /* ------------------------------------------------------------------ */
@@ -238,7 +215,7 @@ typedef struct {
  * Lives in the problem pool; linked together via `next`.
  */
 typedef struct {
-    ExprRef  next;       /* next VarSpec, or EXPR_NULL */
+    dvs_expr_t  next;       /* next VarSpec, or EXPR_NULL */
     uint32_t var_id;     /* 0-based index              */
     uint8_t  width;      /* bit width (1–64)           */
     uint8_t  is_signed;  /* non-zero = signed          */
@@ -254,8 +231,8 @@ typedef struct {
  * Lives in the problem pool; linked via `next`.
  */
 typedef struct {
-    ExprRef  next;  /* next ConstraintSpec, or EXPR_NULL */
-    ExprRef  root;  /* root ExprRef of the expression    */
+    dvs_expr_t  next;  /* next ConstraintSpec, or EXPR_NULL */
+    dvs_expr_t  root;  /* root dvs_expr_t of the expression    */
     uint32_t constraint_id; /* user-visible constraint ID (contradiction analysis) */
 } ConstraintSpec;
 
@@ -266,7 +243,7 @@ typedef struct {
  * struct in pool memory.  Use source_spec_vars() to obtain the pointer.
  */
 typedef struct {
-    ExprRef  next;    /* next SourceSpec, or EXPR_NULL */
+    dvs_expr_t  next;    /* next SourceSpec, or EXPR_NULL */
     uint32_t n_vars;  /* number of variable IDs that follow */
 } SourceSpec;
 
@@ -275,7 +252,7 @@ typedef struct {
  * n_vars uint32_t variable IDs follow immediately in pool memory.
  */
 typedef struct {
-    ExprRef  next;       /* next AllDiffSpec, or EXPR_NULL */
+    dvs_expr_t  next;       /* next AllDiffSpec, or EXPR_NULL */
     uint32_t n_vars;     /* number of variable IDs that follow */
 } AllDiffSpec;
 
@@ -285,63 +262,53 @@ typedef struct {
  * Higher priority value = lower priority (relaxed first on conflict).
  */
 typedef struct {
-    ExprRef  next;       /* next SoftSpec, or EXPR_NULL */
-    ExprRef  root;       /* root ExprRef of the constraint expression */
+    dvs_expr_t  next;       /* next SoftSpec, or EXPR_NULL */
+    dvs_expr_t  root;       /* root dvs_expr_t of the constraint expression */
     uint32_t priority;   /* 0 = highest priority, larger = relaxed first */
     uint32_t constraint_id; /* original hard constraint ID (contradiction analysis) */
 } SoftSpec;
 
-/**
- * DistEntry -- one range/weight pair in a distribution constraint.
- */
-typedef struct {
-    int64_t  lo;           /* lower bound of the range               */
-    int64_t  hi;           /* upper bound of the range               */
-    uint32_t weight;       /* := weight (per-value) or :/ weight     */
-    uint8_t  is_per_value; /* 1 = := (weight per value), 0 = :/ (weight divided across range) */
-    uint8_t  _dpad[3];
-} DistEntry;
 
 /**
  * DistSpec -- declares a distribution constraint on a variable.
- * n_entries DistEntry values follow immediately in pool memory.
+ * n_entries dvs_dist_entry_t values follow immediately in pool memory.
  * Use dist_spec_entries() to obtain the pointer.
  */
 typedef struct {
-    ExprRef  next;       /* next DistSpec, or EXPR_NULL */
+    dvs_expr_t  next;       /* next DistSpec, or EXPR_NULL */
     uint32_t var_id;     /* variable this distribution applies to   */
-    uint32_t n_entries;  /* number of DistEntry items that follow   */
+    uint32_t n_entries;  /* number of dvs_dist_entry_t items that follow   */
 } DistSpec;
 
 
 /* ------------------------------------------------------------------ */
-/* SolveProblem                                                        */
+/* dvs_problem_t                                                        */
 /*                                                                     */
 /* The caller supplies a buffer; solve_problem_init() places this      */
 /* struct at the front and initialises a dvs_pool_t for all expression */
 /* and spec data immediately after it.                                 */
 /*                                                                     */
-/* All ExprRef values are offsets from &sp->pool (i.e. from the start  */
+/* All dvs_expr_t values are offsets from &sp->pool (i.e. from the start  */
 /* of the embedded pool, NOT from the start of the buffer).           */
 /* ------------------------------------------------------------------ */
-typedef struct {
+struct dvs_problem_s {
     uint32_t   n_vars;            /* number of variables added         */
     uint32_t   n_constraints;     /* number of constraints added       */
     uint32_t   n_sources;         /* number of source groups added     */
-    ExprRef    vars_head;         /* head of VarSpec linked list       */
-    ExprRef    constraints_head;  /* head of ConstraintSpec linked list */
-    ExprRef    sources_head;      /* head of SourceSpec linked list    */
+    dvs_expr_t    vars_head;         /* head of VarSpec linked list       */
+    dvs_expr_t    constraints_head;  /* head of ConstraintSpec linked list */
+    dvs_expr_t    sources_head;      /* head of SourceSpec linked list    */
     uint32_t   n_alldiffs;         /* number of AllDifferent constraints */
-    ExprRef    allDiff_head;       /* head of AllDiffSpec linked list    */
+    dvs_expr_t    allDiff_head;       /* head of AllDiffSpec linked list    */
     uint32_t   n_softs;            /* number of soft constraints         */
-    ExprRef    softs_head;         /* head of SoftSpec linked list       */
+    dvs_expr_t    softs_head;         /* head of SoftSpec linked list       */
     uint32_t   n_dists;            /* number of distribution constraints */
-    ExprRef    dists_head;         /* head of DistSpec linked list       */
+    dvs_expr_t    dists_head;         /* head of DistSpec linked list       */
     uint32_t   next_constraint_id; /* auto-incrementing constraint ID counter */
     uint32_t   flags;             /* DVS_PROBLEM_F_* */
     dvs_pool_t pool;              /* MUST be last field                */
     /* pool data region follows immediately in the same buffer         */
-} SolveProblem;
+};
 
 /** The problem's expressions are already EXPLICIT: every constant is sized
  * and every operator's operands already share the width and signedness the
@@ -349,7 +316,7 @@ typedef struct {
  * is skipped for such a problem. Set by the SMT-LIB2 front end. */
 #define DVS_PROBLEM_F_EXPLICIT  0x1u
 
-/** Convert a pool offset (ExprRef) to a real pointer. */
+/** Convert a pool offset (dvs_expr_t) to a real pointer. */
 #define POOL_PTR(sp, ref)  dvs_pool_ptr(&(sp)->pool, (ref))
 
 /* ------------------------------------------------------------------ */
@@ -357,20 +324,20 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 /**
- * Initialise a SolveProblem in a caller-supplied buffer.
+ * Initialise a dvs_problem_t in a caller-supplied buffer.
  *
  * @param buf       Suitably aligned buffer (e.g. from malloc / block_alloc).
  * @param buf_size  Total size of `buf`.
  * @return  Pointer to the initialised problem (== buf), or NULL on error.
  */
-SolveProblem *solve_problem_init(void *buf, size_t buf_size);
+dvs_problem_t *solve_problem_init(void *buf, size_t buf_size);
 
 /**
  * Initialise with sizing hints (n_vars/constraints/sources are ignored
  * in Phase 3 — the pool is flat; hints will be used in Phase 4 for
  * static-segment pre-allocation).
  */
-SolveProblem *solve_problem_init_sized(void *buf, size_t buf_size,
+dvs_problem_t *solve_problem_init_sized(void *buf, size_t buf_size,
                                        uint32_t n_vars,
                                        uint32_t n_constraints,
                                        uint32_t n_sources);
@@ -379,85 +346,85 @@ SolveProblem *solve_problem_init_sized(void *buf, size_t buf_size,
  * Reset the problem for reuse.  Clears all counts, linked-list heads,
  * and resets the pool (all previous ExprRefs become invalid).
  */
-void solve_problem_reset(SolveProblem *sp);
+void solve_problem_reset(dvs_problem_t *sp);
 
 /**
  * No-op for caller-managed buffers.  Provided for symmetry with future
  * heap-managed variants; safe to call unconditionally.
  */
-void solve_problem_destroy(SolveProblem *sp);
+void solve_problem_destroy(dvs_problem_t *sp);
 
 /* ------------------------------------------------------------------ */
 /* Expression builders — return EXPR_NULL on pool overflow             */
 /* ------------------------------------------------------------------ */
 
-ExprRef expr_const(SolveProblem *sp, int64_t value, uint8_t is_signed);
+dvs_expr_t expr_const(dvs_problem_t *sp, int64_t value, uint8_t is_signed);
 /** A sized constant of `width` bits (see ExprConst). width 0 == expr_const. */
-ExprRef expr_const_sized(SolveProblem *sp, int64_t value, uint8_t is_signed,
+dvs_expr_t expr_const_sized(dvs_problem_t *sp, int64_t value, uint8_t is_signed,
                          uint8_t width);
-ExprRef expr_var(SolveProblem *sp, uint32_t var_id);
-ExprRef expr_binary(SolveProblem *sp, BinOp op, ExprRef lhs, ExprRef rhs);
-ExprRef expr_unary(SolveProblem *sp, UnaryOp op, ExprRef operand);
-ExprRef expr_ite(SolveProblem *sp, ExprRef cond, ExprRef then_e, ExprRef else_e);
-ExprRef expr_in_range(SolveProblem *sp, ExprRef value, ExprRef lo, ExprRef hi);
+dvs_expr_t expr_var(dvs_problem_t *sp, uint32_t var_id);
+dvs_expr_t expr_binary(dvs_problem_t *sp, dvs_binop_t op, dvs_expr_t lhs, dvs_expr_t rhs);
+dvs_expr_t expr_unary(dvs_problem_t *sp, dvs_unop_t op, dvs_expr_t operand);
+dvs_expr_t expr_ite(dvs_problem_t *sp, dvs_expr_t cond, dvs_expr_t then_e, dvs_expr_t else_e);
+dvs_expr_t expr_in_range(dvs_problem_t *sp, dvs_expr_t value, dvs_expr_t lo, dvs_expr_t hi);
 
 /**
  * Build an in-set node.
  *
  * @param n_elems  Number of elements in `elems`.
- * @param elems    Array of ExprRef values (the allowed set members).
+ * @param elems    Array of dvs_expr_t values (the allowed set members).
  */
-ExprRef expr_in_set(SolveProblem *sp, ExprRef value,
-                    uint32_t n_elems, const ExprRef *elems);
+dvs_expr_t expr_in_set(dvs_problem_t *sp, dvs_expr_t value,
+                    uint32_t n_elems, const dvs_expr_t *elems);
 
-ExprRef expr_extend(SolveProblem *sp, ExprRef operand,
+dvs_expr_t expr_extend(dvs_problem_t *sp, dvs_expr_t operand,
                     uint8_t from_bits, uint8_t to_bits, uint8_t sign_extend);
-ExprRef expr_extract(SolveProblem *sp, ExprRef operand,
+dvs_expr_t expr_extract(dvs_problem_t *sp, dvs_expr_t operand,
                      uint8_t hi_bit, uint8_t lo_bit);
 
-ExprRef expr_concat(SolveProblem *sp, ExprRef hi, ExprRef lo,
+dvs_expr_t expr_concat(dvs_problem_t *sp, dvs_expr_t hi, dvs_expr_t lo,
                     uint8_t lo_width);
 
 /** Build an N-ary sum expression: result == sum of var_ids[].
- *  @param result   ExprRef of the result variable.
+ *  @param result   dvs_expr_t of the result variable.
  *  @param n_vars   Number of summand variable ExprRefs.
- *  @param var_refs Array of ExprRef values for summand variables. */
-ExprRef expr_sum(SolveProblem *sp, ExprRef result,
-                 uint32_t n_vars, const ExprRef *var_refs);
+ *  @param var_refs Array of dvs_expr_t values for summand variables. */
+dvs_expr_t expr_sum(dvs_problem_t *sp, dvs_expr_t result,
+                 uint32_t n_vars, const dvs_expr_t *var_refs);
 
 /** Build a countones (popcount) expression: result == popcount(operand). */
-ExprRef expr_countones(SolveProblem *sp, ExprRef result, ExprRef operand);
+dvs_expr_t expr_countones(dvs_problem_t *sp, dvs_expr_t result, dvs_expr_t operand);
 
 /** Build a clog2 expression: result == ceil(log2(operand)). */
-ExprRef expr_clog2(SolveProblem *sp, ExprRef result, ExprRef operand);
+dvs_expr_t expr_clog2(dvs_problem_t *sp, dvs_expr_t result, dvs_expr_t operand);
 
 /** Build an array-select expression: result = base[index].
  *  @param base_var_id  First element variable ID (elements are contiguous).
  *  @param n_elems      Number of array elements.
- *  @param result       ExprRef for the result variable.
- *  @param index        ExprRef for the index expression. */
-ExprRef expr_array_select(SolveProblem *sp, uint32_t base_var_id,
-                          uint32_t n_elems, ExprRef result, ExprRef index);
+ *  @param result       dvs_expr_t for the result variable.
+ *  @param index        dvs_expr_t for the index expression. */
+dvs_expr_t expr_array_select(dvs_problem_t *sp, uint32_t base_var_id,
+                          uint32_t n_elems, dvs_expr_t result, dvs_expr_t index);
 
 /* ------------------------------------------------------------------ */
 /* Problem builders                                                    */
 /* ------------------------------------------------------------------ */
 
-/** Add a variable; returns ExprRef to its VarSpec, or EXPR_NULL. */
-ExprRef problem_add_var(SolveProblem *sp, uint32_t var_id,
+/** Add a variable; returns dvs_expr_t to its VarSpec, or EXPR_NULL. */
+dvs_expr_t problem_add_var(dvs_problem_t *sp, uint32_t var_id,
                         uint8_t width, uint8_t is_signed,
                         int64_t lo, int64_t hi);
 
-/** Add a constraint; returns ExprRef to its ConstraintSpec, or EXPR_NULL. */
-ExprRef problem_add_constraint(SolveProblem *sp, ExprRef root);
+/** Add a constraint; returns dvs_expr_t to its ConstraintSpec, or EXPR_NULL. */
+dvs_expr_t problem_add_constraint(dvs_problem_t *sp, dvs_expr_t root);
 
 /**
- * Add a source group; returns ExprRef to its SourceSpec, or EXPR_NULL.
+ * Add a source group; returns dvs_expr_t to its SourceSpec, or EXPR_NULL.
  *
  * @param n_vars   Number of variable IDs.
  * @param var_ids  Array of variable IDs.
  */
-ExprRef problem_add_source(SolveProblem *sp,
+dvs_expr_t problem_add_source(dvs_problem_t *sp,
                            uint32_t n_vars, const uint32_t *var_ids);
 
 
@@ -465,32 +432,32 @@ ExprRef problem_add_source(SolveProblem *sp,
  * Add an AllDifferent constraint over the given variable IDs.
  * @param n_vars   Number of variable IDs.
  * @param var_ids  Array of variable IDs.
- * @return ExprRef to the AllDiffSpec, or EXPR_NULL on overflow.
+ * @return dvs_expr_t to the AllDiffSpec, or EXPR_NULL on overflow.
  */
-ExprRef problem_add_all_different(SolveProblem *sp,
+dvs_expr_t problem_add_all_different(dvs_problem_t *sp,
                                   uint32_t n_vars, const uint32_t *var_ids);
 
 /**
  * Add a soft (relaxable) constraint.
- * @param root     ExprRef of the constraint expression root.
+ * @param root     dvs_expr_t of the constraint expression root.
  * @param priority Priority (0 = highest, larger = relaxed first on conflict).
- * @return ExprRef to the SoftSpec, or EXPR_NULL on overflow.
+ * @return dvs_expr_t to the SoftSpec, or EXPR_NULL on overflow.
  */
-ExprRef problem_add_soft_constraint(SolveProblem *sp, ExprRef root,
+dvs_expr_t problem_add_soft_constraint(dvs_problem_t *sp, dvs_expr_t root,
                                     uint32_t priority);
 
 /**
  * Add a distribution constraint on a variable.
  * @param var_id     Variable ID this distribution applies to.
- * @param n_entries  Number of DistEntry items.
- * @param entries    Array of DistEntry values (copied into the pool).
- * @return ExprRef to the DistSpec, or EXPR_NULL on overflow.
+ * @param n_entries  Number of dvs_dist_entry_t items.
+ * @param entries    Array of dvs_dist_entry_t values (copied into the pool).
+ * @return dvs_expr_t to the DistSpec, or EXPR_NULL on overflow.
  */
-ExprRef problem_add_dist(SolveProblem *sp, uint32_t var_id,
-                         uint32_t n_entries, const DistEntry *entries);
+dvs_expr_t problem_add_dist(dvs_problem_t *sp, uint32_t var_id,
+                         uint32_t n_entries, const dvs_dist_entry_t *entries);
 
 /** Return a pointer to the entry array of a DistSpec node. */
-DistEntry *dist_spec_entries(SolveProblem *sp, ExprRef dist_ref);
+dvs_dist_entry_t *dist_spec_entries(dvs_problem_t *sp, dvs_expr_t dist_ref);
 
 /* ------------------------------------------------------------------ */
 /* Access helpers for variable-length nodes                            */
@@ -500,22 +467,22 @@ DistEntry *dist_spec_entries(SolveProblem *sp, ExprRef dist_ref);
  * Return a pointer to the element array of an EXPR_IN_SET node.
  * The returned pointer is valid until the problem is reset or destroyed.
  */
-ExprRef *expr_in_set_elems(SolveProblem *sp, ExprRef set_ref);
+dvs_expr_t *expr_in_set_elems(dvs_problem_t *sp, dvs_expr_t set_ref);
 
-/** Lo / hi ExprRef arrays of an EXPR_IN_RANGES node (n_ranges each). */
-ExprRef *expr_in_ranges_los(SolveProblem *sp, ExprRef ref);
-ExprRef *expr_in_ranges_his(SolveProblem *sp, ExprRef ref);
+/** Lo / hi dvs_expr_t arrays of an EXPR_IN_RANGES node (n_ranges each). */
+dvs_expr_t *expr_in_ranges_los(dvs_problem_t *sp, dvs_expr_t ref);
+dvs_expr_t *expr_in_ranges_his(dvs_problem_t *sp, dvs_expr_t ref);
 
 /**
  * Return a pointer to the variable-ID array of a SourceSpec node.
  */
-uint32_t *source_spec_vars(SolveProblem *sp, ExprRef src_ref);
+uint32_t *source_spec_vars(dvs_problem_t *sp, dvs_expr_t src_ref);
 
 /**
  * Return a pointer to the embedded pool base (&sp->pool).
  * Useful for ctypes tests that need to compute POOL_PTR manually.
  */
-void *solve_problem_pool_base(SolveProblem *sp);
+void *solve_problem_pool_base(dvs_problem_t *sp);
 
 #ifdef __cplusplus
 }

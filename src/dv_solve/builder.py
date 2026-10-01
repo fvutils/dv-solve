@@ -47,14 +47,14 @@ class SolveProblemBuilder:
                 "libdv_solve.so not found -- native solver unavailable"
             )
         self._lib = lib
-        self._b = lib.builder_create(block_size, None)
+        self._b = lib.dvs_builder_create(block_size, None)
         if self._b is None:
-            raise RuntimeError("builder_create returned NULL")
+            raise RuntimeError("dvs_builder_create returned NULL")
         self._finalized_bufs: list = []  # prevent GC of finalized buffers
 
     def reset(self) -> None:
         """Discard everything added so far and start a new problem."""
-        self._lib.builder_reset(self._b)
+        self._lib.dvs_builder_reset(self._b)
 
     def destroy(self) -> None:
         """Free the builder's native memory.
@@ -62,7 +62,7 @@ class SolveProblemBuilder:
         Called automatically when the builder is garbage-collected.
         """
         if self._b is not None:
-            self._lib.builder_destroy(self._b)
+            self._lib.dvs_builder_destroy(self._b)
             self._b = None
 
     def __del__(self) -> None:
@@ -72,7 +72,7 @@ class SolveProblemBuilder:
     @property
     def virtual_used(self) -> int:
         """Bytes allocated in the virtual address space so far."""
-        return self._lib.builder_virtual_used(self._b)
+        return self._lib.dvs_builder_virtual_used(self._b)
 
     # ------------------------------------------------------------------ #
     # Finalize                                                             #
@@ -88,9 +88,9 @@ class SolveProblemBuilder:
             ``(buffer, size)``: the problem buffer and its size in bytes.
         """
         size = ctypes.c_size_t(0)
-        sp_ptr = self._lib.builder_finalize(self._b, ctypes.byref(size))
+        sp_ptr = self._lib.dvs_builder_finalize(self._b, ctypes.byref(size))
         if sp_ptr is None or sp_ptr == 0:
-            raise RuntimeError("builder_finalize returned NULL")
+            raise RuntimeError("dvs_builder_finalize returned NULL")
 
         sz = size.value
         # Copy the C-allocated buffer into a ctypes-managed array so Python
@@ -98,7 +98,7 @@ class SolveProblemBuilder:
         buf = (ctypes.c_uint8 * sz)()
         ctypes.memmove(buf, sp_ptr, sz)
         # Free the C-allocated buffer
-        self._lib.builder_free_problem(self._b, sp_ptr, sz)
+        self._lib.dvs_builder_free_problem(self._b, sp_ptr, sz)
         return buf, sz
 
     def finalize_bytes(self) -> bytes:
@@ -132,7 +132,7 @@ class SolveProblemBuilder:
             A reference to the declaration (rarely needed; use
             :meth:`expr_var` to refer to the variable in expressions).
         """
-        ref = self._lib.builder_add_var(
+        ref = self._lib.dvs_builder_add_var(
             self._b,
             ctypes.c_uint32(var_id),
             ctypes.c_uint8(width),
@@ -141,7 +141,7 @@ class SolveProblemBuilder:
             ctypes.c_int64(hi),
         )
         if ref == EXPR_NULL:
-            raise RuntimeError("builder_add_var returned EXPR_NULL (malloc failure)")
+            raise RuntimeError("dvs_builder_add_var returned EXPR_NULL (malloc failure)")
         return ref
 
     def add_constraint(self, root: int) -> int:
@@ -150,21 +150,21 @@ class SolveProblemBuilder:
         Args:
             root: A Boolean-valued expression, such as a comparison.
         """
-        ref = self._lib.builder_add_constraint(
+        ref = self._lib.dvs_builder_add_constraint(
             self._b, ctypes.c_uint32(root)
         )
         if ref == EXPR_NULL:
-            raise RuntimeError("builder_add_constraint returned EXPR_NULL")
+            raise RuntimeError("dvs_builder_add_constraint returned EXPR_NULL")
         return ref
 
     def add_source(self, var_ids: Sequence[int]) -> int:
         """Add a source group."""
         arr = (ctypes.c_uint32 * len(var_ids))(*var_ids)
-        ref = self._lib.builder_add_source(
+        ref = self._lib.dvs_builder_add_source(
             self._b, ctypes.c_uint32(len(var_ids)), arr
         )
         if ref == EXPR_NULL:
-            raise RuntimeError("builder_add_source returned EXPR_NULL")
+            raise RuntimeError("dvs_builder_add_source returned EXPR_NULL")
         return ref
 
 
@@ -175,11 +175,11 @@ class SolveProblemBuilder:
             var_ids: Variable ids (not expressions).
         """
         arr = (ctypes.c_uint32 * len(var_ids))(*var_ids)
-        ref = self._lib.builder_add_all_different(
+        ref = self._lib.dvs_builder_add_all_different(
             self._b, ctypes.c_uint32(len(var_ids)), arr
         )
         if ref == EXPR_NULL:
-            raise RuntimeError("builder_add_all_different returned EXPR_NULL")
+            raise RuntimeError("dvs_builder_add_all_different returned EXPR_NULL")
         return ref
     # ------------------------------------------------------------------ #
     # Expression builders                                                  #
@@ -194,18 +194,18 @@ class SolveProblemBuilder:
             is_signed: Set for a negative constant.
         """
         if width:
-            return self._lib.builder_expr_const_sized(
+            return self._lib.dvs_builder_expr_const_sized(
                 self._b, ctypes.c_int64(value),
                 ctypes.c_uint8(1 if is_signed else 0), ctypes.c_uint8(width),
             )
-        return self._lib.builder_expr_const(
+        return self._lib.dvs_builder_expr_const(
             self._b, ctypes.c_int64(value),
             ctypes.c_uint8(1 if is_signed else 0),
         )
 
     def expr_var(self, var_id: int) -> int:
         """The value of variable ``var_id``."""
-        return self._lib.builder_expr_var(
+        return self._lib.dvs_builder_expr_var(
             self._b, ctypes.c_uint32(var_id)
         )
 
@@ -217,7 +217,7 @@ class SolveProblemBuilder:
             lhs: Left operand expression.
             rhs: Right operand expression.
         """
-        return self._lib.builder_expr_binary(
+        return self._lib.dvs_builder_expr_binary(
             self._b,
             ctypes.c_uint32(op),
             ctypes.c_uint32(lhs),
@@ -231,7 +231,7 @@ class SolveProblemBuilder:
             op: One of the ``UN_*`` constants in :mod:`dv_solve.problem`.
             operand: Operand expression.
         """
-        return self._lib.builder_expr_unary(
+        return self._lib.dvs_builder_expr_unary(
             self._b, ctypes.c_uint32(op), ctypes.c_uint32(operand)
         )
 
@@ -242,7 +242,7 @@ class SolveProblemBuilder:
         with an alternative, such as SystemVerilog's ``if (...) ... else ...``
         inside a constraint.
         """
-        return self._lib.builder_expr_ite(
+        return self._lib.dvs_builder_expr_ite(
             self._b,
             ctypes.c_uint32(cond),
             ctypes.c_uint32(then_e),
@@ -257,7 +257,7 @@ class SolveProblemBuilder:
             lo: Lower bound expression (inclusive).
             hi: Upper bound expression (inclusive).
         """
-        return self._lib.builder_expr_in_range(
+        return self._lib.dvs_builder_expr_in_range(
             self._b,
             ctypes.c_uint32(value),
             ctypes.c_uint32(lo),
@@ -272,7 +272,7 @@ class SolveProblemBuilder:
             elems: Candidate expressions, typically constants.
         """
         arr = (ctypes.c_uint32 * len(elems))(*elems)
-        return self._lib.builder_expr_in_set(
+        return self._lib.dvs_builder_expr_in_set(
             self._b,
             ctypes.c_uint32(value),
             ctypes.c_uint32(len(elems)),
@@ -289,7 +289,7 @@ class SolveProblemBuilder:
         n = len(ranges)
         los = (ctypes.c_uint32 * n)(*[r[0] for r in ranges])
         his = (ctypes.c_uint32 * n)(*[r[1] for r in ranges])
-        return self._lib.builder_expr_in_ranges(
+        return self._lib.dvs_builder_expr_in_ranges(
             self._b,
             ctypes.c_uint32(value),
             ctypes.c_uint32(n),
@@ -312,7 +312,7 @@ class SolveProblemBuilder:
             to_bits: Width of the result.
             sign_extend: Replicate the sign bit instead of filling with zeros.
         """
-        return self._lib.builder_expr_extend(
+        return self._lib.dvs_builder_expr_extend(
             self._b,
             ctypes.c_uint32(operand),
             ctypes.c_uint8(from_bits),
@@ -322,7 +322,7 @@ class SolveProblemBuilder:
 
     def expr_extract(self, operand: int, hi_bit: int, lo_bit: int) -> int:
         """Bits ``hi_bit`` down to ``lo_bit`` of ``operand`` (inclusive)."""
-        return self._lib.builder_expr_extract(
+        return self._lib.dvs_builder_expr_extract(
             self._b,
             ctypes.c_uint32(operand),
             ctypes.c_uint8(hi_bit),
@@ -331,7 +331,7 @@ class SolveProblemBuilder:
 
     def expr_concat(self, hi: int, lo: int, lo_width: int) -> int:
         """Concatenation: ``hi`` in the upper bits, ``lo`` in the lower ``lo_width`` bits."""
-        return self._lib.builder_expr_concat(
+        return self._lib.dvs_builder_expr_concat(
             self._b,
             ctypes.c_uint32(hi),
             ctypes.c_uint32(lo),
@@ -341,7 +341,7 @@ class SolveProblemBuilder:
     def expr_array_select(self, base_var_id: int, n_elems: int,
                           result: int, index: int) -> int:
         """Build an array-select expression: result = base[index]."""
-        return self._lib.builder_expr_array_select(
+        return self._lib.dvs_builder_expr_array_select(
             self._b,
             ctypes.c_uint32(base_var_id),
             ctypes.c_uint32(n_elems),
@@ -361,7 +361,7 @@ class SolveProblemBuilder:
         n = len(var_refs)
         arr_t = ctypes.c_uint32 * n
         arr = arr_t(*var_refs)
-        return self._lib.builder_expr_sum(
+        return self._lib.dvs_builder_expr_sum(
             self._b, ctypes.c_uint32(result),
             ctypes.c_uint32(n), ctypes.cast(arr, ctypes.c_void_p),
         )
@@ -371,7 +371,7 @@ class SolveProblemBuilder:
 
         Pass the returned expression to :meth:`add_constraint`.
         """
-        return self._lib.builder_expr_countones(
+        return self._lib.dvs_builder_expr_countones(
             self._b, ctypes.c_uint32(result), ctypes.c_uint32(operand),
         )
 
@@ -380,7 +380,7 @@ class SolveProblemBuilder:
 
         Pass the returned expression to :meth:`add_constraint`.
         """
-        return self._lib.builder_expr_clog2(
+        return self._lib.dvs_builder_expr_clog2(
             self._b, ctypes.c_uint32(result), ctypes.c_uint32(operand),
         )
 
@@ -395,11 +395,11 @@ class SolveProblemBuilder:
             root: A Boolean-valued expression.
             priority: 0 is the most important.
         """
-        ref = self._lib.builder_add_soft_constraint(
+        ref = self._lib.dvs_builder_add_soft_constraint(
             self._b, ctypes.c_uint32(root), ctypes.c_uint32(priority)
         )
         if ref == EXPR_NULL:
-            raise RuntimeError("builder_add_soft_constraint returned EXPR_NULL")
+            raise RuntimeError("dvs_builder_add_soft_constraint returned EXPR_NULL")
         return ref
 
     def add_dist(self, var_id: int, entries) -> int:
@@ -421,12 +421,12 @@ class SolveProblemBuilder:
             arr[i].hi = e["hi"]
             arr[i].weight = e["weight"]
             arr[i].is_per_value = 1 if e.get("is_per_value", True) else 0
-        ref = self._lib.builder_add_dist(
+        ref = self._lib.dvs_builder_add_dist(
             self._b,
             ctypes.c_uint32(var_id),
             ctypes.c_uint32(len(entries)),
             arr,
         )
         if ref == EXPR_NULL:
-            raise RuntimeError("builder_add_dist returned EXPR_NULL")
+            raise RuntimeError("dvs_builder_add_dist returned EXPR_NULL")
         return ref

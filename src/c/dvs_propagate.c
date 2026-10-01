@@ -8,7 +8,7 @@
 /* Internal: wake all watchers on a variable                          */
 /* ------------------------------------------------------------------ */
 
-static void _wake_var(SolveCtx *ctx, uint32_t var_id) {
+static void _wake_var(dvs_ctx_t *ctx, uint32_t var_id) {
     uint32_t prop_ref = ctx->watcher_heads[var_id];
     while (prop_ref != EXPR_NULL) {
         Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref);
@@ -66,7 +66,7 @@ static void _wake_var(SolveCtx *ctx, uint32_t var_id) {
 /* Queue management                                                    */
 /* ------------------------------------------------------------------ */
 
-void prop_enqueue(SolveCtx *ctx, uint32_t prop_ref) {
+void prop_enqueue(dvs_ctx_t *ctx, uint32_t prop_ref) {
     Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref);
     if (p->flags & (PROP_FLAG_IN_QUEUE | PROP_FLAG_ENTAILED)) return;
 
@@ -90,7 +90,7 @@ void prop_enqueue(SolveCtx *ctx, uint32_t prop_ref) {
 /* Guard management                                                    */
 /* ------------------------------------------------------------------ */
 
-void prop_set_guard(SolveCtx *ctx, uint32_t prop_ref, uint32_t guard_var_id) {
+void prop_set_guard(dvs_ctx_t *ctx, uint32_t prop_ref, uint32_t guard_var_id) {
     Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref);
     if (ctx->prop_guard_vars && p->prop_id < ctx->n_prop_refs_capacity) {
         ctx->prop_guard_vars[p->prop_id] = guard_var_id;
@@ -108,7 +108,7 @@ void prop_set_guard(SolveCtx *ctx, uint32_t prop_ref, uint32_t guard_var_id) {
  * decision level and mark both with TRAIL_FLAG_SINGLETON. The CDCL
  * analyzer uses this to count the LB+UB pair as a single logical
  * antecedent in n_at_cur_level. */
-static void _mark_singleton_pair(SolveCtx *ctx, uint32_t var_id,
+static void _mark_singleton_pair(dvs_ctx_t *ctx, uint32_t var_id,
                                   uint8_t this_kind) {
     if (!ctx->trail_top) return;
     /* The just-pushed entry. */
@@ -127,7 +127,7 @@ static void _mark_singleton_pair(SolveCtx *ctx, uint32_t var_id,
 /* When LCG is active, notify the clause DB so that learnt clauses
  * containing literals on this variable can propagate (or detect
  * conflict).  Returns PROP_OK or PROP_CONFLICT. */
-static inline PropResult _lcg_notify_lb(SolveCtx *ctx, uint32_t var_id,
+static inline PropResult _lcg_notify_lb(dvs_ctx_t *ctx, uint32_t var_id,
                                          int64_t new_lb) {
     if (!ctx->lcg) return PROP_OK;
     LCGCtx *lcg = (LCGCtx *)ctx->lcg;
@@ -135,7 +135,7 @@ static inline PropResult _lcg_notify_lb(SolveCtx *ctx, uint32_t var_id,
     return clause_notify_lb(&lcg->clause_db, ctx, var_id, new_lb);
 }
 
-static inline PropResult _lcg_notify_ub(SolveCtx *ctx, uint32_t var_id,
+static inline PropResult _lcg_notify_ub(dvs_ctx_t *ctx, uint32_t var_id,
                                          int64_t new_ub) {
     if (!ctx->lcg) return PROP_OK;
     LCGCtx *lcg = (LCGCtx *)ctx->lcg;
@@ -143,7 +143,7 @@ static inline PropResult _lcg_notify_ub(SolveCtx *ctx, uint32_t var_id,
     return clause_notify_ub(&lcg->clause_db, ctx, var_id, new_ub);
 }
 
-PropResult ctx_tighten_lb32(SolveCtx *ctx, uint32_t var_id, int32_t new_lb) {
+PropResult ctx_tighten_lb32(dvs_ctx_t *ctx, uint32_t var_id, int32_t new_lb) {
     Variable *v = &ctx->vars[var_id];
     if (new_lb <= v->lo) return PROP_OK;
 
@@ -160,7 +160,7 @@ PropResult ctx_tighten_lb32(SolveCtx *ctx, uint32_t var_id, int32_t new_lb) {
     return _lcg_notify_lb(ctx, var_id, (int64_t)new_lb);
 }
 
-PropResult ctx_tighten_ub32(SolveCtx *ctx, uint32_t var_id, int32_t new_ub) {
+PropResult ctx_tighten_ub32(dvs_ctx_t *ctx, uint32_t var_id, int32_t new_ub) {
     Variable *v = &ctx->vars[var_id];
     if (new_ub >= v->hi) return PROP_OK;
 
@@ -176,7 +176,7 @@ PropResult ctx_tighten_ub32(SolveCtx *ctx, uint32_t var_id, int32_t new_ub) {
     return _lcg_notify_ub(ctx, var_id, (int64_t)new_ub);
 }
 
-PropResult ctx_tighten_lb64(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
+PropResult ctx_tighten_lb64(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_lb) {
     Variable *v = &ctx->vars[var_id];
     int64_t curr = var_lo64(ctx, v);
     if (!var_b_gt(v, new_lb, curr)) return PROP_OK;  /* new_lb <= curr */
@@ -203,7 +203,7 @@ PropResult ctx_tighten_lb64(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
     return _lcg_notify_lb(ctx, var_id, new_lb);
 }
 
-PropResult ctx_tighten_ub64(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
+PropResult ctx_tighten_ub64(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub) {
     Variable *v = &ctx->vars[var_id];
     int64_t curr = var_hi64(ctx, v);
     if (!var_b_lt(v, new_ub, curr)) return PROP_OK;  /* new_ub >= curr */
@@ -232,7 +232,7 @@ PropResult ctx_tighten_ub64(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
 /* Propagation loop                                                    */
 /* ------------------------------------------------------------------ */
 
-PropResult solver_propagate(SolveCtx *ctx) {
+PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
     /* A clause conflict recorded by an earlier, unanalysed conflict (e.g. a
      * shaving probe) must not be mistaken for the source of the next one. */
     ctx->conflict_clause_idx = EXPR_NULL;
@@ -292,9 +292,9 @@ PropResult solver_propagate(SolveCtx *ctx) {
 }
 
 /* ------------------------------------------------------------------ */
-/* solver_propagate_only -- public propagation-only feasibility check */
+/* dvs_solver_propagate_only -- public propagation-only feasibility check */
 /* ------------------------------------------------------------------ */
 
-PropResult solver_propagate_only(SolveCtx *ctx) {
-    return solver_propagate(ctx);
+PropResult dvs_solver_propagate_only(dvs_ctx_t *ctx) {
+    return dvs_solver_propagate(ctx);
 }

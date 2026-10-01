@@ -33,7 +33,7 @@ extern "C" {
 /**
  * Compile a problem from a base64-encoded byte buffer.
  *
- * @param b64_data  Null-terminated base64 string of the SolveProblem buffer.
+ * @param b64_data  Null-terminated base64 string of the dvs_problem_t buffer.
  * @return  Opaque handle (chandle) on success, NULL on error.
  */
 void *dvs_dpi_compile_b64(const char *b64_data);
@@ -61,7 +61,7 @@ void *dvs_dpi_compile_b64(const char *b64_data);
 int dvs_dpi_solve_h(void *ctx, long long seed);
 
 /**
- * Number of constraints solver_compile could not compile natively.
+ * Number of constraints dvs_solver_compile could not compile natively.
  *
  * 0 means the compiled context covers the whole problem. A positive value
  * means the search is running against a SUBSET of the constraints, and

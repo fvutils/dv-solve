@@ -20,7 +20,7 @@ int main(void) {
 
     size_t sp_sz = 65536;
     void *sp_buf = calloc(1, sp_sz);
-    SolveProblem *sp = solve_problem_init(sp_buf, sp_sz);
+    dvs_problem_t *sp = solve_problem_init(sp_buf, sp_sz);
 
     /* Rects: 10x10, 15x12, 10x10, 15x12 */
     int widths[]  = {10, 15, 10, 15};
@@ -37,8 +37,8 @@ int main(void) {
     size_t ctx_sz = 1 << 22;
     void *ctx_buf = calloc(1, ctx_sz);
     dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
-    SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
-    solver_compile(ctx, sp);
+    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, ctx_sz, ba);
+    dvs_solver_compile(ctx, sp);
 
     RectSpec rects[4];
     for (int i = 0; i < n; i++) {
@@ -61,29 +61,29 @@ int main(void) {
     /* Test WITHOUT LCG */
     printf("\n=== Without LCG ===\n");
     {
-        SolveOpts sopts = {0};
+        dvs_solve_opts_t sopts = {0};
         sopts.seed = 42; sopts.max_conflicts = 200;
         sopts.max_restarts = 5000; sopts.max_shave_iters = 0;
-        SolveResult sr = solver_solve(ctx, &sopts);
+        dvs_result_t sr = dvs_solver_solve(ctx, &sopts);
         printf("result=%d, conflicts=%lu\n", sr, ctx->conflict_count);
         if (sr == 0) {
             for (int i = 0; i < n; i++)
                 printf("  rect %d: (%ld, %ld)\n", i,
-                       solver_get_value(ctx, (uint32_t)i),
-                       solver_get_value(ctx, (uint32_t)(n+i)));
+                       dvs_solver_get_value(ctx, (uint32_t)i),
+                       dvs_solver_get_value(ctx, (uint32_t)(n+i)));
         }
     }
 
-    solver_reset(ctx);
+    dvs_solver_reset(ctx);
 
     /* Test WITH LCG - trace learned clauses */
     printf("\n=== With LCG (tracing) ===\n");
-    solver_enable_lcg(ctx);
+    dvs_solver_enable_lcg(ctx);
 
-    SolveOpts sopts = {0};
+    dvs_solve_opts_t sopts = {0};
     sopts.seed = 42; sopts.max_conflicts = 200;
     sopts.max_restarts = 100; sopts.max_shave_iters = 0;
-    SolveResult sr = solver_solve(ctx, &sopts);
+    dvs_result_t sr = dvs_solver_solve(ctx, &sopts);
     printf("result=%d, conflicts=%lu\n", sr, ctx->conflict_count);
 
     LCGCtx *lcg = (LCGCtx *)ctx->lcg_ctx;
@@ -109,8 +109,8 @@ int main(void) {
     if (sr == 0) {
         for (int i = 0; i < n; i++)
             printf("  rect %d: (%ld, %ld)\n", i,
-                   solver_get_value(ctx, (uint32_t)i),
-                   solver_get_value(ctx, (uint32_t)(n+i)));
+                   dvs_solver_get_value(ctx, (uint32_t)i),
+                   dvs_solver_get_value(ctx, (uint32_t)(n+i)));
     }
 
     /* Verify: check if the known feasible solution violates any learned clause */
@@ -118,17 +118,17 @@ int main(void) {
         printf("\nValidation: checking if known solution violates clauses...\n");
         /* Try the solution from the non-LCG run manually */
         /* We'll just reset and try without LCG to get positions */
-        solver_disable_lcg(ctx);
-        solver_reset(ctx);
-        SolveOpts sopts2 = {0};
+        dvs_solver_disable_lcg(ctx);
+        dvs_solver_reset(ctx);
+        dvs_solve_opts_t sopts2 = {0};
         sopts2.seed = 42; sopts2.max_conflicts = 200;
         sopts2.max_restarts = 5000; sopts2.max_shave_iters = 0;
-        SolveResult sr2 = solver_solve(ctx, &sopts2);
+        dvs_result_t sr2 = dvs_solver_solve(ctx, &sopts2);
         if (sr2 == 0) {
             printf("  Known feasible solution:\n");
             int64_t vals[8];
             for (int i = 0; i < 2*n; i++)
-                vals[i] = solver_get_value(ctx, (uint32_t)i);
+                vals[i] = dvs_solver_get_value(ctx, (uint32_t)i);
             for (int i = 0; i < n; i++)
                 printf("    rect %d: (%ld, %ld)\n", i, vals[i], vals[n+i]);
         }

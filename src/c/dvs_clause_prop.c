@@ -8,7 +8,7 @@
 /* Helper: check a single clause, propagate if unit.                  */
 /* Returns PROP_OK, PROP_CONFLICT, or 2 if clause is satisfied.       */
 /* ------------------------------------------------------------------ */
-static PropResult _check_clause(ClauseDB *db, SolveCtx *ctx,
+static PropResult _check_clause(ClauseDB *db, dvs_ctx_t *ctx,
                                  uint32_t ci) {
     Clause *cl = db->clauses[ci];
     if (!cl) return PROP_OK;
@@ -79,7 +79,7 @@ static PropResult _check_clause(ClauseDB *db, SolveCtx *ctx,
 /* Reentrancy guard: prevent recursive clause notifications */
 static int _in_clause_prop = 0;
 
-PropResult clause_notify_lb(ClauseDB *db, SolveCtx *ctx,
+PropResult clause_notify_lb(ClauseDB *db, dvs_ctx_t *ctx,
                               uint32_t var_id, int64_t new_lb) {
     if (_in_clause_prop) return PROP_OK;  /* skip recursive calls */
     _in_clause_prop = 1;
@@ -97,7 +97,7 @@ PropResult clause_notify_lb(ClauseDB *db, SolveCtx *ctx,
     return PROP_OK;
 }
 
-PropResult clause_notify_ub(ClauseDB *db, SolveCtx *ctx,
+PropResult clause_notify_ub(ClauseDB *db, dvs_ctx_t *ctx,
                               uint32_t var_id, int64_t new_ub) {
     if (_in_clause_prop) return PROP_OK;
     _in_clause_prop = 1;
@@ -119,7 +119,7 @@ PropResult clause_notify_ub(ClauseDB *db, SolveCtx *ctx,
 /* Full scan propagation (fallback, used less frequently now)          */
 /* ------------------------------------------------------------------ */
 
-PropResult clause_propagate(ClauseDB *db, SolveCtx *ctx) {
+PropResult clause_propagate(ClauseDB *db, dvs_ctx_t *ctx) {
     /* Fixed-point loop: keep scanning until no new propagations */
     int changed = 1;
     int iterations = 0;

@@ -19,7 +19,7 @@ int main(void) {
 
     size_t sp_sz = 65536;
     void *sp_buf = calloc(1, sp_sz);
-    SolveProblem *sp = solve_problem_init(sp_buf, sp_sz);
+    dvs_problem_t *sp = solve_problem_init(sp_buf, sp_sz);
 
     for (int i = 0; i < n; i++) {
         problem_add_var(sp, (uint32_t)i,     32, 0, 0, canvas - 10);
@@ -32,8 +32,8 @@ int main(void) {
     size_t ctx_sz = 1 << 22;
     void *ctx_buf = calloc(1, ctx_sz);
     dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
-    SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
-    solver_compile(ctx, sp);
+    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, ctx_sz, ba);
+    dvs_solver_compile(ctx, sp);
 
     RectSpec rects[4];
     for (int i = 0; i < n; i++) {
@@ -47,44 +47,44 @@ int main(void) {
 
     printf("=== Without LCG ===\n");
     {
-        SolveOpts sopts = {0};
+        dvs_solve_opts_t sopts = {0};
         sopts.seed = 42; sopts.max_conflicts = 200;
         sopts.max_restarts = 5000; sopts.max_shave_iters = 0;
-        SolveResult sr = solver_solve(ctx, &sopts);
+        dvs_result_t sr = dvs_solver_solve(ctx, &sopts);
         printf("result=%d, conflicts=%lu\n", sr, ctx->conflict_count);
         if (sr == 0) {
             for (int i = 0; i < n; i++)
                 printf("  rect %d: (%ld, %ld)\n", i,
-                       solver_get_value(ctx, (uint32_t)i),
-                       solver_get_value(ctx, (uint32_t)(n+i)));
+                       dvs_solver_get_value(ctx, (uint32_t)i),
+                       dvs_solver_get_value(ctx, (uint32_t)(n+i)));
         }
     }
 
     /* Reset and try with LCG */
-    solver_reset(ctx);
+    dvs_solver_reset(ctx);
     /* Re-add the propagator after reset since it was cleared */
-    /* Actually, solver_reset preserves propagators. Re-enqueue them. */
+    /* Actually, dvs_solver_reset preserves propagators. Re-enqueue them. */
 
     printf("\n=== With LCG ===\n");
-    solver_enable_lcg(ctx);
+    dvs_solver_enable_lcg(ctx);
     {
-        SolveOpts sopts = {0};
+        dvs_solve_opts_t sopts = {0};
         sopts.seed = 42; sopts.max_conflicts = 200;
         sopts.max_restarts = 5000; sopts.max_shave_iters = 0;
-        SolveResult sr = solver_solve(ctx, &sopts);
+        dvs_result_t sr = dvs_solver_solve(ctx, &sopts);
         printf("result=%d, conflicts=%lu\n", sr, ctx->conflict_count);
         if (sr == 0) {
             for (int i = 0; i < n; i++)
                 printf("  rect %d: (%ld, %ld)\n", i,
-                       solver_get_value(ctx, (uint32_t)i),
-                       solver_get_value(ctx, (uint32_t)(n+i)));
+                       dvs_solver_get_value(ctx, (uint32_t)i),
+                       dvs_solver_get_value(ctx, (uint32_t)(n+i)));
         }
         LCGCtx *lcg = (LCGCtx *)ctx->lcg_ctx;
         printf("clauses=%lu, analyses=%lu, db_props=%lu, db_conflicts=%lu\n",
                lcg->n_learnt, lcg->n_analyses,
                lcg->clause_db.n_propagations, lcg->clause_db.n_conflicts);
     }
-    solver_disable_lcg(ctx);
+    dvs_solver_disable_lcg(ctx);
 
     dvs_block_alloc_destroy(ba);
     free(ctx_buf);

@@ -190,7 +190,7 @@ def resolve_report():
     link = _resolve.find_library("dv_solve", linkable=True)
     return {
         "package_dir": _pkg_dir(),
-        "override": os.environ.get("DVS_SOLVER_PATH"),
+        "override": _resolve.override_root(),
         "search_dirs": list(_lib_search_dirs()),
         "installation": ({"kind": inst.kind, "root": inst.root}
                          if inst is not None else None),

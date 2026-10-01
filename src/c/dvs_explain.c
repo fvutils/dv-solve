@@ -31,7 +31,7 @@
 #define PROP_WS(p) ((PropWatchSect *)((char *)(p) + sizeof(Propagator)))
 
 /* Resolve a var_id through the alias table to its root representative. */
-static inline uint32_t _resolve_var(const SolveCtx *ctx, uint32_t var_id) {
+static inline uint32_t _resolve_var(const dvs_ctx_t *ctx, uint32_t var_id) {
     if (!ctx->var_alias) return var_id;
     uint32_t root = var_id;
     while (ctx->var_alias[root] != root) root = ctx->var_alias[root];
@@ -60,7 +60,7 @@ static Literal _mk_ub(uint32_t var_id, int64_t bound) {
 /* BoundsLE: x <= y                                                    */
 /* ------------------------------------------------------------------ */
 
-int explain_bounds_le(Propagator *self, SolveCtx *ctx,
+int explain_bounds_le(Propagator *self, dvs_ctx_t *ctx,
                        uint32_t var_id, uint8_t is_lb,
                        int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -84,7 +84,7 @@ int explain_bounds_le(Propagator *self, SolveCtx *ctx,
 /* BoundsLT: x < y                                                    */
 /* ------------------------------------------------------------------ */
 
-int explain_bounds_lt(Propagator *self, SolveCtx *ctx,
+int explain_bounds_lt(Propagator *self, dvs_ctx_t *ctx,
                        uint32_t var_id, uint8_t is_lb,
                        int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -108,7 +108,7 @@ int explain_bounds_lt(Propagator *self, SolveCtx *ctx,
 /* BoundsEQ: x == y                                                    */
 /* ------------------------------------------------------------------ */
 
-int explain_bounds_eq(Propagator *self, SolveCtx *ctx,
+int explain_bounds_eq(Propagator *self, dvs_ctx_t *ctx,
                        uint32_t var_id, uint8_t is_lb,
                        int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -131,7 +131,7 @@ int explain_bounds_eq(Propagator *self, SolveCtx *ctx,
 /* BoundsNE: x != y                                                    */
 /* ------------------------------------------------------------------ */
 
-int explain_bounds_ne(Propagator *self, SolveCtx *ctx,
+int explain_bounds_ne(Propagator *self, dvs_ctx_t *ctx,
                        uint32_t var_id, uint8_t is_lb,
                        int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -153,7 +153,7 @@ int explain_bounds_ne(Propagator *self, SolveCtx *ctx,
 /* BoundsAdd: r = a + b                                                */
 /* ------------------------------------------------------------------ */
 
-int explain_bounds_add(Propagator *self, SolveCtx *ctx,
+int explain_bounds_add(Propagator *self, dvs_ctx_t *ctx,
                         uint32_t var_id, uint8_t is_lb,
                         int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -206,7 +206,7 @@ int explain_bounds_add(Propagator *self, SolveCtx *ctx,
 
 /* ---- BoundsMul: r = a * b ---- */
 
-int explain_bounds_mul(Propagator *self, SolveCtx *ctx,
+int explain_bounds_mul(Propagator *self, dvs_ctx_t *ctx,
                         uint32_t var_id, uint8_t is_lb,
                         int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -227,7 +227,7 @@ int explain_bounds_mul(Propagator *self, SolveCtx *ctx,
 
 /* ---- BoundsDiv: r = a / b ---- */
 
-int explain_bounds_div(Propagator *self, SolveCtx *ctx,
+int explain_bounds_div(Propagator *self, dvs_ctx_t *ctx,
                         uint32_t var_id, uint8_t is_lb,
                         int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -247,7 +247,7 @@ int explain_bounds_div(Propagator *self, SolveCtx *ctx,
 
 /* ---- BoundsMod: r = a % b ---- */
 
-int explain_bounds_mod(Propagator *self, SolveCtx *ctx,
+int explain_bounds_mod(Propagator *self, dvs_ctx_t *ctx,
                         uint32_t var_id, uint8_t is_lb,
                         int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -270,7 +270,7 @@ int explain_bounds_mod(Propagator *self, SolveCtx *ctx,
 
 /* ---- UnaryNeg: r = -a ---- */
 
-int explain_unary_neg(Propagator *self, SolveCtx *ctx,
+int explain_unary_neg(Propagator *self, dvs_ctx_t *ctx,
                        uint32_t var_id, uint8_t is_lb,
                        int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -297,7 +297,7 @@ int explain_unary_neg(Propagator *self, SolveCtx *ctx,
 
 /* ---- Implication: guard=1 -> var bound ---- */
 
-int explain_implication(Propagator *self, SolveCtx *ctx,
+int explain_implication(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -311,7 +311,7 @@ int explain_implication(Propagator *self, SolveCtx *ctx,
 
 /* ---- ITE: r = cond ? a : b ---- */
 
-int explain_ite_value(Propagator *self, SolveCtx *ctx,
+int explain_ite_value(Propagator *self, dvs_ctx_t *ctx,
                        uint32_t var_id, uint8_t is_lb,
                        int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -349,7 +349,7 @@ int explain_ite_value(Propagator *self, SolveCtx *ctx,
 
 /* ---- InSet: x in {elems} ---- */
 
-int explain_in_set(Propagator *self, SolveCtx *ctx,
+int explain_in_set(Propagator *self, dvs_ctx_t *ctx,
                     uint32_t var_id, uint8_t is_lb,
                     int64_t new_bound, Explanation *out) {
     /* For InSet, the bound change is implied by set membership itself.
@@ -365,7 +365,7 @@ int explain_in_set(Propagator *self, SolveCtx *ctx,
 
 /* ---- DisjClause: x1 op1 c1 OR x2 op2 c2 OR ... ---- */
 
-int explain_disj_clause(Propagator *self, SolveCtx *ctx,
+int explain_disj_clause(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
     /* When enforcing a survivor, the reason is that all other clauses
@@ -384,7 +384,7 @@ int explain_disj_clause(Propagator *self, SolveCtx *ctx,
 
 /* ---- SumEq: r = sum(vars) ---- */
 
-int explain_sum_eq(Propagator *self, SolveCtx *ctx,
+int explain_sum_eq(Propagator *self, dvs_ctx_t *ctx,
                     uint32_t var_id, uint8_t is_lb,
                     int64_t new_bound, Explanation *out) {
     /* Generalized Add: all summand bounds are antecedents */
@@ -404,7 +404,7 @@ int explain_sum_eq(Propagator *self, SolveCtx *ctx,
 
 /* ---- AllDifferent: singleton exclusion ---- */
 
-int explain_all_different(Propagator *self, SolveCtx *ctx,
+int explain_all_different(Propagator *self, dvs_ctx_t *ctx,
                            uint32_t var_id, uint8_t is_lb,
                            int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -428,7 +428,7 @@ int explain_all_different(Propagator *self, SolveCtx *ctx,
 /* ---- Reification: guard <-> (x <= y) ---- */
 
 /* The guard literal the x/y tightening rests on. */
-static void _explain_guard_lits(SolveCtx *ctx, uint32_t gid, Explanation *out) {
+static void _explain_guard_lits(dvs_ctx_t *ctx, uint32_t gid, Explanation *out) {
     out->lits[out->n_lits++] = _mk_lb(gid, var_lo64(ctx, &ctx->vars[gid]));
     out->lits[out->n_lits++] = _mk_ub(gid, var_hi64(ctx, &ctx->vars[gid]));
 }
@@ -439,7 +439,7 @@ static void _explain_guard_lits(SolveCtx *ctx, uint32_t gid, Explanation *out) {
  * from the guard alone, which is unsound as soon as the operand bound came from
  * a decision. The operand literal is recovered exactly from new_bound, the same
  * way explain_bounds_le/lt do. */
-int explain_reification(Propagator *self, SolveCtx *ctx,
+int explain_reification(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -472,7 +472,7 @@ int explain_reification(Propagator *self, SolveCtx *ctx,
 
 /* Same defect as explain_reification had: the x/y tightenings depend on the
  * other operand, not just the guard. */
-int explain_reification_eq(Propagator *self, SolveCtx *ctx,
+int explain_reification_eq(Propagator *self, dvs_ctx_t *ctx,
                             uint32_t var_id, uint8_t is_lb,
                             int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -506,7 +506,7 @@ int explain_reification_eq(Propagator *self, SolveCtx *ctx,
 
 /* ---- BitSlice: r = a[hi:lo] ---- */
 
-int explain_bit_slice(Propagator *self, SolveCtx *ctx,
+int explain_bit_slice(Propagator *self, dvs_ctx_t *ctx,
                        uint32_t var_id, uint8_t is_lb,
                        int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -522,7 +522,7 @@ int explain_bit_slice(Propagator *self, SolveCtx *ctx,
 /* ---- Bitwise: BAND, BOR, BXOR, BNOT, SHL, LSHR, Concat ---- */
 /* All use conservative "both operand bounds" as antecedents. */
 
-static int _explain_binary_bitwise(Propagator *self, SolveCtx *ctx,
+static int _explain_binary_bitwise(Propagator *self, dvs_ctx_t *ctx,
                                     uint32_t var_id, uint8_t is_lb,
                                     int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -552,7 +552,7 @@ static int _explain_binary_bitwise(Propagator *self, SolveCtx *ctx,
  *   r.lb from both-singletons exact: need full singletons.
  *   a.lb (var_id==aid): rule 5 needs r and b as singletons.
  */
-int explain_bounds_band(Propagator *self, SolveCtx *ctx,
+int explain_bounds_band(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -617,7 +617,7 @@ int explain_bounds_band(Propagator *self, SolveCtx *ctx,
  *     a|b >= b >= blo (when both non-negative).
  *   r.lb / r.ub from both-singletons exact: full singletons.
  */
-int explain_bounds_bor(Propagator *self, SolveCtx *ctx,
+int explain_bounds_bor(Propagator *self, dvs_ctx_t *ctx,
                         uint32_t var_id, uint8_t is_lb,
                         int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -653,7 +653,7 @@ int explain_bounds_bor(Propagator *self, SolveCtx *ctx,
 /* Rule-aware bvxor explanation. _fire_bounds_bxor_64 only tightens
  * exact values (both-singletons or one-singleton-and-r-singleton).
  * Every rule needs both operands fully pinned, so cite full bounds. */
-int explain_bounds_bxor(Propagator *self, SolveCtx *ctx,
+int explain_bounds_bxor(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -688,7 +688,7 @@ int explain_bounds_bxor(Propagator *self, SolveCtx *ctx,
     return 0;
 }
 
-int explain_bounds_bnot(Propagator *self, SolveCtx *ctx,
+int explain_bounds_bnot(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -703,25 +703,25 @@ int explain_bounds_bnot(Propagator *self, SolveCtx *ctx,
     return 0;
 }
 
-int explain_bounds_shl(Propagator *self, SolveCtx *ctx,
+int explain_bounds_shl(Propagator *self, dvs_ctx_t *ctx,
                         uint32_t var_id, uint8_t is_lb,
                         int64_t new_bound, Explanation *out) {
     return _explain_binary_bitwise(self, ctx, var_id, is_lb, new_bound, out);
 }
 
-int explain_bounds_lshr(Propagator *self, SolveCtx *ctx,
+int explain_bounds_lshr(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
     return _explain_binary_bitwise(self, ctx, var_id, is_lb, new_bound, out);
 }
 
-int explain_bounds_concat(Propagator *self, SolveCtx *ctx,
+int explain_bounds_concat(Propagator *self, dvs_ctx_t *ctx,
                            uint32_t var_id, uint8_t is_lb,
                            int64_t new_bound, Explanation *out) {
     return _explain_binary_bitwise(self, ctx, var_id, is_lb, new_bound, out);
 }
 
-int explain_countones(Propagator *self, SolveCtx *ctx,
+int explain_countones(Propagator *self, dvs_ctx_t *ctx,
                        uint32_t var_id, uint8_t is_lb,
                        int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -734,7 +734,7 @@ int explain_countones(Propagator *self, SolveCtx *ctx,
     return 0;
 }
 
-int explain_clog2(Propagator *self, SolveCtx *ctx,
+int explain_clog2(Propagator *self, dvs_ctx_t *ctx,
                    uint32_t var_id, uint8_t is_lb,
                    int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -760,7 +760,7 @@ int explain_clog2(Propagator *self, SolveCtx *ctx,
  * Called in debug builds after every explain callback during
  * proof extraction. Triggers an assertion on failure.
  */
-void _verify_explanation(const SolveCtx *ctx,
+void _verify_explanation(const dvs_ctx_t *ctx,
                           uint32_t var_id, uint8_t is_lb,
                           int64_t new_bound, const Explanation *expl) {
     assert(expl->n_lits <= MAX_EXPLAIN_LITS);

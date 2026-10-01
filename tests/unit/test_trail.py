@@ -54,13 +54,13 @@ def _setup(lib: ctypes.CDLL):
                                     ctypes.c_int64, ctypes.c_int64]
 
     # context
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.dvs_var_lo32.restype  = ctypes.c_int32
     lib.dvs_var_lo32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
@@ -95,8 +95,8 @@ def _setup(lib: ctypes.CDLL):
     lib.dvs_stack_block_count.restype  = ctypes.c_size_t
     lib.dvs_stack_block_count.argtypes = [ctypes.c_void_p]
 
-    lib.solver_get_var.restype  = ctypes.c_void_p
-    lib.solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_get_var.restype  = ctypes.c_void_p
+    lib.dvs_solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 # ------------------------------------------------------------------ #
@@ -121,13 +121,13 @@ def _make_sp(lib, *var_specs):
 
 def _make_ctx(lib, ba=None):
     buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ctx = lib.solver_create(buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(buf, _CTX_BUF_SIZE, ba)
     assert ctx is not None
     return ctx, buf
 
 
 def _compile(lib, ctx, sp):
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc == 0
 
 
@@ -155,7 +155,7 @@ class TestTrail:
         self.lib.trail_push_level(ctx)
         assert self.lib.dvs_ctx_decision_level(ctx) == 2
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
 
     # -- tier-0 LB record ------------------------------------------- #
@@ -173,7 +173,7 @@ class TestTrail:
         assert self.lib.dvs_var_lo32(ctx, 0) == 10
         assert self.lib.dvs_ctx_trail_count(ctx) == 1
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
 
     # -- tier-0 UB record ------------------------------------------- #
@@ -189,7 +189,7 @@ class TestTrail:
         assert rc == 0
         assert self.lib.dvs_var_hi32(ctx, 0) == 200
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
 
     # -- backtrack to level 0: restores bounds ---------------------- #
@@ -212,7 +212,7 @@ class TestTrail:
         assert self.lib.dvs_var_hi32(ctx, 0) == 255
         assert self.lib.dvs_ctx_trail_count(ctx) == 0
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
 
     # -- multiple changes at one level ------------------------------ #
@@ -239,7 +239,7 @@ class TestTrail:
         assert self.lib.dvs_var_hi32(ctx, 1) ==  255
         assert self.lib.dvs_ctx_trail_count(ctx) == 0
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
 
     # -- multi-level push/pop --------------------------------------- #
@@ -275,7 +275,7 @@ class TestTrail:
         assert self.lib.dvs_ctx_decision_level(ctx) == 0
         assert self.lib.dvs_var_lo32(ctx, 0) == 0
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
 
     # -- tier-1 (64-bit) trail -------------------------------------- #
@@ -303,7 +303,7 @@ class TestTrail:
         assert self.lib.dvs_var_lo64(ctx, 0) == orig_lo
         assert self.lib.dvs_var_hi64(ctx, 0) == orig_hi
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
 
     # -- hole record (no-op restore) -------------------------------- #
@@ -323,7 +323,7 @@ class TestTrail:
         self.lib.trail_backtrack(ctx, 0)
         assert self.lib.dvs_ctx_trail_count(ctx) == 0
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
 
     # -- backtrack across block boundary ---------------------------- #
@@ -354,7 +354,7 @@ class TestTrail:
         assert self.lib.dvs_var_lo32(ctx, 0) == orig_lo
         assert self.lib.dvs_ctx_trail_count(ctx) == 0
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
 
     # -- trail_count accumulates across levels ---------------------- #
@@ -380,7 +380,7 @@ class TestTrail:
         assert self.lib.dvs_var_lo32(ctx, 1) == 0   # restored
         assert self.lib.dvs_var_hi32(ctx, 1) == 255  # restored
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
 
     # -- dynamic stack block count shrinks on backtrack ------------- #
@@ -407,5 +407,5 @@ class TestTrail:
         assert self.lib.dvs_ctx_trail_count(ctx) == 0
         assert self.lib.dvs_var_lo32(ctx, 0) == 0
 
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)

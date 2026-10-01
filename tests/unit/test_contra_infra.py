@@ -48,11 +48,11 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_sum.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                              ctypes.c_uint32, ctypes.c_void_p]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.dvs_prop_constraint_id.restype  = ctypes.c_uint32
     lib.dvs_prop_constraint_id.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
@@ -62,7 +62,7 @@ def _make_ctx(lib):
     """Create a block_alloc and solver context; return (ctx_buf, ctx, ba)."""
     ba = lib.dvs_block_alloc_create(None, 4096)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
     return ctx_buf, ctx, ba
 
@@ -97,8 +97,8 @@ def test_constraint_id_auto(libdvs):
 
     # Compile
     ctx_buf, ctx, ba = _make_ctx(lib)
-    rc = lib.solver_compile(ctx, sp)
-    assert rc >= 0, f"solver_compile failed with rc={rc}"
+    rc = lib.dvs_solver_compile(ctx, sp)
+    assert rc >= 0, f"dvs_solver_compile failed with rc={rc}"
 
     # Each propagator should have a constraint_id in {1, 2}
     seen_ids = set()
@@ -138,7 +138,7 @@ def test_constraint_id_roundtrip(libdvs):
     lib.problem_add_constraint(sp, esum)
 
     ctx_buf, ctx, ba = _make_ctx(lib)
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     # All propagators should map to constraint_id == 1
@@ -155,7 +155,7 @@ def test_constraint_id_roundtrip(libdvs):
 
 
 def test_contra_hooks_null(libdvs):
-    """contra_ctx and contra_hooks are NULL after solver_create;
+    """contra_ctx and contra_hooks are NULL after dvs_solver_create;
     UNSAT at compile time does not crash."""
     lib = libdvs
     _setup(lib)
@@ -172,7 +172,7 @@ def test_contra_hooks_null(libdvs):
     c5 = lib.expr_const(sp, 5, 0)
     lib.problem_add_constraint(sp, lib.expr_binary(sp, BIN_LTE, vx, c5))
 
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc == -2, "Expected UNSAT at compile time"
 
     lib.dvs_block_alloc_destroy(ba)
@@ -202,7 +202,7 @@ def test_contra_api_available(libdvs_debug):
     lib.problem_add_var(sp, 0, 8, 0, 0, 100)
 
     ctx_buf, ctx, ba = _make_ctx(lib)
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     # contra_analyze_unsat should be callable (returns 0 for a SAT problem)

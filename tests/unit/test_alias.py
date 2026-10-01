@@ -4,7 +4,7 @@ Tests:
 - Basic aliasing: x == y eliminates the EQ propagator.
 - Transitive aliasing: x == y, y == z -> all resolve to same root.
 - Domain intersection: aliased vars get intersected domains.
-- Aliased var values: solver_get_value returns the root's value.
+- Aliased var values: dvs_solver_get_value returns the root's value.
 - Non-aliased NEQ: x != y is not aliased.
 """
 from __future__ import annotations
@@ -50,30 +50,30 @@ def _wire(lib):
     lib.expr_const.argtypes = [c.c_void_p, c.c_int64, c.c_uint8]
     lib.expr_binary.restype = c.c_uint32
     lib.expr_binary.argtypes = [c.c_void_p, c.c_int32, c.c_uint32, c.c_uint32]
-    lib.solver_create.restype = c.c_void_p
-    lib.solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
-    lib.solver_destroy.restype = None
-    lib.solver_destroy.argtypes = [c.c_void_p]
-    lib.solver_compile.restype = c.c_int
-    lib.solver_compile.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_solve.restype = c.c_int
-    lib.solver_solve.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_get_value.restype = c.c_int64
-    lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_solver_create.restype = c.c_void_p
+    lib.dvs_solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
+    lib.dvs_solver_destroy.restype = None
+    lib.dvs_solver_destroy.argtypes = [c.c_void_p]
+    lib.dvs_solver_compile.restype = c.c_int
+    lib.dvs_solver_compile.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_solve.restype = c.c_int
+    lib.dvs_solver_solve.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_get_value.restype = c.c_int64
+    lib.dvs_solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
 
 
 def _solve(lib, sp, n_vars, seed=42):
     ctx_buf = (ctypes.c_uint8 * _CTX)()
     ba = lib.dvs_block_alloc_create(None, _CTX)
-    ctx = lib.solver_create(ctx_buf, _CTX, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX, ba)
     assert ctx
-    crc = lib.solver_compile(ctx, sp)
+    crc = lib.dvs_solver_compile(ctx, sp)
     assert crc == 0, f"compile returned {crc}"
     opts = SolveOpts(seed=seed)
-    rc = lib.solver_solve(ctx, ctypes.byref(opts))
+    rc = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert rc == SOLVE_OK, f"solve returned {rc}"
-    vals = [lib.solver_get_value(ctx, i) for i in range(n_vars)]
-    lib.solver_destroy(ctx)
+    vals = [lib.dvs_solver_get_value(ctx, i) for i in range(n_vars)]
+    lib.dvs_solver_destroy(ctx)
     lib.dvs_block_alloc_destroy(ba)
     return vals
 
@@ -185,8 +185,8 @@ def test_alias_conflict_detected(libdvs):
 
     ctx_buf = (ctypes.c_uint8 * _CTX)()
     ba = libdvs.dvs_block_alloc_create(None, _CTX)
-    ctx = libdvs.solver_create(ctx_buf, _CTX, ba)
-    crc = libdvs.solver_compile(ctx, sp)
+    ctx = libdvs.dvs_solver_create(ctx_buf, _CTX, ba)
+    crc = libdvs.dvs_solver_compile(ctx, sp)
     assert crc == -2, f"Expected UNSAT (-2) at compile time, got {crc}"
-    libdvs.solver_destroy(ctx)
+    libdvs.dvs_solver_destroy(ctx)
     libdvs.dvs_block_alloc_destroy(ba)

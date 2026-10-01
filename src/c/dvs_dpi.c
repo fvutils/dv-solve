@@ -58,7 +58,7 @@ static uint8_t *_b64_decode(const char *src, size_t *out_len) {
 /* ------------------------------------------------------------------ */
 /* DpiHandle -- persistent context for the compiled problem            */
 /*                                                                     */
-/* The SolveCtx is compiled once and reused across solve calls.       */
+/* The dvs_ctx_t is compiled once and reused across solve calls.       */
 /* pin_var, checkpoint, and restore operate directly on this context,  */
 /* so their effects persist across solve calls until restored.         */
 /* ------------------------------------------------------------------ */
@@ -66,14 +66,14 @@ static uint8_t *_b64_decode(const char *src, size_t *out_len) {
 #define INTERNAL_CTX_SIZE (2 << 20)  /* 2 MiB for persistent ctx */
 
 typedef struct {
-    void              *problem_buf;  /* malloc'd decoded SolveProblem buffer */
+    void              *problem_buf;  /* malloc'd decoded dvs_problem_t buffer */
     size_t             problem_size;
-    void              *ctx_buf;      /* malloc'd SolveCtx static pool */
+    void              *ctx_buf;      /* malloc'd dvs_ctx_t static pool */
     dvs_block_alloc_t *block_alloc;  /* dynamic stack allocator */
-    SolveCtx          *ctx;          /* persistent solver context */
+    dvs_ctx_t          *ctx;          /* persistent solver context */
     uint32_t           n_vars;
-    int                solved;       /* 1 if last solve returned SOLVE_OK */
-    int                n_uncompiled; /* constraints solver_compile could not take */
+    int                solved;       /* 1 if last solve returned DVS_SOLVE_OK */
+    int                n_uncompiled; /* constraints dvs_solver_compile could not take */
 } DpiHandle;
 
 /* ------------------------------------------------------------------ */
@@ -88,14 +88,14 @@ void *dvs_dpi_compile_b64(const char *b64_data) {
     uint8_t *buf = _b64_decode(b64_data, &buf_len);
     if (!buf) return NULL;
 
-    /* 2. Allocate the persistent SolveCtx */
+    /* 2. Allocate the persistent dvs_ctx_t */
     void *ctx_buf = malloc(INTERNAL_CTX_SIZE);
     if (!ctx_buf) { free(buf); return NULL; }
 
     dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, 0);
     if (!ba) { free(ctx_buf); free(buf); return NULL; }
 
-    SolveCtx *ctx = solver_create(ctx_buf, INTERNAL_CTX_SIZE, ba);
+    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, INTERNAL_CTX_SIZE, ba);
     if (!ctx) {
         dvs_block_alloc_destroy(ba);
         free(ctx_buf);
@@ -104,9 +104,9 @@ void *dvs_dpi_compile_b64(const char *b64_data) {
     }
 
     /* 3. Compile the problem into the persistent context */
-    int rc = solver_compile(ctx, (SolveProblem *)buf);
+    int rc = dvs_solver_compile(ctx, (dvs_problem_t *)buf);
     if (rc < 0) {
-        solver_destroy(ctx);
+        dvs_solver_destroy(ctx);
         dvs_block_alloc_destroy(ba);
         free(ctx_buf);
         free(buf);
@@ -116,7 +116,7 @@ void *dvs_dpi_compile_b64(const char *b64_data) {
     /* 4. Build the handle */
     DpiHandle *h = (DpiHandle *)calloc(1, sizeof(DpiHandle));
     if (!h) {
-        solver_destroy(ctx);
+        dvs_solver_destroy(ctx);
         dvs_block_alloc_destroy(ba);
         free(ctx_buf);
         free(buf);
@@ -128,9 +128,9 @@ void *dvs_dpi_compile_b64(const char *b64_data) {
     h->ctx_buf      = ctx_buf;
     h->block_alloc  = ba;
     h->ctx          = ctx;
-    h->n_vars       = ((SolveProblem *)buf)->n_vars;
+    h->n_vars       = ((dvs_problem_t *)buf)->n_vars;
     h->solved       = 0;
-    /* A POSITIVE solver_compile return is the count of constraints it could not
+    /* A POSITIVE dvs_solver_compile return is the count of constraints it could not
      * compile, and this path used to test only `rc < 0` -- so those constraints
      * were dropped and the SV/DPI consumer solved without them, producing
      * under-constrained stimulus that looks exactly like a successful solve.
@@ -152,13 +152,13 @@ int dvs_dpi_solve_h(void *ctx, long long seed) {
 
     h->solved = 0;
 
-    SolveOpts opts;
+    dvs_solve_opts_t opts;
     memset(&opts, 0, sizeof(opts));
     opts.seed = (uint64_t)seed;
 
-    SolveResult sr = solver_solve(h->ctx, &opts);
+    dvs_result_t sr = dvs_solver_solve(h->ctx, &opts);
 
-    if (sr == SOLVE_OK) {
+    if (sr == DVS_SOLVE_OK) {
         /* The post-solve net, and the only one this path has: re-evaluate every
          * constraint in the original problem against the assignment. It is
          * needed exactly when compile dropped something -- an assignment that
@@ -167,13 +167,13 @@ int dvs_dpi_solve_h(void *ctx, long long seed) {
          * violates the problem") is the whole point: the alternative is handing
          * back stimulus that silently ignores a constraint the user wrote. */
         if (h->n_uncompiled > 0 &&
-            solver_validate_model(h->ctx, (SolveProblem *)h->problem_buf,
+            dvs_solver_validate_model(h->ctx, (dvs_problem_t *)h->problem_buf,
                                   NULL) != 0) {
             return 3;
         }
         h->solved = 1;
         return 0;
-    } else if (sr == SOLVE_UNSAT) {
+    } else if (sr == DVS_SOLVE_UNSAT) {
         return 1;
     } else {
         return 2;
@@ -185,21 +185,21 @@ int dvs_dpi_pin_var_h(void *ctx, int var_id, long long value) {
     DpiHandle *h = (DpiHandle *)ctx;
     if (var_id < 0 || (uint32_t)var_id >= h->n_vars) return -1;
 
-    int rc = solver_pin_var(h->ctx, (uint32_t)var_id, (int64_t)value);
-    /* solver_pin_var returns 0 on success, -1 on conflict */
+    int rc = dvs_solver_pin_var(h->ctx, (uint32_t)var_id, (int64_t)value);
+    /* dvs_solver_pin_var returns 0 on success, -1 on conflict */
     return (rc == 0) ? 0 : -2;
 }
 
 int dvs_dpi_checkpoint_h(void *ctx) {
     if (!ctx) return -1;
     DpiHandle *h = (DpiHandle *)ctx;
-    return solver_checkpoint(h->ctx);
+    return dvs_solver_checkpoint(h->ctx);
 }
 
 void dvs_dpi_restore_h(void *ctx, int cp) {
     if (!ctx || cp < 0) return;
     DpiHandle *h = (DpiHandle *)ctx;
-    solver_restore(h->ctx, (uint32_t)cp);
+    dvs_solver_restore(h->ctx, (uint32_t)cp);
     h->solved = 0;  /* restored state has no guaranteed solved values */
 }
 
@@ -208,13 +208,13 @@ long long dvs_dpi_get_value_h(void *ctx, int var_id) {
     DpiHandle *h = (DpiHandle *)ctx;
     if (!h->solved) return 0;
     if (var_id < 0 || (uint32_t)var_id >= h->n_vars) return 0;
-    return (long long)solver_get_value(h->ctx, (uint32_t)var_id);
+    return (long long)dvs_solver_get_value(h->ctx, (uint32_t)var_id);
 }
 
 void dvs_dpi_release_h(void *ctx) {
     if (!ctx) return;
     DpiHandle *h = (DpiHandle *)ctx;
-    solver_destroy(h->ctx);
+    dvs_solver_destroy(h->ctx);
     dvs_block_alloc_destroy(h->block_alloc);
     free(h->ctx_buf);
     free(h->problem_buf);

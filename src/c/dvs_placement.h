@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 /* forward declaration */
-typedef struct SolveCtx SolveCtx;
+typedef struct dvs_ctx_s dvs_ctx_t;
 
 /* ================================================================== */
 /* MinOf_N / MaxOf_N propagators                                       */
@@ -44,7 +44,7 @@ typedef struct {
  * MinOf_N: r == min(operands[0], ..., operands[n-1]).
  * var_ids[0]=result, var_ids[1..n]=operands.
  */
-uint32_t prop_add_min_of_n_32(SolveCtx *ctx, uint32_t result_id,
+uint32_t prop_add_min_of_n_32(dvs_ctx_t *ctx, uint32_t result_id,
                                uint32_t n_operands, const uint32_t *operand_ids,
                                uint8_t priority);
 
@@ -52,7 +52,7 @@ uint32_t prop_add_min_of_n_32(SolveCtx *ctx, uint32_t result_id,
  * MaxOf_N: r == max(operands[0], ..., operands[n-1]).
  * var_ids[0]=result, var_ids[1..n]=operands.
  */
-uint32_t prop_add_max_of_n_32(SolveCtx *ctx, uint32_t result_id,
+uint32_t prop_add_max_of_n_32(dvs_ctx_t *ctx, uint32_t result_id,
                                uint32_t n_operands, const uint32_t *operand_ids,
                                uint8_t priority);
 
@@ -106,13 +106,13 @@ typedef struct {
  * @param priority  Queue priority level.
  * @return Pool offset, or EXPR_NULL on failure.
  */
-uint32_t prop_add_no_overlap_2d(SolveCtx *ctx, uint32_t n_rects,
+uint32_t prop_add_no_overlap_2d(dvs_ctx_t *ctx, uint32_t n_rects,
                                  const RectSpec *rects, uint8_t priority);
 
 /* ================================================================== */
 /* Optimization: branch-and-bound wrapper                              */
 /*                                                                     */
-/* solver_optimize() minimizes an objective variable by iteratively    */
+/* dvs_solver_optimize() minimizes an objective variable by iteratively    */
 /* solving with tighter upper bounds.                                  */
 /* ================================================================== */
 
@@ -147,7 +147,7 @@ typedef struct {
  * @param result          Output: best solution info.
  * @return 0 on success, -1 on error.
  */
-int solver_optimize(SolveCtx *ctx, uint32_t objective_var_id,
+int dvs_solver_optimize(dvs_ctx_t *ctx, uint32_t objective_var_id,
                     const OptimizeOpts *opts, OptimizeResult *result);
 
 #ifdef __cplusplus

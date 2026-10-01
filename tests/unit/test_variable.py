@@ -1,8 +1,8 @@
-"""Unit tests for the Variable model and solver_compile (Phase 4).
+"""Unit tests for the Variable model and dvs_solver_compile (Phase 4).
 
 Tests:
-- solver_create: basic lifecycle
-- solver_compile with 0 variables: no-op
+- dvs_solver_create: basic lifecycle
+- dvs_solver_compile with 0 variables: no-op
 - Tier-0 (≤32-bit) variable: correct lo/hi via var_lo32/var_hi32
 - Tier-0 signed variable: negative bounds stored correctly
 - Tier-1 (33–64-bit) variable: correct lo/hi via var_lo64/var_hi64
@@ -10,7 +10,7 @@ Tests:
 - var_lo64 on tier-0 widens correctly (signed & unsigned)
 - Static pool grows after compile
 - Multiple variables with different tiers in one problem
-- solver_get_var returns correct Variable fields (width, flags)
+- dvs_solver_get_var returns correct Variable fields (width, flags)
 """
 from __future__ import annotations
 
@@ -66,18 +66,18 @@ def _setup(lib: ctypes.CDLL):
                                     ctypes.c_uint8, ctypes.c_uint8,
                                     ctypes.c_int64, ctypes.c_int64]
     # SolveCtx
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
 
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
 
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.solver_get_var.restype  = ctypes.c_void_p
-    lib.solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_get_var.restype  = ctypes.c_void_p
+    lib.dvs_solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     lib.dvs_var_lo32.restype  = ctypes.c_int32
     lib.dvs_var_lo32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
@@ -108,13 +108,13 @@ def _make_sp(lib):
 
 def _make_ctx(lib, block_alloc=None):
     buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ctx = lib.solver_create(buf, _CTX_BUF_SIZE, block_alloc)
+    ctx = lib.dvs_solver_create(buf, _CTX_BUF_SIZE, block_alloc)
     assert ctx is not None
     return ctx, buf
 
 
 def _var(lib, ctx, var_id):
-    ptr = lib.solver_get_var(ctx, var_id)
+    ptr = lib.dvs_solver_get_var(ctx, var_id)
     assert ptr is not None
     return Variable.from_address(ptr)
 
@@ -133,11 +133,11 @@ class TestVariable:
 
     def test_solver_create_returns_non_null(self):
         ctx, buf = _make_ctx(self.lib)
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     def test_solver_create_too_small(self):
         tiny = (ctypes.c_uint8 * 32)()
-        ctx = self.lib.solver_create(tiny, 32, None)
+        ctx = self.lib.dvs_solver_create(tiny, 32, None)
         assert ctx is None
 
     # -- zero-variable compile -------------------------------------- #
@@ -145,9 +145,9 @@ class TestVariable:
     def test_compile_zero_vars(self):
         sp, sp_buf = _make_sp(self.lib)
         ctx, ctx_buf = _make_ctx(self.lib)
-        rc = self.lib.solver_compile(ctx, sp)
+        rc = self.lib.dvs_solver_compile(ctx, sp)
         assert rc == 0
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     # -- tier-0: unsigned 8-bit ------------------------------------ #
 
@@ -155,7 +155,7 @@ class TestVariable:
         sp, sp_buf = _make_sp(self.lib)
         self.lib.problem_add_var(sp, 0, 8, 0, 0, 255)  # u8 [0, 255]
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
 
         v = _var(self.lib, ctx, 0)
         assert v.width == 8
@@ -165,7 +165,7 @@ class TestVariable:
 
         assert self.lib.dvs_var_lo32(ctx, 0) == 0
         assert self.lib.dvs_var_hi32(ctx, 0) == 255
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     # -- tier-0: signed 32-bit ------------------------------------- #
 
@@ -173,7 +173,7 @@ class TestVariable:
         sp, sp_buf = _make_sp(self.lib)
         self.lib.problem_add_var(sp, 0, 32, 1, -2**31, 2**31 - 1)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
 
         v = _var(self.lib, ctx, 0)
         assert v.width == 32
@@ -182,7 +182,7 @@ class TestVariable:
 
         assert self.lib.dvs_var_lo32(ctx, 0) == -(2**31)
         assert self.lib.dvs_var_hi32(ctx, 0) == 2**31 - 1
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     # -- tier-0: negative bounds ----------------------------------- #
 
@@ -190,11 +190,11 @@ class TestVariable:
         sp, sp_buf = _make_sp(self.lib)
         self.lib.problem_add_var(sp, 0, 16, 1, -100, 100)  # s16 [-100, 100]
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
 
         assert self.lib.dvs_var_lo32(ctx, 0) == -100
         assert self.lib.dvs_var_hi32(ctx, 0) ==  100
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     # -- tier-0: var_lo64 widens correctly  ------------------------ #
 
@@ -203,22 +203,22 @@ class TestVariable:
         sp, sp_buf = _make_sp(self.lib)
         self.lib.problem_add_var(sp, 0, 32, 0, 0, 2**32 - 1)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
 
         # lo is 0 → zero-extended should still be 0
         assert self.lib.dvs_var_lo64(ctx, 0) == 0
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     def test_tier0_lo64_signed_widening(self):
         """var_lo64 on a signed tier-0 var should sign-extend."""
         sp, sp_buf = _make_sp(self.lib)
         self.lib.problem_add_var(sp, 0, 8, 1, -128, 127)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
 
         assert self.lib.dvs_var_lo64(ctx, 0) == -128
         assert self.lib.dvs_var_hi64(ctx, 0) ==  127
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     # -- tier-1: 64-bit -------------------------------------------- #
 
@@ -229,7 +229,7 @@ class TestVariable:
         hi = 2**63 - 1   # max positive int64_t (stored as signed int64)
         self.lib.problem_add_var(sp, 0, 64, 0, lo, hi)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
 
         v = _var(self.lib, ctx, 0)
         assert v.width == 64
@@ -239,7 +239,7 @@ class TestVariable:
 
         assert self.lib.dvs_var_lo64(ctx, 0) == lo
         assert self.lib.dvs_var_hi64(ctx, 0) == hi
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     def test_tier1_signed_64bit(self):
         sp, sp_buf = _make_sp(self.lib)
@@ -247,7 +247,7 @@ class TestVariable:
         hi = 2**63 - 1
         self.lib.problem_add_var(sp, 0, 64, 1, lo, hi)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
 
         v = _var(self.lib, ctx, 0)
         assert v.flags & VAR_TIER1
@@ -255,24 +255,24 @@ class TestVariable:
 
         assert self.lib.dvs_var_lo64(ctx, 0) == lo
         assert self.lib.dvs_var_hi64(ctx, 0) == hi
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     def test_tier1_33bit_boundary(self):
         """33-bit variable is the smallest tier-1."""
         sp, sp_buf = _make_sp(self.lib)
         self.lib.problem_add_var(sp, 0, 33, 0, 0, 2**33 - 1)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
 
         v = _var(self.lib, ctx, 0)
         assert v.width == 33
         assert v.flags & VAR_TIER1
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     # -- tier-2: > 64-bit ------------------------------------------ #
 
     def test_tier2_declined(self):
-        """A variable wider than 64 bits makes solver_compile DECLINE.
+        """A variable wider than 64 bits makes dvs_solver_compile DECLINE.
 
         This asserted that a 128-bit variable compiles to a tier-2 Variable.
         Tier-2 storage does exist -- _init_tier2 allocates the limb arrays --
@@ -291,19 +291,19 @@ class TestVariable:
         sp, sp_buf = _make_sp(self.lib)
         self.lib.problem_add_var(sp, 0, 128, 0, 0, 1000)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == DVS_COMPILE_UNSUPPORTED_WIDTH
-        self.lib.solver_destroy(ctx)
+        assert self.lib.dvs_solver_compile(ctx, sp) == DVS_COMPILE_UNSUPPORTED_WIDTH
+        self.lib.dvs_solver_destroy(ctx)
 
     def test_tier1_64bit_still_accepted(self):
         """The boundary: 64 bits is tier-1 and fully supported."""
         sp, sp_buf = _make_sp(self.lib)
         self.lib.problem_add_var(sp, 0, 64, 0, 0, 2**63 - 1)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
         v = _var(self.lib, ctx, 0)
         assert v.flags & VAR_TIER1
         assert not (v.flags & VAR_TIER2)
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     def test_tier2_declined_even_alongside_supported_vars(self):
         """One unsupported variable declines the whole problem.
@@ -315,8 +315,8 @@ class TestVariable:
         self.lib.problem_add_var(sp, 0,   8, 0, 0, 255)
         self.lib.problem_add_var(sp, 1, 128, 0, 0, 1000)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == DVS_COMPILE_UNSUPPORTED_WIDTH
-        self.lib.solver_destroy(ctx)
+        assert self.lib.dvs_solver_compile(ctx, sp) == DVS_COMPILE_UNSUPPORTED_WIDTH
+        self.lib.dvs_solver_destroy(ctx)
 
     # -- multiple variables of mixed tiers ------------------------- #
 
@@ -327,7 +327,7 @@ class TestVariable:
         self.lib.problem_add_var(sp, 2,  64, 0,       0, 2**63-1)  # tier-1
 
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
 
         v0 = _var(self.lib, ctx, 0)
         v1 = _var(self.lib, ctx, 1)
@@ -342,7 +342,7 @@ class TestVariable:
         assert self.lib.dvs_var_lo32(ctx, 1) == -(2**31)
         assert self.lib.dvs_var_lo64(ctx, 2) == 0
         assert self.lib.dvs_var_hi64(ctx, 2) == 2**63 - 1
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     # -- static pool usage ----------------------------------------- #
 
@@ -353,13 +353,13 @@ class TestVariable:
         ctx, ctx_buf = _make_ctx(self.lib)
 
         used_before = self.lib.dvs_ctx_pool_used(ctx)
-        assert self.lib.solver_compile(ctx, sp) == 0
+        assert self.lib.dvs_solver_compile(ctx, sp) == 0
         used_after = self.lib.dvs_ctx_pool_used(ctx)
 
         assert used_after > used_before, (
             f"Pool should have grown: {used_before} → {used_after}"
         )
-        self.lib.solver_destroy(ctx)
+        self.lib.dvs_solver_destroy(ctx)
 
     def test_pool_used_larger_for_tier1(self):
         """Tier-1 variables need extra pool space for WideBounds64."""
@@ -370,8 +370,8 @@ class TestVariable:
 
         ctx0, cbuf0 = _make_ctx(self.lib)
         ctx1, cbuf1 = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx0, sp0) == 0
-        assert self.lib.solver_compile(ctx1, sp1) == 0
+        assert self.lib.dvs_solver_compile(ctx0, sp0) == 0
+        assert self.lib.dvs_solver_compile(ctx1, sp1) == 0
 
         used0 = self.lib.dvs_ctx_pool_used(ctx0)
         used1 = self.lib.dvs_ctx_pool_used(ctx1)
@@ -379,5 +379,5 @@ class TestVariable:
         assert used1 > used0, (
             f"Tier-1 should use more pool than tier-0: {used0} vs {used1}"
         )
-        self.lib.solver_destroy(ctx0)
-        self.lib.solver_destroy(ctx1)
+        self.lib.dvs_solver_destroy(ctx0)
+        self.lib.dvs_solver_destroy(ctx1)

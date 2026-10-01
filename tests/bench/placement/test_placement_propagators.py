@@ -1,6 +1,6 @@
 """Unit tests for placement-specific propagators.
 
-Tests MinOf_N, MaxOf_N, NoOverlap2D, and solver_optimize.
+Tests MinOf_N, MaxOf_N, NoOverlap2D, and dvs_solver_optimize.
 """
 import ctypes
 import os
@@ -45,10 +45,10 @@ def _make_ctx(lib, n_vars, var_specs, buf_size=1 << 20):
 
     ba = lib.dvs_block_alloc_create(None, buf_size)
     ctx_buf = (ctypes.c_uint8 * buf_size)()
-    ctx = lib.solver_create(ctx_buf, buf_size, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, buf_size, ba)
     assert ctx is not None
 
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc == 0
 
     return ctx, ba, ctx_buf, sp_buf
@@ -92,13 +92,13 @@ class TestMinOfN:
         assert ref != 0xFFFFFFFF
 
         sopts = _SolveOpts(seed=42, max_conflicts=100, max_restarts=1000)
-        sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+        sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
         assert sr == 0  # SOLVE_OK
 
-        r = lib.solver_get_value(ctx, ctypes.c_uint32(0))
-        a = lib.solver_get_value(ctx, ctypes.c_uint32(1))
-        b = lib.solver_get_value(ctx, ctypes.c_uint32(2))
-        c = lib.solver_get_value(ctx, ctypes.c_uint32(3))
+        r = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(0))
+        a = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(1))
+        b = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(2))
+        c = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(3))
 
         assert r == min(a, b, c), f"r={r}, min({a},{b},{c})={min(a,b,c)}"
         _cleanup(lib, ba)
@@ -118,12 +118,12 @@ class TestMinOfN:
                                   ctypes.c_uint8(1))
 
         sopts = _SolveOpts(seed=99, max_conflicts=100, max_restarts=1000)
-        sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+        sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
         assert sr == 0
 
-        r = lib.solver_get_value(ctx, ctypes.c_uint32(0))
-        a = lib.solver_get_value(ctx, ctypes.c_uint32(1))
-        b = lib.solver_get_value(ctx, ctypes.c_uint32(2))
+        r = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(0))
+        a = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(1))
+        b = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(2))
         assert r == min(a, b)
         assert b == 3
         _cleanup(lib, ba)
@@ -150,13 +150,13 @@ class TestMaxOfN:
                                   ctypes.c_uint8(1))
 
         sopts = _SolveOpts(seed=42, max_conflicts=100, max_restarts=1000)
-        sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+        sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
         assert sr == 0
 
-        r = lib.solver_get_value(ctx, ctypes.c_uint32(0))
-        a = lib.solver_get_value(ctx, ctypes.c_uint32(1))
-        b = lib.solver_get_value(ctx, ctypes.c_uint32(2))
-        c = lib.solver_get_value(ctx, ctypes.c_uint32(3))
+        r = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(0))
+        a = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(1))
+        b = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(2))
+        c = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(3))
 
         assert r == max(a, b, c), f"r={r}, max({a},{b},{c})={max(a,b,c)}"
         _cleanup(lib, ba)
@@ -176,11 +176,11 @@ class TestMaxOfN:
                                   ctypes.c_uint8(1))
 
         sopts = _SolveOpts(seed=42, max_conflicts=100, max_restarts=1000)
-        sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+        sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
         assert sr == 0
 
-        a = lib.solver_get_value(ctx, ctypes.c_uint32(1))
-        b = lib.solver_get_value(ctx, ctypes.c_uint32(2))
+        a = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(1))
+        b = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(2))
         assert a <= 7 and b <= 7
         assert max(a, b) == 7
         _cleanup(lib, ba)
@@ -226,11 +226,11 @@ class TestNoOverlap2D:
         assert ref != 0xFFFFFFFF
 
         sopts = _SolveOpts(seed=42, max_conflicts=100, max_restarts=1000)
-        sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+        sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
         assert sr == 0
 
-        x0 = lib.solver_get_value(ctx, ctypes.c_uint32(0))
-        x1 = lib.solver_get_value(ctx, ctypes.c_uint32(1))
+        x0 = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(0))
+        x1 = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(1))
 
         # With y forced to 0, they must be non-overlapping in x
         assert x0 + 5 <= x1 or x1 + 5 <= x0, \
@@ -263,14 +263,14 @@ class TestNoOverlap2D:
         assert ref != 0xFFFFFFFF
 
         sopts = _SolveOpts(seed=42, max_conflicts=200, max_restarts=5000)
-        sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+        sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
         assert sr == 0
 
         # Verify no overlap including halos
         positions = []
         for i in range(3):
-            x = lib.solver_get_value(ctx, ctypes.c_uint32(i))
-            y = lib.solver_get_value(ctx, ctypes.c_uint32(3 + i))
+            x = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(i))
+            y = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(3 + i))
             positions.append((x, y))
 
         for i in range(3):
@@ -315,7 +315,7 @@ class TestNoOverlap2D:
                                     rects, ctypes.c_uint8(2))
 
         sopts = _SolveOpts(seed=42, max_conflicts=100, max_restarts=500)
-        sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+        sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
         # Should be UNSAT or TIMEOUT (x range 0-4 can't fit two 6-wide with y=0)
         assert sr != 0, "Expected UNSAT for two 6x6 rects on [0,4]x{0} canvas"
         _cleanup(lib, ba)
@@ -367,7 +367,7 @@ class TestOptimize:
                               use_phase_save=1, max_shave_iters=500)
         result = COptimizeResult()
 
-        rc = lib.solver_optimize(ctx, ctypes.c_uint32(0),
+        rc = lib.dvs_solver_optimize(ctx, ctypes.c_uint32(0),
                                   ctypes.byref(opts), ctypes.byref(result))
         assert rc == 0
         assert result.found == 1
@@ -444,14 +444,14 @@ class TestHPWL:
                                 ctypes.c_uint8(1))
 
         sopts = _SolveOpts(seed=42, max_conflicts=200, max_restarts=5000)
-        sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+        sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
         assert sr == 0
 
-        x0 = lib.solver_get_value(ctx, ctypes.c_uint32(0))
-        y0 = lib.solver_get_value(ctx, ctypes.c_uint32(1))
-        x1 = lib.solver_get_value(ctx, ctypes.c_uint32(2))
-        y1 = lib.solver_get_value(ctx, ctypes.c_uint32(3))
-        hpwl = lib.solver_get_value(ctx, ctypes.c_uint32(10))
+        x0 = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(0))
+        y0 = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(1))
+        x1 = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(2))
+        y1 = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(3))
+        hpwl = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(10))
 
         expected_hpwl = abs(x0 - x1) + abs(y0 - y1)
         assert hpwl == expected_hpwl, \

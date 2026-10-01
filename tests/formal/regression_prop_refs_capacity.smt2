@@ -1,16 +1,16 @@
-; Regression for prop_refs capacity OOB read in solver_restore (Phase 10 fix).
+; Regression for prop_refs capacity OOB read in dvs_solver_restore (Phase 10 fix).
 ;
 ; Captured from `sby -f counter_assert_d30.sby bmc` (yosys-smtbmc piping
 ; SMT2 commands into dv-solve-smt2). Before the fix, this trace SEGV'd
-; under ASAN at step 25 in solver_propagate at the p->fire dispatch:
+; under ASAN at step 25 in dvs_solver_propagate at the p->fire dispatch:
 ;
-;   #0 solver_propagate /src/c/dvs_propagate.c:265
-;   #1 solver_add_constraint /src/c/dvs_compile.c:2843
+;   #0 dvs_solver_propagate /src/c/dvs_propagate.c:265
+;   #1 dvs_solver_add_constraint /src/c/dvs_compile.c:2843
 ;   #2 _flush_aux /src/c/smt2/smt2_frontend.c:1670
 ;   #3 _cmd_check_sat /src/c/smt2/smt2_frontend.c:1716
 ;
 ; Root cause: incremental_capacity_hint sized the var array but NOT the
-; prop_refs side table. solver_restore iterates prop_refs[0..n_props_at_cp);
+; prop_refs side table. dvs_solver_restore iterates prop_refs[0..n_props_at_cp);
 ; once n_props_at_cp exceeded n_prop_refs_capacity, the loop read past
 ; the end of prop_refs into adjacent prop_guard_vars/prop_constraint_id
 ; memory. Those slots can legitimately hold 0 (var id 0 or unset
@@ -18,8 +18,8 @@
 ; resulting prop_ref=0 → p = pool_base+0 (pool header) → garbage
 ; function pointer → SEGV in p->fire().
 ;
-; Fix: solver_compile now applies incremental_capacity_hint to pr_cap.
-; Defense-in-depth: solver_restore clamps its loop bound to capacity.
+; Fix: dvs_solver_compile now applies incremental_capacity_hint to pr_cap.
+; Defense-in-depth: dvs_solver_restore clamps its loop bound to capacity.
 ;
 ; Expected: 51 sat/unsat lines, exit 2 (final unsat), no crash.
 (set-option :produce-models true)

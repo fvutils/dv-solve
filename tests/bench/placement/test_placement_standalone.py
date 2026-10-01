@@ -42,10 +42,10 @@ def _make_ctx(lib, var_specs, buf_size=1 << 20):
 
     ba = lib.dvs_block_alloc_create(None, buf_size)
     ctx_buf = (ctypes.c_uint8 * buf_size)()
-    ctx = lib.solver_create(ctx_buf, buf_size, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, buf_size, ba)
     assert ctx is not None
 
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc == 0
 
     return ctx, ba, ctx_buf, sp_buf
@@ -112,13 +112,13 @@ def test_min_of_3():
     assert ref != 0xFFFFFFFF, "MinOfN alloc failed"
 
     sopts = _SolveOpts(seed=42, max_conflicts=100, max_restarts=1000)
-    sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+    sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
     assert sr == 0, f"Expected SOLVE_OK, got {sr}"
 
-    r = lib.solver_get_value(ctx, 0)
-    a = lib.solver_get_value(ctx, 1)
-    b = lib.solver_get_value(ctx, 2)
-    c = lib.solver_get_value(ctx, 3)
+    r = lib.dvs_solver_get_value(ctx, 0)
+    a = lib.dvs_solver_get_value(ctx, 1)
+    b = lib.dvs_solver_get_value(ctx, 2)
+    c = lib.dvs_solver_get_value(ctx, 3)
     assert r == min(a, b, c), f"r={r}, min({a},{b},{c})={min(a,b,c)}"
     lib.dvs_block_alloc_destroy(ba)
 
@@ -138,13 +138,13 @@ def test_max_of_3():
     assert ref != 0xFFFFFFFF
 
     sopts = _SolveOpts(seed=42, max_conflicts=100, max_restarts=1000)
-    sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+    sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
     assert sr == 0
 
-    r = lib.solver_get_value(ctx, 0)
-    a = lib.solver_get_value(ctx, 1)
-    b = lib.solver_get_value(ctx, 2)
-    c = lib.solver_get_value(ctx, 3)
+    r = lib.dvs_solver_get_value(ctx, 0)
+    a = lib.dvs_solver_get_value(ctx, 1)
+    b = lib.dvs_solver_get_value(ctx, 2)
+    c = lib.dvs_solver_get_value(ctx, 3)
     assert r == max(a, b, c), f"r={r}, max({a},{b},{c})={max(a,b,c)}"
     lib.dvs_block_alloc_destroy(ba)
 
@@ -167,11 +167,11 @@ def test_no_overlap_2_rects():
     assert ref != 0xFFFFFFFF
 
     sopts = _SolveOpts(seed=42, max_conflicts=100, max_restarts=1000)
-    sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+    sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
     assert sr == 0
 
-    x0 = lib.solver_get_value(ctx, 0)
-    x1 = lib.solver_get_value(ctx, 1)
+    x0 = lib.dvs_solver_get_value(ctx, 0)
+    x1 = lib.dvs_solver_get_value(ctx, 1)
     assert x0 + 5 <= x1 or x1 + 5 <= x0, f"Overlap: x0={x0}, x1={x1}"
     lib.dvs_block_alloc_destroy(ba)
 
@@ -194,13 +194,13 @@ def test_no_overlap_3_rects_with_halo():
     assert ref != 0xFFFFFFFF
 
     sopts = _SolveOpts(seed=42, max_conflicts=200, max_restarts=5000)
-    sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+    sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
     assert sr == 0
 
     positions = []
     for i in range(3):
-        x = lib.solver_get_value(ctx, i)
-        y = lib.solver_get_value(ctx, 3 + i)
+        x = lib.dvs_solver_get_value(ctx, i)
+        y = lib.dvs_solver_get_value(ctx, 3 + i)
         positions.append((x, y))
 
     for i in range(3):
@@ -238,7 +238,7 @@ def test_optimize_sum():
                           use_phase_save=1, max_shave_iters=500)
     result = COptimizeResult()
 
-    rc = lib.solver_optimize(ctx, ctypes.c_uint32(0),
+    rc = lib.dvs_solver_optimize(ctx, ctypes.c_uint32(0),
                               ctypes.byref(opts), ctypes.byref(result))
     assert rc == 0
     assert result.found == 1
@@ -279,14 +279,14 @@ def test_hpwl():
     lib.prop_add_sum_eq_32(ctx, ctypes.c_uint32(10), ctypes.c_uint32(2), h_sum, ctypes.c_uint8(1))
 
     sopts = _SolveOpts(seed=42, max_conflicts=200, max_restarts=5000)
-    sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+    sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
     assert sr == 0
 
-    x0 = lib.solver_get_value(ctx, 0)
-    y0 = lib.solver_get_value(ctx, 1)
-    x1 = lib.solver_get_value(ctx, 2)
-    y1 = lib.solver_get_value(ctx, 3)
-    hpwl = lib.solver_get_value(ctx, 10)
+    x0 = lib.dvs_solver_get_value(ctx, 0)
+    y0 = lib.dvs_solver_get_value(ctx, 1)
+    x1 = lib.dvs_solver_get_value(ctx, 2)
+    y1 = lib.dvs_solver_get_value(ctx, 3)
+    hpwl = lib.dvs_solver_get_value(ctx, 10)
     expected = abs(x0 - x1) + abs(y0 - y1)
     assert hpwl == expected, f"HPWL={hpwl}, expected={expected} ({x0},{y0}),({x1},{y1})"
     lib.dvs_block_alloc_destroy(ba)

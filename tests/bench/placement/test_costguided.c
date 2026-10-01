@@ -23,7 +23,7 @@ static double now_sec(void) {
 }
 
 /* Compute HPWL from placed positions */
-static int64_t compute_hpwl(const SolveCtx *ctx, const HPWLCostCtx *hctx) {
+static int64_t compute_hpwl(const dvs_ctx_t *ctx, const HPWLCostCtx *hctx) {
     int64_t total = 0;
     for (uint32_t ni = 0; ni < hctx->n_nets; ni++) {
         const CostGuidedNet *net = &hctx->nets[ni];
@@ -31,9 +31,9 @@ static int64_t compute_hpwl(const SolveCtx *ctx, const HPWLCostCtx *hctx) {
         int32_t ymin = INT32_MAX, ymax = INT32_MIN;
         for (uint32_t pi = 0; pi < net->n_pins; pi++) {
             uint32_t mid = net->pins[pi].macro_id;
-            int32_t x = (int32_t)solver_get_value(ctx, hctx->macros[mid].x_var_id)
+            int32_t x = (int32_t)dvs_solver_get_value(ctx, hctx->macros[mid].x_var_id)
                         + net->pins[pi].offset_x;
-            int32_t y = (int32_t)solver_get_value(ctx, hctx->macros[mid].y_var_id)
+            int32_t y = (int32_t)dvs_solver_get_value(ctx, hctx->macros[mid].y_var_id)
                         + net->pins[pi].offset_y;
             if (x < xmin) xmin = x;
             if (x > xmax) xmax = x;
@@ -60,7 +60,7 @@ static RunResult run_placement(int n_macros, int canvas, int n_nets,
     /* Build problem */
     size_t sp_sz = 65536;
     void *sp_buf = calloc(1, sp_sz);
-    SolveProblem *sp = solve_problem_init(sp_buf, sp_sz);
+    dvs_problem_t *sp = solve_problem_init(sp_buf, sp_sz);
     if (!sp) { free(sp_buf); return rr; }
 
     int widths[64], heights[64];
@@ -78,8 +78,8 @@ static RunResult run_placement(int n_macros, int canvas, int n_nets,
     size_t ctx_sz = 1 << 22;
     void *ctx_buf = calloc(1, ctx_sz);
     dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
-    SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
-    if (solver_compile(ctx, sp) != 0) { rr.result = -2; goto done; }
+    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, ctx_sz, ba);
+    if (dvs_solver_compile(ctx, sp) != 0) { rr.result = -2; goto done; }
 
     /* Add NoOverlap2D */
     RectSpec rects[64];
@@ -149,21 +149,21 @@ static RunResult run_placement(int n_macros, int canvas, int n_nets,
     hctx.macro_heights = macro_hs;
 
     if (use_costguided) {
-        solver_set_cost_guided_hpwl(ctx, &hctx, 500);
+        dvs_solver_set_cost_guided_hpwl(ctx, &hctx, 500);
     } else {
         /* Build the index anyway so we can compute HPWL after solve */
         hpwl_cost_ctx_build_index(&hctx);
     }
 
     /* Solve */
-    SolveOpts sopts = {0};
+    dvs_solve_opts_t sopts = {0};
     sopts.seed = seed;
     sopts.max_conflicts = 200;
     sopts.max_restarts = 5000;
     sopts.max_shave_iters = 0;
 
     double t0 = now_sec();
-    rr.result = solver_solve(ctx, &sopts);
+    rr.result = dvs_solver_solve(ctx, &sopts);
     rr.time_ms = (now_sec() - t0) * 1000.0;
     rr.conflicts = ctx->conflict_count;
 

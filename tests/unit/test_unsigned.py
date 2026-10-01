@@ -41,24 +41,24 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.dvs_var_lo64.restype  = ctypes.c_int64
     lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.dvs_var_hi64.restype  = ctypes.c_int64
     lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_get_var.restype  = ctypes.c_void_p
-    lib.solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_get_var.restype  = ctypes.c_void_p
+    lib.dvs_solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
     lib.ctx_tighten_lb64.restype  = ctypes.c_int
     lib.ctx_tighten_lb64.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
@@ -78,11 +78,11 @@ def _setup(lib: ctypes.CDLL):
         ]
     lib._SolveOpts = SolveOpts
 
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 # BinOp enum values
@@ -114,14 +114,14 @@ def _make_ctx(lib, var_specs):
 def _compile_and_solve(lib, sp_buf, ctx_buf, sp, seed=0x1234):
     ba  = lib.dvs_block_alloc_create(None, 0)
     assert ba
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
 
-    rc = lib.solver_compile(ctx, sp)
-    assert rc >= 0, f"solver_compile returned {rc}"
+    rc = lib.dvs_solver_compile(ctx, sp)
+    assert rc >= 0, f"dvs_solver_compile returned {rc}"
 
     opts = lib._SolveOpts(seed=seed)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     return ba, ctx, result
 
 
@@ -148,7 +148,7 @@ def test_unsigned_32_full_range(libdvs):
     ba, ctx, result = _compile_and_solve(lib, sp_buf, ctx_buf, sp)
     assert result == SOLVE_OK
 
-    val = lib.solver_get_value(ctx, 0)
+    val = lib.dvs_solver_get_value(ctx, 0)
     assert val > 0x80000000, f"Expected > 0x80000000, got {val:#x}"
     assert val <= 0xFFFFFFFF, f"Expected <= 0xFFFFFFFF, got {val:#x}"
 
@@ -175,8 +175,8 @@ def test_unsigned_32_comparison(libdvs):
     ba, ctx, result = _compile_and_solve(lib, sp_buf, ctx_buf, sp)
     assert result == SOLVE_OK
 
-    x = lib.solver_get_value(ctx, 0)
-    y = lib.solver_get_value(ctx, 1)
+    x = lib.dvs_solver_get_value(ctx, 0)
+    y = lib.dvs_solver_get_value(ctx, 1)
     assert x < y, f"Expected x < y, got x={x:#x}, y={y:#x}"
 
     lib.dvs_block_alloc_destroy(ba)
@@ -199,7 +199,7 @@ def test_unsigned_32_eq_high_value(libdvs):
     ba, ctx, result = _compile_and_solve(lib, sp_buf, ctx_buf, sp)
     assert result == SOLVE_OK
 
-    val = lib.solver_get_value(ctx, 0)
+    val = lib.dvs_solver_get_value(ctx, 0)
     assert val == 0xDEADBEEF, f"Expected 0xDEADBEEF, got {val:#x}"
 
     lib.dvs_block_alloc_destroy(ba)
@@ -217,8 +217,8 @@ def test_unsigned_32_bounds_read(libdvs):
     lib.problem_add_var(sp, 0, 32, 0, 0, 0xFFFFFFFF)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    assert lib.solver_compile(ctx, sp) >= 0
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    assert lib.dvs_solver_compile(ctx, sp) >= 0
 
     lo = lib.dvs_var_lo64(ctx, 0)
     hi = lib.dvs_var_hi64(ctx, 0)
@@ -241,8 +241,8 @@ def test_signed_32_unchanged(libdvs):
     lib.problem_add_var(sp, 0, 32, 1, -100, 100)  # signed 32-bit
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     lo = lib.dvs_var_lo64(ctx, 0)
@@ -252,7 +252,7 @@ def test_signed_32_unchanged(libdvs):
 
     # Verify variable is still tier-0 by checking that the Variable struct
     # has lo/hi set directly (tier-0 characteristic)
-    var_ptr = lib.solver_get_var(ctx, 0)
+    var_ptr = lib.dvs_solver_get_var(ctx, 0)
     # Variable struct: lo(4) hi(4) holes_offset(4) width(2) flags(1) _pad(1)
     lo32 = ctypes.c_int32.from_address(var_ptr).value
     hi32 = ctypes.c_int32.from_address(var_ptr + 4).value
@@ -274,8 +274,8 @@ def test_unsigned_32_domain_tighten(libdvs):
     lib.problem_add_var(sp, 0, 32, 0, 0, 0xFFFFFFFF)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    assert lib.solver_compile(ctx, sp) >= 0
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    assert lib.dvs_solver_compile(ctx, sp) >= 0
 
     # Tighten to [0x80000000, 0xFFFFFFFF]
     rc = lib.ctx_tighten_lb64(ctx, 0, 0x80000000)

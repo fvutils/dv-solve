@@ -40,7 +40,7 @@ host workstation needs lives in layers 2–4.
 
 ## 1. Problem framing
 
-When `solver_solve()` does not return a usable result, the user faces
+When `dvs_solver_solve()` does not return a usable result, the user faces
 one of four situations, and each needs a *different* explanation:
 
 | Outcome | User's real question | Primary technique |
@@ -250,7 +250,7 @@ line 42."
                                  │ Layer 1 primitive hooks
    C core (always present, ~zero cost when debug off)            
    libdv_solve.so                                                
-     • solver_solve(ctx, opts)        incremental                
+     • dvs_solver_solve(ctx, opts)        incremental                
      • assumption push/pin (already used by soft)                
      • get_unsat_core()  ← thin: report assumptions in conflict  
      • LCG explain() callbacks (already exist)                   

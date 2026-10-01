@@ -2,7 +2,7 @@
 
 The primary engine honors softs; the BV-SAT serve path historically did not
 (bit-blast ignored softs_head). dvs_bbsolver_check_maxsat keeps the maximal
-priority-respecting soft set on the serve path, mirroring solver_solve's
+priority-respecting soft set on the serve path, mirroring dvs_solver_solve's
 relaxation policy. These tests drive the C API directly.
 
 Op codes (dvs_problem.h): BIN_EQ=10 BIN_GT=14 BIN_GTE=15.

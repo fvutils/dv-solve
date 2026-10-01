@@ -33,58 +33,58 @@ def _setup_dpi(lib: ctypes.CDLL):
     lib.dvs_dpi_n_uncompiled_h.argtypes = [ctypes.c_void_p]
 
     # Builder functions for constructing test problems
-    lib.builder_create.restype = ctypes.c_void_p
-    lib.builder_create.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
-    lib.builder_destroy.restype = None
-    lib.builder_destroy.argtypes = [ctypes.c_void_p]
-    lib.builder_finalize.restype = ctypes.c_void_p
-    lib.builder_finalize.argtypes = [
+    lib.dvs_builder_create.restype = ctypes.c_void_p
+    lib.dvs_builder_create.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    lib.dvs_builder_destroy.restype = None
+    lib.dvs_builder_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_builder_finalize.restype = ctypes.c_void_p
+    lib.dvs_builder_finalize.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t)
     ]
-    lib.builder_free_problem.restype = None
-    lib.builder_free_problem.argtypes = [
+    lib.dvs_builder_free_problem.restype = None
+    lib.dvs_builder_free_problem.argtypes = [
         ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t
     ]
-    lib.builder_add_var.restype = ctypes.c_uint32
-    lib.builder_add_var.argtypes = [
+    lib.dvs_builder_add_var.restype = ctypes.c_uint32
+    lib.dvs_builder_add_var.argtypes = [
         ctypes.c_void_p, ctypes.c_uint32,
         ctypes.c_uint8, ctypes.c_uint8,
         ctypes.c_int64, ctypes.c_int64,
     ]
-    lib.builder_expr_var.restype = ctypes.c_uint32
-    lib.builder_expr_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.builder_expr_const.restype = ctypes.c_uint32
-    lib.builder_expr_const.argtypes = [
+    lib.dvs_builder_expr_var.restype = ctypes.c_uint32
+    lib.dvs_builder_expr_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_builder_expr_const.restype = ctypes.c_uint32
+    lib.dvs_builder_expr_const.argtypes = [
         ctypes.c_void_p, ctypes.c_int64, ctypes.c_uint8
     ]
-    lib.builder_expr_binary.restype = ctypes.c_uint32
-    lib.builder_expr_binary.argtypes = [
+    lib.dvs_builder_expr_binary.restype = ctypes.c_uint32
+    lib.dvs_builder_expr_binary.argtypes = [
         ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
     ]
-    lib.builder_add_constraint.restype = ctypes.c_uint32
-    lib.builder_add_constraint.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_builder_add_constraint.restype = ctypes.c_uint32
+    lib.dvs_builder_add_constraint.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 def _build_2var_b64(lib):
     """Build a 2-var problem (a<=b, [0,100]) and return its base64 string."""
-    b = lib.builder_create(0, None)
+    b = lib.dvs_builder_create(0, None)
     assert b
-    lib.builder_add_var(b, 0, 8, 0, 0, 100)
-    lib.builder_add_var(b, 1, 8, 0, 0, 100)
-    v0 = lib.builder_expr_var(b, 0)
-    v1 = lib.builder_expr_var(b, 1)
-    le = lib.builder_expr_binary(b, BIN_LTE, v0, v1)
-    lib.builder_add_constraint(b, le)
+    lib.dvs_builder_add_var(b, 0, 8, 0, 0, 100)
+    lib.dvs_builder_add_var(b, 1, 8, 0, 0, 100)
+    v0 = lib.dvs_builder_expr_var(b, 0)
+    v1 = lib.dvs_builder_expr_var(b, 1)
+    le = lib.dvs_builder_expr_binary(b, BIN_LTE, v0, v1)
+    lib.dvs_builder_add_constraint(b, le)
 
     size = ctypes.c_size_t(0)
-    sp_ptr = lib.builder_finalize(b, ctypes.byref(size))
+    sp_ptr = lib.dvs_builder_finalize(b, ctypes.byref(size))
     assert sp_ptr
     sz = size.value
 
     buf = (ctypes.c_uint8 * sz)()
     ctypes.memmove(buf, sp_ptr, sz)
-    lib.builder_free_problem(b, sp_ptr, sz)
-    lib.builder_destroy(b)
+    lib.dvs_builder_free_problem(b, sp_ptr, sz)
+    lib.dvs_builder_destroy(b)
 
     raw = bytes(buf)
     return base64.b64encode(raw).decode("ascii")
@@ -212,7 +212,7 @@ class TestDpiShim:
     def test_n_uncompiled_reported(self):
         """The shim must expose whether compile took the whole problem.
 
-        It used to test only `rc < 0`, so a POSITIVE solver_compile return --
+        It used to test only `rc < 0`, so a POSITIVE dvs_solver_compile return --
         the count of constraints it could not compile -- was discarded and the
         SV consumer solved with those constraints dropped. Nothing reported it,
         which made the result indistinguishable from a correct solve."""

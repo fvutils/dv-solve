@@ -35,6 +35,7 @@ def layout(tmp_path, monkeypatch):
     pkg_dir.mkdir(parents=True)
     src_root.mkdir()
     monkeypatch.delenv("DVS_SOLVER_PATH", raising=False)
+    monkeypatch.delenv("ZSP_SOLVER_PATH", raising=False)
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     monkeypatch.setattr(_resolve, "_pkg_dir", lambda: str(pkg_dir))
     monkeypatch.setattr(_resolve, "_src_root", lambda: str(src_root))
@@ -128,5 +129,5 @@ def test_the_reported_incdirs_actually_hold_the_headers():
     an unqualified `#include "dvs_ctx.h"` has to resolve against one of them."""
     incdirs = dv_solve.get_incdirs()
     assert incdirs
-    assert any(os.path.isfile(os.path.join(d, "dvs_ctx.h")) for d in incdirs), \
-        "no reported include dir holds dvs_ctx.h: %s" % incdirs
+    assert any(os.path.isfile(os.path.join(d, "dv_solve.h")) for d in incdirs), \
+        "no reported include dir holds dv_solve.h: %s" % incdirs

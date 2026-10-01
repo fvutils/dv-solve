@@ -33,21 +33,21 @@ def _setup(lib: ctypes.CDLL):
                                     ctypes.c_uint8, ctypes.c_uint8,
                                     ctypes.c_int64, ctypes.c_int64]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.dvs_var_lo64.restype  = ctypes.c_int64
     lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.dvs_var_hi64.restype  = ctypes.c_int64
     lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
     lib.ctx_tighten_lb64.restype  = ctypes.c_int
     lib.ctx_tighten_lb64.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
@@ -80,10 +80,10 @@ def _setup(lib: ctypes.CDLL):
             ("max_shave_iters", ctypes.c_uint32),
         ]
     lib._SolveOpts = SolveOpts
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 def _make_ctx(lib, var_specs):
@@ -95,8 +95,8 @@ def _make_ctx(lib, var_specs):
         ref = lib.problem_add_var(sp, i, width, is_signed, lo, hi)
         assert ref != EXPR_NULL
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
     return sp_buf, ctx_buf, ba, sp, ctx
 
@@ -123,7 +123,7 @@ def test_guard_true_fires(libdvs):
     lib.ctx_tighten_lb32(ctx, 2, 1)
     lib.ctx_tighten_ub32(ctx, 2, 1)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # Propagator should have fired: x.hi <= 5
@@ -151,7 +151,7 @@ def test_guard_false_entails(libdvs):
     lib.ctx_tighten_lb32(ctx, 2, 0)
     lib.ctx_tighten_ub32(ctx, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # Propagator should NOT have fired: x.hi still 100
@@ -176,7 +176,7 @@ def test_guard_undecided_skips(libdvs):
     lib.prop_set_guard(ctx, ref, 2)
 
     # Don't pin guard -- it stays [0,1]
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # Propagator should not have fired: x.hi still 100
@@ -201,7 +201,7 @@ def test_guard_becomes_true_during_search(libdvs):
     lib.prop_set_guard(ctx, ref, 2)
 
     # Initial propagation: guard undecided, LE should not fire
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
     assert lib.dvs_var_hi64(ctx, 0) == 100
 
@@ -210,7 +210,7 @@ def test_guard_becomes_true_during_search(libdvs):
     lib.ctx_tighten_ub32(ctx, 2, 1)
 
     # Propagate again: LE should now fire
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
     assert lib.dvs_var_hi64(ctx, 0) <= 5
 

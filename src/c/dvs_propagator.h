@@ -10,7 +10,7 @@ extern "C" {
 
 /* forward declarations */
 typedef struct Propagator Propagator;
-typedef struct SolveCtx   SolveCtx;
+typedef struct dvs_ctx_s   dvs_ctx_t;
 
 /* ------------------------------------------------------------------ */
 /* PropResult                                                          */
@@ -64,10 +64,10 @@ typedef struct {
 struct Explanation;
 
 struct Propagator {
-    PropResult (*fire)(Propagator *self, SolveCtx *ctx);  /* 8 bytes */
+    PropResult (*fire)(Propagator *self, dvs_ctx_t *ctx);  /* 8 bytes */
     /* Explanation callback for LCG (NULL if propagator doesn't support LCG).
      * Called during conflict analysis to explain why a bound was tightened. */
-    int (*explain)(Propagator *self, SolveCtx *ctx,
+    int (*explain)(Propagator *self, dvs_ctx_t *ctx,
                    uint32_t var_id, uint8_t is_lb,
                    int64_t new_bound, struct Explanation *out);  /* 8 bytes */
     uint32_t    queue_next;  /* pool offset to next in FIFO queue       */
@@ -243,12 +243,12 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 /** Enqueue a propagator (no-op if already queued or entailed). */
-void prop_enqueue(SolveCtx *ctx, uint32_t prop_ref);
+void prop_enqueue(dvs_ctx_t *ctx, uint32_t prop_ref);
 
 /** Set a guard variable on a propagator. When guard is 0, propagator is
  *  entailed; when guard is undecided (lo!=hi), propagator is skipped;
  *  when guard is 1, propagator fires normally. */
-void prop_set_guard(SolveCtx *ctx, uint32_t prop_ref, uint32_t guard_var_id);
+void prop_set_guard(dvs_ctx_t *ctx, uint32_t prop_ref, uint32_t guard_var_id);
 
 /* ------------------------------------------------------------------ */
 /* Domain-tightening functions                                        */
@@ -261,10 +261,10 @@ void prop_set_guard(SolveCtx *ctx, uint32_t prop_ref, uint32_t guard_var_id);
 /*   4. Wakes all watchers on the variable.                           */
 /* ------------------------------------------------------------------ */
 
-PropResult ctx_tighten_lb32(SolveCtx *ctx, uint32_t var_id, int32_t new_lb);
-PropResult ctx_tighten_ub32(SolveCtx *ctx, uint32_t var_id, int32_t new_ub);
-PropResult ctx_tighten_lb64(SolveCtx *ctx, uint32_t var_id, int64_t new_lb);
-PropResult ctx_tighten_ub64(SolveCtx *ctx, uint32_t var_id, int64_t new_ub);
+PropResult ctx_tighten_lb32(dvs_ctx_t *ctx, uint32_t var_id, int32_t new_lb);
+PropResult ctx_tighten_ub32(dvs_ctx_t *ctx, uint32_t var_id, int32_t new_ub);
+PropResult ctx_tighten_lb64(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_lb);
+PropResult ctx_tighten_ub64(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub);
 
 /* ------------------------------------------------------------------ */
 /* Propagation loop                                                    */
@@ -275,13 +275,13 @@ PropResult ctx_tighten_ub64(SolveCtx *ctx, uint32_t var_id, int64_t new_ub);
  *
  * @return PROP_OK on fixedpoint, PROP_CONFLICT if any domain empties.
  */
-PropResult solver_propagate(SolveCtx *ctx);
+PropResult dvs_solver_propagate(dvs_ctx_t *ctx);
 
 /**
  * Run propagation only (no search).  Returns PROP_OK or PROP_CONFLICT.
  * Useful for fast feasibility checks.
  */
-PropResult solver_propagate_only(SolveCtx *ctx);
+PropResult dvs_solver_propagate_only(dvs_ctx_t *ctx);
 
 /* ------------------------------------------------------------------ */
 /* Propagator constructors                                             */
@@ -293,70 +293,70 @@ PropResult solver_propagate_only(SolveCtx *ctx);
 /*   - Returns the pool offset (PropRef), or EXPR_NULL on failure.    */
 /* ------------------------------------------------------------------ */
 
-uint32_t prop_add_bounds_le_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
-uint32_t prop_add_bounds_lt_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
-uint32_t prop_add_bounds_eq_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
-uint32_t prop_add_bounds_ne_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
-uint32_t prop_add_bounds_add_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
-uint32_t prop_add_bounds_mul_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
-uint32_t prop_add_bounds_div_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
-uint32_t prop_add_bounds_mod_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
-uint32_t prop_add_unary_neg_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint8_t priority);
+uint32_t prop_add_bounds_le_32(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
+uint32_t prop_add_bounds_lt_32(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
+uint32_t prop_add_bounds_eq_32(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
+uint32_t prop_add_bounds_ne_32(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
+uint32_t prop_add_bounds_add_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
+uint32_t prop_add_bounds_mul_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
+uint32_t prop_add_bounds_div_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
+uint32_t prop_add_bounds_mod_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
+uint32_t prop_add_unary_neg_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint8_t priority);
 
-uint32_t prop_add_bounds_le_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
-uint32_t prop_add_bounds_lt_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
-uint32_t prop_add_bounds_eq_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
-uint32_t prop_add_bounds_ne_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
-uint32_t prop_add_bounds_add_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
+uint32_t prop_add_bounds_le_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
+uint32_t prop_add_bounds_lt_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
+uint32_t prop_add_bounds_eq_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
+uint32_t prop_add_bounds_ne_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
+uint32_t prop_add_bounds_add_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
 /** Modular BV add with constant: r = (x + c) mod 2^width. width is 1..64. */
-uint32_t prop_add_bvadd_const_64(SolveCtx *ctx, uint32_t r_id, uint32_t x_id,
+uint32_t prop_add_bvadd_const_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t x_id,
                                   uint64_t c, uint8_t width, uint8_t priority);
 /** Modular fixed-width 2's-complement var-var arithmetic (width 1..63):
  *  r = (a + b) mod 2^width / (a - b) / (a * b) / (a << b). */
-uint32_t prop_add_bvadd_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
-uint32_t prop_add_bvsub_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
-uint32_t prop_add_bvmul_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
-uint32_t prop_add_bvshl_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
-uint32_t prop_add_bounds_mul_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
-uint32_t prop_add_bounds_div_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
-uint32_t prop_add_bounds_mod_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
-uint32_t prop_add_unary_neg_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint8_t priority);
+uint32_t prop_add_bvadd_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
+uint32_t prop_add_bvsub_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
+uint32_t prop_add_bvmul_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
+uint32_t prop_add_bvshl_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority);
+uint32_t prop_add_bounds_mul_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
+uint32_t prop_add_bounds_div_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
+uint32_t prop_add_bounds_mod_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
+uint32_t prop_add_unary_neg_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint8_t priority);
 
 /** ITE value propagator: r = cond ? a : b.
  *  var_ids[0]=r, var_ids[1]=cond, var_ids[2]=a, var_ids[3]=b */
-uint32_t prop_add_ite_value_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_ite_value_64(dvs_ctx_t *ctx, uint32_t r_id,
                                 uint32_t cond_id, uint32_t a_id,
                                 uint32_t b_id, uint8_t priority);
 
 /** Bitwise AND: r = a & b.  var_ids[0]=r, [1]=a, [2]=b */
-uint32_t prop_add_bounds_band_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_band_64(dvs_ctx_t *ctx, uint32_t r_id,
                                   uint32_t a_id, uint32_t b_id,
                                   uint8_t priority);
 /** Bitwise OR: r = a | b */
-uint32_t prop_add_bounds_bor_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_bor_64(dvs_ctx_t *ctx, uint32_t r_id,
                                  uint32_t a_id, uint32_t b_id,
                                  uint8_t priority);
 /** Bitwise XOR: r = a ^ b */
-uint32_t prop_add_bounds_bxor_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_bxor_64(dvs_ctx_t *ctx, uint32_t r_id,
                                   uint32_t a_id, uint32_t b_id,
                                   uint8_t priority);
 /** Bitwise NOT: r = ~a.  var_ids[0]=r, [1]=a */
-uint32_t prop_add_bounds_bnot_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_bnot_64(dvs_ctx_t *ctx, uint32_t r_id,
                                   uint32_t a_id, uint8_t priority);
 
 /** Left shift: r = a << b.  var_ids[0]=r, [1]=a, [2]=b */
-uint32_t prop_add_bounds_shl_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_shl_64(dvs_ctx_t *ctx, uint32_t r_id,
                                  uint32_t a_id, uint32_t b_id,
                                  uint8_t priority);
 /** Logical right shift: r = a >> b */
-uint32_t prop_add_bounds_lshr_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_lshr_64(dvs_ctx_t *ctx, uint32_t r_id,
                                   uint32_t a_id, uint32_t b_id,
                                   uint8_t priority);
 
 
 /** Concat: r = {hi, lo}. lo_width is the bit width of lo.
  *  var_ids[0]=r, [1]=hi, [2]=lo */
-uint32_t prop_add_bounds_concat_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_concat_64(dvs_ctx_t *ctx, uint32_t r_id,
                                     uint32_t hi_id, uint32_t lo_id,
                                     uint8_t lo_width, uint8_t priority);
 
@@ -364,10 +364,10 @@ uint32_t prop_add_bounds_concat_64(SolveCtx *ctx, uint32_t r_id,
  * InSet: x ∈ {elems[0], …, elems[n_elems-1]}.
  * @param elems  Array of int32_t allowed values.
  */
-uint32_t prop_add_in_set_32(SolveCtx *ctx, uint32_t x_id,
+uint32_t prop_add_in_set_32(dvs_ctx_t *ctx, uint32_t x_id,
                              uint32_t n_elems, const int32_t *elems,
                              uint8_t priority);
-uint32_t prop_add_in_set_64(SolveCtx *ctx, uint32_t x_id,
+uint32_t prop_add_in_set_64(dvs_ctx_t *ctx, uint32_t x_id,
                              uint32_t n_elems, const int64_t *elems,
                              uint8_t priority);
 /**
@@ -377,7 +377,7 @@ uint32_t prop_add_in_set_64(SolveCtx *ctx, uint32_t x_id,
  * singleton that lands in a gap). Distribution over the ranges is supplied
  * separately by add_dist; this propagator only enforces membership.
  */
-uint32_t prop_add_in_ranges_64(SolveCtx *ctx, uint32_t x_id,
+uint32_t prop_add_in_ranges_64(dvs_ctx_t *ctx, uint32_t x_id,
                                 uint32_t n_ranges, const int64_t *los,
                                 const int64_t *his, uint8_t priority);
 
@@ -385,32 +385,32 @@ uint32_t prop_add_in_ranges_64(SolveCtx *ctx, uint32_t x_id,
  * Implication: guard=true → (var ≤ bound) if is_ub, or (var ≥ bound) otherwise.
  * var_ids[0]=guard, var_ids[1]=var.
  */
-uint32_t prop_add_implication_32(SolveCtx *ctx,
+uint32_t prop_add_implication_32(dvs_ctx_t *ctx,
                                   uint32_t guard_id, uint32_t var_id,
                                   int32_t bound, uint8_t is_ub,
                                   uint8_t priority);
-uint32_t prop_add_implication_64(SolveCtx *ctx,
+uint32_t prop_add_implication_64(dvs_ctx_t *ctx,
                                   uint32_t guard_id, uint32_t var_id,
                                   int64_t bound, uint8_t is_ub,
                                   uint8_t priority);
 
-uint32_t prop_add_reification_32(SolveCtx *ctx, uint32_t guard_id,
+uint32_t prop_add_reification_32(dvs_ctx_t *ctx, uint32_t guard_id,
                                    uint32_t x_id, uint32_t y_id,
                                    uint8_t priority);
-uint32_t prop_add_reification_64(SolveCtx *ctx, uint32_t guard_id,
+uint32_t prop_add_reification_64(dvs_ctx_t *ctx, uint32_t guard_id,
                                    uint32_t x_id, uint32_t y_id,
                                    uint8_t priority);
 
-uint32_t prop_add_reification_eq_32(SolveCtx *ctx, uint32_t guard_id,
+uint32_t prop_add_reification_eq_32(dvs_ctx_t *ctx, uint32_t guard_id,
                                      uint32_t x_id, uint32_t y_id,
                                      uint8_t priority);
-uint32_t prop_add_reification_eq_64(SolveCtx *ctx, uint32_t guard_id,
+uint32_t prop_add_reification_eq_64(dvs_ctx_t *ctx, uint32_t guard_id,
                                      uint32_t x_id, uint32_t y_id,
                                      uint8_t priority);
 
-uint32_t prop_add_bit_slice_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
+uint32_t prop_add_bit_slice_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                 uint8_t hi_bit, uint8_t lo_bit, uint8_t priority);
-uint32_t prop_add_bit_slice_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
+uint32_t prop_add_bit_slice_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                 uint8_t hi_bit, uint8_t lo_bit, uint8_t priority);
 
 
@@ -439,7 +439,7 @@ typedef struct {
  * @param priority Queue priority level.
  * @return Pool offset of the propagator, or EXPR_NULL on failure.
  */
-uint32_t prop_add_all_different(SolveCtx *ctx, uint32_t n_vars,
+uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
                                  const uint32_t *var_ids, uint8_t priority);
 
 
@@ -458,13 +458,13 @@ typedef struct {
     uint32_t      n_clauses;
     struct {
         uint32_t var_id;
-        uint32_t op;       /* BIN_EQ / BIN_NEQ / BIN_LT / BIN_LTE / BIN_GT / BIN_GTE */
+        uint32_t op;       /* DVS_BIN_EQ / DVS_BIN_NEQ / DVS_BIN_LT / DVS_BIN_LTE / DVS_BIN_GT / DVS_BIN_GTE */
         int64_t  constant;
         uint32_t rhs_var_id;  /* UINT32_MAX = use constant; else = var-var */
     } clauses[MAX_DISJ_CLAUSES];
 } DisjClause_t;
 
-uint32_t prop_add_disj_clause(SolveCtx *ctx,
+uint32_t prop_add_disj_clause(dvs_ctx_t *ctx,
                                uint32_t n_clauses,
                                const uint32_t *var_ids,
                                const uint32_t *ops,
@@ -512,7 +512,7 @@ typedef struct {
  * @param priority    Queue priority level.
  * @return Pool offset of the propagator, or EXPR_NULL on failure.
  */
-uint32_t prop_add_sum_eq_32(SolveCtx *ctx, uint32_t result_id,
+uint32_t prop_add_sum_eq_32(dvs_ctx_t *ctx, uint32_t result_id,
                              uint32_t n_summands, const uint32_t *summand_ids,
                              uint8_t priority);
 
@@ -521,7 +521,7 @@ uint32_t prop_add_sum_eq_32(SolveCtx *ctx, uint32_t result_id,
 /* ------------------------------------------------------------------ */
 typedef struct { Propagator hdr; PropWatchSect ws; } Countones_32_t;
 
-uint32_t prop_add_countones_32(SolveCtx *ctx, uint32_t result_id,
+uint32_t prop_add_countones_32(dvs_ctx_t *ctx, uint32_t result_id,
                                 uint32_t operand_id, uint8_t priority);
 
 /* ------------------------------------------------------------------ */
@@ -529,7 +529,7 @@ uint32_t prop_add_countones_32(SolveCtx *ctx, uint32_t result_id,
 /* ------------------------------------------------------------------ */
 typedef struct { Propagator hdr; PropWatchSect ws; } Clog2_32_t;
 
-uint32_t prop_add_clog2_32(SolveCtx *ctx, uint32_t result_id,
+uint32_t prop_add_clog2_32(dvs_ctx_t *ctx, uint32_t result_id,
                             uint32_t operand_id, uint8_t priority);
 
 #ifdef __cplusplus

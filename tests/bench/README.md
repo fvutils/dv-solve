@@ -42,7 +42,7 @@ DVS_SOLVERS=native pytest tests/bench/ -m bench
 - `test_fifo_ctrl` -- FIFO control
 
 **Solver lifecycle**
-- `test_reset_reuse` -- solver_reset + re-solve vs full recompile
+- `test_reset_reuse` -- dvs_solver_reset + re-solve vs full recompile
 
 **New features (Sprints 6-8)**
 - `test_soft_relaxation` -- soft constraint relaxation overhead

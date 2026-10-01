@@ -11,7 +11,7 @@
 /**
  * dvs_bbsolver — bit-blast theory back-end for dv-solve.
  *
- * Phase B.0 of the bitwuzla adoption plan. Takes a SolveProblem (built by
+ * Phase B.0 of the bitwuzla adoption plan. Takes a dvs_problem_t (built by
  * the SMT2 frontend or via the builder API), bit-blasts each constraint to
  * AIG via dvs_bitblast, Tseitin-encodes via dvs_aig_cnf, and solves with
  * dvs_sat (kissat). On SAT, reads back integer values for each declared
@@ -25,7 +25,7 @@
  * bbsolver respects the operand width context).
  *
  * Signedness: for the operand widths in arithmetic, we use the width of
- * each operand as-is. For BIN_LT/LTE/GT/GTE the signedness comes from
+ * each operand as-is. For DVS_BIN_LT/LTE/GT/GTE the signedness comes from
  * the VarSpec of either side: if any operand traces back to a signed
  * variable, we use signed comparison (SLT). Mixed-signedness yields a
  * conservative signed comparison.
@@ -52,14 +52,14 @@ extern "C" {
 
 /** Create a bbsolver for the given problem. `alloc` may be NULL. The SAT
  * backend is env-driven (DV_SAT_BACKEND, default kissat). */
-dvs_bbsolver_t *dvs_bbsolver_new(dvs_alloc_t *alloc, SolveProblem *problem);
+dvs_bbsolver_t *dvs_bbsolver_new(dvs_alloc_t *alloc, dvs_problem_t *problem);
 
 /** Create a bbsolver with an explicit backend preference: prefer_cadical -1 =
  * env-driven (as dvs_bbsolver_new), 0 = force kissat, 1 = prefer CaDiCaL (falls
  * back to kissat when CaDiCaL is not compiled in). The cube engine uses 1 so it
  * gets retractable assumptions without the caller setting DV_SAT_BACKEND. */
 dvs_bbsolver_t *dvs_bbsolver_new_backend(dvs_alloc_t *alloc,
-                                         SolveProblem *problem,
+                                         dvs_problem_t *problem,
                                          int prefer_cadical);
 
 /** Free the bbsolver and all transient resources (AIG, SAT, bit-blaster). */
@@ -79,7 +79,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *bb, uint64_t seed);
  * repeated randomize()s of an identical problem produce different (still sound)
  * models at a fraction of a full bit-blast + SAT cost. The kept model is read
  * back via dvs_bbsolver_value / _value_wide as usual. Uses only solver-owned
- * state (AIG/CNF/vars/model) — safe even if the SolveProblem it was built from
+ * state (AIG/CNF/vars/model) — safe even if the dvs_problem_t it was built from
  * has since been freed. Returns 0 on success, -1 if the instance is not SAT.
  */
 int dvs_bbsolver_rediversify(dvs_bbsolver_t *bb, uint64_t seed);
@@ -87,8 +87,8 @@ int dvs_bbsolver_rediversify(dvs_bbsolver_t *bb, uint64_t seed);
 /**
  * Incremental extension: keep one live instance across solves.
  *
- * dvs_bbsolver_assert bit-blasts and asserts one more predicate (an ExprRef
- * into the SolveProblem the solver was built from) into the running instance,
+ * dvs_bbsolver_assert bit-blasts and asserts one more predicate (an dvs_expr_t
+ * into the dvs_problem_t the solver was built from) into the running instance,
  * building/bounding any newly referenced variables; it does not solve.
  * dvs_bbsolver_resolve then re-solves, reusing the accumulated clause DB and —
  * on an incremental SAT backend (CaDiCaL) — the retained learned clauses.
@@ -108,7 +108,7 @@ int dvs_bbsolver_rediversify(dvs_bbsolver_t *bb, uint64_t seed);
  * construct, or DVS_BB_ERROR on a hard error / non-incremental backend.
  * dvs_bbsolver_resolve returns DVS_BB_SAT/UNSAT/UNKNOWN/ERROR.
  */
-int dvs_bbsolver_assert(dvs_bbsolver_t *bb, ExprRef pred_ref);
+int dvs_bbsolver_assert(dvs_bbsolver_t *bb, dvs_expr_t pred_ref);
 int dvs_bbsolver_resolve(dvs_bbsolver_t *bb, uint64_t seed);
 
 /* Like dvs_bbsolver_resolve but WITHOUT don't-care diversification: reads back
@@ -228,7 +228,7 @@ int dvs_bbsolver_install_worker_model(dvs_bbsolver_t *bb, dvs_sat_t *worker_sat)
  *
  * Returns DVS_BB_SAT / DVS_BB_UNSAT / DVS_BB_UNKNOWN / DVS_BB_ERROR.
  */
-int dvs_bbsolver_check_maxsat(dvs_alloc_t *alloc, SolveProblem *problem,
+int dvs_bbsolver_check_maxsat(dvs_alloc_t *alloc, dvs_problem_t *problem,
                               uint64_t seed, dvs_bbsolver_t **out_bb,
                               uint8_t *out_keep, uint32_t keep_cap);
 

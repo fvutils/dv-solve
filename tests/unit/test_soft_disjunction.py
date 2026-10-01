@@ -55,11 +55,11 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_unary.restype = ctypes.c_uint32
     lib.expr_unary.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     class SolveOpts(ctypes.Structure):
         _fields_ = [
@@ -71,10 +71,10 @@ def _setup(lib: ctypes.CDLL):
             ("max_shave_iters", ctypes.c_uint32),
         ]
     lib._SolveOpts = SolveOpts
-    lib.solver_solve.restype = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_get_value.restype = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_solve.restype = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_get_value.restype = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 def _run_once(lib, seed, *, hard_guard_true, not_wrapped=False):
@@ -118,15 +118,15 @@ def _run_once(lib, seed, *, hard_guard_true, not_wrapped=False):
     lib.problem_add_soft_constraint(sp, disj, 0)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0, f"compile rc={rc}"
 
     opts = lib._SolveOpts(seed=seed, use_phase_save=1)
-    res = lib.solver_solve(ctx, ctypes.byref(opts))
+    res = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert res == SOLVE_OK
-    a = lib.solver_get_value(ctx, 0)
-    d = lib.solver_get_value(ctx, 1)
+    a = lib.dvs_solver_get_value(ctx, 0)
+    d = lib.dvs_solver_get_value(ctx, 1)
     lib.dvs_block_alloc_destroy(ba)
     return a, d
 
@@ -141,11 +141,11 @@ def _run_simple(lib, seed):
                               lib.expr_const(sp, 40, 0))
     lib.problem_add_soft_constraint(sp, d_eq_40, 0)
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    assert lib.solver_compile(ctx, sp) >= 0
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    assert lib.dvs_solver_compile(ctx, sp) >= 0
     opts = lib._SolveOpts(seed=seed, use_phase_save=1)
-    assert lib.solver_solve(ctx, ctypes.byref(opts)) == SOLVE_OK
-    d = lib.solver_get_value(ctx, 0)
+    assert lib.dvs_solver_solve(ctx, ctypes.byref(opts)) == SOLVE_OK
+    d = lib.dvs_solver_get_value(ctx, 0)
     lib.dvs_block_alloc_destroy(ba)
     return d
 

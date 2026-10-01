@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-typedef struct SolveCtx SolveCtx;
+typedef struct dvs_ctx_s dvs_ctx_t;
 
 /* ================================================================== */
 /* Wire Mask Value Selector                                            */
@@ -56,7 +56,7 @@ typedef struct {
  * @return Best value in [lo, hi] that minimizes incremental HPWL.
  *         Returns lo if no wire mask info is available for this variable.
  */
-int32_t wiremask_select_value(const SolveCtx *ctx, const WireMaskCtx *wm,
+int32_t wiremask_select_value(const dvs_ctx_t *ctx, const WireMaskCtx *wm,
                                uint32_t var_id);
 
 /**
@@ -71,7 +71,7 @@ int32_t wiremask_select_value(const SolveCtx *ctx, const WireMaskCtx *wm,
  * @param n_macros  Number of macros to place.
  * @return 0 on success, -1 if any macro cannot be legally placed.
  */
-int wiremask_greedy_place(SolveCtx *ctx, const WireMaskCtx *wm,
+int wiremask_greedy_place(dvs_ctx_t *ctx, const WireMaskCtx *wm,
                            const uint32_t *order, uint32_t n_macros);
 
 #ifdef __cplusplus

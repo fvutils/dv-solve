@@ -1,6 +1,6 @@
-/* Width-64 ADD/SUB: every SOLVE_OK model must satisfy the constraint.
+/* Width-64 ADD/SUB: every DVS_SOLVE_OK model must satisfy the constraint.
  *
- * Three defects, each of which returned SOLVE_OK with a model violating
+ * Three defects, each of which returned DVS_SOLVE_OK with a model violating
  * `t == a op b` when the operands' true result lies outside int64:
  *
  *   - bounds_add_64 declined every tightening it could not compute in int64
@@ -42,37 +42,37 @@ static int in_domain(int64_t v, int is_signed, int64_t lo, int64_t hi) {
 }
 
 static void run(const Case *c) {
-    /* SolveProblem needs 8-byte alignment. */
+    /* dvs_problem_t needs 8-byte alignment. */
     static uint64_t sp_buf[(1u << 16) / sizeof(uint64_t)];
-    SolveProblem *sp = solve_problem_init(sp_buf, sizeof(sp_buf));
+    dvs_problem_t *sp = solve_problem_init(sp_buf, sizeof(sp_buf));
     problem_add_var(sp, 0, (uint16_t)c->aw, (uint8_t)c->as_, c->alo, c->ahi);
     problem_add_var(sp, 1, (uint16_t)c->aw, (uint8_t)c->as_, c->alo, c->ahi);
     problem_add_var(sp, 2, (uint16_t)c->tw, (uint8_t)c->ts, c->tlo, c->thi);
-    problem_add_constraint(sp, expr_binary(sp, BIN_EQ, expr_var(sp, 2),
-        expr_binary(sp, (BinOp)c->op, expr_var(sp, 0), expr_var(sp, 1))));
+    problem_add_constraint(sp, expr_binary(sp, DVS_BIN_EQ, expr_var(sp, 2),
+        expr_binary(sp, (dvs_binop_t)c->op, expr_var(sp, 0), expr_var(sp, 1))));
 
     uint8_t *buf = (uint8_t *)malloc(CTX_BUF_SIZE);
     int ok = 0, bad = 0, other = 0;
     for (int i = 0; i < N_SEEDS; i++) {
         void *ba = dvs_block_alloc_create(NULL, CTX_BUF_SIZE);
-        SolveCtx *ctx = solver_create(buf, CTX_BUF_SIZE, ba);
-        if (solver_compile(ctx, sp) != 0) {
+        dvs_ctx_t *ctx = dvs_solver_create(buf, CTX_BUF_SIZE, ba);
+        if (dvs_solver_compile(ctx, sp) != 0) {
             fprintf(stderr, "FAIL %s: compile\n", c->name);
             failures++;
             dvs_block_alloc_destroy(ba);
             break;
         }
-        SolveOpts o;
+        dvs_solve_opts_t o;
         memset(&o, 0, sizeof(o));
         o.seed = (uint64_t)i + 1;
-        SolveResult sr = solver_solve(ctx, &o);
-        if (sr != SOLVE_OK) {
+        dvs_result_t sr = dvs_solver_solve(ctx, &o);
+        if (sr != DVS_SOLVE_OK) {
             other++;
         } else {
-            uint64_t a = (uint64_t)solver_get_value(ctx, 0);
-            uint64_t b = (uint64_t)solver_get_value(ctx, 1);
-            int64_t  t = solver_get_value(ctx, 2);
-            uint64_t want = c->op == BIN_ADD ? a + b : a - b;
+            uint64_t a = (uint64_t)dvs_solver_get_value(ctx, 0);
+            uint64_t b = (uint64_t)dvs_solver_get_value(ctx, 1);
+            int64_t  t = dvs_solver_get_value(ctx, 2);
+            uint64_t want = c->op == DVS_BIN_ADD ? a + b : a - b;
             if ((uint64_t)t != want || !in_domain(t, c->ts, c->tlo, c->thi)) {
                 if (!bad)
                     fprintf(stderr, "  %s seed %d: a=%" PRIu64 " b=%" PRIu64
@@ -100,17 +100,17 @@ int main(void) {
     const int64_t P62 = INT64_C(1) << 62;
     const Case cases[] = {
         /* the tier-2 wide_add_64 shape: result range forces a + b < 2^62 */
-        { "add 63u -> 64s [-2^62, 2^62)", BIN_ADD, 63, 0, MINA, MAXOP,
+        { "add 63u -> 64s [-2^62, 2^62)", DVS_BIN_ADD, 63, 0, MINA, MAXOP,
           64, 1, -P62, P62 - 1 },
-        { "add 63u -> 64s full",  BIN_ADD, 63, 0, MINA, MAXOP,
+        { "add 63u -> 64s full",  DVS_BIN_ADD, 63, 0, MINA, MAXOP,
           64, 1, INT64_MIN, INT64_MAX },
-        { "add 63u -> 64u full",  BIN_ADD, 63, 0, MINA, MAXOP,
+        { "add 63u -> 64u full",  DVS_BIN_ADD, 63, 0, MINA, MAXOP,
           64, 0, 0, -1 },
-        { "sub 63u -> 64s full",  BIN_SUB, 63, 0, 0, INT64_MAX,
+        { "sub 63u -> 64s full",  DVS_BIN_SUB, 63, 0, 0, INT64_MAX,
           64, 1, INT64_MIN, INT64_MAX },
-        { "sub 64u -> 64s full",  BIN_SUB, 64, 0, 0, -1,
+        { "sub 64u -> 64s full",  DVS_BIN_SUB, 64, 0, 0, -1,
           64, 1, INT64_MIN, INT64_MAX },
-        { "sub 64s -> 64s full",  BIN_SUB, 64, 1, INT64_MIN, INT64_MAX,
+        { "sub 64s -> 64s full",  DVS_BIN_SUB, 64, 1, INT64_MIN, INT64_MAX,
           64, 1, INT64_MIN, INT64_MAX },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)

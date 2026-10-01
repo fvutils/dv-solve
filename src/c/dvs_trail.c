@@ -6,12 +6,12 @@
 /* Internal helpers                                                    */
 /* ------------------------------------------------------------------ */
 
-static TrailEntry *_alloc_entry(SolveCtx *ctx) {
+static TrailEntry *_alloc_entry(dvs_ctx_t *ctx) {
     return (TrailEntry *)dvs_stack_alloc(
         ctx->dynamic, sizeof(TrailEntry), _Alignof(TrailEntry));
 }
 
-static void _push_entry(SolveCtx *ctx, TrailEntry *e) {
+static void _push_entry(dvs_ctx_t *ctx, TrailEntry *e) {
     e->prev        = ctx->trail_top;
     ctx->trail_top = e;
     ctx->trail_count++;
@@ -21,14 +21,14 @@ static void _push_entry(SolveCtx *ctx, TrailEntry *e) {
 /* Decision-level push                                                 */
 /* ------------------------------------------------------------------ */
 
-void trail_push_level(SolveCtx *ctx) {
+void trail_push_level(dvs_ctx_t *ctx) {
     uint32_t lvl = ctx->decision_level;
     LevelMark *mark = &ctx->level_marks[lvl];
     mark->stack_mark  = dvs_stack_push(ctx->dynamic);
     mark->trail_top   = ctx->trail_top;
     mark->trail_count = ctx->trail_count;
     /* Phase B.1 step 5 (plumbing slice): SAT-arena top defaults to 0 —
-     * SolveCtx does not hold a dvs_sat handle yet. Future step 6 will
+     * dvs_ctx_t does not hold a dvs_sat handle yet. Future step 6 will
      * set this from dvs_sat_arena_save_mark. */
     mark->sat_arena_top = 0;
     ctx->decision_level = lvl + 1;
@@ -38,7 +38,7 @@ void trail_push_level(SolveCtx *ctx) {
 /* Record lower-bound tightening                                       */
 /* ------------------------------------------------------------------ */
 
-int trail_record_lb(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
+int trail_record_lb(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_lb) {
     Variable *v = &ctx->vars[var_id];
 
     int64_t old_lb;
@@ -76,7 +76,7 @@ int trail_record_lb(SolveCtx *ctx, uint32_t var_id, int64_t new_lb) {
 /* Record upper-bound tightening                                       */
 /* ------------------------------------------------------------------ */
 
-int trail_record_ub(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
+int trail_record_ub(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub) {
     Variable *v = &ctx->vars[var_id];
 
     int64_t old_ub;
@@ -114,7 +114,7 @@ int trail_record_ub(SolveCtx *ctx, uint32_t var_id, int64_t new_ub) {
 /* Record hole                                                         */
 /* ------------------------------------------------------------------ */
 
-int trail_record_hole(SolveCtx *ctx, uint32_t var_id, int64_t removed_val) {
+int trail_record_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t removed_val) {
     TrailEntry *e = _alloc_entry(ctx);
     if (!e) return -1;
 
@@ -134,7 +134,7 @@ int trail_record_hole(SolveCtx *ctx, uint32_t var_id, int64_t removed_val) {
 /* Backtrack                                                           */
 /* ------------------------------------------------------------------ */
 
-void trail_backtrack(SolveCtx *ctx, uint32_t target_level) {
+void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
     LevelMark *mark = &ctx->level_marks[target_level];
     TrailEntry *stop = mark->trail_top;
     TrailEntry *e    = ctx->trail_top;
@@ -219,7 +219,7 @@ void trail_backtrack(SolveCtx *ctx, uint32_t target_level) {
      * restoration, so they must be eligible for re-firing.
      *
      * Exception: stale post-cp propagators left in watcher chains by
-     * solver_restore (marked ENTAILED + their prop_refs[] slot NULL'd
+     * dvs_solver_restore (marked ENTAILED + their prop_refs[] slot NULL'd
      * but not detached from the chain) MUST stay ENTAILED. Their
      * underlying var ids may have been rolled back and re-bound to a
      * new variable in the post-pop scope; firing them again would

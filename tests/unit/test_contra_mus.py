@@ -54,11 +54,11 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.contra_analyze_unsat.restype  = ctypes.c_int
     lib.contra_analyze_unsat.argtypes = [
@@ -72,7 +72,7 @@ def _setup(lib: ctypes.CDLL):
 def _make_ctx(lib):
     ba = lib.dvs_block_alloc_create(None, 4096)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
     return ctx_buf, ctx, ba
 
@@ -159,7 +159,7 @@ def test_mus_is_minimal(libdvs_debug):
     lib = libdvs_debug
     _setup(lib)
 
-    # Set up solver_solve for verification
+    # Set up dvs_solver_solve for verification
     class SolveOpts(ctypes.Structure):
         _fields_ = [
             ("seed",           ctypes.c_uint64),
@@ -169,8 +169,8 @@ def test_mus_is_minimal(libdvs_debug):
             ("_pad",           ctypes.c_uint8 * 3),
             ("max_shave_iters", ctypes.c_uint32),
         ]
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
     sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
@@ -231,9 +231,9 @@ def test_mus_is_minimal(libdvs_debug):
             lib.problem_add_constraint(sub_sp, lib.expr_binary(sub_sp, op, ve, ce))
 
         ctx_buf2, ctx2, ba2 = _make_ctx(lib)
-        rc = lib.solver_compile(ctx2, sub_sp)
+        rc = lib.dvs_solver_compile(ctx2, sub_sp)
         if rc >= 0:
-            res = lib.solver_solve(ctx2, None)
+            res = lib.dvs_solver_solve(ctx2, None)
             assert res == 0, (
                 f"MUS minus C{removed_cid} should be SAT but got {res}. "
                 f"MUS={mus_list}"

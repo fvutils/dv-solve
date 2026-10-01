@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "dvs_alloc.h"
-#include "dvs_pool.h"     /* ExprRef, EXPR_NULL */
-#include "dvs_problem.h"  /* ExprKind, BinOp, UnaryOp, SolveProblem */
+#include "dvs_pool.h"     /* dvs_expr_t, EXPR_NULL */
+#include "dvs_problem.h"  /* ExprKind, dvs_binop_t, dvs_unop_t, dvs_problem_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,113 +27,74 @@ typedef struct BuilderBlock {
 #define BUILDER_BLOCK_DATA(blk) ((uint8_t *)((blk) + 1))
 
 /* ------------------------------------------------------------------ */
-/* SolveProblemBuilder                                                 */
+/* dvs_builder_t                                                 */
 /*                                                                     */
 /* Growable problem builder that produces an exact-sized, contiguous   */
-/* SolveProblem buffer on finalize().  ExprRef values match exactly    */
-/* what the fixed-buffer SolveProblem API would produce for the same   */
+/* dvs_problem_t buffer on finalize().  dvs_expr_t values match exactly    */
+/* what the fixed-buffer dvs_problem_t API would produce for the same   */
 /* allocation sequence: sizeof(dvs_pool_t) + virtual_offset.           */
 /* ------------------------------------------------------------------ */
-typedef struct {
+struct dvs_builder_s {
     BuilderBlock *first;            /* head of block list              */
     BuilderBlock *current;          /* tail (active block)             */
     uint32_t      virtual_used;     /* running total logical offset    */
     uint32_t      block_size;       /* capacity for new blocks         */
     dvs_alloc_t  *alloc;            /* backing allocator (NULL=malloc) */
 
-    /* Problem metadata (mirrors SolveProblem header) */
+    /* Problem metadata (mirrors dvs_problem_t header) */
     uint32_t      n_vars;
     uint32_t      n_constraints;
     uint32_t      n_sources;
-    ExprRef       vars_head;
-    ExprRef       constraints_head;
-    ExprRef       sources_head;
+    dvs_expr_t       vars_head;
+    dvs_expr_t       constraints_head;
+    dvs_expr_t       sources_head;
     uint32_t      n_alldiffs;
-    ExprRef       allDiff_head;
+    dvs_expr_t       allDiff_head;
     uint32_t      n_softs;
-    ExprRef       softs_head;
+    dvs_expr_t       softs_head;
     uint32_t      n_dists;
-    ExprRef       dists_head;
-} SolveProblemBuilder;
+    dvs_expr_t       dists_head;
+};
+
+/* The documented builder functions are declared in dv_solve.h; this
+ * header adds the internal ones. */
 
 /* ------------------------------------------------------------------ */
-/* Lifecycle                                                           */
-/* ------------------------------------------------------------------ */
-
-/**
- * Create a new problem builder.
- *
- * @param block_size  Capacity for each allocation block (default 4096).
- *                    Pass 0 for the default.
- * @param alloc       Backing allocator, or NULL for malloc/free.
- * @return  New builder, or NULL on allocation failure.
- */
-SolveProblemBuilder *builder_create(uint32_t block_size, dvs_alloc_t *alloc);
-
-/**
- * Reset the builder to empty state, reusing existing block memory.
- */
-void builder_reset(SolveProblemBuilder *b);
-
-/**
- * Destroy the builder and free all blocks.
- */
-void builder_destroy(SolveProblemBuilder *b);
-
-/* ------------------------------------------------------------------ */
-/* Finalize -- produce a contiguous SolveProblem buffer                */
+/* Finalize -- produce a contiguous dvs_problem_t buffer                */
 /* ------------------------------------------------------------------ */
 
 /**
- * Finalize the builder into an exact-sized, contiguous SolveProblem.
- *
- * The returned buffer is allocated via calloc (or the builder's alloc).
- * The caller owns the buffer and must free it with builder_free_problem()
- * or free() (if using the default allocator).
- *
- * @param b     The builder.
- * @param size  If non-NULL, receives the total buffer size in bytes.
- * @return  Pointer to a valid SolveProblem, or NULL on failure.
- */
-SolveProblem *builder_finalize(SolveProblemBuilder *b, size_t *size);
-
-/**
- * Like builder_finalize, but leaves `extra_bytes` of unused pool capacity
+ * Like dvs_builder_finalize, but leaves `extra_bytes` of unused pool capacity
  * (pool.capacity > pool.used). The in-place expr_ / problem_add_var API can then
  * append nodes + variables into the slack after finalize -- used by the lazy
  * array refinement loop to inject read-over-write / congruence lemmas and new
  * read variables into the live problem. Returns NULL on allocation failure.
  */
-SolveProblem *builder_finalize_reserve(SolveProblemBuilder *b, size_t *size,
+dvs_problem_t *dvs_builder_finalize_reserve(dvs_builder_t *b, size_t *size,
                                        uint32_t extra_bytes);
 
 /**
  * A position in the builder's item lists (vars, constraints, sources,
- * all-different groups, softs, dists), taken with builder_mark().
+ * all-different groups, softs, dists), taken with dvs_builder_mark().
  */
 typedef struct {
     uint32_t n_vars, n_constraints, n_sources, n_alldiffs, n_softs, n_dists;
-} BuilderMark;
+} dvs_builder_mark_t;
 
 /** Record the current end of every item list. */
-BuilderMark builder_mark(const SolveProblemBuilder *b);
+dvs_builder_mark_t dvs_builder_mark(const dvs_builder_t *b);
 
 /**
- * Like builder_finalize, but the returned problem lists ONLY the items added
- * since `mark`. The whole pool is still copied, so every ExprRef stays valid
+ * Like dvs_builder_finalize, but the returned problem lists ONLY the items added
+ * since `mark`. The whole pool is still copied, so every dvs_expr_t stays valid
  * even though earlier items are no longer reachable from the list heads.
  *
  * This lets a caller keep one builder holding the complete constraint set (to
  * finalize in full later) while handing an incremental consumer just the new
  * items. Returns NULL on allocation failure or if `mark` is ahead of `b`.
  */
-SolveProblem *builder_finalize_since(SolveProblemBuilder *b,
-                                     const BuilderMark *mark, size_t *size);
-
-/**
- * Free a SolveProblem buffer returned by builder_finalize().
- */
-void builder_free_problem(SolveProblemBuilder *b, SolveProblem *sp, size_t size);
+dvs_problem_t *dvs_builder_finalize_since(dvs_builder_t *b,
+                                     const dvs_builder_mark_t *mark, size_t *size);
 
 /* ------------------------------------------------------------------ */
 /* Low-level allocation                                                */
@@ -145,90 +106,47 @@ void builder_free_problem(SolveProblemBuilder *b, SolveProblem *sp, size_t size)
  * @param b      The builder.
  * @param bytes  Number of bytes to allocate.
  * @param align  Alignment requirement (power of 2, 0 or 1 for none).
- * @return  ExprRef (sizeof(dvs_pool_t) + virtual_offset), matching the
+ * @return  dvs_expr_t (sizeof(dvs_pool_t) + virtual_offset), matching the
  *          pool offset convention.  Returns EXPR_NULL only on malloc
  *          failure (not on capacity overflow -- the builder grows).
  */
-ExprRef builder_alloc(SolveProblemBuilder *b, uint32_t bytes, uint32_t align);
+dvs_expr_t dvs_builder_alloc(dvs_builder_t *b, uint32_t bytes, uint32_t align);
 
 /**
  * Return the current virtual offset (bytes allocated so far).
  */
-uint32_t builder_virtual_used(const SolveProblemBuilder *b);
+uint32_t dvs_builder_virtual_used(const dvs_builder_t *b);
 
 /**
- * Return a pointer to the data at the given ExprRef within the builder's
+ * Return a pointer to the data at the given dvs_expr_t within the builder's
  * virtual address space.  Used to read back nodes (e.g. ExprVar.var_id)
  * that were allocated earlier.  Returns NULL if ref is EXPR_NULL.
  */
-void *builder_ref_ptr(const SolveProblemBuilder *b, ExprRef ref);
+void *dvs_builder_ref_ptr(const dvs_builder_t *b, dvs_expr_t ref);
 
 /* ------------------------------------------------------------------ */
 /* Expression builders (mirror dvs_problem.h API)                      */
 /* ------------------------------------------------------------------ */
 
-ExprRef builder_expr_const(SolveProblemBuilder *b, int64_t value,
-                           uint8_t is_signed);
 /** A sized constant of `width` bits (see ExprConst in dvs_problem.h).
- *  width 0 is the same as builder_expr_const (an unsized literal). */
-ExprRef builder_expr_const_sized(SolveProblemBuilder *b, int64_t value,
+ *  width 0 is the same as dvs_builder_expr_const (an unsized literal). */
+dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value,
                                  uint8_t is_signed, uint8_t width);
-ExprRef builder_expr_var(SolveProblemBuilder *b, uint32_t var_id);
-ExprRef builder_expr_binary(SolveProblemBuilder *b, BinOp op,
-                            ExprRef lhs, ExprRef rhs);
-ExprRef builder_expr_unary(SolveProblemBuilder *b, UnaryOp op,
-                           ExprRef operand);
-ExprRef builder_expr_ite(SolveProblemBuilder *b,
-                         ExprRef cond, ExprRef then_e, ExprRef else_e);
-ExprRef builder_expr_in_range(SolveProblemBuilder *b,
-                              ExprRef value, ExprRef lo, ExprRef hi);
-ExprRef builder_expr_in_set(SolveProblemBuilder *b, ExprRef value,
-                            uint32_t n_elems, const ExprRef *elems);
-ExprRef builder_expr_in_ranges(SolveProblemBuilder *b, ExprRef value,
-                               uint32_t n_ranges, const ExprRef *los,
-                               const ExprRef *his);
 /** INTERNAL (not part of the documented surface): an explicit
  *  width/signedness conversion node, EXPR_SV_CAST (see dvs_problem.h). Used
  *  by front ends that build explicit problems, e.g. the SMT-LIB2 front end
  *  reading an unsigned bit pattern as signed for `bvashr`. */
-ExprRef builder_expr_sv_cast(SolveProblemBuilder *b, ExprRef operand,
+dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
                              uint8_t from_bits, uint8_t to_bits,
                              uint8_t sign_extend, uint8_t dst_signed);
-ExprRef builder_expr_extend(SolveProblemBuilder *b, ExprRef operand,
-                            uint8_t from_bits, uint8_t to_bits,
-                            uint8_t sign_extend);
-ExprRef builder_expr_extract(SolveProblemBuilder *b, ExprRef operand,
-                             uint8_t hi_bit, uint8_t lo_bit);
-ExprRef builder_expr_concat(SolveProblemBuilder *b, ExprRef hi,
-                           ExprRef lo, uint8_t lo_width);
 
 /** Build an array-select expression: result = base[index]. */
-ExprRef builder_expr_array_select(SolveProblemBuilder *b, uint32_t base_var_id,
-                                   uint32_t n_elems, ExprRef result, ExprRef index);
-
-/** Build an N-ary sum expression. var_refs[] are ExprRef for summand vars. */
-ExprRef builder_expr_sum(SolveProblemBuilder *b, ExprRef result,
-                         uint32_t n_vars, const ExprRef *var_refs);
-
-/** Build a countones (popcount) expression. */
-ExprRef builder_expr_countones(SolveProblemBuilder *b, ExprRef result,
-                                ExprRef operand);
-
-/** Build a clog2 expression. */
-ExprRef builder_expr_clog2(SolveProblemBuilder *b, ExprRef result,
-                            ExprRef operand);
+dvs_expr_t dvs_builder_expr_array_select(dvs_builder_t *b, uint32_t base_var_id,
+                                   uint32_t n_elems, dvs_expr_t result, dvs_expr_t index);
 
 /* ------------------------------------------------------------------ */
 /* Problem builders (mirror dvs_problem.h API)                         */
 /* ------------------------------------------------------------------ */
-
-/**
- * Add a variable declaration to the problem.
- * @return ExprRef to the VarSpec, or EXPR_NULL on alloc failure.
- */
-ExprRef builder_add_var(SolveProblemBuilder *b, uint32_t var_id,
-                        uint8_t width, uint8_t is_signed,
-                        int64_t lo, int64_t hi);
 
 /**
  * Mark a previously-added variable as a compiler-generated auxiliary.
@@ -237,65 +155,32 @@ ExprRef builder_add_var(SolveProblemBuilder *b, uint32_t var_id,
  * them. Mis-marking a user variable as aux can lead to unknown results
  * when search would have been needed.
  */
-void builder_mark_var_aux(SolveProblemBuilder *b, ExprRef var_ref);
-
-/**
- * Add a constraint to the problem.
- * @param root  ExprRef of the constraint expression root.
- * @return ExprRef to the ConstraintSpec, or EXPR_NULL on alloc failure.
- */
-ExprRef builder_add_constraint(SolveProblemBuilder *b, ExprRef root);
+void dvs_builder_mark_var_aux(dvs_builder_t *b, dvs_expr_t var_ref);
 
 /**
  * Add a source group (set of variables to randomize together).
- * @return ExprRef to the SourceSpec, or EXPR_NULL on alloc failure.
+ * @return dvs_expr_t to the SourceSpec, or EXPR_NULL on alloc failure.
  */
-ExprRef builder_add_source(SolveProblemBuilder *b,
+dvs_expr_t dvs_builder_add_source(dvs_builder_t *b,
                            uint32_t n_vars, const uint32_t *var_ids);
 
-
-/**
- * Add an AllDifferent constraint.
- * @return ExprRef to the AllDiffSpec, or EXPR_NULL on alloc failure.
- */
-ExprRef builder_add_all_different(SolveProblemBuilder *b,
-                                  uint32_t n_vars, const uint32_t *var_ids);
-
-/**
- * Add a soft (relaxable) constraint.
- * @param root     ExprRef of the constraint expression root.
- * @param priority Priority (0 = highest, larger = relaxed first).
- * @return ExprRef to the SoftSpec, or EXPR_NULL on alloc failure.
- */
-ExprRef builder_add_soft_constraint(SolveProblemBuilder *b, ExprRef root,
-                                    uint32_t priority);
-
-/**
- * Add a distribution constraint on a variable.
- * @param var_id     Variable ID this distribution applies to.
- * @param n_entries  Number of DistEntry items.
- * @param entries    Array of DistEntry values (copied into pool).
- * @return ExprRef to the DistSpec, or EXPR_NULL on alloc failure.
- */
-ExprRef builder_add_dist(SolveProblemBuilder *b, uint32_t var_id,
-                         uint32_t n_entries, const DistEntry *entries);
 
 /* ------------------------------------------------------------------ */
 /* Query                                                               */
 /* ------------------------------------------------------------------ */
 
 /** Return the number of variables added so far. */
-static inline uint32_t builder_n_vars(const SolveProblemBuilder *b) {
+static inline uint32_t dvs_builder_n_vars(const dvs_builder_t *b) {
     return b->n_vars;
 }
 
 /** Return the number of constraints added so far. */
-static inline uint32_t builder_n_constraints(const SolveProblemBuilder *b) {
+static inline uint32_t dvs_builder_n_constraints(const dvs_builder_t *b) {
     return b->n_constraints;
 }
 
 /** Return the number of source groups added so far. */
-static inline uint32_t builder_n_sources(const SolveProblemBuilder *b) {
+static inline uint32_t dvs_builder_n_sources(const dvs_builder_t *b) {
     return b->n_sources;
 }
 

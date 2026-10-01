@@ -29,7 +29,7 @@
 extern "C" {
 #endif
 
-typedef struct SolveCtx SolveCtx;
+typedef struct dvs_ctx_s dvs_ctx_t;
 typedef struct Propagator Propagator;
 
 /* ================================================================== */
@@ -50,8 +50,8 @@ typedef struct {
  *   is_lb && var_hi(x) < bound, or
  *  !is_lb && var_lo(x) > bound
  */
-static inline int literal_is_true(const SolveCtx *ctx, Literal lit);
-static inline int literal_is_false(const SolveCtx *ctx, Literal lit);
+static inline int literal_is_true(const dvs_ctx_t *ctx, Literal lit);
+static inline int literal_is_false(const dvs_ctx_t *ctx, Literal lit);
 
 /* Negate a literal: (x >= v) becomes (x <= v-1), (x <= v) becomes (x >= v+1) */
 static inline Literal literal_negate(Literal lit) {
@@ -157,7 +157,7 @@ typedef struct Explanation {
  * @param out        Output: the literals that imply this bound change.
  * @return 0 on success, -1 if the propagator cannot explain.
  */
-typedef int (*ExplainFunc)(Propagator *self, SolveCtx *ctx,
+typedef int (*ExplainFunc)(Propagator *self, dvs_ctx_t *ctx,
                             uint32_t var_id, uint8_t is_lb,
                             int64_t new_bound, Explanation *out);
 
@@ -176,7 +176,7 @@ int  vsids_init(VSIDS *vs, uint32_t n_vars);
 void vsids_destroy(VSIDS *vs);
 void vsids_bump(VSIDS *vs, uint32_t var_id);
 void vsids_decay(VSIDS *vs);
-uint32_t vsids_pick(const VSIDS *vs, const SolveCtx *ctx);
+uint32_t vsids_pick(const VSIDS *vs, const dvs_ctx_t *ctx);
 
 /* ================================================================== */
 /* LCG context: aggregates clause DB, VSIDS, and conflict analysis    */
@@ -219,7 +219,7 @@ uint32_t lcg_n_clauses(const LCGCtx *lcg);
  * @param out_bt     Output: backtrack level.
  * @return 0 on success, -1 if analysis fails (e.g., no explanations).
  */
-int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
+int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
                           Literal *out_lits, uint32_t *out_n,
                           uint32_t *out_bt, uint32_t *out_lbd);
 
@@ -235,7 +235,7 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
  * Checks clauses watching "var_id <= v" literals that may have become false.
  * @return PROP_OK or PROP_CONFLICT.
  */
-PropResult clause_notify_lb(ClauseDB *db, SolveCtx *ctx,
+PropResult clause_notify_lb(ClauseDB *db, dvs_ctx_t *ctx,
                               uint32_t var_id, int64_t new_lb);
 
 /**
@@ -243,7 +243,7 @@ PropResult clause_notify_lb(ClauseDB *db, SolveCtx *ctx,
  * Checks clauses watching "var_id >= v" literals that may have become false.
  * @return PROP_OK or PROP_CONFLICT.
  */
-PropResult clause_notify_ub(ClauseDB *db, SolveCtx *ctx,
+PropResult clause_notify_ub(ClauseDB *db, dvs_ctx_t *ctx,
                               uint32_t var_id, int64_t new_ub);
 
 /**
@@ -251,13 +251,13 @@ PropResult clause_notify_ub(ClauseDB *db, SolveCtx *ctx,
  * Scans all learned clauses; enforces any that are unit.
  * @return PROP_OK or PROP_CONFLICT.
  */
-PropResult clause_propagate(ClauseDB *db, SolveCtx *ctx);
+PropResult clause_propagate(ClauseDB *db, dvs_ctx_t *ctx);
 
 #ifdef __cplusplus
 }
 #endif
 
-/* Inline implementations (need SolveCtx definition) */
+/* Inline implementations (need dvs_ctx_t definition) */
 #include "dvs_ctx.h"
 
 /* Literal evaluation must order bounds the way the VARIABLE's domain does,
@@ -266,7 +266,7 @@ PropResult clause_propagate(ClauseDB *db, SolveCtx *ctx);
  * [0, 2^64-1] as hi < lo and declares literals like "v >= 1" FALSE — which
  * falsifies a just-learnt clause at level 0 and mints a wrong UNSAT (B26).
  * var_b_lt/var_b_gt switch to unsigned ordering exactly for that case. */
-static inline int literal_is_true(const SolveCtx *ctx, Literal lit) {
+static inline int literal_is_true(const dvs_ctx_t *ctx, Literal lit) {
     const Variable *v = &ctx->vars[lit.var_id];
     if (lit.is_lb)
         return !var_b_lt(v, var_lo64(ctx, v), lit.bound);
@@ -274,7 +274,7 @@ static inline int literal_is_true(const SolveCtx *ctx, Literal lit) {
         return !var_b_gt(v, var_hi64(ctx, v), lit.bound);
 }
 
-static inline int literal_is_false(const SolveCtx *ctx, Literal lit) {
+static inline int literal_is_false(const dvs_ctx_t *ctx, Literal lit) {
     const Variable *v = &ctx->vars[lit.var_id];
     if (lit.is_lb)
         return var_b_lt(v, var_hi64(ctx, v), lit.bound);

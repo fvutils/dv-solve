@@ -5,8 +5,8 @@ An *unwired* function (``argtypes is None``) makes ctypes coerce the 64-bit
 ``SolveProblemBuilder *`` as a C ``int``, **truncating the pointer to 32 bits**.
 It is harmless only while the builder sits at a low heap address; at a high
 address — which AddressSanitizer's allocator and CI both produce — the truncated
-pointer is wild and ``builder_alloc``'s first field read segfaults. That is
-exactly how an unwired ``builder_expr_concat`` crashed downstream CI on the
+pointer is wild and ``dvs_builder_alloc``'s first field read segfaults. That is
+exactly how an unwired ``dvs_builder_expr_concat`` crashed downstream CI on the
 >64-bit-constant path.
 
 Hermetic: it feeds ``_wire_argtypes`` a stand-in CDLL and inspects what got
@@ -83,6 +83,6 @@ def test_builder_pointer_first_arg_is_void_p():
 
 def test_concat_wired_canary():
     lib = _wired_fake()
-    argtypes = lib.builder_expr_concat.argtypes
-    assert argtypes is not None, "builder_expr_concat lost its ctypes wiring"
+    argtypes = lib.dvs_builder_expr_concat.argtypes
+    assert argtypes is not None, "dvs_builder_expr_concat lost its ctypes wiring"
     assert argtypes[0] is ctypes.c_void_p

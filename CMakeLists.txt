@@ -331,6 +331,11 @@ target_link_libraries(test_dvs_block_alloc_cache PRIVATE dv_solve)
 target_include_directories(test_dvs_block_alloc_cache PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_dvs_block_alloc_cache COMMAND test_dvs_block_alloc_cache)
 
+# The public API through dv_solve.h alone; the test includes no other header.
+add_executable(test_public_api tests/c/test_public_api.c)
+target_link_libraries(test_public_api PRIVATE dv_solve)
+add_test(NAME test_public_api COMMAND test_public_api)
+
 add_executable(test_dvs_arena tests/c/test_dvs_arena.c)
 target_link_libraries(test_dvs_arena PRIVATE dv_solve)
 target_include_directories(test_dvs_arena PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)

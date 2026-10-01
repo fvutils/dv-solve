@@ -8,7 +8,7 @@ The invariant these exist to protect: the ctypes loader and the public
 link/compile helpers must always name the SAME installation. When they drift,
 the Python API runs one build of the solver while generated C is linked
 against another, and the ABI mismatch surfaces as a crash inside
-``solver_compile`` with nothing pointing back at the cause.
+``dvs_solver_compile`` with nothing pointing back at the cause.
 """
 import os
 
@@ -21,6 +21,7 @@ from dv_solve import _resolve
 def _clean_env(monkeypatch):
     """Discovery must be decided by the test, not by the developer's shell."""
     monkeypatch.delenv("DVS_SOLVER_PATH", raising=False)
+    monkeypatch.delenv("ZSP_SOLVER_PATH", raising=False)
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
 
 
@@ -485,3 +486,14 @@ def test_resolve_report_never_raises_and_names_the_problem(
     assert rep["installation"] == {"kind": "override", "root": str(override)}
     assert rep["link_dirs"] is None
     assert "link_dirs" in rep["errors"]
+
+
+def test_legacy_override_name_is_honoured(monkeypatch, tmp_path):
+    """zuspec-be-sw still sets ``ZSP_SOLVER_PATH``; it selects the override
+    installation when ``DVS_SOLVER_PATH`` is unset, and loses to it when both
+    are set."""
+    monkeypatch.delenv("DVS_SOLVER_PATH", raising=False)
+    monkeypatch.setenv("ZSP_SOLVER_PATH", str(tmp_path / "legacy"))
+    assert _resolve.override_root() == str(tmp_path / "legacy")
+    monkeypatch.setenv("DVS_SOLVER_PATH", str(tmp_path / "new"))
+    assert _resolve.override_root() == str(tmp_path / "new")

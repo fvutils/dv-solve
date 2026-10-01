@@ -1,8 +1,8 @@
-"""Unit tests for the SumEq propagator and solver_add_array_vars.
+"""Unit tests for the SumEq propagator and dvs_solver_add_array_vars.
 
 Tests:
 - SumEq: result == sum of N summands, forward + backward propagation.
-- solver_add_array_vars: bulk element variable creation.
+- dvs_solver_add_array_vars: bulk element variable creation.
 """
 from __future__ import annotations
 
@@ -54,24 +54,24 @@ def _wire(lib):
     lib.expr_countones.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32]
     lib.expr_clog2.restype = c.c_uint32
     lib.expr_clog2.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32]
-    lib.solver_create.restype = c.c_void_p
-    lib.solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
-    lib.solver_destroy.restype = None
-    lib.solver_destroy.argtypes = [c.c_void_p]
-    lib.solver_compile.restype = c.c_int
-    lib.solver_compile.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_solve.restype = c.c_int
-    lib.solver_solve.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_get_value.restype = c.c_int64
-    lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
-    lib.solver_reset.restype = None
-    lib.solver_reset.argtypes = [c.c_void_p]
-    lib.solver_add_array_vars.restype = c.c_int
-    lib.solver_add_array_vars.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32,
+    lib.dvs_solver_create.restype = c.c_void_p
+    lib.dvs_solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
+    lib.dvs_solver_destroy.restype = None
+    lib.dvs_solver_destroy.argtypes = [c.c_void_p]
+    lib.dvs_solver_compile.restype = c.c_int
+    lib.dvs_solver_compile.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_solve.restype = c.c_int
+    lib.dvs_solver_solve.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_get_value.restype = c.c_int64
+    lib.dvs_solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_solver_reset.restype = None
+    lib.dvs_solver_reset.argtypes = [c.c_void_p]
+    lib.dvs_solver_add_array_vars.restype = c.c_int
+    lib.dvs_solver_add_array_vars.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32,
                                           c.c_uint8, c.c_uint8,
                                           c.c_int64, c.c_int64]
-    lib.solver_add_constraint.restype = c.c_int
-    lib.solver_add_constraint.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_add_constraint.restype = c.c_int
+    lib.dvs_solver_add_constraint.argtypes = [c.c_void_p, c.c_void_p]
 
 
 def _build_and_solve(lib, sp_setup, n_vars, seed=42):
@@ -84,18 +84,18 @@ def _build_and_solve(lib, sp_setup, n_vars, seed=42):
 
     ctx_buf = (ctypes.c_uint8 * _CTX)()
     ba = lib.dvs_block_alloc_create(None, _CTX)
-    ctx = lib.solver_create(ctx_buf, _CTX, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX, ba)
     assert ctx
 
-    crc = lib.solver_compile(ctx, sp)
-    assert crc == 0, f"solver_compile returned {crc}"
+    crc = lib.dvs_solver_compile(ctx, sp)
+    assert crc == 0, f"dvs_solver_compile returned {crc}"
 
     opts = SolveOpts(seed=seed)
-    rc = lib.solver_solve(ctx, ctypes.byref(opts))
-    assert rc == SOLVE_OK, f"solver_solve returned {rc}"
+    rc = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
+    assert rc == SOLVE_OK, f"dvs_solver_solve returned {rc}"
 
-    values = [lib.solver_get_value(ctx, i) for i in range(n_vars)]
-    lib.solver_destroy(ctx)
+    values = [lib.dvs_solver_get_value(ctx, i) for i in range(n_vars)]
+    lib.dvs_solver_destroy(ctx)
     lib.dvs_block_alloc_destroy(ba)
     return values
 
@@ -173,9 +173,9 @@ def test_sum_conflict(libdvs):
 
     ctx_buf = (ctypes.c_uint8 * _CTX)()
     ba = libdvs.dvs_block_alloc_create(None, _CTX)
-    ctx = libdvs.solver_create(ctx_buf, _CTX, ba)
+    ctx = libdvs.dvs_solver_create(ctx_buf, _CTX, ba)
 
-    crc = libdvs.solver_compile(ctx, sp)
+    crc = libdvs.dvs_solver_compile(ctx, sp)
     if crc == -2:
         # Detected at compile time -- acceptable
         pass
@@ -183,10 +183,10 @@ def test_sum_conflict(libdvs):
         assert crc == 0
         # Should detect UNSAT at solve time
         opts = SolveOpts(seed=42)
-        rc = libdvs.solver_solve(ctx, ctypes.byref(opts))
+        rc = libdvs.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert rc == SOLVE_UNSAT, f"Expected UNSAT, got {rc}"
 
-    libdvs.solver_destroy(ctx)
+    libdvs.dvs_solver_destroy(ctx)
     libdvs.dvs_block_alloc_destroy(ba)
 
 
@@ -359,7 +359,7 @@ def test_clog2_with_equality(libdvs):
 
 
 # ------------------------------------------------------------------ #
-# solver_add_array_vars tests                                         #
+# dvs_solver_add_array_vars tests                                         #
 # ------------------------------------------------------------------ #
 
 def test_add_array_vars_basic(libdvs):
@@ -373,26 +373,26 @@ def test_add_array_vars_basic(libdvs):
 
     ctx_buf = (ctypes.c_uint8 * _CTX)()
     ba = libdvs.dvs_block_alloc_create(None, _CTX)
-    ctx = libdvs.solver_create(ctx_buf, _CTX, ba)
+    ctx = libdvs.dvs_solver_create(ctx_buf, _CTX, ba)
 
-    crc = libdvs.solver_compile(ctx, sp)
+    crc = libdvs.dvs_solver_compile(ctx, sp)
     assert crc == 0
 
     # Add 8 element vars (IDs 1..8) with domain [10, 50]
-    rc = libdvs.solver_add_array_vars(ctx, 1, 8, 8, 0, 10, 50)
+    rc = libdvs.dvs_solver_add_array_vars(ctx, 1, 8, 8, 0, 10, 50)
     assert rc == 0
 
     # Solve
     opts = SolveOpts(seed=42)
-    rc = libdvs.solver_solve(ctx, ctypes.byref(opts))
+    rc = libdvs.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert rc == SOLVE_OK
 
     # Read values
     for i in range(1, 9):
-        v = libdvs.solver_get_value(ctx, i)
+        v = libdvs.dvs_solver_get_value(ctx, i)
         assert 10 <= v <= 50, f"var[{i}]={v} out of [10, 50]"
 
-    libdvs.solver_destroy(ctx)
+    libdvs.dvs_solver_destroy(ctx)
     libdvs.dvs_block_alloc_destroy(ba)
 
 
@@ -407,14 +407,14 @@ def test_add_array_vars_with_sum_constraint(libdvs):
 
     ctx_buf = (ctypes.c_uint8 * _CTX)()
     ba = libdvs.dvs_block_alloc_create(None, _CTX)
-    ctx = libdvs.solver_create(ctx_buf, _CTX, ba)
+    ctx = libdvs.dvs_solver_create(ctx_buf, _CTX, ba)
 
-    crc = libdvs.solver_compile(ctx, sp)
+    crc = libdvs.dvs_solver_compile(ctx, sp)
     assert crc == 0
 
     # Phase 2: add element vars and sum constraint
     N = 4
-    rc = libdvs.solver_add_array_vars(ctx, 1, N, 32, 1, 0, 100)
+    rc = libdvs.dvs_solver_add_array_vars(ctx, 1, N, 32, 1, 0, 100)
     assert rc == 0
 
     # Build aux problem with sum constraint
@@ -437,16 +437,16 @@ def test_add_array_vars_with_sum_constraint(libdvs):
     ec = libdvs.expr_const(aux, 200, 0)
     libdvs.problem_add_constraint(aux, libdvs.expr_binary(aux, BIN_EQ, er, ec))
 
-    arc = libdvs.solver_add_constraint(ctx, aux)
-    assert arc >= 0, f"solver_add_constraint returned {arc}"
+    arc = libdvs.dvs_solver_add_constraint(ctx, aux)
+    assert arc >= 0, f"dvs_solver_add_constraint returned {arc}"
 
     opts = SolveOpts(seed=42)
-    rc = libdvs.solver_solve(ctx, ctypes.byref(opts))
+    rc = libdvs.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert rc == SOLVE_OK
 
-    values = [libdvs.solver_get_value(ctx, i) for i in range(N + 1)]
+    values = [libdvs.dvs_solver_get_value(ctx, i) for i in range(N + 1)]
     assert values[0] == 200
     assert sum(values[1:N + 1]) == 200
 
-    libdvs.solver_destroy(ctx)
+    libdvs.dvs_solver_destroy(ctx)
     libdvs.dvs_block_alloc_destroy(ba)

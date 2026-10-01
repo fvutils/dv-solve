@@ -29,7 +29,7 @@ static int _find_macro_axis(const WireMaskCtx *wm, uint32_t var_id,
     return 0;
 }
 
-int32_t wiremask_select_value(const SolveCtx *ctx, const WireMaskCtx *wm,
+int32_t wiremask_select_value(const dvs_ctx_t *ctx, const WireMaskCtx *wm,
                                uint32_t var_id) {
     if (!wm || !ctx) {
         return ctx->vars[var_id].lo;
@@ -116,7 +116,7 @@ int32_t wiremask_select_value(const SolveCtx *ctx, const WireMaskCtx *wm,
 /* Greedy placement using wire mask                                    */
 /* ================================================================== */
 
-int wiremask_greedy_place(SolveCtx *ctx, const WireMaskCtx *wm,
+int wiremask_greedy_place(dvs_ctx_t *ctx, const WireMaskCtx *wm,
                            const uint32_t *order, uint32_t n_macros) {
     if (!ctx || !wm || !order) return -1;
 
@@ -132,8 +132,8 @@ int wiremask_greedy_place(SolveCtx *ctx, const WireMaskCtx *wm,
         int32_t best_y = wiremask_select_value(ctx, wm, y_var);
 
         /* Pin the macro to the selected position */
-        if (solver_pin_var(ctx, x_var, best_x) != 0) return -1;
-        if (solver_pin_var(ctx, y_var, best_y) != 0) return -1;
+        if (dvs_solver_pin_var(ctx, x_var, best_x) != 0) return -1;
+        if (dvs_solver_pin_var(ctx, y_var, best_y) != 0) return -1;
     }
 
     return 0;

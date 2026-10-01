@@ -9,7 +9,7 @@
 /* ================================================================== */
 /* CostGuided value selector callback                                  */
 /*                                                                     */
-/* This is the function installed via solver_set_value_selector().     */
+/* This is the function installed via dvs_solver_set_value_selector().     */
 /* It scans the variable's domain, evaluates the cost function at     */
 /* each candidate value, and returns the minimum-cost value.          */
 /* ================================================================== */
@@ -41,7 +41,7 @@ static void _insert_candidate(CostCandidate *top, int *n,
     }
 }
 
-static int64_t _costguided_select(SolveCtx *ctx, uint32_t var_id,
+static int64_t _costguided_select(dvs_ctx_t *ctx, uint32_t var_id,
                                    void *user_data) {
     CostGuidedCtx *cg = (CostGuidedCtx *)user_data;
     if (!cg || !cg->cost_fn) return var_lo64(ctx, &ctx->vars[var_id]);
@@ -96,7 +96,7 @@ static int64_t _costguided_select(SolveCtx *ctx, uint32_t var_id,
 /* Public API                                                          */
 /* ================================================================== */
 
-void solver_set_cost_guided(SolveCtx *ctx, CostFunc cost_fn,
+void dvs_solver_set_cost_guided(dvs_ctx_t *ctx, CostFunc cost_fn,
                              void *cost_data, int32_t max_scan) {
     if (!ctx) return;
 
@@ -111,7 +111,7 @@ void solver_set_cost_guided(SolveCtx *ctx, CostFunc cost_fn,
     cg->cost_data = cost_data;
     cg->max_domain_scan = max_scan;
 
-    solver_set_value_selector(ctx, _costguided_select, cg);
+    dvs_solver_set_value_selector(ctx, _costguided_select, cg);
 }
 
 /* ================================================================== */
@@ -132,7 +132,7 @@ static int _find_macro_axis(const HPWLCostCtx *hctx, uint32_t var_id,
     return 0;
 }
 
-int64_t hpwl_cost_fn(const SolveCtx *ctx, uint32_t var_id,
+int64_t hpwl_cost_fn(const dvs_ctx_t *ctx, uint32_t var_id,
                       int64_t value, void *user_data) {
     HPWLCostCtx *hctx = (HPWLCostCtx *)user_data;
     if (!hctx) return 0;
@@ -291,13 +291,13 @@ void hpwl_cost_ctx_destroy(HPWLCostCtx *hctx) {
     hctx->macro_net_ids = NULL;
 }
 
-int solver_set_cost_guided_hpwl(SolveCtx *ctx, HPWLCostCtx *hctx,
+int dvs_solver_set_cost_guided_hpwl(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
                                  int32_t max_scan) {
     if (!ctx || !hctx) return -1;
     if (!hctx->macro_net_count) {
         if (hpwl_cost_ctx_build_index(hctx) != 0) return -1;
     }
-    solver_set_cost_guided(ctx, hpwl_cost_fn, hctx, max_scan);
+    dvs_solver_set_cost_guided(ctx, hpwl_cost_fn, hctx, max_scan);
     return 0;
 }
 
@@ -316,7 +316,7 @@ static int _cmp_by_connectivity(const void *a, const void *b, void *ctx) {
     return (int)*ia - (int)*ib;  /* tie-break by index */
 }
 
-int costguided_greedy_place(SolveCtx *ctx, HPWLCostCtx *hctx,
+int costguided_greedy_place(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
                              int32_t max_scan, int32_t *out_positions) {
     if (!ctx || !hctx || !out_positions) return -1;
     if (!hctx->macro_net_count) {
@@ -359,7 +359,7 @@ int costguided_greedy_place(SolveCtx *ctx, HPWLCostCtx *hctx,
     for (uint32_t i = 0; i < nm * 2; i++) out_positions[i] = -1;
 
     /* Checkpoint to restore after greedy evaluation */
-    int cp = solver_checkpoint(ctx);
+    int cp = dvs_solver_checkpoint(ctx);
     if (cp < 0) { free(order); return -1; }
 
     /* Place each macro: evaluate HPWL, pin, propagate, continue.
@@ -431,11 +431,11 @@ int costguided_greedy_place(SolveCtx *ctx, HPWLCostCtx *hctx,
         }
 
         for (int xi = 0; xi < n_x_cands && !found; xi++) {
-            int cp_try = solver_checkpoint(ctx);
+            int cp_try = dvs_solver_checkpoint(ctx);
             if (cp_try < 0) break;
 
-            if (solver_pin_var(ctx, xv, x_cands[xi]) != 0) {
-                solver_restore(ctx, (uint32_t)cp_try);
+            if (dvs_solver_pin_var(ctx, xv, x_cands[xi]) != 0) {
+                dvs_solver_restore(ctx, (uint32_t)cp_try);
                 continue;
             }
 
@@ -445,7 +445,7 @@ int costguided_greedy_place(SolveCtx *ctx, HPWLCostCtx *hctx,
             int64_t yh = var_hi64(ctx, &ctx->vars[yv]);
 
             if (yl > yh) {  /* y domain empty after x propagation */
-                solver_restore(ctx, (uint32_t)cp_try);
+                dvs_solver_restore(ctx, (uint32_t)cp_try);
                 continue;
             }
 
@@ -454,7 +454,7 @@ int costguided_greedy_place(SolveCtx *ctx, HPWLCostCtx *hctx,
             if (try_y < (int32_t)yl) try_y = (int32_t)yl;
             if (try_y > (int32_t)yh) try_y = (int32_t)yh;
 
-            if (solver_pin_var(ctx, yv, try_y) == 0) {
+            if (dvs_solver_pin_var(ctx, yv, try_y) == 0) {
                 out_positions[m * 2]     = x_cands[xi];
                 out_positions[m * 2 + 1] = try_y;
                 placed++;
@@ -463,27 +463,27 @@ int costguided_greedy_place(SolveCtx *ctx, HPWLCostCtx *hctx,
             }
 
             /* Try y_lo (always valid if domain is non-empty) */
-            solver_restore(ctx, (uint32_t)cp_try);
-            cp_try = solver_checkpoint(ctx);
+            dvs_solver_restore(ctx, (uint32_t)cp_try);
+            cp_try = dvs_solver_checkpoint(ctx);
             if (cp_try < 0) break;
-            if (solver_pin_var(ctx, xv, x_cands[xi]) != 0) {
-                solver_restore(ctx, (uint32_t)cp_try);
+            if (dvs_solver_pin_var(ctx, xv, x_cands[xi]) != 0) {
+                dvs_solver_restore(ctx, (uint32_t)cp_try);
                 continue;
             }
 
-            if (solver_pin_var(ctx, yv, (int32_t)yl) == 0) {
+            if (dvs_solver_pin_var(ctx, yv, (int32_t)yl) == 0) {
                 out_positions[m * 2]     = x_cands[xi];
                 out_positions[m * 2 + 1] = (int32_t)yl;
                 placed++;
                 found = 1;
                 continue;
             }
-            solver_restore(ctx, (uint32_t)cp_try);
+            dvs_solver_restore(ctx, (uint32_t)cp_try);
         }
     }
 
     /* Restore to clean state */
-    solver_restore(ctx, (uint32_t)cp);
+    dvs_solver_restore(ctx, (uint32_t)cp);
 
     free(order);
     return (placed == (int)nm) ? 0 : -1;
@@ -493,7 +493,7 @@ int costguided_greedy_place(SolveCtx *ctx, HPWLCostCtx *hctx,
 /* Phase hint injection                                                */
 /* ================================================================== */
 
-int solver_set_phase_hints(SolveCtx *ctx, const uint32_t *var_ids,
+int dvs_solver_set_phase_hints(dvs_ctx_t *ctx, const uint32_t *var_ids,
                             const int64_t *values, uint32_t n_hints) {
     if (!ctx || !var_ids || !values) return -1;
 
@@ -560,7 +560,7 @@ static uint64_t _lns_rng(uint64_t *state) {
     return s;
 }
 
-int solver_lns_optimize(SolveCtx *ctx, HPWLCostCtx *hctx,
+int dvs_solver_lns_optimize(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
                          const LNSOpts *opts,
                          int32_t *out_positions, LNSResult *result) {
     if (!ctx || !hctx || !out_positions || !result) return -1;
@@ -660,7 +660,7 @@ int solver_lns_optimize(SolveCtx *ctx, HPWLCostCtx *hctx,
 
         /* Checkpoint and freeze all macros at current positions,
          * except the unfrozen ones */
-        int cp = solver_checkpoint(ctx);
+        int cp = dvs_solver_checkpoint(ctx);
         if (cp < 0) break;
 
         int freeze_ok = 1;
@@ -674,35 +674,35 @@ int solver_lns_optimize(SolveCtx *ctx, HPWLCostCtx *hctx,
             /* Pin this macro at its current position */
             uint32_t xv = hctx->macros[m].x_var_id;
             uint32_t yv = hctx->macros[m].y_var_id;
-            if (solver_pin_var(ctx, xv, cur[m * 2]) != 0 ||
-                solver_pin_var(ctx, yv, cur[m * 2 + 1]) != 0) {
+            if (dvs_solver_pin_var(ctx, xv, cur[m * 2]) != 0 ||
+                dvs_solver_pin_var(ctx, yv, cur[m * 2 + 1]) != 0) {
                 freeze_ok = 0;
                 break;
             }
         }
 
         if (!freeze_ok) {
-            solver_restore(ctx, (uint32_t)cp);
+            dvs_solver_restore(ctx, (uint32_t)cp);
             continue;
         }
 
         /* Solve the subproblem: only unfrozen macros can move */
-        SolveOpts sopts;
+        dvs_solve_opts_t sopts;
         memset(&sopts, 0, sizeof(sopts));
         sopts.seed = _lns_rng(&rng_state);
         sopts.max_conflicts = sub_conf;
         sopts.max_restarts = 50;
         sopts.use_phase_save = 0;
 
-        SolveResult sr = solver_solve(ctx, &sopts);
+        dvs_result_t sr = dvs_solver_solve(ctx, &sopts);
 
-        if (sr == SOLVE_OK) {
+        if (sr == DVS_SOLVE_OK) {
             /* Read new positions for unfrozen macros */
             int32_t new_pos[2 * 256];  /* enough for neigh_sz <= 128 */
             for (uint32_t k = 0; k < actual_neigh; k++) {
                 uint32_t m = unfrozen[k];
-                new_pos[k * 2]     = (int32_t)solver_get_value(ctx, hctx->macros[m].x_var_id);
-                new_pos[k * 2 + 1] = (int32_t)solver_get_value(ctx, hctx->macros[m].y_var_id);
+                new_pos[k * 2]     = (int32_t)dvs_solver_get_value(ctx, hctx->macros[m].x_var_id);
+                new_pos[k * 2 + 1] = (int32_t)dvs_solver_get_value(ctx, hctx->macros[m].y_var_id);
             }
 
             /* Compute new HPWL with the updated positions */
@@ -719,17 +719,17 @@ int solver_lns_optimize(SolveCtx *ctx, HPWLCostCtx *hctx,
                 if (new_hpwl < result->best_hpwl) {
                     /* Validate: re-pin all macros at trial positions
                      * to verify no overlaps via NoOverlap2D */
-                    int cp_val = solver_checkpoint(ctx);
+                    int cp_val = dvs_solver_checkpoint(ctx);
                     int valid = 1;
                     if (cp_val >= 0) {
                         for (uint32_t vm = 0; vm < nm && valid; vm++) {
-                            if (solver_pin_var(ctx, hctx->macros[vm].x_var_id,
+                            if (dvs_solver_pin_var(ctx, hctx->macros[vm].x_var_id,
                                                trial[vm * 2]) != 0 ||
-                                solver_pin_var(ctx, hctx->macros[vm].y_var_id,
+                                dvs_solver_pin_var(ctx, hctx->macros[vm].y_var_id,
                                                trial[vm * 2 + 1]) != 0)
                                 valid = 0;
                         }
-                        solver_restore(ctx, (uint32_t)cp_val);
+                        dvs_solver_restore(ctx, (uint32_t)cp_val);
                     }
 
                     if (valid) {
@@ -741,7 +741,7 @@ int solver_lns_optimize(SolveCtx *ctx, HPWLCostCtx *hctx,
             }
         }
 
-        solver_restore(ctx, (uint32_t)cp);
+        dvs_solver_restore(ctx, (uint32_t)cp);
     }
 
     result->improved = (result->best_hpwl < result->initial_hpwl) ? 1 : 0;

@@ -40,19 +40,19 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_extend.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.dvs_var_lo64.restype  = ctypes.c_int64
     lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.dvs_var_hi64.restype  = ctypes.c_int64
     lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
     lib.ctx_tighten_lb64.restype  = ctypes.c_int
     lib.ctx_tighten_lb64.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
@@ -71,10 +71,10 @@ def _setup(lib: ctypes.CDLL):
             ("max_shave_iters", ctypes.c_uint32),
         ]
     lib._SolveOpts = SolveOpts
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 BIN_EQ = 10
@@ -115,8 +115,8 @@ def test_zero_extend_8_to_32(libdvs):
     lib.problem_add_constraint(sp, eq_e)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     # After compilation, r should be tightened to [0, 255]
@@ -126,7 +126,7 @@ def test_zero_extend_8_to_32(libdvs):
     # Tighten a to [100, 200]
     lib.ctx_tighten_lb64(ctx, 1, 100)
     lib.ctx_tighten_ub64(ctx, 1, 200)
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # r should follow a
@@ -156,16 +156,16 @@ def test_zero_extend_e2e(libdvs):
     lib.problem_add_constraint(sp, eq_e)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0xABCD)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    r = lib.solver_get_value(ctx, 0)
-    a = lib.solver_get_value(ctx, 1)
+    r = lib.dvs_solver_get_value(ctx, 0)
+    a = lib.dvs_solver_get_value(ctx, 1)
     assert r == a, f"r={r} != a={a}"
     assert 0 <= r <= 255
 
@@ -197,8 +197,8 @@ def test_sign_extend_8_to_32(libdvs):
     lib.problem_add_constraint(sp, eq_e)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     # After compilation, r should be tightened to [-128, 127]
@@ -228,16 +228,16 @@ def test_sign_extend_e2e(libdvs):
     lib.problem_add_constraint(sp, eq_e)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0x4567)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    r = lib.solver_get_value(ctx, 0)
-    a = lib.solver_get_value(ctx, 1)
+    r = lib.dvs_solver_get_value(ctx, 0)
+    a = lib.dvs_solver_get_value(ctx, 1)
     assert r == a, f"r={r} != a={a}"
     assert -128 <= r <= 127
 
@@ -283,8 +283,8 @@ def test_mixed_width_constraint(libdvs):
     lib.problem_add_constraint(sp, eq_zext)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     # r_sext should be tightened to [-128, 127]
@@ -296,13 +296,13 @@ def test_mixed_width_constraint(libdvs):
     assert _hi(lib, ctx, 2) <= 1
 
     opts = lib._SolveOpts(seed=0x9999)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    r_sext = lib.solver_get_value(ctx, 0)
-    x = lib.solver_get_value(ctx, 1)
-    r_zext = lib.solver_get_value(ctx, 2)
-    tiny = lib.solver_get_value(ctx, 3)
+    r_sext = lib.dvs_solver_get_value(ctx, 0)
+    x = lib.dvs_solver_get_value(ctx, 1)
+    r_zext = lib.dvs_solver_get_value(ctx, 2)
+    tiny = lib.dvs_solver_get_value(ctx, 3)
 
     assert r_sext == x
     assert r_zext == tiny

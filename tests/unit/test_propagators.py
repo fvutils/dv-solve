@@ -54,16 +54,16 @@ def _setup(lib: ctypes.CDLL):
                                     ctypes.c_uint32, ctypes.c_uint8,
                                     ctypes.c_int64, ctypes.c_int64]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.solver_get_var.restype  = ctypes.c_void_p
-    lib.solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_get_var.restype  = ctypes.c_void_p
+    lib.dvs_solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     lib.dvs_ctx_decision_level.restype  = ctypes.c_uint32
     lib.dvs_ctx_decision_level.argtypes = [ctypes.c_void_p]
@@ -117,8 +117,8 @@ def _setup(lib: ctypes.CDLL):
                                              ctypes.c_int32, ctypes.c_uint8,
                                              ctypes.c_uint8]
 
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
     lib.ctx_tighten_lb32.restype  = ctypes.c_int
     lib.ctx_tighten_lb32.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
@@ -151,11 +151,11 @@ def _make_problem_and_ctx(lib, var_specs):
 
     ba = lib.dvs_block_alloc_create(None, 0)
     assert ba
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
 
-    rc = lib.solver_compile(ctx, sp)
-    assert rc == 0, f"solver_compile returned {rc}"
+    rc = lib.dvs_solver_compile(ctx, sp)
+    assert rc == 0, f"dvs_solver_compile returned {rc}"
 
     return sp_buf, ctx_buf, ba, sp, ctx
 
@@ -198,7 +198,7 @@ def test_bounds_add_32_propagates(libdvs):
     _fix(lib, ctx, 2, 4)
 
     # BoundsAdd was enqueued at creation; propagate
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # After initial fire: r=[0+0=0 .. 100+100=200], then a/b fixed → re-fire
@@ -208,7 +208,7 @@ def test_bounds_add_32_propagates(libdvs):
     lib.ctx_tighten_lb32(ctx, 2, 4)
     lib.ctx_tighten_ub32(ctx, 2, 4)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 7
@@ -234,7 +234,7 @@ def test_bounds_le_32_propagates(libdvs):
     lib.ctx_tighten_ub32(ctx, 1, 5)
     lib.ctx_tighten_lb32(ctx, 1, 5)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _hi(lib, ctx, 0) <= 5
@@ -260,7 +260,7 @@ def test_bounds_lt_32_propagates(libdvs):
     lib.ctx_tighten_ub32(ctx, 1, 10)
     lib.ctx_tighten_lb32(ctx, 1, 10)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _hi(lib, ctx, 0) <= 9
@@ -284,7 +284,7 @@ def test_bounds_eq_32_propagates(libdvs):
     lib.ctx_tighten_lb32(ctx, 0, 7)
     lib.ctx_tighten_ub32(ctx, 0, 7)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 1) == 7
@@ -309,7 +309,7 @@ def test_bounds_ne_32_singleton_conflict(libdvs):
     ref = lib.prop_add_bounds_ne_32(ctx, 0, 1, 0)
     assert ref != EXPR_NULL
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_CONFLICT
 
     lib.dvs_block_alloc_destroy(ba)
@@ -331,7 +331,7 @@ def test_unary_neg_32(libdvs):
     lib.ctx_tighten_lb32(ctx, 1, 3)
     lib.ctx_tighten_ub32(ctx, 1, 3)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == -3
@@ -353,7 +353,7 @@ def test_in_set_32(libdvs):
     ref = lib.prop_add_in_set_32(ctx, 0, 3, elems, 0)
     assert ref != EXPR_NULL
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # InSet shrinks bounds to [min_valid, max_valid] = [2, 9]
@@ -376,7 +376,7 @@ def test_in_set_32_conflict(libdvs):
     ref = lib.prop_add_in_set_32(ctx, 0, 3, elems, 0)
     assert ref != EXPR_NULL
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_CONFLICT
 
     lib.dvs_block_alloc_destroy(ba)
@@ -398,7 +398,7 @@ def test_implication_32_ub_fires_when_guard_true(libdvs):
     lib.ctx_tighten_lb32(ctx, 0, 1)
     lib.ctx_tighten_ub32(ctx, 0, 1)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _hi(lib, ctx, 1) <= 3
@@ -423,7 +423,7 @@ def test_implication_32_entailed_when_guard_false(libdvs):
     lib.ctx_tighten_ub32(ctx, 0, 0)
     lib.ctx_tighten_lb32(ctx, 0, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # a should be unchanged (no tightening)
@@ -472,7 +472,7 @@ def test_priority_queue_ordering(libdvs):
     assert r1 != EXPR_NULL
     assert r2 != EXPR_NULL
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # x.hi must be ≤ 5 (tightest, from y)
@@ -500,7 +500,7 @@ def test_chained_propagators(libdvs):
     assert r1 != EXPR_NULL
     assert r2 != EXPR_NULL
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 6
@@ -526,13 +526,13 @@ def test_watcher_re_enqueues_on_tighten(libdvs):
     assert ref != EXPR_NULL
 
     # Drain the initial queue
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # Now tighten y → should wake the LE propagator
     lib.ctx_tighten_ub32(ctx, 1, 20)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _hi(lib, ctx, 0) <= 20

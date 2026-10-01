@@ -13,8 +13,8 @@
 #include "dvs_explain.h"
 
 /* Forward declarations for hole management */
-static int _is_hole(const SolveCtx *ctx, uint32_t var_id, int64_t value);
-static uint32_t _count_holes_in_range(const SolveCtx *ctx, uint32_t var_id,
+static int _is_hole(const dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
+static uint32_t _count_holes_in_range(const dvs_ctx_t *ctx, uint32_t var_id,
                                        int64_t lo, int64_t hi);
 
 /* ------------------------------------------------------------------ */
@@ -35,7 +35,7 @@ static uint32_t _luby(uint32_t n) {
 /* Fast xorshift64 RNG                                                 */
 /* ------------------------------------------------------------------ */
 
-static uint64_t _rand64(SolveCtx *ctx) {
+static uint64_t _rand64(dvs_ctx_t *ctx) {
     uint64_t x = ctx->rng_state;
     if (x == 0) x = 0xDEADBEEF12345678ULL;
     x ^= x << 13;
@@ -46,7 +46,7 @@ static uint64_t _rand64(SolveCtx *ctx) {
 }
 
 /* Return a random integer in [lo, hi] (inclusive), 64-bit range. */
-static int64_t _rand_range64(SolveCtx *ctx, int64_t lo, int64_t hi) {
+static int64_t _rand_range64(dvs_ctx_t *ctx, int64_t lo, int64_t hi) {
     /* `hi - lo` is correct modulo 2^64 for both signed and unsigned bound
      * patterns -- computed in uint64, where wrapping is defined. In int64 it
      * is signed overflow for any span above INT64_MAX (undefined behaviour,
@@ -65,7 +65,7 @@ static int64_t _rand_range64(SolveCtx *ctx, int64_t lo, int64_t hi) {
 /* domain, or EXPR_NULL if all variables are assigned.                */
 /* ------------------------------------------------------------------ */
 
-static uint32_t _select_unassigned(SolveCtx *ctx) {
+static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
     /* VSIDS path: when LCG is active and we have non-zero activity
      * (i.e. at least one conflict has fired the bumper), pick the
      * highest-activity unassigned, non-aux variable. Falls through to
@@ -170,7 +170,7 @@ static uint32_t _select_unassigned(SolveCtx *ctx) {
 /* Pick a value from a distribution-constrained variable using weighted
  * random selection.  Returns the chosen value, or falls through to
  * uniform random if no valid dist entry intersects the feasible domain. */
-static int64_t _pick_value_dist(SolveCtx *ctx, uint32_t var_id,
+static int64_t _pick_value_dist(dvs_ctx_t *ctx, uint32_t var_id,
                                  int64_t lo, int64_t hi) {
     uint32_t dm_off = ctx->dist_offsets[var_id];
     if (dm_off == 0) return _rand_range64(ctx, lo, hi);
@@ -231,7 +231,7 @@ static int64_t _pick_value_dist(SolveCtx *ctx, uint32_t var_id,
 }
 
 /* Check if variable has any holes. */
-static int _has_holes(const SolveCtx *ctx, uint32_t var_id) {
+static int _has_holes(const dvs_ctx_t *ctx, uint32_t var_id) {
     return ctx->var_holes_head &&
            var_id < ctx->n_vars_capacity &&
            ctx->var_holes_head[var_id] != 0;
@@ -239,7 +239,7 @@ static int _has_holes(const SolveCtx *ctx, uint32_t var_id) {
 
 /* Pick a value avoiding holes via rejection sampling, with fallback
  * to enumeration for domains with many holes. */
-static int64_t _pick_avoiding_holes(SolveCtx *ctx, uint32_t var_id,
+static int64_t _pick_avoiding_holes(dvs_ctx_t *ctx, uint32_t var_id,
                                      int64_t candidate, int64_t lo, int64_t hi) {
     /* Fast path: no holes */
     if (!_has_holes(ctx, var_id)) return candidate;
@@ -278,8 +278,8 @@ static int64_t _pick_avoiding_holes(SolveCtx *ctx, uint32_t var_id,
     return cur + (int64_t)k;
 }
 
-static int64_t _pick_value(SolveCtx *ctx, uint32_t var_id,
-                            const SolveOpts *opts) {
+static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
+                            const dvs_solve_opts_t *opts) {
     int64_t lo = var_lo64(ctx, &ctx->vars[var_id]);
     int64_t hi = var_hi64(ctx, &ctx->vars[var_id]);
 
@@ -346,7 +346,7 @@ static int _split_random_enabled(void) {
     return cached;
 }
 
-static int _split_upper_first(SolveCtx *ctx, const SolveOpts *opts,
+static int _split_upper_first(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
                                int64_t dlo, int64_t val, int64_t dhi) {
     if (!(opts && opts->seed != 0)) return 0;      /* deterministic mode */
     if (!_split_random_enabled()) return 0;
@@ -362,13 +362,13 @@ static int _split_upper_first(SolveCtx *ctx, const SolveOpts *opts,
 }
 
 /* ------------------------------------------------------------------ */
-/* solver_solve                                                        */
+/* dvs_solver_solve                                                        */
 /* ------------------------------------------------------------------ */
 
 /* Monotonic wall-clock seconds — for the CDCL time budget (B10). The
  * conflict/restart counters bound *work* but not *time*: a hard problem can
  * churn through a Luby-growing conflict budget for many minutes, which reads as
- * a hang. A wall-clock deadline lets the search bail to SOLVE_TIMEOUT so the
+ * a hang. A wall-clock deadline lets the search bail to DVS_SOLVE_TIMEOUT so the
  * caller degrades to `unknown` (and, outside DV_NO_BITBLAST, escalates to
  * bitblast). CDCL must be correct-or-unknown in bounded time — never hang. */
 static double _now_sec(void) {
@@ -393,7 +393,7 @@ static uint64_t _seed_mix64(uint64_t z) {
     return z ^ (z >> 31);
 }
 
-const char *solver_bail_reason_str(const SolveCtx *ctx) {
+const char *dvs_solver_bail_reason_str(const dvs_ctx_t *ctx) {
     if (!ctx) return "?";
     switch (ctx->bail_reason) {
     case DVS_BAIL_DEADLINE:      return "wall-clock deadline (search)";
@@ -404,7 +404,7 @@ const char *solver_bail_reason_str(const SolveCtx *ctx) {
     }
 }
 
-static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
+static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     ctx->bail_reason = DVS_BAIL_NONE;
     /* Seed or preserve RNG. Sequential seeds must be avalanched first. */
     if (opts && opts->seed != 0) ctx->rng_state = _seed_mix64(opts->seed);
@@ -493,17 +493,17 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                               : UINT32_MAX;
 
     /* Level-0 BCP */
-    if (solver_propagate(ctx) == PROP_CONFLICT) return SOLVE_UNSAT;
+    if (dvs_solver_propagate(ctx) == PROP_CONFLICT) return DVS_SOLVE_UNSAT;
 
     /* Check for domains that became empty before search (e.g. from
-     * conflicting bounds imposed externally before solver_solve).
+     * conflicting bounds imposed externally before dvs_solver_solve).
      * Sign-aware: an unsigned domain straddling 2^63 (lo < 2^63 <= hi)
      * has lo "positive" and hi "negative" as int64, so a bare `lo > hi`
      * would wrongly call it empty. */
     for (uint32_t i = 0; i < ctx->n_vars; i++) {
         const Variable *vi = &ctx->vars[i];
         if (var_b_gt(vi, var_lo64(ctx, vi), var_hi64(ctx, vi)))
-            return SOLVE_UNSAT;
+            return DVS_SOLVE_UNSAT;
     }
 
     /* Seal compile-time + initial-propagation state as the level-0 baseline.
@@ -521,14 +521,14 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
     uint32_t max_si = opts ? opts->max_shave_iters : 1000;
     if (max_si > 0) {
         PropResult sr = bounds_shave(ctx, max_si);
-        if (sr == PROP_CONFLICT) return SOLVE_UNSAT;
+        if (sr == PROP_CONFLICT) return DVS_SOLVE_UNSAT;
     }
 
     for (;;) {
         /* Wall-clock budget check (decision loop). */
         if (_deadline > 0.0 && (++_tick & 0x3FF) == 0 && _now_sec() > _deadline) {
             ctx->bail_reason = DVS_BAIL_DEADLINE;
-            return SOLVE_TIMEOUT;
+            return DVS_SOLVE_TIMEOUT;
         }
 
         /* ── Variable selection ── */
@@ -547,10 +547,10 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                 int64_t _lo = var_lo64(ctx, &ctx->vars[_di]);
                 int64_t _hi = var_hi64(ctx, &ctx->vars[_di]);
                 (void)_lo; (void)_hi;
-                assert(_lo == _hi && "SOLVE_OK but non-singleton domain");
+                assert(_lo == _hi && "DVS_SOLVE_OK but non-singleton domain");
             }
 #endif
-            return SOLVE_OK;   /* all assigned */
+            return DVS_SOLVE_OK;   /* all assigned */
         }
         int64_t v = _pick_value(ctx, x_id, opts);
 
@@ -561,7 +561,7 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
          * Bail with TIMEOUT so the caller defers/escalates cleanly instead. */
         if (ctx->decision_level >= ctx->max_depth) {
             ctx->bail_reason = DVS_BAIL_MAX_DEPTH;
-            return SOLVE_TIMEOUT;
+            return DVS_SOLVE_TIMEOUT;
         }
 
         /* ── Record decision ── */
@@ -580,7 +580,7 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
         PropResult pr = ctx_tighten_lb64(ctx, x_id, v);
         if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x_id, v);
         if (pr == PROP_OK) {
-            pr = solver_propagate(ctx);
+            pr = dvs_solver_propagate(ctx);
         }
 
         /* ── Conflict loop ── */
@@ -599,7 +599,7 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
              * analyses is noise. */
             if (_deadline > 0.0 && (++_tick & 0xF) == 0 && _now_sec() > _deadline) {
                 ctx->bail_reason = DVS_BAIL_DEADLINE_CONF;
-                return SOLVE_TIMEOUT;
+                return DVS_SOLVE_TIMEOUT;
             }
 
             uint32_t cur = ctx->decision_level;
@@ -608,7 +608,7 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
              * every permanent domain tightening at level 0 is justified by
              * a propagation conflict, so if level-0 propagation itself
              * conflicts there is no search path that can satisfy it. */
-            if (cur == 0) return SOLVE_UNSAT;
+            if (cur == 0) return DVS_SOLVE_UNSAT;
 
             /* Restart check */
             if (max_conflicts > 0 && local_conflicts >= luby_limit) {
@@ -620,7 +620,7 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
 
                 if (max_restarts > 0 && restart_count >= max_restarts) {
                     ctx->bail_reason = DVS_BAIL_MAX_RESTARTS;
-                    return SOLVE_TIMEOUT;
+                    return DVS_SOLVE_TIMEOUT;
                 }
 
                 /* Clause GC: drop clauses with high LBD (literal block
@@ -637,8 +637,8 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                 }
 
 
-                pr = solver_propagate(ctx);
-                if (pr == PROP_CONFLICT) return SOLVE_UNSAT;
+                pr = dvs_solver_propagate(ctx);
+                if (pr == PROP_CONFLICT) return DVS_SOLVE_UNSAT;
                 break;  /* restart outer for-loop */
             }
 
@@ -676,7 +676,7 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
                         /* Force unit propagation from the new clause,
                          * then resume the propagator queue. */
                         pr = clause_propagate(&lcg->clause_db, ctx);
-                        if (pr != PROP_CONFLICT) pr = solver_propagate(ctx);
+                        if (pr != PROP_CONFLICT) pr = dvs_solver_propagate(ctx);
                         continue;  /* re-enter while(pr==CONFLICT) */
                     }
                     /* rc != 0 or empty clause: fall through to bisection */
@@ -748,7 +748,7 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
             }
 
             if (pr == PROP_OK) {
-                pr = solver_propagate(ctx);
+                pr = dvs_solver_propagate(ctx);
                 /* Save phase if enabled */
                 if (pr == PROP_OK && opts && opts->use_phase_save
                         && opts->seed == 0 && ctx->phase_save)
@@ -761,9 +761,9 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
 
 /* Pin every *inactive* soft assumption (mask bit clear) to its var=[0,0] so a
  * reset + re-solve enforces exactly the current kept-soft set. Active assumptions
- * are left at [1,1] by solver_reset. Factored out of the relaxation loop so the
+ * are left at [1,1] by dvs_solver_reset. Factored out of the relaxation loop so the
  * additive re-add refinement below can reuse the identical pinning. */
-static void _pin_inactive_assumptions(SolveCtx *ctx) {
+static void _pin_inactive_assumptions(dvs_ctx_t *ctx) {
     for (uint32_t i = 0; i < ctx->n_assumptions; i++) {
         if (!(ctx->assumption_active_mask & (1ULL << i))) {
             uint32_t av = ctx->assumption_var_ids[i];
@@ -777,7 +777,7 @@ static void _pin_inactive_assumptions(SolveCtx *ctx) {
 
 /* Additive re-add refinement (soft soundness).
  *
- * The subtractive loop in solver_solve stops at the *first* satisfiable kept-soft
+ * The subtractive loop in dvs_solver_solve stops at the *first* satisfiable kept-soft
  * set: on each UNSAT it drops the lowest-preference (highest priority *value*)
  * active soft. To reach a genuinely-conflicting higher-preference soft it may walk
  * past — and shed — satisfiable lower-preference softs as collateral, returning a
@@ -795,7 +795,7 @@ static void _pin_inactive_assumptions(SolveCtx *ctx) {
  * ever re-activates softs, so it cannot worsen the subtractive result. Bounded by
  * the (≤64) assumption count, and only runs when a relaxation actually occurred
  * (soft conflict present), so the common no-conflict hot path is untouched. */
-static void _refine_readd_softs(SolveCtx *ctx, const SolveOpts *opts) {
+static void _refine_readd_softs(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     uint32_t na = ctx->n_assumptions;
     if (na > 64) na = 64;            /* assumption_active_mask is 64-bit */
     uint64_t tried = 0;              /* dropped softs already attempted   */
@@ -819,35 +819,35 @@ static void _refine_readd_softs(SolveCtx *ctx, const SolveOpts *opts) {
 
         uint64_t saved = ctx->assumption_active_mask;
         ctx->assumption_active_mask |= (1ULL << best);
-        solver_reset(ctx);
+        dvs_solver_reset(ctx);
         _pin_inactive_assumptions(ctx);
-        if (solver_propagate(ctx) == PROP_CONFLICT ||
-                _solver_solve_core(ctx, opts) != SOLVE_OK) {
+        if (dvs_solver_propagate(ctx) == PROP_CONFLICT ||
+                _solver_solve_core(ctx, opts) != DVS_SOLVE_OK) {
             ctx->assumption_active_mask = saved;   /* keep it dropped */
         }
     }
     /* Materialize the final accepted set: the last trial may have been a revert,
      * leaving stale search state. The final mask was proven SAT, so this resolves. */
-    solver_reset(ctx);
+    dvs_solver_reset(ctx);
     _pin_inactive_assumptions(ctx);
-    solver_propagate(ctx);
+    dvs_solver_propagate(ctx);
     _solver_solve_core(ctx, opts);
 }
 
 /* ------------------------------------------------------------------ */
-/* solver_solve — wrapper with assumption relaxation                   */
+/* dvs_solver_solve — wrapper with assumption relaxation                   */
 /* ------------------------------------------------------------------ */
 
-SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
-    /* Re-activate all soft assumptions at entry. solver_reset() restores the
+dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
+    /* Re-activate all soft assumptions at entry. dvs_solver_reset() restores the
      * assumption vars to [1,1] but does NOT touch assumption_active_mask, so on a
      * RE-SOLVE of a reused ctx (the backend's plan-reuse path) the mask would
      * still carry the previous call's relaxations — the conflict then relaxes the
      * remaining kept soft and drops the whole set. Resetting the mask here makes
      * each solve start from the full soft set, matching a fresh compile. The
-     * assumption vars are already [1,1] (compile or solver_reset restored them);
+     * assumption vars are already [1,1] (compile or dvs_solver_reset restored them);
      * any var the previous call pinned to [0,0] was a direct live-write that
-     * solver_reset has since undone from initial_vars. */
+     * dvs_solver_reset has since undone from initial_vars. */
     if (ctx->n_assumptions > 0) {
         uint32_t na = ctx->n_assumptions;
         ctx->assumption_active_mask =
@@ -875,8 +875,8 @@ SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
      * such a primary non-OK to the complete BV-SAT engine.) */
     int relaxed_any = 0;
     for (;;) {
-        SolveResult res = _solver_solve_core(ctx, opts);
-        if (res == SOLVE_OK) {
+        dvs_result_t res = _solver_solve_core(ctx, opts);
+        if (res == DVS_SOLVE_OK) {
             /* If we shed any soft to get here, the subtractive walk may have
              * dropped satisfiable softs as collateral; recover them greedily. */
             if (relaxed_any)
@@ -908,7 +908,7 @@ SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
         relaxed_any = 1;
 
         /* Reset solver to post-compile state */
-        solver_reset(ctx);
+        dvs_solver_reset(ctx);
 
         /* Pin all relaxed assumptions to 0 by directly setting bounds.
          * We can't use ctx_tighten because the assumption var starts
@@ -918,7 +918,7 @@ SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
         _pin_inactive_assumptions(ctx);
 
         /* Propagate the relaxations before retrying */
-        if (solver_propagate(ctx) == PROP_CONFLICT) {
+        if (dvs_solver_propagate(ctx) == PROP_CONFLICT) {
             /* Still conflicting — try relaxing more assumptions */
             continue;
         }
@@ -926,10 +926,10 @@ SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts) {
 }
 
 /* ------------------------------------------------------------------ */
-/* solver_get_value                                                    */
+/* dvs_solver_get_value                                                    */
 /* ------------------------------------------------------------------ */
 
-int64_t solver_get_value(const SolveCtx *ctx, uint32_t var_id) {
+int64_t dvs_solver_get_value(const dvs_ctx_t *ctx, uint32_t var_id) {
     if (!ctx || var_id >= ctx->n_vars) return 0;
     /* Resolve through alias table: aliased vars read from their root */
     uint32_t resolved = var_id;
@@ -942,10 +942,10 @@ int64_t solver_get_value(const SolveCtx *ctx, uint32_t var_id) {
 
 
 /* ------------------------------------------------------------------ */
-/* solver_reset                                                        */
+/* dvs_solver_reset                                                        */
 /* ------------------------------------------------------------------ */
 
-void solver_reset(SolveCtx *ctx) {
+void dvs_solver_reset(dvs_ctx_t *ctx) {
     if (!ctx || !ctx->initial_vars || ctx->initial_n_vars == 0) return;
 
     uint32_t n = ctx->initial_n_vars;
@@ -1020,10 +1020,10 @@ void solver_reset(SolveCtx *ctx) {
 }
 
 /* ------------------------------------------------------------------ */
-/* solver_pin_var                                                      */
+/* dvs_solver_pin_var                                                      */
 /* ------------------------------------------------------------------ */
 
-int solver_pin_var(SolveCtx *ctx, uint32_t var_id, int64_t value) {
+int dvs_solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx || var_id >= ctx->n_vars) return -1;
 
     PropResult r = ctx_tighten_lb64(ctx, var_id, value);
@@ -1031,45 +1031,45 @@ int solver_pin_var(SolveCtx *ctx, uint32_t var_id, int64_t value) {
     r = ctx_tighten_ub64(ctx, var_id, value);
     if (r == PROP_CONFLICT) return -1;
 
-    r = solver_propagate(ctx);
+    r = dvs_solver_propagate(ctx);
     if (r == PROP_CONFLICT) return -1;
 
     return 0;
 }
 
 /* ------------------------------------------------------------------ */
-/* solver_set_seed                                                     */
+/* dvs_solver_set_seed                                                     */
 /* ------------------------------------------------------------------ */
 
-void solver_set_seed(SolveCtx *ctx, uint64_t seed) {
+void dvs_solver_set_seed(dvs_ctx_t *ctx, uint64_t seed) {
     if (!ctx) return;
     ctx->rng_state = seed ? seed : 1;
 }
 
 /* ------------------------------------------------------------------ */
-/* solver_get_values                                                   */
+/* dvs_solver_get_values                                                   */
 /* ------------------------------------------------------------------ */
 
-void solver_get_values(const SolveCtx *ctx, uint32_t n,
+void dvs_solver_get_values(const dvs_ctx_t *ctx, uint32_t n,
                        const uint32_t *var_ids, int64_t *out) {
     if (!ctx || !var_ids || !out) return;
     for (uint32_t i = 0; i < n; i++) {
-        out[i] = solver_get_value(ctx, var_ids[i]);
+        out[i] = dvs_solver_get_value(ctx, var_ids[i]);
     }
 }
 
 /* ------------------------------------------------------------------ */
-/* solver_solve_n — batch solve loop (reset+solve+read × N)           */
+/* dvs_solver_solve_n — batch solve loop (reset+solve+read × N)           */
 /* ------------------------------------------------------------------ */
 
-int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
+int dvs_solver_solve_n(dvs_ctx_t *ctx, uint32_t n_solves,
                    uint32_t n_vars, const uint32_t *var_ids,
                    int64_t *out,
                    uint64_t base_seed,
                    uint32_t max_shave_iters) {
     if (!ctx || !var_ids || !out) return 0;
 
-    SolveOpts opts;
+    dvs_solve_opts_t opts;
     opts.max_conflicts  = 100;
     opts.max_restarts   = 10000;
     opts.use_phase_save = 0;
@@ -1080,9 +1080,9 @@ int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
 
     int n_ok = 0;
     for (uint32_t i = 0; i < n_solves; i++) {
-        solver_reset(ctx);
+        dvs_solver_reset(ctx);
         opts.seed = base_seed + i;
-        /* solver_solve, NOT _solver_solve_core: the MaxSAT relaxation loop that
+        /* dvs_solver_solve, NOT _solver_solve_core: the MaxSAT relaxation loop that
          * makes a soft constraint soft lives in the wrapper, not the core. This
          * called the core directly, so a soft constraint that needed relaxing
          * was simply never relaxed -- a hard `x > 200` with a soft `x < 10`
@@ -1090,15 +1090,15 @@ int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
          * returned hundreds. solve_n is the batch entry point a stimulus
          * generator uses, so that was the path most likely to hit it.
          *
-         * The wrapper re-activates the full soft set on entry and solver_reset
+         * The wrapper re-activates the full soft set on entry and dvs_solver_reset
          * above restores the assumption vars from initial_vars, so each solve
          * in the batch starts from the same state rather than inheriting the
          * previous iteration's relaxations. */
-        SolveResult r = solver_solve(ctx, &opts);
-        if (r == SOLVE_OK) {
+        dvs_result_t r = dvs_solver_solve(ctx, &opts);
+        if (r == DVS_SOLVE_OK) {
             int64_t *row = out + (uint64_t)n_ok * n_vars;
             for (uint32_t j = 0; j < n_vars; j++) {
-                row[j] = solver_get_value(ctx, var_ids[j]);
+                row[j] = dvs_solver_get_value(ctx, var_ids[j]);
             }
             n_ok++;
         }
@@ -1107,21 +1107,21 @@ int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
 }
 
 /* ------------------------------------------------------------------ */
-/* solver_soft_active                                                  */
+/* dvs_solver_soft_active                                                  */
 /* ------------------------------------------------------------------ */
 
-int solver_soft_active(const SolveCtx *ctx, uint32_t assumption_idx) {
+int dvs_solver_soft_active(const dvs_ctx_t *ctx, uint32_t assumption_idx) {
     if (!ctx || assumption_idx >= ctx->n_assumptions) return -1;
     return (ctx->assumption_active_mask & (1ULL << assumption_idx)) ? 1 : 0;
 }
 
 
 /* ------------------------------------------------------------------ */
-/* solver_exclude_value                                                */
+/* dvs_solver_exclude_value                                                */
 /* ------------------------------------------------------------------ */
 
 /* Check if a value is in the hole list for a variable. */
-static int _is_hole(const SolveCtx *ctx, uint32_t var_id, int64_t value) {
+static int _is_hole(const dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx->var_holes_head) return 0;
     uint32_t off = ctx->var_holes_head[var_id];
     while (off != 0) {
@@ -1134,7 +1134,7 @@ static int _is_hole(const SolveCtx *ctx, uint32_t var_id, int64_t value) {
 }
 
 /* Count holes within [lo, hi]. */
-static uint32_t _count_holes_in_range(const SolveCtx *ctx, uint32_t var_id,
+static uint32_t _count_holes_in_range(const dvs_ctx_t *ctx, uint32_t var_id,
                                        int64_t lo, int64_t hi) {
     if (!ctx->var_holes_head) return 0;
     uint32_t count = 0;
@@ -1150,7 +1150,7 @@ static uint32_t _count_holes_in_range(const SolveCtx *ctx, uint32_t var_id,
 
 /* Insert a value into the sorted hole list for a variable.
  * Returns 0 on success, 1 if already present, -1 on alloc failure. */
-static int _insert_hole(SolveCtx *ctx, uint32_t var_id, int64_t value) {
+static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx->var_holes_head) return -1;
 
     /* Allocate a HoleEntry in the static pool */
@@ -1179,7 +1179,7 @@ static int _insert_hole(SolveCtx *ctx, uint32_t var_id, int64_t value) {
     return 0;
 }
 
-int solver_exclude_value(SolveCtx *ctx, uint32_t var_id, int64_t value) {
+int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx || var_id >= ctx->n_vars) return -1;
     if (!ctx->var_holes_head) return -1;
 
@@ -1187,7 +1187,7 @@ int solver_exclude_value(SolveCtx *ctx, uint32_t var_id, int64_t value) {
     if (_is_hole(ctx, var_id, value)) return 0;
 
     /* Use the initial (pre-solve) domain for capacity checks so that
-     * callers can exclude values after solver_solve() (when the current
+     * callers can exclude values after dvs_solver_solve() (when the current
      * bounds have been narrowed to a singleton). */
     int64_t init_lo, init_hi;
     if (ctx->initial_vars && var_id < ctx->initial_n_vars) {
@@ -1213,7 +1213,7 @@ int solver_exclude_value(SolveCtx *ctx, uint32_t var_id, int64_t value) {
 
     /* Optimisation: if the excluded value is at a current boundary,
      * tighten bounds now to help propagation. This tightening gets
-     * undone by solver_reset(), but the hole list persists. */
+     * undone by dvs_solver_reset(), but the hole list persists. */
     int64_t lo = var_lo64(ctx, &ctx->vars[var_id]);
     int64_t hi = var_hi64(ctx, &ctx->vars[var_id]);
     if (value >= lo && value <= hi) {

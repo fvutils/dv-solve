@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-typedef struct SolveCtx SolveCtx;
+typedef struct dvs_ctx_s dvs_ctx_t;
 
 /* ================================================================== */
 /* CostGuided Value Selector                                           */
@@ -34,7 +34,7 @@ typedef struct SolveCtx SolveCtx;
  * @param user_data Opaque data for the cost function.
  * @return Incremental cost (int64_t).  INT64_MAX means "infeasible".
  */
-typedef int64_t (*CostFunc)(const SolveCtx *ctx, uint32_t var_id,
+typedef int64_t (*CostFunc)(const dvs_ctx_t *ctx, uint32_t var_id,
                              int64_t value, void *user_data);
 
 /**
@@ -59,7 +59,7 @@ typedef struct {
  * @param max_scan  Maximum domain values to evaluate per decision
  *                  (0 = scan entire domain, recommended for small domains).
  */
-void solver_set_cost_guided(SolveCtx *ctx, CostFunc cost_fn,
+void dvs_solver_set_cost_guided(dvs_ctx_t *ctx, CostFunc cost_fn,
                              void *cost_data, int32_t max_scan);
 
 /* ================================================================== */
@@ -134,7 +134,7 @@ void hpwl_cost_ctx_destroy(HPWLCostCtx *hctx);
  *
  * user_data must point to an HPWLCostCtx.
  */
-int64_t hpwl_cost_fn(const SolveCtx *ctx, uint32_t var_id,
+int64_t hpwl_cost_fn(const dvs_ctx_t *ctx, uint32_t var_id,
                       int64_t value, void *user_data);
 
 /**
@@ -142,9 +142,9 @@ int64_t hpwl_cost_fn(const SolveCtx *ctx, uint32_t var_id,
  *
  * Equivalent to:
  *   hpwl_cost_ctx_build_index(hctx);
- *   solver_set_cost_guided(ctx, hpwl_cost_fn, hctx, max_scan);
+ *   dvs_solver_set_cost_guided(ctx, hpwl_cost_fn, hctx, max_scan);
  */
-int solver_set_cost_guided_hpwl(SolveCtx *ctx, HPWLCostCtx *hctx,
+int dvs_solver_set_cost_guided_hpwl(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
                                  int32_t max_scan);
 
 
@@ -165,21 +165,21 @@ int solver_set_cost_guided_hpwl(SolveCtx *ctx, HPWLCostCtx *hctx,
  * @param out_positions  Output array of size 2*n_macros (caller-allocated).
  * @return 0 on success (all macros placed), -1 on failure.
  */
-int costguided_greedy_place(SolveCtx *ctx, HPWLCostCtx *hctx,
+int costguided_greedy_place(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
                              int32_t max_scan, int32_t *out_positions);
 
 /**
  * Inject position hints into the solver's phase-save array.
  *
  * After calling this, the solver will try these values first on each
- * restart (when use_phase_save=1 in SolveOpts).
+ * restart (when use_phase_save=1 in dvs_solve_opts_t).
  *
  * @param ctx     Solver context.
  * @param hints   Array of (var_id, value) pairs.
  * @param n_hints Number of pairs.
  * @return 0 on success.
  */
-int solver_set_phase_hints(SolveCtx *ctx, const uint32_t *var_ids,
+int dvs_solver_set_phase_hints(dvs_ctx_t *ctx, const uint32_t *var_ids,
                             const int64_t *values, uint32_t n_hints);
 
 #ifdef __cplusplus
@@ -232,7 +232,7 @@ typedef struct {
  * @param result        Output: LNS statistics.
  * @return 0 on success (feasible solution found), -1 on failure.
  */
-int solver_lns_optimize(SolveCtx *ctx, HPWLCostCtx *hctx,
+int dvs_solver_lns_optimize(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
                          const LNSOpts *opts,
                          int32_t *out_positions, LNSResult *result);
 

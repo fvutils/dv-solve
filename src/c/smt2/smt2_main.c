@@ -191,9 +191,9 @@ static int _run_batch(FILE *f, int show_stats, int verilator_mode) {
 
     if (exit_code == 0 && fe.has_result) {
         switch (fe.last_result) {
-        case SOLVE_OK:      exit_code = 0; break;
-        case SOLVE_UNSAT:   exit_code = 1; break;
-        case SOLVE_TIMEOUT: exit_code = 2; break;
+        case DVS_SOLVE_OK:      exit_code = 0; break;
+        case DVS_SOLVE_UNSAT:   exit_code = 1; break;
+        case DVS_SOLVE_TIMEOUT: exit_code = 2; break;
         }
     }
 
@@ -250,9 +250,9 @@ static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
 
     if (exit_code == 0 && fe.has_result) {
         switch (fe.last_result) {
-        case SOLVE_OK:      exit_code = 0; break;
-        case SOLVE_UNSAT:   exit_code = 1; break;
-        case SOLVE_TIMEOUT: exit_code = 2; break;
+        case DVS_SOLVE_OK:      exit_code = 0; break;
+        case DVS_SOLVE_UNSAT:   exit_code = 1; break;
+        case DVS_SOLVE_TIMEOUT: exit_code = 2; break;
         }
     }
 

@@ -9,8 +9,8 @@
 extern "C" {
 #endif
 
-/* forward declaration — SolveCtx is defined in dvs_ctx.h */
-typedef struct SolveCtx SolveCtx;
+/* forward declaration — dvs_ctx_t is defined in dvs_ctx.h */
+typedef struct dvs_ctx_s dvs_ctx_t;
 
 /* ------------------------------------------------------------------ */
 /* TrailKind — what kind of domain change was recorded                 */
@@ -82,7 +82,7 @@ typedef struct {
     uint64_t           trail_count;  /* trail_count at time of push    */
     /* Phase B.1 step 5 (plumbing slice): SAT clause-arena position at
      * the time of the push, expressed in `ward` units (see
-     * dvs_sat_arena_mark_t). Zero today — no SolveCtx→dvs_sat handle
+     * dvs_sat_arena_mark_t). Zero today — no dvs_ctx_t→dvs_sat handle
      * exists; the field is populated when step 6 wires the bbsolver
      * to re-use a kissat instance across check-sat. The matching
      * "rewind kissat arena to this mark on restore" is intentionally
@@ -102,7 +102,7 @@ typedef struct {
  * Saves the current dynamic-stack position and trail_top into
  * ctx->level_marks[ctx->decision_level], then increments decision_level.
  */
-void trail_push_level(SolveCtx *ctx);
+void trail_push_level(dvs_ctx_t *ctx);
 
 /**
  * Record (and apply) a lower-bound tightening on `var_id`.
@@ -111,12 +111,12 @@ void trail_push_level(SolveCtx *ctx);
  *
  * @return 0 on success, -1 if the dynamic stack is full or tier-2 (unsupported).
  */
-int trail_record_lb(SolveCtx *ctx, uint32_t var_id, int64_t new_lb);
+int trail_record_lb(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_lb);
 
 /**
  * Record (and apply) an upper-bound tightening on `var_id`.
  */
-int trail_record_ub(SolveCtx *ctx, uint32_t var_id, int64_t new_ub);
+int trail_record_ub(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub);
 
 /**
  * Record (and mark) a value removal (hole) on `var_id`.
@@ -126,7 +126,7 @@ int trail_record_ub(SolveCtx *ctx, uint32_t var_id, int64_t new_ub);
  *
  * @return 0 on success, -1 on allocation failure.
  */
-int trail_record_hole(SolveCtx *ctx, uint32_t var_id, int64_t removed_val);
+int trail_record_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t removed_val);
 
 /**
  * Backtrack to `target_level`.
@@ -137,7 +137,7 @@ int trail_record_hole(SolveCtx *ctx, uint32_t var_id, int64_t removed_val);
  *
  * Requires target_level <= ctx->decision_level.
  */
-void trail_backtrack(SolveCtx *ctx, uint32_t target_level);
+void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level);
 
 #ifdef __cplusplus
 }

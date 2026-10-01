@@ -11,7 +11,7 @@ int main(void) {
     /* Build problem: 4 variables */
     size_t sp_sz = 65536;
     void *sp_buf = calloc(1, sp_sz);
-    SolveProblem *sp = solve_problem_init(sp_buf, sp_sz);
+    dvs_problem_t *sp = solve_problem_init(sp_buf, sp_sz);
     if (!sp) { fprintf(stderr, "sp init fail\n"); return 1; }
 
     problem_add_var(sp, 0, 32, 0, 0, 10);  /* r */
@@ -26,10 +26,10 @@ int main(void) {
     size_t ctx_sz = 1 << 20;
     void *ctx_buf = calloc(1, ctx_sz);
     dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
-    SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
+    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, ctx_sz, ba);
     if (!ctx) { fprintf(stderr, "ctx create fail\n"); return 1; }
 
-    int rc = solver_compile(ctx, sp);
+    int rc = dvs_solver_compile(ctx, sp);
     printf("compile rc=%d, n_vars=%u, n_props=%u, n_prop_refs_cap=%u\n",
            rc, ctx->n_vars, ctx->n_props, ctx->n_prop_refs_capacity);
 
@@ -47,20 +47,20 @@ int main(void) {
     }
 
     /* Solve */
-    SolveOpts sopts = {0};
+    dvs_solve_opts_t sopts = {0};
     sopts.seed = 42;
     sopts.max_conflicts = 100;
     sopts.max_restarts = 1000;
 
     printf("Solving...\n");
-    SolveResult sr = solver_solve(ctx, &sopts);
+    dvs_result_t sr = dvs_solver_solve(ctx, &sopts);
     printf("solve result=%d\n", sr);
 
-    if (sr == SOLVE_OK) {
-        int64_t r = solver_get_value(ctx, 0);
-        int64_t a = solver_get_value(ctx, 1);
-        int64_t b = solver_get_value(ctx, 2);
-        int64_t c = solver_get_value(ctx, 3);
+    if (sr == DVS_SOLVE_OK) {
+        int64_t r = dvs_solver_get_value(ctx, 0);
+        int64_t a = dvs_solver_get_value(ctx, 1);
+        int64_t b = dvs_solver_get_value(ctx, 2);
+        int64_t c = dvs_solver_get_value(ctx, 3);
         printf("r=%ld, a=%ld, b=%ld, c=%ld\n", r, a, b, c);
         printf("min(a,b,c)=%ld\n",
                a < b ? (a < c ? a : c) : (b < c ? b : c));

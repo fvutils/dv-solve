@@ -32,12 +32,12 @@ class TestPythonBuilder:
         self.lib.dvs_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
         self.lib.dvs_block_alloc_destroy.restype  = None
         self.lib.dvs_block_alloc_destroy.argtypes = [c.c_void_p]
-        self.lib.solver_create.restype  = c.c_void_p
-        self.lib.solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
-        self.lib.solver_destroy.restype  = None
-        self.lib.solver_destroy.argtypes = [c.c_void_p]
-        self.lib.solver_compile.restype  = c.c_int
-        self.lib.solver_compile.argtypes = [c.c_void_p, c.c_void_p]
+        self.lib.dvs_solver_create.restype  = c.c_void_p
+        self.lib.dvs_solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
+        self.lib.dvs_solver_destroy.restype  = None
+        self.lib.dvs_solver_destroy.argtypes = [c.c_void_p]
+        self.lib.dvs_solver_compile.restype  = c.c_int
+        self.lib.dvs_solver_compile.argtypes = [c.c_void_p, c.c_void_p]
 
         class SolveOpts(ctypes.Structure):
             _fields_ = [
@@ -49,27 +49,27 @@ class TestPythonBuilder:
                 ("max_shave_iters", c.c_uint32),
             ]
         self._SolveOpts = SolveOpts
-        self.lib.solver_solve.restype  = c.c_int
-        self.lib.solver_solve.argtypes = [c.c_void_p, c.c_void_p]
-        self.lib.solver_get_value.restype  = c.c_int64
-        self.lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
+        self.lib.dvs_solver_solve.restype  = c.c_int
+        self.lib.dvs_solver_solve.argtypes = [c.c_void_p, c.c_void_p]
+        self.lib.dvs_solver_get_value.restype  = c.c_int64
+        self.lib.dvs_solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
 
     def _solve_buffer(self, buf, n_vars, seed=0x42):
         """Compile and solve a finalized ctypes buffer."""
         ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
         ba = self.lib.dvs_block_alloc_create(None, 0)
         assert ba
-        # Cast the ctypes array to a void pointer for solver_compile
+        # Cast the ctypes array to a void pointer for dvs_solver_compile
         sp_ptr = ctypes.cast(buf, ctypes.c_void_p).value
-        ctx = self.lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+        ctx = self.lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
         assert ctx
-        rc = self.lib.solver_compile(ctx, sp_ptr)
-        assert rc == 0, f"solver_compile failed: {rc}"
+        rc = self.lib.dvs_solver_compile(ctx, sp_ptr)
+        assert rc == 0, f"dvs_solver_compile failed: {rc}"
         opts = self._SolveOpts(seed=seed)
-        result = self.lib.solver_solve(ctx, ctypes.byref(opts))
+        result = self.lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
-        values = [self.lib.solver_get_value(ctx, i) for i in range(n_vars)]
-        self.lib.solver_destroy(ctx)
+        values = [self.lib.dvs_solver_get_value(ctx, i) for i in range(n_vars)]
+        self.lib.dvs_solver_destroy(ctx)
         self.lib.dvs_block_alloc_destroy(ba)
         return values
 

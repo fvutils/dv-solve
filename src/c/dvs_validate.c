@@ -1,11 +1,11 @@
 /*
- * solver_validate_model — post-solve sanity check.
+ * dvs_solver_validate_model — post-solve sanity check.
  *
- * Walks every top-level ConstraintSpec in the original SolveProblem and
+ * Walks every top-level ConstraintSpec in the original dvs_problem_t and
  * evaluates its root expression under the current variable assignment.
  * A 0 value means the constraint is violated; this catches silent
  * constraint-drop bugs that the compile path would otherwise hide
- * behind a SOLVE_OK result.
+ * behind a DVS_SOLVE_OK result.
  *
  * Expressions are evaluated under the builder API's SystemVerilog sizing
  * and signedness rules (dvs_sv.h), independently of the engines (which run on
@@ -24,8 +24,8 @@
  * whose current domain is wider than a singleton. Such a constraint may
  * be unfinished by propagation rather than truly violated; treating it
  * as a violation produces false positives. */
-static int _has_loose_aux(const SolveCtx *ctx, const SolveProblem *sp,
-                           ExprRef ref) {
+static int _has_loose_aux(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
+                           dvs_expr_t ref) {
     if (ref == EXPR_NULL) return 0;
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
     switch (k) {
@@ -118,7 +118,7 @@ static VI _wrap(VU u, uint16_t w, uint8_t s) {
     return (VI)u;
 }
 
-static const Variable *_var_of(const SolveCtx *ctx, uint32_t id) {
+static const Variable *_var_of(const dvs_ctx_t *ctx, uint32_t id) {
     uint32_t r = id;
     if (ctx->var_alias) {
         while (ctx->var_alias[r] != r) r = ctx->var_alias[r];
@@ -126,10 +126,10 @@ static const Variable *_var_of(const SolveCtx *ctx, uint32_t id) {
     return &ctx->vars[r];
 }
 
-static int _vis_arith(BinOp op) {
+static int _vis_arith(dvs_binop_t op) {
     switch (op) {
-    case BIN_ADD: case BIN_SUB: case BIN_MUL: case BIN_DIV: case BIN_MOD:
-    case BIN_BAND: case BIN_BOR: case BIN_BXOR:
+    case DVS_BIN_ADD: case DVS_BIN_SUB: case DVS_BIN_MUL: case DVS_BIN_DIV: case DVS_BIN_MOD:
+    case DVS_BIN_BAND: case DVS_BIN_BOR: case DVS_BIN_BXOR:
         return 1;
     default:
         return 0;
@@ -137,7 +137,7 @@ static int _vis_arith(BinOp op) {
 }
 
 /* Self-determined type of a node. */
-static VTy _vtype(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
+static VTy _vtype(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
                   int *skip) {
     VTy t = { 1, 0 };
     if (ref == EXPR_NULL) { *skip = 1; return t; }
@@ -163,15 +163,15 @@ static VTy _vtype(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
             VTy b = _vtype(ctx, sp, eb->rhs, skip);
             t.w = a.w > b.w ? a.w : b.w;
             t.s = (uint8_t)(a.s && b.s);
-        } else if (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT ||
-                   eb->op == BIN_ASHR) {
+        } else if (eb->op == DVS_BIN_LSHIFT || eb->op == DVS_BIN_RSHIFT ||
+                   eb->op == DVS_BIN_ASHR) {
             t = _vtype(ctx, sp, eb->lhs, skip);
         }
         break;
     }
     case EXPR_UNARY: {
         ExprUnary *eu = (ExprUnary *)dvs_pool_ptr(&sp->pool, ref);
-        if (eu->op != UN_NOT) t = _vtype(ctx, sp, eu->operand, skip);
+        if (eu->op != DVS_UN_NOT) t = _vtype(ctx, sp, eu->operand, skip);
         break;
     }
     case EXPR_ITE: {
@@ -211,11 +211,11 @@ static VTy _vtype(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
     return t;
 }
 
-static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
+static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
               uint16_t W, uint8_t S, int *skip);
 
 /* Truth value of a node evaluated in its own type. */
-static int _truth(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
+static int _truth(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
                   int *skip) {
     VTy t = _vtype(ctx, sp, ref, skip);
     if (*skip) return 0;
@@ -224,8 +224,8 @@ static int _truth(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
 }
 
 /* `l op r` for a comparison op, in the comparison's own context. */
-static int _cmp(const SolveCtx *ctx, const SolveProblem *sp, BinOp op,
-                ExprRef l, ExprRef r, int *skip) {
+static int _cmp(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_binop_t op,
+                dvs_expr_t l, dvs_expr_t r, int *skip) {
     VTy a = _vtype(ctx, sp, l, skip);
     VTy b = _vtype(ctx, sp, r, skip);
     if (*skip) return 0;
@@ -237,17 +237,17 @@ static int _cmp(const SolveCtx *ctx, const SolveProblem *sp, BinOp op,
     if (*skip) return 0;
     VU ux = (VU)x & _mask_for(w), uy = (VU)y & _mask_for(w);
     switch (op) {
-    case BIN_EQ:  return ux == uy;
-    case BIN_NEQ: return ux != uy;
-    case BIN_LT:  return s ? x <  y : ux <  uy;
-    case BIN_LTE: return s ? x <= y : ux <= uy;
-    case BIN_GT:  return s ? x >  y : ux >  uy;
-    case BIN_GTE: return s ? x >= y : ux >= uy;
+    case DVS_BIN_EQ:  return ux == uy;
+    case DVS_BIN_NEQ: return ux != uy;
+    case DVS_BIN_LT:  return s ? x <  y : ux <  uy;
+    case DVS_BIN_LTE: return s ? x <= y : ux <= uy;
+    case DVS_BIN_GT:  return s ? x >  y : ux >  uy;
+    case DVS_BIN_GTE: return s ? x >= y : ux >= uy;
     default: *skip = 1; return 0;
     }
 }
 
-static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
+static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
               uint16_t W, uint8_t S, int *skip) {
     if (*skip) return 0;
     if (ref == EXPR_NULL || W > V_MAXW) { *skip = 1; return 0; }
@@ -281,20 +281,20 @@ static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
     }
     case EXPR_BINARY: {
         ExprBinary *eb = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
-        BinOp op = eb->op;
+        dvs_binop_t op = eb->op;
         if (_vis_arith(op)) {
             VI a = _ev(ctx, sp, eb->lhs, W, S, skip);
             VI b = _ev(ctx, sp, eb->rhs, W, S, skip);
             if (*skip) return 0;
             VU ua = (VU)a & M, ub = (VU)b & M;
             switch (op) {
-            case BIN_ADD:  return _wrap(ua + ub, W, S);
-            case BIN_SUB:  return _wrap(ua - ub, W, S);
-            case BIN_MUL:  return _wrap(ua * ub, W, S);
-            case BIN_BAND: return _wrap(ua & ub, W, S);
-            case BIN_BOR:  return _wrap(ua | ub, W, S);
-            case BIN_BXOR: return _wrap(ua ^ ub, W, S);
-            case BIN_DIV:
+            case DVS_BIN_ADD:  return _wrap(ua + ub, W, S);
+            case DVS_BIN_SUB:  return _wrap(ua - ub, W, S);
+            case DVS_BIN_MUL:  return _wrap(ua * ub, W, S);
+            case DVS_BIN_BAND: return _wrap(ua & ub, W, S);
+            case DVS_BIN_BOR:  return _wrap(ua | ub, W, S);
+            case DVS_BIN_BXOR: return _wrap(ua ^ ub, W, S);
+            case DVS_BIN_DIV:
                 if (ub == 0) { *skip = 1; return 0; }
                 if (S) {
                     /* truncating; MIN / -1 traps in C and wraps here */
@@ -302,7 +302,7 @@ static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
                     return _wrap((VU)(a / b), W, S);
                 }
                 return _wrap(ua / ub, W, S);
-            case BIN_MOD:
+            case DVS_BIN_MOD:
                 if (ub == 0) { *skip = 1; return 0; }
                 if (S) {
                     if (b == -1) return 0;
@@ -313,7 +313,7 @@ static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
             }
             *skip = 1; return 0;
         }
-        if (op == BIN_LSHIFT || op == BIN_RSHIFT || op == BIN_ASHR) {
+        if (op == DVS_BIN_LSHIFT || op == DVS_BIN_RSHIFT || op == DVS_BIN_ASHR) {
             VI a = _ev(ctx, sp, eb->lhs, W, S, skip);
             VTy rt = _vtype(ctx, sp, eb->rhs, skip);
             if (*skip) return 0;
@@ -321,7 +321,7 @@ static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
             /* The amount is self-determined and read unsigned. */
             VU sh = (VU)_ev(ctx, sp, eb->rhs, rt.w, rt.s, skip) & _mask_for(rt.w);
             if (*skip) return 0;
-            if (op == BIN_ASHR && S) {
+            if (op == DVS_BIN_ASHR && S) {
                 /* `>>>` in a signed context: arithmetic shift of the
                  * context-width value, sign replicated; a is already the
                  * signed W-bit value. >= W bits leaves only the sign. */
@@ -331,18 +331,18 @@ static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
             if (sh >= W) return 0;
             VU ua = (VU)a & M;
             /* `>>` (and `>>>` unsigned) is LOGICAL on the context-width pattern. */
-            return _wrap(op == BIN_LSHIFT ? (ua << (int)sh) : (ua >> (int)sh), W, S);
+            return _wrap(op == DVS_BIN_LSHIFT ? (ua << (int)sh) : (ua >> (int)sh), W, S);
         }
         switch (op) {
-        case BIN_EQ: case BIN_NEQ: case BIN_LT:
-        case BIN_LTE: case BIN_GT: case BIN_GTE:
+        case DVS_BIN_EQ: case DVS_BIN_NEQ: case DVS_BIN_LT:
+        case DVS_BIN_LTE: case DVS_BIN_GT: case DVS_BIN_GTE:
             return _cmp(ctx, sp, op, eb->lhs, eb->rhs, skip);
-        case BIN_AND: {
+        case DVS_BIN_AND: {
             int l = _truth(ctx, sp, eb->lhs, skip);
             int r = _truth(ctx, sp, eb->rhs, skip);
             return l && r;
         }
-        case BIN_OR: {
+        case DVS_BIN_OR: {
             int l = _truth(ctx, sp, eb->lhs, skip);
             int r = _truth(ctx, sp, eb->rhs, skip);
             return l || r;
@@ -353,11 +353,11 @@ static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
     }
     case EXPR_UNARY: {
         ExprUnary *eu = (ExprUnary *)dvs_pool_ptr(&sp->pool, ref);
-        if (eu->op == UN_NOT) return !_truth(ctx, sp, eu->operand, skip);
+        if (eu->op == DVS_UN_NOT) return !_truth(ctx, sp, eu->operand, skip);
         VI a = _ev(ctx, sp, eu->operand, W, S, skip);
         if (*skip) return 0;
-        if (eu->op == UN_NEG)    return _wrap((VU)0 - (VU)a, W, S);
-        if (eu->op == UN_INVERT) return _wrap(~(VU)a, W, S);
+        if (eu->op == DVS_UN_NEG)    return _wrap((VU)0 - (VU)a, W, S);
+        if (eu->op == DVS_UN_INVERT) return _wrap(~(VU)a, W, S);
         *skip = 1; return 0;
     }
     case EXPR_ITE: {
@@ -412,26 +412,26 @@ static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
     case EXPR_IN_RANGE: {
         /* Each comparison is its own SV context. */
         ExprInRange *ir = (ExprInRange *)dvs_pool_ptr(&sp->pool, ref);
-        int a = _cmp(ctx, sp, BIN_GTE, ir->value, ir->lo, skip);
-        int b = _cmp(ctx, sp, BIN_LTE, ir->value, ir->hi, skip);
+        int a = _cmp(ctx, sp, DVS_BIN_GTE, ir->value, ir->lo, skip);
+        int b = _cmp(ctx, sp, DVS_BIN_LTE, ir->value, ir->hi, skip);
         return a && b;
     }
     case EXPR_IN_SET: {
         ExprInSet *is = (ExprInSet *)dvs_pool_ptr(&sp->pool, ref);
-        const ExprRef *el = (const ExprRef *)(is + 1);
+        const dvs_expr_t *el = (const dvs_expr_t *)(is + 1);
         for (uint32_t i = 0; i < is->n_elems; i++) {
-            if (_cmp(ctx, sp, BIN_EQ, is->value, el[i], skip)) return 1;
+            if (_cmp(ctx, sp, DVS_BIN_EQ, is->value, el[i], skip)) return 1;
             if (*skip) return 0;
         }
         return 0;
     }
     case EXPR_IN_RANGES: {
         ExprInRanges *ir = (ExprInRanges *)dvs_pool_ptr(&sp->pool, ref);
-        const ExprRef *los = (const ExprRef *)(ir + 1);
-        const ExprRef *his = los + ir->n_ranges;
+        const dvs_expr_t *los = (const dvs_expr_t *)(ir + 1);
+        const dvs_expr_t *his = los + ir->n_ranges;
         for (uint32_t i = 0; i < ir->n_ranges; i++) {
-            if (_cmp(ctx, sp, BIN_GTE, ir->value, los[i], skip) &&
-                _cmp(ctx, sp, BIN_LTE, ir->value, his[i], skip)) return 1;
+            if (_cmp(ctx, sp, DVS_BIN_GTE, ir->value, los[i], skip) &&
+                _cmp(ctx, sp, DVS_BIN_LTE, ir->value, his[i], skip)) return 1;
             if (*skip) return 0;
         }
         return 0;
@@ -449,8 +449,8 @@ static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
 
 /* Compact expression-tree dumper for diagnostics. Prints a single-line
  * s-expression with var values inlined; truncated at depth 8. */
-static void _dump_expr(const SolveCtx *ctx, const SolveProblem *sp,
-                        ExprRef ref, FILE *err, int depth) {
+static void _dump_expr(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
+                        dvs_expr_t ref, FILE *err, int depth) {
     if (depth > 16) { fprintf(err, "..."); return; }
     if (ref == EXPR_NULL) { fprintf(err, "<null>"); return; }
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
@@ -543,10 +543,10 @@ static void _dump_expr(const SolveCtx *ctx, const SolveProblem *sp,
     }
 }
 
-int solver_validate_model(SolveCtx *ctx, SolveProblem *sp, FILE *err) {
+int dvs_solver_validate_model(dvs_ctx_t *ctx, dvs_problem_t *sp, FILE *err) {
     if (!ctx || !sp) return 0;
     int violations = 0;
-    ExprRef cref = sp->constraints_head;
+    dvs_expr_t cref = sp->constraints_head;
     uint32_t idx = 0;
     while (cref != EXPR_NULL) {
         ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&sp->pool, cref);

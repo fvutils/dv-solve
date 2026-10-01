@@ -57,14 +57,14 @@ def _setup(lib):
     lib.expr_binary.restype  = c.c_uint32
     lib.expr_binary.argtypes = [c.c_void_p, c.c_int32, c.c_uint32, c.c_uint32]
 
-    lib.solver_create.restype  = c.c_void_p
-    lib.solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
-    lib.solver_compile.restype  = c.c_int
-    lib.solver_compile.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_solve.restype  = c.c_int
-    lib.solver_solve.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_get_value.restype  = c.c_int64
-    lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_solver_create.restype  = c.c_void_p
+    lib.dvs_solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
+    lib.dvs_solver_compile.restype  = c.c_int
+    lib.dvs_solver_compile.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_solve.restype  = c.c_int
+    lib.dvs_solver_solve.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_get_value.restype  = c.c_int64
+    lib.dvs_solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
 
 
 # ------------------------------------------------------------------ #
@@ -125,9 +125,9 @@ def _make_ctx(lib, sp, buf_size=1 << 20):
     ba = lib.dvs_block_alloc_create(None, buf_size)
     assert ba is not None
     ctx_buf = (ctypes.c_uint8 * buf_size)()
-    ctx = lib.solver_create(ctx_buf, buf_size, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, buf_size, ba)
     assert ctx is not None
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     return ctx_buf, ba, ctx, rc
 
 
@@ -184,12 +184,12 @@ class TestBacktrackFix:
             assert rc == 0, f"seed={seed}: {rc} constraints uncompiled"
 
             opts = SolveOpts(seed=seed)
-            result = lib.solver_solve(ctx, ctypes.byref(opts))
+            result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
             assert result == SOLVE_OK, f"seed={seed}: solve returned {result}"
 
-            p0 = lib.solver_get_value(ctx, 0)
-            p1 = lib.solver_get_value(ctx, 1)
-            s01 = lib.solver_get_value(ctx, 2)
+            p0 = lib.dvs_solver_get_value(ctx, 0)
+            p1 = lib.dvs_solver_get_value(ctx, 1)
+            s01 = lib.dvs_solver_get_value(ctx, 2)
 
             assert p0 <= p1, f"seed={seed}: p0={p0} > p1={p1}"
             assert p0 + p1 == 100, f"seed={seed}: p0+p1={p0+p1} != 100"
@@ -222,11 +222,11 @@ class TestBacktrackFix:
         for seed in [42, 1, 999, 0xBEEF]:
             ctx_buf, ba, ctx, rc = _make_ctx(lib, sp)
             opts = SolveOpts(seed=seed)
-            result = lib.solver_solve(ctx, ctypes.byref(opts))
+            result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
             assert result == SOLVE_OK, f"seed={seed}: {result}"
 
-            x = lib.solver_get_value(ctx, 0)
-            y = lib.solver_get_value(ctx, 1)
+            x = lib.dvs_solver_get_value(ctx, 0)
+            y = lib.dvs_solver_get_value(ctx, 1)
             assert y == 20, f"seed={seed}: y={y}"
             assert x <= 20, f"seed={seed}: x={x} > 20"
 
@@ -255,11 +255,11 @@ class TestBacktrackFix:
         for seed in [42, 1, 999]:
             ctx_buf, ba, ctx, rc = _make_ctx(lib, sp)
             opts = SolveOpts(seed=seed)
-            result = lib.solver_solve(ctx, ctypes.byref(opts))
+            result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
             assert result == SOLVE_OK, f"seed={seed}: {result}"
 
-            x = lib.solver_get_value(ctx, 0)
-            y = lib.solver_get_value(ctx, 1)
+            x = lib.dvs_solver_get_value(ctx, 0)
+            y = lib.dvs_solver_get_value(ctx, 1)
             assert y == 80, f"seed={seed}: y={y}"
             assert x >= 80, f"seed={seed}: x={x} < 80"
 
@@ -274,11 +274,11 @@ class TestBacktrackFix:
         assert rc == 0
 
         opts = SolveOpts(seed=42, max_shave_iters=1000)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
 
-        p0 = lib.solver_get_value(ctx, 0)
-        p1 = lib.solver_get_value(ctx, 1)
+        p0 = lib.dvs_solver_get_value(ctx, 0)
+        p1 = lib.dvs_solver_get_value(ctx, 1)
         assert p0 <= p1
         assert p0 + p1 == 100
         assert p0 <= 50, f"p0={p0} should be <= 50 after shaving"
@@ -293,11 +293,11 @@ class TestBacktrackFix:
 
         ctx_buf, ba, ctx, rc = _make_ctx(lib, sp)
         opts = SolveOpts(seed=42, max_conflicts=1, max_restarts=1000)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
 
-        p0 = lib.solver_get_value(ctx, 0)
-        p1 = lib.solver_get_value(ctx, 1)
+        p0 = lib.dvs_solver_get_value(ctx, 0)
+        p1 = lib.dvs_solver_get_value(ctx, 1)
         assert p0 <= p1, f"p0={p0} > p1={p1}"
         assert p0 + p1 == 100, f"p0+p1={p0+p1} != 100"
 
@@ -313,11 +313,11 @@ class TestBacktrackFix:
 
         ctx_buf, ba, ctx, rc = _make_ctx(lib, sp)
         opts = SolveOpts(seed=42)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
 
-        a = lib.solver_get_value(ctx, 0)
-        b = lib.solver_get_value(ctx, 1)
+        a = lib.dvs_solver_get_value(ctx, 0)
+        b = lib.dvs_solver_get_value(ctx, 1)
         assert 0 <= a <= 255
         assert 0 <= b <= 255
 
@@ -336,8 +336,8 @@ class TestBacktrackFix:
 
         ba = lib.dvs_block_alloc_create(None, 1 << 20)
         ctx_buf = (ctypes.c_uint8 * (1 << 20))()
-        ctx = lib.solver_create(ctx_buf, 1 << 20, ba)
-        rc = lib.solver_compile(ctx, sp)
+        ctx = lib.dvs_solver_create(ctx_buf, 1 << 20, ba)
+        rc = lib.dvs_solver_compile(ctx, sp)
 
         if rc == -2:
             # Caught at compile time -- correct
@@ -345,6 +345,6 @@ class TestBacktrackFix:
             return
 
         opts = SolveOpts(seed=42)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_UNSAT, f"Expected UNSAT, got {result}"
         lib.dvs_block_alloc_destroy(ba)

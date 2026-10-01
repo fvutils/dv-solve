@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include "dvs_alloc.h"
+#include "dv_solve.h"  /* dvs_block_alloc_create, dvs_block_alloc_destroy */
 
 /**
  * dvs_block_alloc_t — block-level allocator with a free-list cache.
@@ -16,16 +17,6 @@
  * neither calls malloc directly.
  */
 typedef struct dvs_block_alloc_s dvs_block_alloc_t;
-
-/**
- * Create a new block allocator.
- *
- * @param alloc       Backing allocator (must outlive the block allocator).
- *                    Pass NULL to use dvs_malloc_alloc.
- * @param block_size  Size of every block vended by this allocator.
- * @return  New block allocator, or NULL on allocation failure.
- */
-dvs_block_alloc_t *dvs_block_alloc_create(dvs_alloc_t *alloc, size_t block_size);
 
 /**
  * Obtain a block of `block_size` bytes.
@@ -43,12 +34,6 @@ void *dvs_block_alloc_get(dvs_block_alloc_t *ba);
  * The caller must not use the block after this call.
  */
 void dvs_block_alloc_put(dvs_block_alloc_t *ba, void *block);
-
-/**
- * Destroy the block allocator and release all cached blocks plus the
- * allocator itself back to the backing allocator.
- */
-void dvs_block_alloc_destroy(dvs_block_alloc_t *ba);
 
 /**
  * Return the block size this allocator was created with.

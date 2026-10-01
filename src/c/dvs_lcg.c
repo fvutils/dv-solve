@@ -36,7 +36,7 @@ static inline int _tron(void) {
     return cached;
 }
 
-static const char *_pname(SolveCtx *ctx, uint32_t prop_ref) {
+static const char *_pname(dvs_ctx_t *ctx, uint32_t prop_ref) {
     if (prop_ref == EXPR_NULL) return "<decision>";
     Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref);
     return prop_fire_name(p->fire);
@@ -204,7 +204,7 @@ void vsids_decay(VSIDS *vs) {
     vs->var_inc /= vs->var_decay;
 }
 
-uint32_t vsids_pick(const VSIDS *vs, const SolveCtx *ctx) {
+uint32_t vsids_pick(const VSIDS *vs, const dvs_ctx_t *ctx) {
     uint32_t best = EXPR_NULL;
     double best_act = -1.0;
 
@@ -270,7 +270,7 @@ void lcg_destroy(LCGCtx *lcg) {
  * H=resolution_no_explain, I=resolution_explain_fail. */
 uint64_t lcg_dbg_bail[16];
 
-int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
+int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
                           Literal *out_lits, uint32_t *out_n,
                           uint32_t *out_bt, uint32_t *out_lbd) {
     if (!lcg || !lcg->enabled || !ctx) return -1;
@@ -314,7 +314,7 @@ int lcg_analyze_conflict(LCGCtx *lcg, SolveCtx *ctx,
          * (the bit pattern 2^64-1), which a bare `lo > hi` calls empty — this
          * loop would then pick an unconstrained variable as the conflict var
          * and explain the conflict from the wrong place. Same 2^63 cliff as
-         * B22/B26; mirrors the guard in solver_solve. */
+         * B22/B26; mirrors the guard in dvs_solver_solve. */
         if (var_b_gt(vi, var_lo64(ctx, vi), var_hi64(ctx, vi))) {
             conflict_var = i;
             break;

@@ -98,7 +98,7 @@ typedef struct {
  *
  * R1 metadata: when this value was produced by a symbolic-index store,
  * store_idx_varid holds the solver var_id of the index variable and
- * store_val holds the ExprRef of the written value, so that
+ * store_val holds the dvs_expr_t of the written value, so that
  * select(store(a,i,v),i) can be rewritten to v without an ITE chain.
  * store_idx_varid == UINT32_MAX means no R1 metadata is available. */
 /* Abstract-array node kinds (DV_ARRAY word-level path). See is_abstract. */
@@ -110,9 +110,9 @@ typedef struct {
 typedef struct Smt2ArrayValue {
     Smt2ArraySort sort;
     uint32_t      n_elems;        /* always 1 << sort.addr_width (dense only) */
-    ExprRef      *elems;          /* n_elems entries; width = sort.data_width */
+    dvs_expr_t      *elems;          /* n_elems entries; width = sort.data_width */
     uint32_t      store_idx_varid;/* R1: var_id of symbolic store index, or UINT32_MAX */
-    ExprRef       store_val;      /* R1: ExprRef of store value, or EXPR_NULL */
+    dvs_expr_t       store_val;      /* R1: dvs_expr_t of store value, or EXPR_NULL */
 
     /* Word-level abstract array (DV_ARRAY). When is_abstract=1 this value is a
      * node in a persistent select/store DAG rather than a dense elems[] vector.
@@ -124,8 +124,8 @@ typedef struct Smt2ArrayValue {
     uint8_t       akind;            /* SMT2_ANODE_* */
     struct Smt2ArrayValue *parent;  /* STORE parent / ITE then-branch */
     struct Smt2ArrayValue *else_node; /* ITE else-branch */
-    ExprRef       store_idx_ref;    /* STORE index ExprRef (store_val = value) */
-    ExprRef       cond_ref;         /* ITE condition ExprRef */
+    dvs_expr_t       store_idx_ref;    /* STORE index dvs_expr_t (store_val = value) */
+    dvs_expr_t       cond_ref;         /* ITE condition dvs_expr_t */
 
     /* Sparse mode (is_sparse=1): used when addr_width is too large to expand
      * densely (2^M elements). The array is then materialized lazily as a map
@@ -140,8 +140,8 @@ typedef struct Smt2ArrayValue {
     uint32_t      sparse_cap;
     uint64_t     *sparse_idx;     /* concrete indices, n_sparse entries */
     uint32_t     *sparse_varid;   /* solver var_id of each index's element var.
-                                   * Stored as var_id (not ExprRef) so get-value
-                                   * survives the builder_reset that follows
+                                   * Stored as var_id (not dvs_expr_t) so get-value
+                                   * survives the dvs_builder_reset that follows
                                    * compilation -- like the dense path's
                                    * name->var lookup. */
 } Smt2ArrayValue;
@@ -156,11 +156,11 @@ typedef struct {
 /* One abstract-array read: read_var == select(node, idx). Recorded per symbolic
  * select on an abstract array (DV_ARRAY), plus the intermediate reads that
  * read-over-write pushes down the store chain. idx_varid caches the index when
- * it is a plain variable so distinct ExprRef nodes for the same variable dedup
+ * it is a plain variable so distinct dvs_expr_t nodes for the same variable dedup
  * to one read var. */
 typedef struct Smt2ArrayRead {
     Smt2ArrayValue *node;
-    ExprRef         idx_ref;
+    dvs_expr_t         idx_ref;
     uint32_t        idx_varid;   /* var_id of idx if a plain var, else UINT32_MAX */
     uint32_t        read_varid;
     uint16_t        width;
@@ -170,12 +170,12 @@ typedef struct Smt2ArrayRead {
 /* One abstract array equality (a == b), reified onto boolean var p_varid.
  * Consistency (p -> reads equal at every shared index) + a Skolem extensionality
  * witness (¬p -> read(a,wit) != read(b,wit)) reify p soundly in both polarities.
- * wit_idx_ref is the witness index ExprRef (a fresh addr-width var). */
+ * wit_idx_ref is the witness index dvs_expr_t (a fresh addr-width var). */
 typedef struct Smt2ArrayEq {
     Smt2ArrayValue *a;
     Smt2ArrayValue *b;
     uint32_t        p_varid;
-    ExprRef         wit_idx_ref;
+    dvs_expr_t         wit_idx_ref;
 } Smt2ArrayEq;
 
 /* ------------------------------------------------------------------ */
@@ -220,7 +220,7 @@ typedef struct {
     /* Memoized translation for let-bindings (has_cache == 1).
      * Stored as the three components of TaggedExpr to avoid a circular
      * dependency with the .c-local TaggedExpr typedef. */
-    ExprRef             cached_ref;      /* EXPR_NULL until translated */
+    dvs_expr_t             cached_ref;      /* EXPR_NULL until translated */
     uint16_t            cached_width;
     Smt2ArrayValue     *cached_array;
     int                 cached_leaf_kind;
@@ -239,7 +239,7 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    ExprRef  ref;
+    dvs_expr_t  ref;
     uint16_t width;  /* bit width (up to 65535) */
 } TypedExpr;
 
@@ -248,16 +248,16 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    SolveProblemBuilder *builder;
-    SolveCtx            *ctx;          /* NULL until check-sat */
-    SolveProblem        *problem;      /* finalized; NULL until check-sat */
+    dvs_builder_t *builder;
+    dvs_ctx_t            *ctx;          /* NULL until check-sat */
+    dvs_problem_t        *problem;      /* finalized; NULL until check-sat */
     size_t               problem_size;
 
     /* Retained aux SolveProblems from _flush_aux. The model-validation
      * pass walks these in addition to fe->problem so that user-asserts
      * added incrementally (after the first check-sat) can also be
      * checked. Each entry is freed in smt2_frontend_destroy. */
-    SolveProblem       **aux_problems;
+    dvs_problem_t       **aux_problems;
     uint32_t             n_aux_problems;
     uint32_t             aux_problems_cap;
     /* Names from `(assert (! t :named N))`, in assertion order, for
@@ -275,15 +275,15 @@ typedef struct {
      * Cleared by pop (the builder would still hold retracted assertions) and
      * when the builder outgrows SMT2_RETAIN_MAX_BYTES. */
     uint8_t              cdcl_retained;
-    BuilderMark          aux_mark;
+    dvs_builder_mark_t          aux_mark;
     /* Problem that bb_solver was built from when it is NOT fe->problem (the
      * escalation's full rebuild). Owned; freed together with bb_solver. */
-    SolveProblem        *bb_problem;
+    dvs_problem_t        *bb_problem;
     char               **named;
     uint32_t             n_named;
     uint32_t             named_cap;
     dvs_block_alloc_t   *block_alloc;
-    void                *ctx_buf;      /* raw buffer for SolveCtx */
+    void                *ctx_buf;      /* raw buffer for dvs_ctx_t */
     size_t               ctx_buf_size;
 
     /* Symbol table */
@@ -360,7 +360,7 @@ typedef struct {
     } logic;
 
     /* Result of last check-sat */
-    SolveResult          last_result;
+    dvs_result_t          last_result;
     int                  has_result;   /* 1 after check-sat */
 
     /* Bit-blast solver kept alive across check-sat and get-value when
@@ -417,7 +417,7 @@ typedef struct {
     uint32_t             n_last_assump;
     int                  last_assump_unsat;   /* 1 if last check-sat-assuming was unsat */
 
-    /* Push/pop stack: maps to solver_checkpoint indices */
+    /* Push/pop stack: maps to dvs_solver_checkpoint indices */
     uint32_t             push_stack[32];
     uint32_t             push_n_vars[32];
     uint32_t             push_n_array_vars[32];
@@ -438,7 +438,7 @@ typedef struct {
      *   problem_dirty    -- constraints were added to the builder after
      *                       fe->problem was finalized; it must be rebuilt.
      *   builder_retained -- fe->problem was finalized WITHOUT a following
-     *                       builder_reset, so the builder still holds the FULL
+     *                       dvs_builder_reset, so the builder still holds the FULL
      *                       constraint set and re-finalizing reproduces it.
      *                       Cleared by any path that resets the builder
      *                       (_ensure_compiled, _check_sat_array), after which a

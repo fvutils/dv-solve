@@ -424,7 +424,7 @@ def check_validator(case, env):
         if ctx.solve(seed=1) != SOLVE_OK:
             return None
         target = case.build()
-        n = ctx._lib.solver_validate_model(
+        n = ctx._lib.dvs_solver_validate_model(
             ctx._ctx, ctypes.cast(target, ctypes.c_void_p).value, None)
         exp = case.holds(env)
         if (n == 0) != exp:

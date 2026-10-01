@@ -48,13 +48,13 @@ def _setup(lib: ctypes.CDLL):
                                     ctypes.c_uint8, ctypes.c_uint8,
                                     ctypes.c_int64, ctypes.c_int64]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.dvs_var_lo32.restype  = ctypes.c_int32
     lib.dvs_var_lo32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
@@ -78,8 +78,8 @@ def _setup(lib: ctypes.CDLL):
     lib.ctx_tighten_ub32.restype  = ctypes.c_int
     lib.ctx_tighten_ub32.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                      ctypes.c_int32]
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
     # SolveOpts layout: seed(8) + max_conflicts(4) + max_restarts(4) +
     #                   use_phase_save(1) + _pad(3)
@@ -94,11 +94,11 @@ def _setup(lib: ctypes.CDLL):
 
     lib._SolveOpts = SolveOpts
 
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 # ------------------------------------------------------------------ #
@@ -122,10 +122,10 @@ def _make_ctx(lib, var_specs):
 
     ba  = lib.dvs_block_alloc_create(None, 0)
     assert ba
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
 
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc == 0
 
     return sp_buf, ctx_buf, ba, sp, ctx
@@ -133,15 +133,15 @@ def _make_ctx(lib, var_specs):
 
 def _solve(lib, ctx, seed=0x1234, max_conflicts=0, max_restarts=0,
            use_phase_save=0):
-    """Call solver_solve with given options."""
+    """Call dvs_solver_solve with given options."""
     SolveOpts = lib._SolveOpts
     opts = SolveOpts(seed=seed, max_conflicts=max_conflicts,
                      max_restarts=max_restarts, use_phase_save=use_phase_save)
-    return lib.solver_solve(ctx, ctypes.byref(opts))
+    return lib.dvs_solver_solve(ctx, ctypes.byref(opts))
 
 
 def _val(lib, ctx, var_id):
-    return lib.solver_get_value(ctx, var_id)
+    return lib.dvs_solver_get_value(ctx, var_id)
 
 
 # ------------------------------------------------------------------ #

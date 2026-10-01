@@ -5,10 +5,10 @@
 #include "dvs_trail.h"
 
 /* ------------------------------------------------------------------ */
-/* solver_checkpoint -- save solver state                              */
+/* dvs_solver_checkpoint -- save solver state                              */
 /* ------------------------------------------------------------------ */
 
-int solver_checkpoint(SolveCtx *ctx) {
+int dvs_solver_checkpoint(dvs_ctx_t *ctx) {
     if (ctx->n_checkpoints >= MAX_CHECKPOINTS) return -1;
 
     uint32_t cp = ctx->n_checkpoints++;
@@ -21,9 +21,9 @@ int solver_checkpoint(SolveCtx *ctx) {
     m->trail_top      = ctx->trail_top;
     m->trail_count    = ctx->trail_count;
     /* Phase B.1 step 5 (plumbing slice): SAT-arena top is zero today —
-     * SolveCtx does not hold a dvs_sat handle yet. The future step 6
+     * dvs_ctx_t does not hold a dvs_sat handle yet. The future step 6
      * wiring will set this to `dvs_sat_arena_save_mark(ctx->sat)`. The
-     * matching rewind on solver_restore is deferred to the deep kissat
+     * matching rewind on dvs_solver_restore is deferred to the deep kissat
      * refactor (see dvs_trail.h:LevelMark for the full note). */
     m->sat_arena_top  = 0;
 
@@ -37,17 +37,17 @@ int solver_checkpoint(SolveCtx *ctx) {
 }
 
 /* ------------------------------------------------------------------ */
-/* solver_restore -- restore solver state to checkpoint               */
+/* dvs_solver_restore -- restore solver state to checkpoint               */
 /* ------------------------------------------------------------------ */
 
-void solver_restore(SolveCtx *ctx, uint32_t cp) {
+void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
     if (cp >= ctx->n_checkpoints) return;
 
     CheckpointMark *m = &ctx->checkpoints[cp];
 
     /* trail_backtrack walks ctx->trail_top backward, stopping when it
      * reaches ctx->level_marks[target_level].trail_top. Inside a push
-     * scope, solver_solve seals "level-0 baseline" at line 341 of
+     * scope, dvs_solver_solve seals "level-0 baseline" at line 341 of
      * dvs_search.c by overwriting level_marks[0] to the current trail
      * state (so its restarts/bounds_shave only undo search-time
      * tightenings, not compile-time ones). If the check-sat inside the
@@ -55,7 +55,7 @@ void solver_restore(SolveCtx *ctx, uint32_t cp) {
      * pointing at a *post*-push state — and trail_backtrack would stop
      * there instead of walking all the way back to m->trail_top.
      * Restore the mark from the saved checkpoint values so the backtrack
-     * undoes every trail entry recorded after solver_checkpoint(). */
+     * undoes every trail entry recorded after dvs_solver_checkpoint(). */
     ctx->level_marks[m->decision_level].trail_top   = m->trail_top;
     ctx->level_marks[m->decision_level].trail_count = m->trail_count;
 
@@ -65,8 +65,8 @@ void solver_restore(SolveCtx *ctx, uint32_t cp) {
     /* Remove propagators added after checkpoint. NULL'ing the
      * prop_refs[] slot is enough — watcher chains may still point
      * at the (now-dead) propagator memory, but neither _wake_var nor
-     * solver_propagate iterate prop_refs slots that are NULL.
-     * Marking ENTAILED alone wasn't sufficient: solver_reset()
+     * dvs_solver_propagate iterate prop_refs slots that are NULL.
+     * Marking ENTAILED alone wasn't sufficient: dvs_solver_reset()
      * clears the ENTAILED bit on every slot in prop_refs, which
      * silently re-activated post-checkpoint props after a pop +
      * subsequent check-sat. The new vars at reused IDs would then

@@ -52,7 +52,7 @@ static inline int _bound_beyond_i64(const Variable *v, int64_t b) {
  * Declining a tightening (above) is sound only while something still enforces
  * the relation. For r = a + b nothing else does: once a and b are fixed with a
  * true sum outside int64, every tightening of r is declined and search is free
- * to pick any r -- a model that violates the constraint, reported as SOLVE_OK.
+ * to pick any r -- a model that violates the constraint, reported as DVS_SOLVE_OK.
  * The check below closes that: it compares the operand sum interval against r
  * in exact arithmetic and reports a conflict when they cannot meet. A conflict
  * computed this way is never fabricated, because nothing is rounded.
@@ -114,7 +114,7 @@ static inline int _i64_sub_chk(int64_t a, int64_t b, int64_t *out) {
 
 /** Apply a computed lower bound, or decline if it cannot be trusted.
  *  `ok` is the success flag from the _i64_*_chk that produced `v`. */
-static inline PropResult _tighten_lb_safe(SolveCtx *ctx, uint32_t vid,
+static inline PropResult _tighten_lb_safe(dvs_ctx_t *ctx, uint32_t vid,
                                            int64_t v, int ok) {
     if (!ok) return PROP_OK;
     if (!_bound_in_repr(&ctx->vars[vid], v)) return PROP_OK;
@@ -122,7 +122,7 @@ static inline PropResult _tighten_lb_safe(SolveCtx *ctx, uint32_t vid,
 }
 
 /** Apply a computed upper bound, or decline if it cannot be trusted. */
-static inline PropResult _tighten_ub_safe(SolveCtx *ctx, uint32_t vid,
+static inline PropResult _tighten_ub_safe(dvs_ctx_t *ctx, uint32_t vid,
                                            int64_t v, int ok) {
     if (!ok) return PROP_OK;
     if (!_bound_in_repr(&ctx->vars[vid], v)) return PROP_OK;
@@ -179,7 +179,7 @@ static int sv_fits_signed(int64_t v, uint16_t w) {
 /* ------------------------------------------------------------------ */
 
 /* Register this propagator into the watcher chain for var_id at slot i. */
-static void _register_watcher(SolveCtx *ctx, uint32_t prop_ref,
+static void _register_watcher(dvs_ctx_t *ctx, uint32_t prop_ref,
                                uint32_t var_id, uint32_t slot) {
     PropWatchSect *ws = PROP_WS(
         (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref));
@@ -190,8 +190,8 @@ static void _register_watcher(SolveCtx *ctx, uint32_t prop_ref,
 /* Allocate a propagator block of `size` bytes from the static pool,
    fill the header fields, fill the PropWatchSect, and enqueue it.
    Returns pool offset or EXPR_NULL. */
-static uint32_t _alloc_prop(SolveCtx *ctx,
-                             PropResult (*fire)(Propagator *, SolveCtx *),
+static uint32_t _alloc_prop(dvs_ctx_t *ctx,
+                             PropResult (*fire)(Propagator *, dvs_ctx_t *),
                              uint8_t priority,
                              uint32_t n_watches, const uint32_t *var_ids,
                              uint32_t total_bytes) {
@@ -231,7 +231,7 @@ static uint32_t _alloc_prop(SolveCtx *ctx,
 /*   ws.var_ids[0] = x, ws.var_ids[1] = y                            */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_le_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_le_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
@@ -246,7 +246,7 @@ static PropResult _fire_bounds_le_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_le_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id,
+uint32_t prop_add_bounds_le_32(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id,
                                 uint8_t priority) {
     uint32_t ids[2] = { x_id, y_id };
     return _alloc_prop(ctx, _fire_bounds_le_32, priority, 2, ids,
@@ -257,7 +257,7 @@ uint32_t prop_add_bounds_le_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id,
 /* BoundsLT_32:  x < y                                                */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_lt_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_lt_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
@@ -275,7 +275,7 @@ static PropResult _fire_bounds_lt_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_lt_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id,
+uint32_t prop_add_bounds_lt_32(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id,
                                 uint8_t priority) {
     uint32_t ids[2] = { x_id, y_id };
     return _alloc_prop(ctx, _fire_bounds_lt_32, priority, 2, ids,
@@ -286,7 +286,7 @@ uint32_t prop_add_bounds_lt_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id,
 /* BoundsEQ_32:  x == y                                               */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_eq_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_eq_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
@@ -307,7 +307,7 @@ static PropResult _fire_bounds_eq_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_eq_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id,
+uint32_t prop_add_bounds_eq_32(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id,
                                 uint8_t priority) {
     uint32_t ids[2] = { x_id, y_id };
     return _alloc_prop(ctx, _fire_bounds_eq_32, priority, 2, ids,
@@ -318,7 +318,7 @@ uint32_t prop_add_bounds_eq_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id,
 /* BoundsNE_32:  x != y  (singleton-only propagation)                */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_ne_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_ne_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
@@ -358,7 +358,7 @@ static PropResult _fire_bounds_ne_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_ne_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id,
+uint32_t prop_add_bounds_ne_32(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id,
                                 uint8_t priority) {
     /* Auto-promote when either side is tier-1: the 32-bit fire reads the int32
      * lo/hi fields, which are 0/0 on a tier-1 var -- it then saw `x != 0` over
@@ -377,7 +377,7 @@ uint32_t prop_add_bounds_ne_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id,
 /*   var_ids[0]=r, var_ids[1]=a, var_ids[2]=b                        */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_add_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_add_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -426,7 +426,7 @@ static PropResult _fire_bounds_add_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_add_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
+uint32_t prop_add_bounds_add_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                   uint32_t b_id, uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
     return _alloc_prop(ctx, _fire_bounds_add_32, priority, 3, ids,
@@ -437,7 +437,7 @@ uint32_t prop_add_bounds_add_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
 /* BoundsMul_32:  r = a * b  (conservative: only when one is fixed)  */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_mul_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_mul_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -482,7 +482,7 @@ static PropResult _fire_bounds_mul_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_mul_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
+uint32_t prop_add_bounds_mul_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                   uint32_t b_id, uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
     return _alloc_prop(ctx, _fire_bounds_mul_32, priority, 3, ids,
@@ -493,7 +493,7 @@ uint32_t prop_add_bounds_mul_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
 /* BoundsDiv_32:  r = a / b  (conservative, b > 0)                   */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_div_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_div_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -568,7 +568,7 @@ static PropResult _fire_bounds_div_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_div_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
+uint32_t prop_add_bounds_div_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                   uint32_t b_id, uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
     return _alloc_prop(ctx, _fire_bounds_div_32, priority, 3, ids,
@@ -579,7 +579,7 @@ uint32_t prop_add_bounds_div_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
 /* BoundsMod_32:  r = a % b  (conservative, b > 0)                   */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_mod_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_mod_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -671,7 +671,7 @@ static PropResult _fire_bounds_mod_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_mod_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
+uint32_t prop_add_bounds_mod_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                   uint32_t b_id, uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
     return _alloc_prop(ctx, _fire_bounds_mod_32, priority, 3, ids,
@@ -682,7 +682,7 @@ uint32_t prop_add_bounds_mod_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
 /* UnaryNeg_32:  r = -a                                               */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_unary_neg_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_unary_neg_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -699,7 +699,7 @@ static PropResult _fire_unary_neg_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_unary_neg_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
+uint32_t prop_add_unary_neg_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                 uint8_t priority) {
     uint32_t ids[2] = { r_id, a_id };
     return _alloc_prop(ctx, _fire_unary_neg_32, priority, 2, ids,
@@ -710,7 +710,7 @@ uint32_t prop_add_unary_neg_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
 /* InSet_32:  x ∈ {elems[0], …}                                      */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_in_set_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_in_set_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws    = PROP_WS(self);
     uint32_t       xid   = ws->var_ids[0];
     Variable      *x     = &ctx->vars[xid];
@@ -734,7 +734,7 @@ static PropResult _fire_in_set_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_in_set_32(SolveCtx *ctx, uint32_t x_id,
+uint32_t prop_add_in_set_32(dvs_ctx_t *ctx, uint32_t x_id,
                               uint32_t n_elems, const int32_t *elems,
                               uint8_t priority) {
     uint32_t ids[1] = { x_id };
@@ -754,7 +754,7 @@ uint32_t prop_add_in_set_32(SolveCtx *ctx, uint32_t x_id,
 /*   var_ids[0]=guard, var_ids[1]=var                                 */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_implication_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_implication_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect    *ws    = PROP_WS(self);
     Implication_32_t *iself = (Implication_32_t *)self;
     uint32_t          gid   = ws->var_ids[0];
@@ -779,7 +779,7 @@ static PropResult _fire_implication_32(Propagator *self, SolveCtx *ctx) {
 /* Tier-1 (int64) sibling of _fire_implication_32: guard → (var ≤/≥ bound), using
  * the edge-guarded 64-bit tighten so it is sound on fields whose representable max
  * exceeds INT32_MAX (unsigned width 32). */
-static PropResult _fire_implication_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_implication_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect    *ws    = PROP_WS(self);
     Implication_64_t *iself = (Implication_64_t *)self;
     uint32_t          gid   = ws->var_ids[0];
@@ -794,7 +794,7 @@ static PropResult _fire_implication_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_implication_64(SolveCtx *ctx,
+uint32_t prop_add_implication_64(dvs_ctx_t *ctx,
                                    uint32_t guard_id, uint32_t var_id,
                                    int64_t bound, uint8_t is_ub,
                                    uint8_t priority) {
@@ -809,7 +809,7 @@ uint32_t prop_add_implication_64(SolveCtx *ctx,
     return ref;
 }
 
-uint32_t prop_add_implication_32(SolveCtx *ctx,
+uint32_t prop_add_implication_32(dvs_ctx_t *ctx,
                                    uint32_t guard_id, uint32_t var_id,
                                    int32_t bound, uint8_t is_ub,
                                    uint8_t priority) {
@@ -833,7 +833,7 @@ uint32_t prop_add_implication_32(SolveCtx *ctx,
 /* Reification_32:  guard ↔ (x ≤ y)                                  */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_reification_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_reification_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       gid = ws->var_ids[0];
     uint32_t       xid = ws->var_ids[1];
@@ -888,7 +888,7 @@ static PropResult _fire_reification_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_reification_32(SolveCtx *ctx, uint32_t guard_id,
+uint32_t prop_add_reification_32(dvs_ctx_t *ctx, uint32_t guard_id,
                                    uint32_t x_id, uint32_t y_id,
                                    uint8_t priority) {
     /* Auto-promote to the 64-bit propagator when either compared operand is
@@ -907,7 +907,7 @@ uint32_t prop_add_reification_32(SolveCtx *ctx, uint32_t guard_id,
 /* ReificationEq_32: guard <-> (x == y)                                */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_reification_eq_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_reification_eq_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       gid = ws->var_ids[0];
     uint32_t       xid = ws->var_ids[1];
@@ -969,7 +969,7 @@ static PropResult _fire_reification_eq_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_reification_eq_32(SolveCtx *ctx, uint32_t guard_id,
+uint32_t prop_add_reification_eq_32(dvs_ctx_t *ctx, uint32_t guard_id,
                                      uint32_t x_id, uint32_t y_id,
                                      uint8_t priority) {
     /* Auto-promote to the 64-bit propagator when either compared operand is
@@ -1054,7 +1054,7 @@ static uint64_t _slice_max_le(uint64_t alo, uint64_t ahi,
  * (tests/unit/test_search_completeness.py). It has no effect on results — a
  * correct solver returns the same SAT/UNSAT either way — only on how much work
  * the search does. Not for production use. */
-static PropResult _bit_slice_backward(SolveCtx *ctx, uint32_t aid,
+static PropResult _bit_slice_backward(dvs_ctx_t *ctx, uint32_t aid,
                                       uint32_t lo, uint32_t hi, uint64_t v,
                                       int64_t alo, int64_t ahi) {
     static int disabled = -1;
@@ -1087,7 +1087,7 @@ static PropResult _bit_slice_backward(SolveCtx *ctx, uint32_t aid,
     return PROP_OK;
 }
 
-static PropResult _fire_bit_slice_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bit_slice_32(Propagator *self, dvs_ctx_t *ctx) {
     BitSlice_32_t *bself = (BitSlice_32_t *)self;
     PropWatchSect *ws    = PROP_WS(self);
     uint32_t       rid   = ws->var_ids[0];
@@ -1127,7 +1127,7 @@ static PropResult _fire_bit_slice_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bit_slice_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
+uint32_t prop_add_bit_slice_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                 uint8_t hi_bit, uint8_t lo_bit,
                                 uint8_t priority) {
     uint32_t ids[2] = { r_id, a_id };
@@ -1145,7 +1145,7 @@ uint32_t prop_add_bit_slice_32(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
 /* _64 variants                                                       */
 /* ================================================================== */
 
-static PropResult _fire_bounds_le_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_le_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
@@ -1156,7 +1156,7 @@ static PropResult _fire_bounds_le_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 /* Explain: x <= y. We tighten x.hi from y.hi and y.lo from x.lo. */
-static int _explain_bounds_le_64(Propagator *self, SolveCtx *ctx,
+static int _explain_bounds_le_64(Propagator *self, dvs_ctx_t *ctx,
                                   uint32_t var_id, uint8_t is_lb,
                                   int64_t new_bound, Explanation *out) {
     (void)ctx;
@@ -1181,7 +1181,7 @@ static int _explain_bounds_le_64(Propagator *self, SolveCtx *ctx,
     }
     return -1;
 }
-uint32_t prop_add_bounds_le_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority) {
+uint32_t prop_add_bounds_le_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority) {
     uint32_t ids[2] = { x_id, y_id };
     uint32_t ref = _alloc_prop(ctx, _fire_bounds_le_64, priority, 2, ids, sizeof(BoundsLE_64_t));
     if (ref != EXPR_NULL) {
@@ -1191,7 +1191,7 @@ uint32_t prop_add_bounds_le_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint
     return ref;
 }
 
-static PropResult _fire_bounds_lt_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_lt_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
@@ -1219,7 +1219,7 @@ static PropResult _fire_bounds_lt_64(Propagator *self, SolveCtx *ctx) {
 }
 /* Explain: x < y. x.hi = y.hi - 1 ⇒ (y >= new_bound+1).
  *          y.lo = x.lo + 1 ⇒ (x <= new_bound-1). */
-static int _explain_bounds_lt_64(Propagator *self, SolveCtx *ctx,
+static int _explain_bounds_lt_64(Propagator *self, dvs_ctx_t *ctx,
                                   uint32_t var_id, uint8_t is_lb,
                                   int64_t new_bound, Explanation *out) {
     (void)ctx;
@@ -1244,7 +1244,7 @@ static int _explain_bounds_lt_64(Propagator *self, SolveCtx *ctx,
     }
     return -1;
 }
-uint32_t prop_add_bounds_lt_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority) {
+uint32_t prop_add_bounds_lt_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority) {
     uint32_t ids[2] = { x_id, y_id };
     uint32_t ref = _alloc_prop(ctx, _fire_bounds_lt_64, priority, 2, ids, sizeof(BoundsLT_64_t));
     if (ref != EXPR_NULL) {
@@ -1254,7 +1254,7 @@ uint32_t prop_add_bounds_lt_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint
     return ref;
 }
 
-static PropResult _fire_bounds_eq_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_eq_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
@@ -1275,7 +1275,7 @@ static PropResult _fire_bounds_eq_64(Propagator *self, SolveCtx *ctx) {
 }
 /* Explain: x == y. Whichever bound was tightened on one side came
  * from the same-direction bound on the other side. */
-static int _explain_bounds_eq_64(Propagator *self, SolveCtx *ctx,
+static int _explain_bounds_eq_64(Propagator *self, dvs_ctx_t *ctx,
                                   uint32_t var_id, uint8_t is_lb,
                                   int64_t new_bound, Explanation *out) {
     (void)ctx;
@@ -1291,7 +1291,7 @@ static int _explain_bounds_eq_64(Propagator *self, SolveCtx *ctx,
     out->lits[0]._pad[0] = out->lits[0]._pad[1] = out->lits[0]._pad[2] = 0;
     return 0;
 }
-uint32_t prop_add_bounds_eq_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority) {
+uint32_t prop_add_bounds_eq_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority) {
     uint32_t ids[2] = { x_id, y_id };
     uint32_t ref = _alloc_prop(ctx, _fire_bounds_eq_64, priority, 2, ids, sizeof(BoundsEQ_64_t));
     if (ref != EXPR_NULL) {
@@ -1301,7 +1301,7 @@ uint32_t prop_add_bounds_eq_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint
     return ref;
 }
 
-static PropResult _fire_bounds_ne_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_ne_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
@@ -1326,12 +1326,12 @@ static PropResult _fire_bounds_ne_64(Propagator *self, SolveCtx *ctx) {
     }
     return PROP_OK;
 }
-uint32_t prop_add_bounds_ne_64(SolveCtx *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority) {
+uint32_t prop_add_bounds_ne_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority) {
     uint32_t ids[2] = { x_id, y_id };
     return _alloc_prop(ctx, _fire_bounds_ne_64, priority, 2, ids, sizeof(BoundsNE_64_t));
 }
 
-static PropResult _fire_bounds_add_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_add_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -1389,7 +1389,7 @@ static PropResult _fire_bounds_add_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 /* Explain: r = a + b. Two-literal explanations using current bounds. */
-static int _explain_bounds_add_64(Propagator *self, SolveCtx *ctx,
+static int _explain_bounds_add_64(Propagator *self, dvs_ctx_t *ctx,
                                    uint32_t var_id, uint8_t is_lb,
                                    int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
@@ -1449,7 +1449,7 @@ static int _explain_bounds_add_64(Propagator *self, SolveCtx *ctx,
     }
     return -1;
 }
-uint32_t prop_add_bounds_add_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority) {
+uint32_t prop_add_bounds_add_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
     uint32_t ref = _alloc_prop(ctx, _fire_bounds_add_64, priority, 3, ids, sizeof(BoundsAdd_64_t));
     if (ref != EXPR_NULL) {
@@ -1463,7 +1463,7 @@ uint32_t prop_add_bounds_add_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uin
 /* BvAddConst_64:  r = (x + c) mod 2^width  (BV modular add with const) */
 /*   var_ids[0]=r, var_ids[1]=x                                       */
 /* ------------------------------------------------------------------ */
-static PropResult _fire_bvadd_const_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bvadd_const_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       xid = ws->var_ids[1];
@@ -1548,7 +1548,7 @@ static PropResult _fire_bvadd_const_64(Propagator *self, SolveCtx *ctx) {
  * full current domain of the other variable (since wrap can split the
  * feasible region into two pieces). Conservative sound explanation:
  * both LB and UB of the "other" variable. */
-static int _explain_bvadd_const_64(Propagator *self, SolveCtx *ctx,
+static int _explain_bvadd_const_64(Propagator *self, dvs_ctx_t *ctx,
                                     uint32_t var_id, uint8_t is_lb,
                                     int64_t new_bound, Explanation *out) {
     (void)is_lb; (void)new_bound;
@@ -1567,7 +1567,7 @@ static int _explain_bvadd_const_64(Propagator *self, SolveCtx *ctx,
     return 0;
 }
 
-uint32_t prop_add_bvadd_const_64(SolveCtx *ctx, uint32_t r_id, uint32_t x_id,
+uint32_t prop_add_bvadd_const_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t x_id,
                                   uint64_t c, uint8_t width, uint8_t priority) {
     /* Reduce c mod 2^width */
     if (width < 64) c &= ((uint64_t)1 << width) - 1;
@@ -1624,7 +1624,7 @@ static inline int _modiv_single(ModIv x) { return !x.full && x.span == 0; }
  * domain is contiguous in the var's own order, and `hi - lo` computed in
  * uint64 is its span for a signed var and for an unsigned one (whose 64-bit
  * bounds are bit patterns ordered unsigned) alike. */
-static ModIv _var_modiv(SolveCtx *ctx, uint32_t id, uint8_t w) {
+static ModIv _var_modiv(dvs_ctx_t *ctx, uint32_t id, uint8_t w) {
     uint64_t mask = _bv_mask(w);
     int64_t lo = var_lo64(ctx, &ctx->vars[id]);
     int64_t hi = var_hi64(ctx, &ctx->vars[id]);
@@ -1646,7 +1646,7 @@ static ModIv _var_modiv(SolveCtx *ctx, uint32_t id, uint8_t w) {
  * [M - half, M - 1] at the top (value = residue - M). We intersect a
  * non-wrapping `iv` with each block and tighten the var to the value-space
  * hull of what is left (a sound superset); nothing left is a conflict. */
-static PropResult _tighten_to_modiv(SolveCtx *ctx, uint32_t id,
+static PropResult _tighten_to_modiv(dvs_ctx_t *ctx, uint32_t id,
                                     ModIv iv, uint8_t w) {
     if (iv.full) return PROP_OK;               /* nothing to learn */
     uint64_t mask = _bv_mask(w);
@@ -1845,7 +1845,7 @@ static uint64_t _egcd(uint64_t a, uint64_t b, int64_t *x, int64_t *y) {
  * the forward rule still decides a fully-fixed product, which keeps the
  * search complete. */
 #define BV_MUL_BACK_MAX_SOLS 4096u
-static PropResult _bv_mul_back_singleton(SolveCtx *ctx, uint32_t aid,
+static PropResult _bv_mul_back_singleton(dvs_ctx_t *ctx, uint32_t aid,
                                          uint64_t k, ModIv R, uint8_t w) {
     if (!_modiv_single(R)) return PROP_OK;   /* only when r is fixed */
     if (w >= 64) return PROP_OK;
@@ -1929,7 +1929,7 @@ static int _shift_range(ModIv B, uint8_t w, uint64_t *s0, uint64_t *s1) {
  * a 16-bit one of an 8-bit shift) aliases: 16 is residue 0 mod 16 but shifts
  * everything out. Any amount >= w acts the same, so values are clamped to w,
  * which keeps the range exact. */
-static int _shift_amount_range(SolveCtx *ctx, uint32_t bid, ModIv B, uint8_t w,
+static int _shift_amount_range(dvs_ctx_t *ctx, uint32_t bid, ModIv B, uint8_t w,
                                uint64_t *s0, uint64_t *s1) {
     const Variable *bv = &ctx->vars[bid];
     if (bv->width <= w) return _shift_range(B, w, s0, s1);
@@ -1943,7 +1943,7 @@ static int _shift_amount_range(SolveCtx *ctx, uint32_t bid, ModIv B, uint8_t w,
     return 1;
 }
 
-static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
+static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -1957,7 +1957,7 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
     ModIv B = _var_modiv(ctx, bid, w);
     PropResult res;
 
-    if (op == BIN_ADD) {
+    if (op == DVS_BIN_ADD) {
         ModIv R = _modiv_add(A, B, w);
         if ((res = _tighten_to_modiv(ctx, rid, R, w)) != PROP_OK) return res;
         /* Backward: a = r - b, b = r - a. */
@@ -1967,7 +1967,7 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
         ModIv Ac = _var_modiv(ctx, aid, w);
         ModIv Bnew = _modiv_add(Rc, _modiv_neg(Ac, w), w);
         if ((res = _tighten_to_modiv(ctx, bid, Bnew, w)) != PROP_OK) return res;
-    } else if (op == BIN_SUB) {
+    } else if (op == DVS_BIN_SUB) {
         ModIv R = _modiv_add(A, _modiv_neg(B, w), w);
         if ((res = _tighten_to_modiv(ctx, rid, R, w)) != PROP_OK) return res;
         /* Backward: a = r + b, b = a - r. */
@@ -1977,7 +1977,7 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
         ModIv Ac = _var_modiv(ctx, aid, w);
         ModIv Bnew = _modiv_add(Ac, _modiv_neg(Rc, w), w);
         if ((res = _tighten_to_modiv(ctx, bid, Bnew, w)) != PROP_OK) return res;
-    } else if (op == BIN_MUL) {
+    } else if (op == DVS_BIN_MUL) {
         ModIv R = _modiv_mul(A, B, w);
         if ((res = _tighten_to_modiv(ctx, rid, R, w)) != PROP_OK) return res;
         /* Backward: when one operand is a singleton constant, derive the
@@ -1995,7 +1995,7 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
         if (_modiv_single(Rc) && _modiv_single(Ac) && _modiv_single(Bc) &&
             ((Ac.start * Bc.start) & mask) != Rc.start)
             return PROP_CONFLICT;
-    } else if (op == BIN_LSHIFT) {
+    } else if (op == DVS_BIN_LSHIFT) {
         uint64_t s0, s1;
         if (_shift_amount_range(ctx, bid, B, w, &s0, &s1)) {
             ModIv R = _modiv_shl(A, s0, s1, w);
@@ -2054,15 +2054,15 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
     return PROP_OK;
 }
 
-static PropResult _fire_bvadd_64(Propagator *self, SolveCtx *ctx) { return _fire_bvbin_64(self, ctx, BIN_ADD); }
-static PropResult _fire_bvsub_64(Propagator *self, SolveCtx *ctx) { return _fire_bvbin_64(self, ctx, BIN_SUB); }
-static PropResult _fire_bvmul_64(Propagator *self, SolveCtx *ctx) { return _fire_bvbin_64(self, ctx, BIN_MUL); }
-static PropResult _fire_bvshl_64(Propagator *self, SolveCtx *ctx) { return _fire_bvbin_64(self, ctx, BIN_LSHIFT); }
+static PropResult _fire_bvadd_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64(self, ctx, DVS_BIN_ADD); }
+static PropResult _fire_bvsub_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64(self, ctx, DVS_BIN_SUB); }
+static PropResult _fire_bvmul_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64(self, ctx, DVS_BIN_MUL); }
+static PropResult _fire_bvshl_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64(self, ctx, DVS_BIN_LSHIFT); }
 
 /* Conservative sound explanation: the modular tightening of any one var
  * depends on the full current domains of the other two vars; cite both
  * bounds of each other variable. */
-static int _explain_bvbin_64(Propagator *self, SolveCtx *ctx,
+static int _explain_bvbin_64(Propagator *self, dvs_ctx_t *ctx,
                              uint32_t var_id, uint8_t is_lb,
                              int64_t new_bound, Explanation *out) {
     (void)is_lb; (void)new_bound;
@@ -2084,9 +2084,9 @@ static int _explain_bvbin_64(Propagator *self, SolveCtx *ctx,
     return 0;
 }
 
-static uint32_t _prop_add_bvbin_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
+static uint32_t _prop_add_bvbin_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                    uint32_t b_id, uint8_t width, uint8_t priority,
-                                   PropResult (*fire)(Propagator *, SolveCtx *)) {
+                                   PropResult (*fire)(Propagator *, dvs_ctx_t *)) {
     uint32_t ids[3] = { r_id, a_id, b_id };
     uint32_t ref = _alloc_prop(ctx, fire, priority, 3, ids, sizeof(BvBin_64_t));
     if (ref == EXPR_NULL) return ref;
@@ -2097,21 +2097,21 @@ static uint32_t _prop_add_bvbin_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
     return ref;
 }
 
-uint32_t prop_add_bvadd_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
+uint32_t prop_add_bvadd_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
     return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvadd_64);
 }
-uint32_t prop_add_bvsub_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
+uint32_t prop_add_bvsub_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
     return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvsub_64);
 }
-uint32_t prop_add_bvmul_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
+uint32_t prop_add_bvmul_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
     return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvmul_64);
 }
-uint32_t prop_add_bvshl_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
+uint32_t prop_add_bvshl_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
     return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvshl_64);
 }
 
 /* Stubs for Mul/Div/Mod _64 (conservative: no propagation) */
-static PropResult _fire_noop(Propagator *self, SolveCtx *ctx) { (void)self;(void)ctx; return PROP_OK; }
+static PropResult _fire_noop(Propagator *self, dvs_ctx_t *ctx) { (void)self;(void)ctx; return PROP_OK; }
 
 /* ------------------------------------------------------------------ */
 /* BoundsMul_64:  r = a * b  (singleton specialisation + range approx) */
@@ -2134,7 +2134,7 @@ static int _mul64_overflow(int64_t a, int64_t b, int64_t *out) {
 #endif
 }
 
-static PropResult _fire_bounds_mul_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_mul_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -2213,7 +2213,7 @@ static PropResult _fire_bounds_mul_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_mul_64(SolveCtx *c, uint32_t r, uint32_t a, uint32_t b, uint8_t p) {
+uint32_t prop_add_bounds_mul_64(dvs_ctx_t *c, uint32_t r, uint32_t a, uint32_t b, uint8_t p) {
     uint32_t ids[3]={r,a,b};
     return _alloc_prop(c, _fire_bounds_mul_64, p, 3, ids, sizeof(BoundsMul_64_t));
 }
@@ -2222,7 +2222,7 @@ uint32_t prop_add_bounds_mul_64(SolveCtx *c, uint32_t r, uint32_t a, uint32_t b,
 /* BoundsDiv_64:  r = a / b  (conservative, singleton b > 0)          */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_div_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_div_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -2307,7 +2307,7 @@ static PropResult _fire_bounds_div_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_div_64(SolveCtx *c, uint32_t r, uint32_t a, uint32_t b, uint8_t p) {
+uint32_t prop_add_bounds_div_64(dvs_ctx_t *c, uint32_t r, uint32_t a, uint32_t b, uint8_t p) {
     uint32_t ids[3]={r,a,b};
     return _alloc_prop(c, _fire_bounds_div_64, p, 3, ids, sizeof(BoundsDiv_64_t));
 }
@@ -2316,7 +2316,7 @@ uint32_t prop_add_bounds_div_64(SolveCtx *c, uint32_t r, uint32_t a, uint32_t b,
 /* BoundsMod_64:  r = a % b  (tighten r range from b)                */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_mod_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_mod_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -2413,12 +2413,12 @@ static PropResult _fire_bounds_mod_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_mod_64(SolveCtx *c, uint32_t r, uint32_t a, uint32_t b, uint8_t p) {
+uint32_t prop_add_bounds_mod_64(dvs_ctx_t *c, uint32_t r, uint32_t a, uint32_t b, uint8_t p) {
     uint32_t ids[3]={r,a,b};
     return _alloc_prop(c, _fire_bounds_mod_64, p, 3, ids, sizeof(BoundsMod_64_t));
 }
 
-static PropResult _fire_unary_neg_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_unary_neg_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -2430,7 +2430,7 @@ static PropResult _fire_unary_neg_64(Propagator *self, SolveCtx *ctx) {
     if ((r = ctx_tighten_ub64(ctx, aid, -var_lo64(ctx,&ctx->vars[rid]))) != PROP_OK) return r;
     return PROP_OK;
 }
-uint32_t prop_add_unary_neg_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint8_t priority) {
+uint32_t prop_add_unary_neg_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint8_t priority) {
     uint32_t ids[2] = { r_id, a_id };
     return _alloc_prop(ctx, _fire_unary_neg_64, priority, 2, ids, sizeof(UnaryNeg_64_t));
 }
@@ -2441,7 +2441,7 @@ uint32_t prop_add_unary_neg_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id, uint
 /*   var_ids[0]=r, var_ids[1]=cond, var_ids[2]=a, var_ids[3]=b       */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_ite_value_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_ite_value_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws   = PROP_WS(self);
     uint32_t       rid  = ws->var_ids[0];
     uint32_t       cid  = ws->var_ids[1];
@@ -2531,7 +2531,7 @@ static PropResult _fire_ite_value_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_ite_value_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_ite_value_64(dvs_ctx_t *ctx, uint32_t r_id,
                                 uint32_t cond_id, uint32_t a_id,
                                 uint32_t b_id, uint8_t priority) {
     uint32_t ids[4] = { r_id, cond_id, a_id, b_id };
@@ -2539,7 +2539,7 @@ uint32_t prop_add_ite_value_64(SolveCtx *ctx, uint32_t r_id,
                        sizeof(ITEValue_64_t));
 }
 
-static PropResult _fire_in_set_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_in_set_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws    = PROP_WS(self);
     uint32_t       xid   = ws->var_ids[0];
     InSet_64_t    *iself = (InSet_64_t *)self;
@@ -2561,7 +2561,7 @@ static PropResult _fire_in_set_64(Propagator *self, SolveCtx *ctx) {
     if ((r = ctx_tighten_ub64(ctx, xid, new_hi)) != PROP_OK) return r;
     return PROP_OK;
 }
-uint32_t prop_add_in_set_64(SolveCtx *ctx, uint32_t x_id,
+uint32_t prop_add_in_set_64(dvs_ctx_t *ctx, uint32_t x_id,
                               uint32_t n_elems, const int64_t *elems,
                               uint8_t priority) {
     uint32_t ids[1] = { x_id };
@@ -2582,7 +2582,7 @@ uint32_t prop_add_in_set_64(SolveCtx *ctx, uint32_t x_id,
  * values is rejected only once they pin to a singleton, while the paired
  * add_dist keeps draws inside the ranges. Sign-aware (unsigned width-64 safe)
  * via the var_b_* comparators. */
-static PropResult _fire_in_ranges_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_in_ranges_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect  *ws    = PROP_WS(self);
     uint32_t        xid   = ws->var_ids[0];
     InRanges_64_t  *iself = (InRanges_64_t *)self;
@@ -2609,7 +2609,7 @@ static PropResult _fire_in_ranges_64(Propagator *self, SolveCtx *ctx) {
     if ((r = ctx_tighten_ub64(ctx, xid, new_hi)) != PROP_OK) return r;
     return PROP_OK;
 }
-uint32_t prop_add_in_ranges_64(SolveCtx *ctx, uint32_t x_id,
+uint32_t prop_add_in_ranges_64(dvs_ctx_t *ctx, uint32_t x_id,
                                 uint32_t n_ranges, const int64_t *los,
                                 const int64_t *his, uint8_t priority) {
     uint32_t ids[1] = { x_id };
@@ -2630,7 +2630,7 @@ uint32_t prop_add_in_ranges_64(SolveCtx *ctx, uint32_t x_id,
  * _fire_reification_32: reads bounds via var_lo64/var_hi64 (which resolve tier-1
  * WideBounds64) and tightens via the edge-guarded ctx_tighten_*64, so it is sound
  * for fields whose representable max exceeds INT32_MAX (e.g. unsigned width 32). */
-static PropResult _fire_reification_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_reification_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       gid = ws->var_ids[0];
     uint32_t       xid = ws->var_ids[1];
@@ -2694,7 +2694,7 @@ static PropResult _fire_reification_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_reification_64(SolveCtx *ctx, uint32_t guard_id,
+uint32_t prop_add_reification_64(dvs_ctx_t *ctx, uint32_t guard_id,
                                    uint32_t x_id, uint32_t y_id,
                                    uint8_t priority) {
     uint32_t ids[3] = { guard_id, x_id, y_id };
@@ -2705,7 +2705,7 @@ uint32_t prop_add_reification_64(SolveCtx *ctx, uint32_t guard_id,
 /* 64-bit (tier-1) reification of `guard <-> (x == y)`. Sign-aware sibling of
  * _fire_reification_eq_32; the guard=1 intersection mirrors _fire_bounds_eq_64 and
  * the guard=0 exclusion mirrors _fire_bounds_ne_64. */
-static PropResult _fire_reification_eq_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_reification_eq_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       gid = ws->var_ids[0];
     uint32_t       xid = ws->var_ids[1];
@@ -2757,7 +2757,7 @@ static PropResult _fire_reification_eq_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_reification_eq_64(SolveCtx *ctx, uint32_t guard_id,
+uint32_t prop_add_reification_eq_64(dvs_ctx_t *ctx, uint32_t guard_id,
                                      uint32_t x_id, uint32_t y_id,
                                      uint8_t priority) {
     uint32_t ids[3] = { guard_id, x_id, y_id };
@@ -2765,7 +2765,7 @@ uint32_t prop_add_reification_eq_64(SolveCtx *ctx, uint32_t guard_id,
                        sizeof(ReificationEq_64_t));
 }
 
-static PropResult _fire_bit_slice_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bit_slice_64(Propagator *self, dvs_ctx_t *ctx) {
     BitSlice_64_t *bself = (BitSlice_64_t *)self;
     PropWatchSect *ws    = PROP_WS(self);
     uint32_t       rid   = ws->var_ids[0];
@@ -2799,7 +2799,7 @@ static PropResult _fire_bit_slice_64(Propagator *self, SolveCtx *ctx) {
     }
     return PROP_OK;
 }
-uint32_t prop_add_bit_slice_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
+uint32_t prop_add_bit_slice_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                 uint8_t hi_bit, uint8_t lo_bit, uint8_t priority) {
     uint32_t ids[2] = { r_id, a_id };
     uint32_t ref = _alloc_prop(ctx, _fire_bit_slice_64, priority, 2, ids, sizeof(BitSlice_64_t));
@@ -2814,7 +2814,7 @@ uint32_t prop_add_bit_slice_64(SolveCtx *ctx, uint32_t r_id, uint32_t a_id,
 /* BoundsBAND_64:  r = a & b                                          */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_band_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_band_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -2861,7 +2861,7 @@ static PropResult _fire_bounds_band_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_band_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_band_64(dvs_ctx_t *ctx, uint32_t r_id,
                                   uint32_t a_id, uint32_t b_id,
                                   uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
@@ -2873,7 +2873,7 @@ uint32_t prop_add_bounds_band_64(SolveCtx *ctx, uint32_t r_id,
 /* BoundsBOR_64:  r = a | b                                           */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_bor_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_bor_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -2915,7 +2915,7 @@ static PropResult _fire_bounds_bor_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_bor_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_bor_64(dvs_ctx_t *ctx, uint32_t r_id,
                                  uint32_t a_id, uint32_t b_id,
                                  uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
@@ -2927,7 +2927,7 @@ uint32_t prop_add_bounds_bor_64(SolveCtx *ctx, uint32_t r_id,
 /* BoundsBXOR_64:  r = a ^ b                                         */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_bxor_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_bxor_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -3009,7 +3009,7 @@ static PropResult _fire_bounds_bxor_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_bxor_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_bxor_64(dvs_ctx_t *ctx, uint32_t r_id,
                                   uint32_t a_id, uint32_t b_id,
                                   uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
@@ -3021,7 +3021,7 @@ uint32_t prop_add_bounds_bxor_64(SolveCtx *ctx, uint32_t r_id,
 /* BoundsBNOT_64:  r = ~a                                            */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_bnot_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_bnot_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -3077,7 +3077,7 @@ static PropResult _fire_bounds_bnot_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_bnot_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_bnot_64(dvs_ctx_t *ctx, uint32_t r_id,
                                   uint32_t a_id, uint8_t priority) {
     uint32_t ids[2] = { r_id, a_id };
     return _alloc_prop(ctx, _fire_bounds_bnot_64, priority, 2, ids,
@@ -3089,7 +3089,7 @@ uint32_t prop_add_bounds_bnot_64(SolveCtx *ctx, uint32_t r_id,
 /* BoundsSHL_64:  r = a << b                                          */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_shl_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_shl_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -3136,7 +3136,7 @@ static PropResult _fire_bounds_shl_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_shl_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_shl_64(dvs_ctx_t *ctx, uint32_t r_id,
                                  uint32_t a_id, uint32_t b_id,
                                  uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
@@ -3175,7 +3175,7 @@ static int64_t _shl_checked(int64_t v, int64_t s, int *ok) {
     return r;
 }
 
-static PropResult _fire_bounds_lshr_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_lshr_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -3275,7 +3275,7 @@ static PropResult _fire_bounds_lshr_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_lshr_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_lshr_64(dvs_ctx_t *ctx, uint32_t r_id,
                                   uint32_t a_id, uint32_t b_id,
                                   uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
@@ -3290,7 +3290,7 @@ uint32_t prop_add_bounds_lshr_64(SolveCtx *ctx, uint32_t r_id,
 /*   lo_width = bit width of lo operand                               */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_concat_64(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_bounds_concat_64(Propagator *self, dvs_ctx_t *ctx) {
     BoundsConcat_64_t *cself = (BoundsConcat_64_t *)self;
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
@@ -3357,7 +3357,7 @@ static PropResult _fire_bounds_concat_64(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_bounds_concat_64(SolveCtx *ctx, uint32_t r_id,
+uint32_t prop_add_bounds_concat_64(dvs_ctx_t *ctx, uint32_t r_id,
                                     uint32_t hi_id, uint32_t lo_id,
                                     uint8_t lo_width, uint8_t priority) {
     uint32_t ids[3] = { r_id, hi_id, lo_id };
@@ -3418,31 +3418,31 @@ static inline int _pair_lt(const Variable *lv, const Variable *rv,
     return a < b;
 }
 
-static int _clause_definitely_false(Variable *v, SolveCtx *ctx,
+static int _clause_definitely_false(Variable *v, dvs_ctx_t *ctx,
                                      uint32_t op, int64_t c) {
     int64_t lo = var_lo64(ctx, v);
     int64_t hi = var_hi64(ctx, v);
     /* Negate the op and check if negation is definitely true */
     switch (op) {
-    case BIN_EQ:   return (var_b_gt(v, lo, c) || var_b_lt(v, hi, c));
-    case BIN_NEQ:  return (lo == hi && lo == c);      /* singleton == c */
-    case BIN_LT:   return !var_b_lt(v, lo, c);        /* all >= c => none < c */
-    case BIN_LTE:  return var_b_gt(v, lo, c);
-    case BIN_GT:   return !var_b_gt(v, hi, c);
-    case BIN_GTE:  return var_b_lt(v, hi, c);
+    case DVS_BIN_EQ:   return (var_b_gt(v, lo, c) || var_b_lt(v, hi, c));
+    case DVS_BIN_NEQ:  return (lo == hi && lo == c);      /* singleton == c */
+    case DVS_BIN_LT:   return !var_b_lt(v, lo, c);        /* all >= c => none < c */
+    case DVS_BIN_LTE:  return var_b_gt(v, lo, c);
+    case DVS_BIN_GT:   return !var_b_gt(v, hi, c);
+    case DVS_BIN_GTE:  return var_b_lt(v, hi, c);
     default:       return 0;
     }
 }
 
 /** Enforce clause: tighten var's domain so (var op constant) can hold. */
-static PropResult _enforce_clause(SolveCtx *ctx, uint32_t var_id,
+static PropResult _enforce_clause(dvs_ctx_t *ctx, uint32_t var_id,
                                    uint32_t op, int64_t c) {
     switch (op) {
-    case BIN_EQ:
+    case DVS_BIN_EQ:
         if (ctx_tighten_lb64(ctx, var_id, c) == PROP_CONFLICT) return PROP_CONFLICT;
         if (ctx_tighten_ub64(ctx, var_id, c) == PROP_CONFLICT) return PROP_CONFLICT;
         return PROP_OK;
-    case BIN_NEQ:
+    case DVS_BIN_NEQ:
         /* Can only tighten if domain is singleton or c is at a bound */
         {
             Variable *v = &ctx->vars[var_id];
@@ -3460,15 +3460,15 @@ static PropResult _enforce_clause(SolveCtx *ctx, uint32_t var_id,
             }
         }
         return PROP_OK;
-    case BIN_LT:
+    case DVS_BIN_LT:
         /* v < repr_min is unsatisfiable; c-1 would otherwise wrap. */
         if (c == var_repr_min(&ctx->vars[var_id])) return PROP_CONFLICT;
         return ctx_tighten_ub64(ctx, var_id, c - 1);
-    case BIN_LTE:  return ctx_tighten_ub64(ctx, var_id, c);
-    case BIN_GT:
+    case DVS_BIN_LTE:  return ctx_tighten_ub64(ctx, var_id, c);
+    case DVS_BIN_GT:
         if (c == var_repr_max(&ctx->vars[var_id])) return PROP_CONFLICT;
         return ctx_tighten_lb64(ctx, var_id, c + 1);
-    case BIN_GTE:  return ctx_tighten_lb64(ctx, var_id, c);
+    case DVS_BIN_GTE:  return ctx_tighten_lb64(ctx, var_id, c);
     default:       return PROP_OK;
     }
 }
@@ -3503,7 +3503,7 @@ static inline int64_t _bnd_inc(const Variable *v, int64_t c) {
  * Hence: unconstrained directions become INT64_MIN/INT64_MAX, and we never
  * consult var_lo64/var_hi64 of `v` here.
  */
-static int _disj_var_range(const SolveCtx *ctx, const DisjClause_t *dc,
+static int _disj_var_range(const dvs_ctx_t *ctx, const DisjClause_t *dc,
                            uint32_t i, uint32_t v,
                            int64_t *lo, int64_t *hi) {
     uint32_t lhs = dc->clauses[i].var_id;
@@ -3521,12 +3521,12 @@ static int _disj_var_range(const SolveCtx *ctx, const DisjClause_t *dc,
     if (lhs == v && rhs == UINT32_MAX) {
         int64_t c = dc->clauses[i].constant;
         switch (op) {
-        case BIN_EQ:  *lo = c; *hi = c;           return 1;
-        case BIN_LT:  *hi = _bnd_dec(vv, c);      return 1;
-        case BIN_LTE: *hi = c;                    return 1;
-        case BIN_GT:  *lo = _bnd_inc(vv, c);      return 1;
-        case BIN_GTE: *lo = c;                    return 1;
-        default:      return 0;   /* BIN_NEQ and friends: no interval */
+        case DVS_BIN_EQ:  *lo = c; *hi = c;           return 1;
+        case DVS_BIN_LT:  *hi = _bnd_dec(vv, c);      return 1;
+        case DVS_BIN_LTE: *hi = c;                    return 1;
+        case DVS_BIN_GT:  *lo = _bnd_inc(vv, c);      return 1;
+        case DVS_BIN_GTE: *lo = c;                    return 1;
+        default:      return 0;   /* DVS_BIN_NEQ and friends: no interval */
         }
     }
 
@@ -3535,11 +3535,11 @@ static int _disj_var_range(const SolveCtx *ctx, const DisjClause_t *dc,
         int64_t r_lo = var_lo64(ctx, &ctx->vars[rhs]);
         int64_t r_hi = var_hi64(ctx, &ctx->vars[rhs]);
         switch (op) {
-        case BIN_EQ:  *lo = r_lo; *hi = r_hi;     return 1;
-        case BIN_LT:  *hi = _bnd_dec(vv, r_hi);   return 1;
-        case BIN_LTE: *hi = r_hi;                 return 1;
-        case BIN_GT:  *lo = _bnd_inc(vv, r_lo);   return 1;
-        case BIN_GTE: *lo = r_lo;                 return 1;
+        case DVS_BIN_EQ:  *lo = r_lo; *hi = r_hi;     return 1;
+        case DVS_BIN_LT:  *hi = _bnd_dec(vv, r_hi);   return 1;
+        case DVS_BIN_LTE: *hi = r_hi;                 return 1;
+        case DVS_BIN_GT:  *lo = _bnd_inc(vv, r_lo);   return 1;
+        case DVS_BIN_GTE: *lo = r_lo;                 return 1;
         default:      return 0;
         }
     }
@@ -3549,11 +3549,11 @@ static int _disj_var_range(const SolveCtx *ctx, const DisjClause_t *dc,
         int64_t l_lo = var_lo64(ctx, &ctx->vars[lhs]);
         int64_t l_hi = var_hi64(ctx, &ctx->vars[lhs]);
         switch (op) {
-        case BIN_EQ:  *lo = l_lo; *hi = l_hi;     return 1;
-        case BIN_LT:  *lo = _bnd_inc(vv, l_lo);   return 1;  /* lhs <  v */
-        case BIN_LTE: *lo = l_lo;                 return 1;  /* lhs <= v */
-        case BIN_GT:  *hi = _bnd_dec(vv, l_hi);   return 1;  /* lhs >  v */
-        case BIN_GTE: *hi = l_hi;                 return 1;  /* lhs >= v */
+        case DVS_BIN_EQ:  *lo = l_lo; *hi = l_hi;     return 1;
+        case DVS_BIN_LT:  *lo = _bnd_inc(vv, l_lo);   return 1;  /* lhs <  v */
+        case DVS_BIN_LTE: *lo = l_lo;                 return 1;  /* lhs <= v */
+        case DVS_BIN_GT:  *hi = _bnd_dec(vv, l_hi);   return 1;  /* lhs >  v */
+        case DVS_BIN_GTE: *hi = l_hi;                 return 1;  /* lhs >= v */
         default:      return 0;
         }
     }
@@ -3574,7 +3574,7 @@ static int _disj_var_range(const SolveCtx *ctx, const DisjClause_t *dc,
  * by the trail: skipping those would make the result depend on the var's own
  * domain, which explain_disj_clause() does not report. See _disj_var_range.
  */
-static PropResult _disj_hull(DisjClause_t *dc, SolveCtx *ctx) {
+static PropResult _disj_hull(DisjClause_t *dc, dvs_ctx_t *ctx) {
     PropWatchSect *ws = PROP_WS(&dc->hdr);
     uint32_t n = dc->n_clauses;
 
@@ -3613,7 +3613,7 @@ static PropResult _disj_hull(DisjClause_t *dc, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-static PropResult _fire_disj_clause(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_disj_clause(Propagator *self, dvs_ctx_t *ctx) {
     DisjClause_t *dc = (DisjClause_t *)self;
     uint32_t n = dc->n_clauses;
 
@@ -3646,13 +3646,13 @@ static PropResult _fire_disj_clause(Propagator *self, SolveCtx *ctx) {
             int64_t r_lo = var_lo64(ctx, rv), r_hi = var_hi64(ctx, rv);
             int def_false = 0;
             switch (dc->clauses[i].op) {
-            case BIN_LT:  def_false = !_pair_lt(lv, rv, l_lo, r_hi); break;
-            case BIN_LTE: def_false = _pair_lt(lv, rv, r_hi, l_lo);  break;
-            case BIN_GT:  def_false = !_pair_lt(lv, rv, r_lo, l_hi); break;
-            case BIN_GTE: def_false = _pair_lt(lv, rv, l_hi, r_lo);  break;
-            case BIN_EQ:  def_false = (_pair_lt(lv, rv, r_hi, l_lo) ||
+            case DVS_BIN_LT:  def_false = !_pair_lt(lv, rv, l_lo, r_hi); break;
+            case DVS_BIN_LTE: def_false = _pair_lt(lv, rv, r_hi, l_lo);  break;
+            case DVS_BIN_GT:  def_false = !_pair_lt(lv, rv, r_lo, l_hi); break;
+            case DVS_BIN_GTE: def_false = _pair_lt(lv, rv, l_hi, r_lo);  break;
+            case DVS_BIN_EQ:  def_false = (_pair_lt(lv, rv, r_hi, l_lo) ||
                                        _pair_lt(lv, rv, l_hi, r_lo)); break;
-            case BIN_NEQ: def_false = (l_lo == l_hi && r_lo == r_hi && l_lo == r_lo); break;
+            case DVS_BIN_NEQ: def_false = (l_lo == l_hi && r_lo == r_hi && l_lo == r_lo); break;
             default: break;
             }
             if (def_false) n_false++;
@@ -3677,23 +3677,23 @@ static PropResult _fire_disj_clause(Propagator *self, SolveCtx *ctx) {
         int64_t r_lo = var_lo64(ctx, &ctx->vars[rv]);
         int64_t l_hi = var_hi64(ctx, &ctx->vars[lv]);
         switch (dc->clauses[survivor].op) {
-        case BIN_GTE:
+        case DVS_BIN_GTE:
             if (ctx_tighten_lb64(ctx, lv, r_lo) == PROP_CONFLICT) return PROP_CONFLICT;
             if (ctx_tighten_ub64(ctx, rv, l_hi) == PROP_CONFLICT) return PROP_CONFLICT;
             return PROP_OK;
-        case BIN_LTE:
+        case DVS_BIN_LTE:
             if (ctx_tighten_ub64(ctx, lv, r_hi) == PROP_CONFLICT) return PROP_CONFLICT;
             if (ctx_tighten_lb64(ctx, rv, l_lo) == PROP_CONFLICT) return PROP_CONFLICT;
             return PROP_OK;
-        case BIN_GT:
+        case DVS_BIN_GT:
             if (ctx_tighten_lb64(ctx, lv, r_lo + 1) == PROP_CONFLICT) return PROP_CONFLICT;
             if (ctx_tighten_ub64(ctx, rv, l_hi - 1) == PROP_CONFLICT) return PROP_CONFLICT;
             return PROP_OK;
-        case BIN_LT:
+        case DVS_BIN_LT:
             if (ctx_tighten_ub64(ctx, lv, r_hi - 1) == PROP_CONFLICT) return PROP_CONFLICT;
             if (ctx_tighten_lb64(ctx, rv, l_lo + 1) == PROP_CONFLICT) return PROP_CONFLICT;
             return PROP_OK;
-        case BIN_EQ:
+        case DVS_BIN_EQ:
             if (ctx_tighten_lb64(ctx, lv, r_lo) == PROP_CONFLICT) return PROP_CONFLICT;
             if (ctx_tighten_ub64(ctx, lv, r_hi) == PROP_CONFLICT) return PROP_CONFLICT;
             if (ctx_tighten_lb64(ctx, rv, l_lo) == PROP_CONFLICT) return PROP_CONFLICT;
@@ -3705,7 +3705,7 @@ static PropResult _fire_disj_clause(Propagator *self, SolveCtx *ctx) {
     }
 }
 
-uint32_t prop_add_disj_clause(SolveCtx *ctx,
+uint32_t prop_add_disj_clause(dvs_ctx_t *ctx,
                                uint32_t n_clauses,
                                const uint32_t *var_ids,
                                const uint32_t *ops,
@@ -3764,7 +3764,7 @@ uint32_t prop_disj_eq_set(const Propagator *p, uint32_t *out_var,
          * else (an inequality, a var-var compare, a second variable) means the
          * solution set is not the finite set {constants}, and installing it as
          * one would drop solutions. */
-        if (dc->clauses[i].op != BIN_EQ) return 0;
+        if (dc->clauses[i].op != DVS_BIN_EQ) return 0;
         if (dc->clauses[i].rhs_var_id != UINT32_MAX) return 0;
         if (dc->clauses[i].var_id != v) return 0;
         out_vals[i] = dc->clauses[i].constant;
@@ -3787,7 +3787,7 @@ uint32_t prop_disj_eq_set(const Propagator *p, uint32_t *out_var,
 /*   4. Entailment: all variables assigned and distinct.              */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_all_different_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
     AllDifferent_t *ad = (AllDifferent_t *)self;
     uint32_t n = ad->n_vars;
 
@@ -3914,7 +3914,7 @@ static PropResult _fire_all_different_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_all_different(SolveCtx *ctx, uint32_t n_vars,
+uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
                                  const uint32_t *var_ids, uint8_t priority) {
     if (n_vars < 2 || n_vars > MAX_ALLDIFF_VARS) return EXPR_NULL;
 
@@ -3962,7 +3962,7 @@ uint32_t prop_add_all_different(SolveCtx *ctx, uint32_t n_vars,
 /* SumEq_32: result == summand[0] + summand[1] + ... + summand[N-1]   */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_sum_eq_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_sum_eq_32(Propagator *self, dvs_ctx_t *ctx) {
     SumEq_32_t *s = (SumEq_32_t *)self;
     uint32_t n = s->n_vars;  /* total watches: [0]=result, [1..n-1]=summands */
     uint32_t rid = s->var_ids[0];
@@ -4004,7 +4004,7 @@ static PropResult _fire_sum_eq_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_sum_eq_32(SolveCtx *ctx, uint32_t result_id,
+uint32_t prop_add_sum_eq_32(dvs_ctx_t *ctx, uint32_t result_id,
                              uint32_t n_summands, const uint32_t *summand_ids,
                              uint8_t priority) {
     if (n_summands < 1 || n_summands > MAX_SUM_VARS) return EXPR_NULL;
@@ -4068,7 +4068,7 @@ static int _popcount64(uint64_t v) {
  * issues at the top of the range they are applied only for width <= 62 (the
  * exact all-ones and >=63-bit cases still terminate soundly via the forward
  * rule, just with less pruning). */
-static PropResult _fire_countones_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_countones_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0];  /* result */
     uint32_t xid = ws->var_ids[1];  /* operand */
@@ -4139,7 +4139,7 @@ static PropResult _fire_countones_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_countones_32(SolveCtx *ctx, uint32_t result_id,
+uint32_t prop_add_countones_32(dvs_ctx_t *ctx, uint32_t result_id,
                                 uint32_t operand_id, uint8_t priority) {
     uint32_t ids[2] = { result_id, operand_id };
     return _alloc_prop(ctx, _fire_countones_32, priority, 2, ids,
@@ -4164,7 +4164,7 @@ static int32_t _clog2_64(uint64_t v) {
  * interval rule is applied only for k < 62 so `1 << k` stays in positive int64;
  * wider results still converge soundly via the forward monotone/singleton
  * rules. */
-static PropResult _fire_clog2_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_clog2_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0];  /* result */
     uint32_t xid = ws->var_ids[1];  /* operand */
@@ -4203,7 +4203,7 @@ static PropResult _fire_clog2_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_clog2_32(SolveCtx *ctx, uint32_t result_id,
+uint32_t prop_add_clog2_32(dvs_ctx_t *ctx, uint32_t result_id,
                             uint32_t operand_id, uint8_t priority) {
     uint32_t ids[2] = { result_id, operand_id };
     return _alloc_prop(ctx, _fire_clog2_32, priority, 2, ids,
@@ -4216,14 +4216,14 @@ uint32_t prop_add_clog2_32(SolveCtx *ctx, uint32_t result_id,
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    PropResult (*fire)(Propagator *, SolveCtx *);
-    int (*explain)(Propagator *, SolveCtx *, uint32_t, uint8_t, int64_t, Explanation *);
+    PropResult (*fire)(Propagator *, dvs_ctx_t *);
+    int (*explain)(Propagator *, dvs_ctx_t *, uint32_t, uint8_t, int64_t, Explanation *);
 } ExplainEntry;
 
 /* Reverse-lookup: propagator fire-fn pointer -> short human-readable
  * name. Kept in lockstep with the explain table below; if you add a
  * propagator there, add it here too. Used only by DV_LCG_TRACE. */
-const char *prop_fire_name(PropResult (*fire)(Propagator *, SolveCtx *)) {
+const char *prop_fire_name(PropResult (*fire)(Propagator *, dvs_ctx_t *)) {
     #define FN_NAME(F) if (fire == F) return #F
     FN_NAME(_fire_bounds_le_32);
     FN_NAME(_fire_bounds_lt_32);
@@ -4271,7 +4271,7 @@ const char *prop_fire_name(PropResult (*fire)(Propagator *, SolveCtx *)) {
     return "?fire";
 }
 
-void contra_register_explanations(SolveCtx *ctx) {
+void contra_register_explanations(dvs_ctx_t *ctx) {
     static const ExplainEntry table[] = {
         { _fire_bounds_le_32,       explain_bounds_le },
         { _fire_bounds_lt_32,       explain_bounds_lt },

@@ -2,22 +2,12 @@
 #define DVS_SEARCH_H
 
 #include <stdint.h>
+#include "dv_solve.h"  /* dvs_ctx_t, dvs_result_t, dvs_solve_opts_t */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* forward declaration */
-typedef struct SolveCtx SolveCtx;
-
-/* ------------------------------------------------------------------ */
-/* SolveResult                                                         */
-/* ------------------------------------------------------------------ */
-typedef enum {
-    SOLVE_OK      = 0,   /* satisfying assignment found               */
-    SOLVE_UNSAT   = 1,   /* problem is unsatisfiable                  */
-    SOLVE_TIMEOUT = 2,   /* conflict/restart budget exhausted         */
-} SolveResult;
 
 /* ------------------------------------------------------------------ */
 /* DecisionRecord                                                      */
@@ -42,41 +32,16 @@ typedef struct {
     uint8_t  _dec_pad[5];
 } DecisionRecord;
 
-/* Why a solve returned SOLVE_TIMEOUT. Diagnostic only; never affects the
- * verdict (SOLVE_TIMEOUT always means "unknown", i.e. correct-or-unknown). */
+/* Why a solve returned DVS_SOLVE_TIMEOUT. Diagnostic only; never affects the
+ * verdict (DVS_SOLVE_TIMEOUT always means "unknown", i.e. correct-or-unknown). */
 #define DVS_BAIL_NONE          0   /* not a timeout, or reason not recorded  */
 #define DVS_BAIL_DEADLINE      1   /* wall-clock budget (decision loop)      */
 #define DVS_BAIL_MAX_DEPTH     2   /* decision_level hit ctx->max_depth      */
 #define DVS_BAIL_DEADLINE_CONF 3   /* wall-clock budget (conflict loop)      */
 #define DVS_BAIL_MAX_RESTARTS  4   /* restart budget exhausted               */
 
-const char *solver_bail_reason_str(const SolveCtx *ctx);
+const char *dvs_solver_bail_reason_str(const dvs_ctx_t *ctx);
 
-/* ------------------------------------------------------------------ */
-/* SolveOpts — tuning knobs                                           */
-/*                                                                     */
-/* Pass NULL for all-default behaviour.                               */
-/* ------------------------------------------------------------------ */
-typedef struct {
-    uint64_t seed;              /* RNG seed (0 = use ctx->rng_state)     */
-    uint32_t max_conflicts;     /* max conflicts per restart (0=unlimited)*/
-    uint32_t max_restarts;      /* max total restarts (0=unlimited)       */
-    uint8_t  use_phase_save;    /* 1 = remember last assigned value       */
-    uint8_t  use_lcg;           /* 1 = enable lazy clause generation (CDCL) */
-    uint8_t  fair_pick;         /* decision-variable tie-break:
-                                 *   0 = fast    — deterministic MRV (lowest
-                                 *       index); finds *a* solution quickly.
-                                 *   1 = uniform — random tie-break among
-                                 *       smallest-domain vars; gives uniform
-                                 *       marginals / full coverage (the right
-                                 *       mode for constrained-random stimulus). */
-    uint8_t  _pad[1];
-    uint32_t max_shave_iters;   /* pre-search bounds shaving budget (0=use default 1000) */
-    uint32_t time_limit_ms;     /* wall-clock budget for THIS solve, ms.
-                                 *   0 = use the DV_CDCL_TIME_LIMIT env default.
-                                 * Lets a caller bound one probe solve without
-                                 * mutating global env state. */
-} SolveOpts;
 
 /* ------------------------------------------------------------------ */
 /* DistMeta -- compiled distribution metadata for a single variable   */
@@ -118,50 +83,17 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 /**
- * Run the search until a satisfying assignment is found, the problem is
- * proved unsatisfiable, or the budget is exhausted.
- *
- * Requires that solver_compile() has already been called on ctx.
- *
- * @return SOLVE_OK, SOLVE_UNSAT, or SOLVE_TIMEOUT.
- */
-SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts);
-
-/**
- * Return the assigned value of variable var_id after a successful solve.
- *
- * Valid only after solver_solve() returns SOLVE_OK.
- * Returns the lower bound (== upper bound if fully assigned).
- */
-int64_t solver_get_value(const SolveCtx *ctx, uint32_t var_id);
-
-/**
- * Reset the solver to its post-compile state.
- * Restores all variable domains, clears trail and decisions,
- * and re-enqueues all propagators.
- */
-void solver_reset(SolveCtx *ctx);
-
-/**
- * Pin a variable to a specific value.
- * Tightens both lb and ub, then runs propagation.
- * @return 0 on success, -1 if the pin causes a conflict.
- */
-int solver_pin_var(SolveCtx *ctx, uint32_t var_id, int64_t value);
-
-/**
  * Set the RNG seed for the next solve.
  */
-void solver_set_seed(SolveCtx *ctx, uint64_t seed);
+void dvs_solver_set_seed(dvs_ctx_t *ctx, uint64_t seed);
 
 /**
- * Read values of multiple variables in one call.
- * @param n       Number of variables to read.
- * @param var_ids Array of variable IDs.
- * @param out     Output array (caller-allocated, size >= n).
+ * Whether a soft constraint's assumption is still active after solve.
+ * Assumption indices run in REVERSE order of addition (the soft list is
+ * prepended): index 0 is the soft constraint added last.
+ * @return 1 if active (constraint was satisfied), 0 if relaxed, -1 on error.
  */
-void solver_get_values(const SolveCtx *ctx, uint32_t n,
-                       const uint32_t *var_ids, int64_t *out);
+int dvs_solver_soft_active(const dvs_ctx_t *ctx, uint32_t assumption_idx);
 
 /**
  * Batch solve: reset + solve + read values, repeated n_solves times.
@@ -173,7 +105,7 @@ void solver_get_values(const SolveCtx *ctx, uint32_t n,
  *             Only the first n_ok rows are filled.
  * @return Number of successful solves (n_ok).
  */
-int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
+int dvs_solver_solve_n(dvs_ctx_t *ctx, uint32_t n_solves,
                    uint32_t n_vars, const uint32_t *var_ids,
                    int64_t *out,
                    uint64_t base_seed,
@@ -181,37 +113,16 @@ int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
 
 
 /**
- * Query whether a soft constraint's assumption is still active after solve.
- * @param assumption_idx  0-based index into the soft constraint list.
- * @return 1 if active (constraint was satisfied), 0 if relaxed, -1 on error.
- */
-int solver_soft_active(const SolveCtx *ctx, uint32_t assumption_idx);
-
-/**
- * Exclude a specific value from a variable's domain.
- *
- * Used for randc (cyclic-random) semantics: after solving, the caller
- * excludes the obtained value so the next solve cannot pick it again.
- *
- * - If value == current lb: tightens lb to lb+1.
- * - If value == current ub: tightens ub to ub-1.
- * - Otherwise: adds the value to a per-variable hole list.
- *
- * @return 0 on success, -1 if the exclusion empties the domain.
- */
-int solver_exclude_value(SolveCtx *ctx, uint32_t var_id, int64_t value);
-
-/**
  * Bulk-create array element variables.
  *
  * Creates n_elems variables with IDs [elem_var_base .. elem_var_base+n_elems-1],
  * all with the same width, signedness, and initial bounds. This is more
- * efficient than building an auxiliary SolveProblem for the common
+ * efficient than building an auxiliary dvs_problem_t for the common
  * "add N identical element variables" pattern.
  *
  * @return 0 on success, -1 on capacity overflow.
  */
-int solver_add_array_vars(SolveCtx *ctx,
+int dvs_solver_add_array_vars(dvs_ctx_t *ctx,
                           uint32_t elem_var_base,
                           uint32_t n_elems,
                           uint8_t  width,

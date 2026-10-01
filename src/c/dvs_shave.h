@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-typedef struct SolveCtx SolveCtx;
+typedef struct dvs_ctx_s dvs_ctx_t;
 
 /**
  * Pre-search bounds shaving (Singleton Arc Consistency on bounds).
@@ -22,7 +22,7 @@ typedef struct SolveCtx SolveCtx;
  * @param max_iters  Maximum total bound removals before stopping.
  * @return PROP_OK on success, PROP_CONFLICT if all domains emptied.
  */
-PropResult bounds_shave(SolveCtx *ctx, uint32_t max_iters);
+PropResult bounds_shave(dvs_ctx_t *ctx, uint32_t max_iters);
 
 #ifdef __cplusplus
 }

@@ -32,7 +32,7 @@ static RunResult run_test(int n, int canvas, int halo,
 
     size_t sp_sz = 65536;
     void *sp_buf = calloc(1, sp_sz);
-    SolveProblem *sp = solve_problem_init(sp_buf, sp_sz);
+    dvs_problem_t *sp = solve_problem_init(sp_buf, sp_sz);
     if (!sp) { free(sp_buf); return rr; }
 
     for (int i = 0; i < n; i++) {
@@ -50,8 +50,8 @@ static RunResult run_test(int n, int canvas, int halo,
     size_t ctx_sz = 1 << 22;
     void *ctx_buf = calloc(1, ctx_sz);
     dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
-    SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
-    if (solver_compile(ctx, sp) != 0) { rr.result = -2; goto done; }
+    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, ctx_sz, ba);
+    if (dvs_solver_compile(ctx, sp) != 0) { rr.result = -2; goto done; }
 
     RectSpec rects[64];
     for (int i = 0; i < n; i++) {
@@ -66,20 +66,20 @@ static RunResult run_test(int n, int canvas, int halo,
 
     if (use_lcg == 1) {
         /* Pre-enable LCG */
-        solver_enable_lcg(ctx);
+        dvs_solver_enable_lcg(ctx);
     } else if (use_lcg == 2) {
         /* Let auto-activation handle it (don't pre-enable) */
         /* The search loop will enable LCG after 100 restarts */
     }
 
-    SolveOpts sopts = {0};
+    dvs_solve_opts_t sopts = {0};
     sopts.seed = 42;
     sopts.max_conflicts = 200;
     sopts.max_restarts = (uint32_t)max_restarts;
     sopts.max_shave_iters = 0;
 
     double t0 = now_sec();
-    rr.result = solver_solve(ctx, &sopts);
+    rr.result = dvs_solver_solve(ctx, &sopts);
     double t1 = now_sec();
     rr.conflicts = ctx->conflict_count;
     rr.time_ms = (t1 - t0) * 1000.0;
@@ -90,7 +90,7 @@ static RunResult run_test(int n, int canvas, int halo,
             printf("    LCG stats: clauses=%lu, analyses=%lu\n",
                    lcg->n_learnt, lcg->n_analyses);
         }
-        solver_disable_lcg(ctx);
+        dvs_solver_disable_lcg(ctx);
     }
 
 done:

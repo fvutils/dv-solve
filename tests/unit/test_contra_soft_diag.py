@@ -87,17 +87,17 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.solver_soft_active.restype  = ctypes.c_int
-    lib.solver_soft_active.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_soft_active.restype  = ctypes.c_int
+    lib.dvs_solver_soft_active.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     lib.contra_explain_soft.restype  = ctypes.c_int
     lib.contra_explain_soft.argtypes = [
@@ -111,7 +111,7 @@ def _setup(lib: ctypes.CDLL):
 def _make_ctx(lib):
     ba = lib.dvs_block_alloc_create(None, 4096)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
     return ctx_buf, ctx, ba
 
@@ -137,15 +137,15 @@ def test_soft_diag_single_relaxed(libdvs_debug):
         lib.expr_binary(sp, BIN_LTE, vx, lib.expr_const(sp, 10, 0)), 5)
 
     ctx_buf, ctx, ba = _make_ctx(lib)
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = SolveOpts()
-    res = lib.solver_solve(ctx, ctypes.byref(opts))
+    res = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert res == SOLVE_OK
 
     # The soft should be relaxed
-    assert lib.solver_soft_active(ctx, 0) == 0, \
+    assert lib.dvs_solver_soft_active(ctx, 0) == 0, \
         "Soft constraint should be relaxed"
 
     # Run diagnostic
@@ -182,13 +182,13 @@ def test_soft_diag_all_kept(libdvs_debug):
         lib.expr_binary(sp, BIN_LTE, vx, lib.expr_const(sp, 50, 0)), 5)
 
     ctx_buf, ctx, ba = _make_ctx(lib)
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = SolveOpts()
-    res = lib.solver_solve(ctx, ctypes.byref(opts))
+    res = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert res == SOLVE_OK
-    assert lib.solver_soft_active(ctx, 0) == 1
+    assert lib.dvs_solver_soft_active(ctx, 0) == 1
 
     diag = ContraSoftDiagResult()
     rc = lib.contra_explain_soft(ctx, sp, None, ctypes.byref(diag))
@@ -228,11 +228,11 @@ def test_soft_diag_two_relaxed(libdvs_debug):
         lib.expr_binary(sp, BIN_LTE, vy, lib.expr_const(sp, 20, 0)), 5)
 
     ctx_buf, ctx, ba = _make_ctx(lib)
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = SolveOpts()
-    res = lib.solver_solve(ctx, ctypes.byref(opts))
+    res = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert res == SOLVE_OK
 
     diag = ContraSoftDiagResult()

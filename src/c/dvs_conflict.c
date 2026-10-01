@@ -44,7 +44,7 @@
  * if its decision_level is below current_level and is the new maximum.
  * Returns 1 if the entry was at the current level (caller may want to
  * recurse into its reason), 0 otherwise (or if no entry found). */
-static int _scan_var(SolveCtx *ctx, uint32_t var_id,
+static int _scan_var(dvs_ctx_t *ctx, uint32_t var_id,
                      uint32_t current_level, uint32_t *out_max_lower,
                      TrailEntry **out_entry) {
     for (TrailEntry *e = ctx->trail_top; e; e = e->prev) {
@@ -62,7 +62,7 @@ static int _scan_var(SolveCtx *ctx, uint32_t var_id,
     return 0;
 }
 
-uint32_t analyze_conflict(SolveCtx *ctx) {
+uint32_t analyze_conflict(dvs_ctx_t *ctx) {
     uint32_t current_level = ctx->decision_level;
     if (current_level == 0) return 0;
 

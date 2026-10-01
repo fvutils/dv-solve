@@ -8,7 +8,7 @@
 #include "dvs_placement.h"
 #include "dvs_lcg.h"
 
-static void dump_trail(SolveCtx *ctx) {
+static void dump_trail(dvs_ctx_t *ctx) {
     printf("  Trail (newest first):\n");
     TrailEntry *e = ctx->trail_top;
     int count = 0;
@@ -39,7 +39,7 @@ int main(void) {
      * Total area = 300, canvas = 625. Easy. */
     size_t sp_sz = 65536;
     void *sp_buf = calloc(1, sp_sz);
-    SolveProblem *sp = solve_problem_init(sp_buf, sp_sz);
+    dvs_problem_t *sp = solve_problem_init(sp_buf, sp_sz);
 
     for (int i = 0; i < n; i++) {
         problem_add_var(sp, (uint32_t)i, 32, 0, 0, canvas - 10);
@@ -52,8 +52,8 @@ int main(void) {
     size_t ctx_sz = 1 << 22;
     void *ctx_buf = calloc(1, ctx_sz);
     dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
-    SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
-    solver_compile(ctx, sp);
+    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, ctx_sz, ba);
+    dvs_solver_compile(ctx, sp);
 
     RectSpec rects[3];
     for (int i = 0; i < n; i++) {
@@ -73,14 +73,14 @@ int main(void) {
 
     /* Manual search: make a decision, propagate, check for conflict */
     printf("\n--- Level 0 propagation ---\n");
-    solver_propagate(ctx);
+    dvs_solver_propagate(ctx);
     dump_trail(ctx);
 
     printf("\n--- Decision: var0 = 0 (x of rect 0 = 0) ---\n");
     trail_push_level(ctx);
     ctx_tighten_lb64(ctx, 0, 0);
     ctx_tighten_ub64(ctx, 0, 0);
-    PropResult pr = solver_propagate(ctx);
+    PropResult pr = dvs_solver_propagate(ctx);
     dump_trail(ctx);
     printf("  propagation result: %s\n", pr == PROP_OK ? "OK" : "CONFLICT");
 
@@ -89,7 +89,7 @@ int main(void) {
         trail_push_level(ctx);
         ctx_tighten_lb64(ctx, 3, 0);
         ctx_tighten_ub64(ctx, 3, 0);
-        pr = solver_propagate(ctx);
+        pr = dvs_solver_propagate(ctx);
         dump_trail(ctx);
         printf("  propagation result: %s\n", pr == PROP_OK ? "OK" : "CONFLICT");
     }
@@ -99,14 +99,14 @@ int main(void) {
         trail_push_level(ctx);
         ctx_tighten_lb64(ctx, 1, 0);
         ctx_tighten_ub64(ctx, 1, 0);
-        pr = solver_propagate(ctx);
+        pr = dvs_solver_propagate(ctx);
         dump_trail(ctx);
         printf("  propagation result: %s\n", pr == PROP_OK ? "OK" : "CONFLICT");
     }
 
     if (pr == PROP_CONFLICT) {
         printf("\n--- Conflict! Running LCG analysis ---\n");
-        solver_enable_lcg(ctx);
+        dvs_solver_enable_lcg(ctx);
         LCGCtx *lcg = (LCGCtx *)ctx->lcg_ctx;
 
         /* Find conflict var */
@@ -127,23 +127,23 @@ int main(void) {
                    learnt[i].var_id, learnt[i].is_lb ? ">=" : "<=",
                    learnt[i].bound);
         }
-        solver_disable_lcg(ctx);
+        dvs_solver_disable_lcg(ctx);
     }
 
     /* Now solve normally without LCG to verify feasibility */
-    solver_reset(ctx);
+    dvs_solver_reset(ctx);
     printf("\n--- Full solve (no LCG) ---\n");
-    SolveOpts sopts = {0};
+    dvs_solve_opts_t sopts = {0};
     sopts.seed = 42; sopts.max_conflicts = 200;
     sopts.max_restarts = 5000; sopts.max_shave_iters = 0;
-    SolveResult sr = solver_solve(ctx, &sopts);
+    dvs_result_t sr = dvs_solver_solve(ctx, &sopts);
     printf("result=%s, conflicts=%lu\n",
            sr==0?"FEASIBLE":sr==1?"UNSAT":"TIMEOUT", ctx->conflict_count);
     if (sr == 0) {
         for (int i = 0; i < n; i++)
             printf("  rect %d: (%ld, %ld)\n", i,
-                   solver_get_value(ctx, (uint32_t)i),
-                   solver_get_value(ctx, (uint32_t)(n+i)));
+                   dvs_solver_get_value(ctx, (uint32_t)i),
+                   dvs_solver_get_value(ctx, (uint32_t)(n+i)));
     }
 
     dvs_block_alloc_destroy(ba);

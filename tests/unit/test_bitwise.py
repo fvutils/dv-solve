@@ -39,21 +39,21 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.dvs_var_lo64.restype  = ctypes.c_int64
     lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.dvs_var_hi64.restype  = ctypes.c_int64
     lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
     lib.ctx_tighten_lb64.restype  = ctypes.c_int
     lib.ctx_tighten_lb64.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
@@ -88,10 +88,10 @@ def _setup(lib: ctypes.CDLL):
             ("max_shave_iters", ctypes.c_uint32),
         ]
     lib._SolveOpts = SolveOpts
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 BIN_EQ   = 10
@@ -109,8 +109,8 @@ def _make_ctx(lib, var_specs):
         ref = lib.problem_add_var(sp, i, width, is_signed, lo, hi)
         assert ref != EXPR_NULL
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
     return sp_buf, ctx_buf, ba, sp, ctx
 
@@ -145,7 +145,7 @@ def test_band_singleton_mask(libdvs):
 
     lib.prop_add_bounds_band_64(ctx, 0, 1, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _hi(lib, ctx, 0) <= 0xF0
@@ -167,7 +167,7 @@ def test_band_both_singletons(libdvs):
 
     lib.prop_add_bounds_band_64(ctx, 0, 1, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 0x0F
@@ -193,7 +193,7 @@ def test_bor_singleton(libdvs):
 
     lib.prop_add_bounds_bor_64(ctx, 0, 1, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) >= 0x80
@@ -218,7 +218,7 @@ def test_bxor_singleton(libdvs):
 
     lib.prop_add_bounds_bxor_64(ctx, 0, 1, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 0xFF
@@ -241,7 +241,7 @@ def test_bxor_backward(libdvs):
     lib.prop_add_bounds_bxor_64(ctx, 0, 1, 2, 0)
     _fix(lib, ctx, 0, 0xAA)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 1) == 0x55
@@ -266,7 +266,7 @@ def test_bnot_zero(libdvs):
 
     lib.prop_add_bounds_bnot_64(ctx, 0, 1, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == -1
@@ -288,7 +288,7 @@ def test_bnot_backward(libdvs):
     lib.prop_add_bounds_bnot_64(ctx, 0, 1, 0)
     _fix(lib, ctx, 0, -1)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 1) == 0
@@ -323,16 +323,16 @@ def test_band_compile_e2e(libdvs):
     lib.problem_add_constraint(sp, eq_e)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0x1234)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    r = lib.solver_get_value(ctx, 0)
-    x = lib.solver_get_value(ctx, 1)
+    r = lib.dvs_solver_get_value(ctx, 0)
+    x = lib.dvs_solver_get_value(ctx, 1)
     assert r == (x & 0xF0), f"r={r:#x} != x&0xF0 = {x&0xF0:#x}"
 
     lib.dvs_block_alloc_destroy(ba)
@@ -360,16 +360,16 @@ def test_bor_compile_e2e(libdvs):
     lib.problem_add_constraint(sp, eq_e)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0x5678)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    r = lib.solver_get_value(ctx, 0)
-    x = lib.solver_get_value(ctx, 1)
+    r = lib.dvs_solver_get_value(ctx, 0)
+    x = lib.dvs_solver_get_value(ctx, 1)
     assert r == (x | 0x80), f"r={r:#x} != x|0x80 = {x|0x80:#x}"
 
     lib.dvs_block_alloc_destroy(ba)

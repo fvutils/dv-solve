@@ -25,7 +25,7 @@ static int32_t i32_max(int32_t a, int32_t b) { return a > b ? a : b; }
 /*     then op_lo_i >= r_lo is still valid but not tighter.           */
 /* ================================================================== */
 
-static PropResult _fire_min_of_n_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_min_of_n_32(Propagator *self, dvs_ctx_t *ctx) {
     MinOfN_32_t *m = (MinOfN_32_t *)self;
     uint32_t n = m->n_vars;    /* [0]=result, [1..n-1]=operands */
     uint32_t rid = m->var_ids[0];
@@ -88,7 +88,7 @@ static PropResult _fire_min_of_n_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_min_of_n_32(SolveCtx *ctx, uint32_t result_id,
+uint32_t prop_add_min_of_n_32(dvs_ctx_t *ctx, uint32_t result_id,
                                uint32_t n_operands, const uint32_t *operand_ids,
                                uint8_t priority) {
     if (n_operands < 1 || n_operands > MAX_MINMAX_VARS) return EXPR_NULL;
@@ -129,7 +129,7 @@ uint32_t prop_add_min_of_n_32(SolveCtx *ctx, uint32_t result_id,
 /* MaxOf_N: r == max(operands[0..n-1])                                */
 /* ================================================================== */
 
-static PropResult _fire_max_of_n_32(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_max_of_n_32(Propagator *self, dvs_ctx_t *ctx) {
     MaxOfN_32_t *m = (MaxOfN_32_t *)self;
     uint32_t n = m->n_vars;
     uint32_t rid = m->var_ids[0];
@@ -187,7 +187,7 @@ static PropResult _fire_max_of_n_32(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_max_of_n_32(SolveCtx *ctx, uint32_t result_id,
+uint32_t prop_add_max_of_n_32(dvs_ctx_t *ctx, uint32_t result_id,
                                uint32_t n_operands, const uint32_t *operand_ids,
                                uint8_t priority) {
     if (n_operands < 1 || n_operands > MAX_MINMAX_VARS) return EXPR_NULL;
@@ -280,7 +280,7 @@ static int _lookup_pair(const NoOverlap2D_t *no, uint32_t var_id,
     return -1;
 }
 
-static int _explain_no_overlap_2d(Propagator *self, SolveCtx *ctx,
+static int _explain_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx,
                                    uint32_t var_id, uint8_t is_lb,
                                    int64_t new_bound, Explanation *out) {
     NoOverlap2D_t *no = (NoOverlap2D_t *)self;
@@ -488,7 +488,7 @@ static int _explain_no_overlap_2d(Propagator *self, SolveCtx *ctx,
     return (out->n_lits > 0) ? 0 : -1;
 }
 
-static PropResult _fire_no_overlap_2d(Propagator *self, SolveCtx *ctx) {
+static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
     NoOverlap2D_t *no = (NoOverlap2D_t *)self;
     uint32_t nr = no->n_rects;  /* actual rect count (not n_vars) */
     PropResult res;
@@ -741,7 +741,7 @@ static PropResult _fire_no_overlap_2d(Propagator *self, SolveCtx *ctx) {
     return PROP_OK;
 }
 
-uint32_t prop_add_no_overlap_2d(SolveCtx *ctx, uint32_t n_rects,
+uint32_t prop_add_no_overlap_2d(dvs_ctx_t *ctx, uint32_t n_rects,
                                  const RectSpec *rects, uint8_t priority) {
     if (n_rects < 2 || n_rects > MAX_NOOVERLAP2D_RECTS) return EXPR_NULL;
 
@@ -784,7 +784,7 @@ uint32_t prop_add_no_overlap_2d(SolveCtx *ctx, uint32_t n_rects,
 }
 
 /* ================================================================== */
-/* solver_optimize: branch-and-bound minimization                     */
+/* dvs_solver_optimize: branch-and-bound minimization                     */
 /* ================================================================== */
 
 static double _now_sec(void) {
@@ -793,7 +793,7 @@ static double _now_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-int solver_optimize(SolveCtx *ctx, uint32_t objective_var_id,
+int dvs_solver_optimize(dvs_ctx_t *ctx, uint32_t objective_var_id,
                     const OptimizeOpts *opts, OptimizeResult *result) {
     if (!ctx || !result) return -1;
     if (objective_var_id >= ctx->n_vars) return -1;
@@ -821,7 +821,7 @@ int solver_optimize(SolveCtx *ctx, uint32_t objective_var_id,
         best_values = (int64_t *)dvs_pool_ptr(&ctx->pool, bv_ref);
     }
 
-    SolveOpts sopts;
+    dvs_solve_opts_t sopts;
     memset(&sopts, 0, sizeof(sopts));
     if (opts) {
         sopts.seed            = opts->seed;
@@ -842,30 +842,30 @@ int solver_optimize(SolveCtx *ctx, uint32_t objective_var_id,
         /* Vary seed each round for diversity */
         sopts.seed = (opts ? opts->seed : 42) + round * 1000003ULL;
 
-        SolveResult sr = solver_solve(ctx, &sopts);
+        dvs_result_t sr = dvs_solver_solve(ctx, &sopts);
 
-        if (sr == SOLVE_OK) {
-            int64_t obj_val = solver_get_value(ctx, objective_var_id);
+        if (sr == DVS_SOLVE_OK) {
+            int64_t obj_val = dvs_solver_get_value(ctx, objective_var_id);
 
             if (!result->found || obj_val < result->best_objective) {
                 result->best_objective = obj_val;
                 result->found = 1;
                 /* Save solution */
                 for (uint32_t i = 0; i < n; i++) {
-                    best_values[i] = solver_get_value(ctx, i);
+                    best_values[i] = dvs_solver_get_value(ctx, i);
                 }
             }
             result->n_rounds = round + 1;
 
             /* Tighten objective for next round */
-            solver_reset(ctx);
+            dvs_solver_reset(ctx);
             PropResult pr = ctx_tighten_ub64(ctx, objective_var_id,
                                               obj_val - 1);
             if (pr == PROP_CONFLICT) {
                 /* Optimal found */
                 break;
             }
-            pr = solver_propagate(ctx);
+            pr = dvs_solver_propagate(ctx);
             if (pr == PROP_CONFLICT) break;
         } else {
             /* UNSAT or TIMEOUT: current bound is infeasible or budget exhausted */
@@ -877,9 +877,9 @@ int solver_optimize(SolveCtx *ctx, uint32_t objective_var_id,
 
     /* Restore best solution into solver context */
     if (result->found) {
-        solver_reset(ctx);
+        dvs_solver_reset(ctx);
         for (uint32_t i = 0; i < n; i++) {
-            solver_pin_var(ctx, i, best_values[i]);
+            dvs_solver_pin_var(ctx, i, best_values[i]);
         }
     }
 

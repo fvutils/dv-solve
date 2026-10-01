@@ -42,22 +42,22 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.dvs_var_lo64.restype  = ctypes.c_int64
     lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.dvs_var_hi64.restype  = ctypes.c_int64
     lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
-    lib.solver_soft_active.restype  = ctypes.c_int
-    lib.solver_soft_active.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_soft_active.restype  = ctypes.c_int
+    lib.dvs_solver_soft_active.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     class SolveOpts(ctypes.Structure):
         _fields_ = [
@@ -69,12 +69,12 @@ def _setup(lib: ctypes.CDLL):
             ("max_shave_iters", ctypes.c_uint32),
         ]
     lib._SolveOpts = SolveOpts
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_reset.restype  = None
-    lib.solver_reset.argtypes = [ctypes.c_void_p]
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_reset.restype  = None
+    lib.dvs_solver_reset.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 BIN_EQ  = 10
@@ -107,19 +107,19 @@ def test_soft_all_satisfiable(libdvs):
     lib.problem_add_soft_constraint(sp, eq_e, 0)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0x1234)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    x = lib.solver_get_value(ctx, 0)
+    x = lib.dvs_solver_get_value(ctx, 0)
     assert x == 5, f"x={x}, expected 5"
 
     # Soft should be active (not relaxed)
-    assert lib.solver_soft_active(ctx, 0) == 1
+    assert lib.dvs_solver_soft_active(ctx, 0) == 1
 
     lib.dvs_block_alloc_destroy(ba)
 
@@ -150,19 +150,19 @@ def test_soft_one_relaxed(libdvs):
     lib.problem_add_soft_constraint(sp, eq_e, 0)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0x5678)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    x = lib.solver_get_value(ctx, 0)
+    x = lib.dvs_solver_get_value(ctx, 0)
     assert x > 7, f"x={x}, expected > 7"
 
     # Soft should be relaxed
-    assert lib.solver_soft_active(ctx, 0) == 0
+    assert lib.dvs_solver_soft_active(ctx, 0) == 0
 
     lib.dvs_block_alloc_destroy(ba)
 
@@ -200,23 +200,23 @@ def test_soft_priority_ordering(libdvs):
     lib.problem_add_soft_constraint(sp, eq5_e, 10)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0xABCD)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    x = lib.solver_get_value(ctx, 0)
+    x = lib.dvs_solver_get_value(ctx, 0)
     assert x >= 10, f"x={x}, expected >= 10"
 
     # Both soft constraints conflict with hard (x >= 10), both must be relaxed.
     # Assumption indices are reversed from add order (prepended list):
     # assumption 0 = soft 1 (x==5, pri 10) -> relaxed
     # assumption 1 = soft 0 (x==3, pri 0)  -> relaxed
-    assert lib.solver_soft_active(ctx, 0) == 0  # both relaxed
-    assert lib.solver_soft_active(ctx, 1) == 0
+    assert lib.dvs_solver_soft_active(ctx, 0) == 0  # both relaxed
+    assert lib.dvs_solver_soft_active(ctx, 1) == 0
 
     lib.dvs_block_alloc_destroy(ba)
 
@@ -261,16 +261,16 @@ def test_soft_multiple_relaxed(libdvs):
     lib.problem_add_soft_constraint(sp, eq7_e, 1)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0x9999)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    x = lib.solver_get_value(ctx, 0)
-    y = lib.solver_get_value(ctx, 1)
+    x = lib.dvs_solver_get_value(ctx, 0)
+    y = lib.dvs_solver_get_value(ctx, 1)
     assert x >= 10, f"x={x}, expected >= 10"
     assert y == 7, f"y={y}, expected 7"
 
@@ -278,9 +278,9 @@ def test_soft_multiple_relaxed(libdvs):
     # assumption 0 = soft 2 (y==7, pri 1) -> should be active
     # assumption 1 = soft 1 (x==5, pri 10) -> should be relaxed
     # assumption 2 = soft 0 (x==3, pri 5) -> should be relaxed
-    assert lib.solver_soft_active(ctx, 0) == 1   # y==7, active
-    assert lib.solver_soft_active(ctx, 1) == 0   # x==5, relaxed
-    assert lib.solver_soft_active(ctx, 2) == 0   # x==3, relaxed
+    assert lib.dvs_solver_soft_active(ctx, 0) == 1   # y==7, active
+    assert lib.dvs_solver_soft_active(ctx, 1) == 0   # x==5, relaxed
+    assert lib.dvs_solver_soft_active(ctx, 2) == 0   # x==3, relaxed
 
     lib.dvs_block_alloc_destroy(ba)
 
@@ -288,7 +288,7 @@ def test_soft_multiple_relaxed(libdvs):
 # NOTE (DSE-3 follow-up): the *serve* path (dvs_bbsolver_check_maxsat) uses additive
 # greedy and is collateral-free — locked by
 # test_soft_maxsat_serve.test_serve_soft_no_collateral_drop. The *primary* path
-# (solver_solve) keeps the subtractive relaxation and can shed a satisfiable
+# (dvs_solver_solve) keeps the subtractive relaxation and can shed a satisfiable
 # lower-preference soft as collateral when a higher-preference sibling conflicts; an
 # additive primary rewrite is blocked on a deeper engine quirk (pinning all assumption
 # vars to 0 + re-solve spuriously reports UNSAT for >1 soft). Tracked in
@@ -325,15 +325,15 @@ def test_soft_priority_ladder_three_primary(libdvs):
     lib.problem_add_soft_constraint(sp, s2, 10)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0xC0DE)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    x = lib.solver_get_value(ctx, 0)
+    x = lib.dvs_solver_get_value(ctx, 0)
     assert x == 10, f"x={x}, expected 10 (highest-preference soft kept)"
 
     lib.dvs_block_alloc_destroy(ba)
@@ -374,17 +374,17 @@ def test_soft_no_collateral_drop_primary(libdvs):
         lib.problem_add_soft_constraint(sp, e, pri)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0xBEEF)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    a = lib.solver_get_value(ctx, 0)
-    x = lib.solver_get_value(ctx, 1)
-    d = lib.solver_get_value(ctx, 2)
+    a = lib.dvs_solver_get_value(ctx, 0)
+    x = lib.dvs_solver_get_value(ctx, 1)
+    d = lib.dvs_solver_get_value(ctx, 2)
     assert x == 20, f"hard must hold: x={x}"
     assert a == 11, f"a={a}: a==11 dropped as collateral"
     assert d == 40, f"d={d}: d==40 dropped as collateral (the test_soft_nested bug)"
@@ -394,8 +394,8 @@ def test_soft_no_collateral_drop_primary(libdvs):
 
 def test_soft_resolve_reuse_keeps_set(libdvs):
     """Regression: solving the SAME ctx twice (the backend's plan-reuse path:
-    solver_reset + solver_solve) must keep the same maximal soft set both times.
-    Previously solver_solve did not re-activate assumption_active_mask at entry,
+    dvs_solver_reset + dvs_solver_solve) must keep the same maximal soft set both times.
+    Previously dvs_solver_solve did not re-activate assumption_active_mask at entry,
     so the second solve inherited the first solve's relaxations, then relaxed the
     remaining kept soft on the conflict and dropped the WHOLE set (the var came
     back unconstrained). Here a 3-soft conflicting ladder must keep x==10 on every
@@ -415,24 +415,24 @@ def test_soft_resolve_reuse_keeps_set(libdvs):
         lib.problem_add_soft_constraint(sp, e, pri)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     for attempt in range(4):
         if attempt > 0:
-            lib.solver_reset(ctx)
+            lib.dvs_solver_reset(ctx)
         opts = lib._SolveOpts(seed=0x1000 + attempt)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK, f"attempt {attempt}: solve failed"
-        x = lib.solver_get_value(ctx, 0)
+        x = lib.dvs_solver_get_value(ctx, 0)
         assert x == 10, f"attempt {attempt}: x={x}, expected 10 (kept soft)"
 
     lib.dvs_block_alloc_destroy(ba)
 
 
 def test_soft_active_query(libdvs):
-    """After solve, verify solver_soft_active() returns correct status."""
+    """After solve, verify dvs_solver_soft_active() returns correct status."""
     lib = libdvs
     _setup(lib)
 
@@ -450,17 +450,17 @@ def test_soft_active_query(libdvs):
     lib.problem_add_soft_constraint(sp, eq_e, 0)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0x4444)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    assert lib.solver_soft_active(ctx, 0) == 1
+    assert lib.dvs_solver_soft_active(ctx, 0) == 1
     # Out of range returns -1
-    assert lib.solver_soft_active(ctx, 99) == -1
+    assert lib.dvs_solver_soft_active(ctx, 99) == -1
 
     lib.dvs_block_alloc_destroy(ba)
 
@@ -492,8 +492,8 @@ def test_soft_with_hard_unsat(libdvs):
     lib.problem_add_soft_constraint(sp, eq_e, 0)
 
     ba = lib.dvs_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
 
     # Compile might detect UNSAT directly (returns -2)
     if rc == -2:
@@ -502,7 +502,7 @@ def test_soft_with_hard_unsat(libdvs):
         return
 
     opts = lib._SolveOpts(seed=0x7777)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     # Should be UNSAT since hard constraint alone is impossible
     assert result != SOLVE_OK
 

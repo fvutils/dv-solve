@@ -43,7 +43,7 @@ static char *_format_json(const ContraResult *result,
 /* ---- GatedProblem ---- */
 
 typedef struct {
-    SolveProblem *sp;
+    dvs_problem_t *sp;
     void         *buf;
     uint32_t      n_hard;
     uint32_t     *cid_map; /* cid_map[assumption_idx] = constraint_id */
@@ -54,15 +54,15 @@ typedef struct {
  * Each hard constraint becomes a soft constraint.
  * cid_map is indexed by the assumption index the compiler will assign.
  */
-static int _build_gated_problem(SolveProblem *orig, GatedProblem *out) {
+static int _build_gated_problem(dvs_problem_t *orig, GatedProblem *out) {
     memset(out, 0, sizeof(*out));
     uint32_t orig_pool_used = dvs_pool_used(&orig->pool);
     uint32_t n_hard = orig->n_constraints;
 
-    size_t buf_size = sizeof(SolveProblem) + orig_pool_used + n_hard * 64 + 4096;
+    size_t buf_size = sizeof(dvs_problem_t) + orig_pool_used + n_hard * 64 + 4096;
     void *buf = malloc(buf_size);
     if (!buf) return -1;
-    SolveProblem *sp = solve_problem_init(buf, buf_size);
+    dvs_problem_t *sp = solve_problem_init(buf, buf_size);
     if (!sp) { free(buf); return -1; }
 
     uint32_t *cid_map = NULL;
@@ -71,7 +71,7 @@ static int _build_gated_problem(SolveProblem *orig, GatedProblem *out) {
         if (!cid_map) { free(buf); return -1; }
     }
 
-    /* Bulk-copy pool data to preserve ExprRef offsets */
+    /* Bulk-copy pool data to preserve dvs_expr_t offsets */
     uint8_t *dst = (uint8_t *)&sp->pool + sizeof(dvs_pool_t);
     uint8_t *src = (uint8_t *)&orig->pool + sizeof(dvs_pool_t);
     memcpy(dst, src, orig_pool_used);
@@ -91,10 +91,10 @@ static int _build_gated_problem(SolveProblem *orig, GatedProblem *out) {
     /* Convert each hard constraint to soft. Walk original constraint list
      * and add as soft with unique priority. */
     uint32_t aidx = 0;
-    ExprRef cref = orig->constraints_head;
+    dvs_expr_t cref = orig->constraints_head;
     while (cref != EXPR_NULL) {
         ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(orig, cref);
-        ExprRef sref = problem_add_soft_constraint(sp, cs->root, aidx);
+        dvs_expr_t sref = problem_add_soft_constraint(sp, cs->root, aidx);
         if (sref == EXPR_NULL) { free(cid_map); free(buf); return -1; }
         SoftSpec *ss = (SoftSpec *)POOL_PTR(sp, sref);
         ss->constraint_id = cs->constraint_id;
@@ -107,7 +107,7 @@ static int _build_gated_problem(SolveProblem *orig, GatedProblem *out) {
      *
      * The constraint list is LIFO, so we walk it in reverse-add order.
      * problem_add_soft_constraint also uses LIFO, so the softs_head list
-     * is doubly-reversed (back to original add order). When solver_compile
+     * is doubly-reversed (back to original add order). When dvs_solver_compile
      * walks softs_head, assumption index 0 gets the LAST constraint we
      * walked (= first originally added). Reversing cid_map aligns the
      * assumption indices with the correct constraint_ids. */
@@ -130,21 +130,21 @@ static void _gated_free(GatedProblem *g) {
 /* ---- SolverInstance ---- */
 
 typedef struct {
-    SolveCtx *ctx;  void *ctx_buf;  dvs_block_alloc_t *ba;
+    dvs_ctx_t *ctx;  void *ctx_buf;  dvs_block_alloc_t *ba;
 } SolverInstance;
 
-static int _solver_create(SolverInstance *si, SolveProblem *sp) {
+static int _solver_create(SolverInstance *si, dvs_problem_t *sp) {
     memset(si, 0, sizeof(*si));
     si->ctx_buf = malloc(CONTRA_CTX_BUF_SIZE);
     if (!si->ctx_buf) return -1;
     si->ba = dvs_block_alloc_create(NULL, CONTRA_BLOCK_SIZE);
     if (!si->ba) { free(si->ctx_buf); si->ctx_buf = NULL; return -1; }
-    si->ctx = solver_create(si->ctx_buf, CONTRA_CTX_BUF_SIZE, si->ba);
+    si->ctx = dvs_solver_create(si->ctx_buf, CONTRA_CTX_BUF_SIZE, si->ba);
     if (!si->ctx) {
         dvs_block_alloc_destroy(si->ba); free(si->ctx_buf);
         memset(si, 0, sizeof(*si)); return -1;
     }
-    int rc = solver_compile(si->ctx, sp);
+    int rc = dvs_solver_compile(si->ctx, sp);
     if (rc == -1) {
         dvs_block_alloc_destroy(si->ba); free(si->ctx_buf);
         memset(si, 0, sizeof(*si)); return -1;
@@ -153,7 +153,7 @@ static int _solver_create(SolverInstance *si, SolveProblem *sp) {
 }
 
 static void _solver_destroy(SolverInstance *si) {
-    if (si->ctx) solver_destroy(si->ctx);
+    if (si->ctx) dvs_solver_destroy(si->ctx);
     if (si->ba) dvs_block_alloc_destroy(si->ba);
     free(si->ctx_buf); memset(si, 0, sizeof(*si));
 }
@@ -161,8 +161,8 @@ static void _solver_destroy(SolverInstance *si) {
 /* ---- _is_sat: raw SAT/UNSAT check with current assumption mask ---- */
 
 static int _is_sat(SolverInstance *si, uint32_t *calls) {
-    SolveCtx *ctx = si->ctx;
-    solver_reset(ctx);
+    dvs_ctx_t *ctx = si->ctx;
+    dvs_solver_reset(ctx);
 
     /* Pin deactivated assumptions to 0 */
     for (uint32_t i = 0; i < ctx->n_assumptions; i++) {
@@ -179,21 +179,21 @@ static int _is_sat(SolverInstance *si, uint32_t *calls) {
     uint32_t saved_n = ctx->n_assumptions;
     ctx->n_assumptions = 0;
 
-    SolveOpts opts;
+    dvs_solve_opts_t opts;
     memset(&opts, 0, sizeof(opts));
     opts.max_conflicts = 50000;
     opts.max_restarts  = 200;
 
     if (calls) (*calls)++;
-    SolveResult res = solver_solve(ctx, &opts);
+    dvs_result_t res = dvs_solver_solve(ctx, &opts);
     ctx->n_assumptions = saved_n;
 
-    return (res == SOLVE_OK) ? 1 : 0;
+    return (res == DVS_SOLVE_OK) ? 1 : 0;
 }
 
 /* ---- Helpers ---- */
 
-static void _activate_set(SolveCtx *ctx, const uint32_t *indices, uint32_t n) {
+static void _activate_set(dvs_ctx_t *ctx, const uint32_t *indices, uint32_t n) {
     for (uint32_t i = 0; i < n; i++) {
         if (indices[i] < 64)
             ctx->assumption_active_mask |= (1ULL << indices[i]);
@@ -292,7 +292,7 @@ static void _deletion_mus(SolverInstance *si,
 
 /* ---- contra_quick_core ---- */
 
-int contra_quick_core(SolveCtx *ctx, SolveProblem *sp,
+int contra_quick_core(dvs_ctx_t *ctx, dvs_problem_t *sp,
                        uint32_t *out_ids, uint32_t *out_n) {
     (void)ctx;
     if (!sp || !out_ids || !out_n) return -1;
@@ -330,7 +330,7 @@ int contra_quick_core(SolveCtx *ctx, SolveProblem *sp,
 
 /* ---- contra_analyze_unsat ---- */
 
-int contra_analyze_unsat(SolveCtx *ctx, SolveProblem *sp,
+int contra_analyze_unsat(dvs_ctx_t *ctx, dvs_problem_t *sp,
                           const ContraOpts *opts, ContraResult *result) {
     (void)ctx;
     if (!result) return -1;
@@ -375,12 +375,12 @@ int contra_analyze_unsat(SolveCtx *ctx, SolveProblem *sp,
         for (uint32_t i = 0; i < gated.n_hard && i < MAX_CORE_SIZE; i++) {
             /* Build sub-problem WITHOUT constraint i */
             uint32_t orig_pu = dvs_pool_used(&sp->pool);
-            size_t bsz = sizeof(SolveProblem) + orig_pu +
+            size_t bsz = sizeof(dvs_problem_t) + orig_pu +
                          gated.n_hard * 64 + 4096;
             void *tbuf = malloc(bsz);
             if (!tbuf) { mus_indices[mus_n++] = i; continue; }
 
-            SolveProblem *tsub = solve_problem_init(tbuf, bsz);
+            dvs_problem_t *tsub = solve_problem_init(tbuf, bsz);
             if (!tsub) { free(tbuf); mus_indices[mus_n++] = i; continue; }
 
             uint8_t *td = (uint8_t *)&tsub->pool + sizeof(dvs_pool_t);
@@ -400,7 +400,7 @@ int contra_analyze_unsat(SolveCtx *ctx, SolveProblem *sp,
 
             /* Add all constraints except the i-th one */
             uint32_t cidx = 0;
-            ExprRef cr = sp->constraints_head;
+            dvs_expr_t cr = sp->constraints_head;
             while (cr != EXPR_NULL) {
                 ConstraintSpec *cs2 = (ConstraintSpec *)POOL_PTR(sp, cr);
                 /* The cid_map maps assumption index to constraint_id.
@@ -418,11 +418,11 @@ int contra_analyze_unsat(SolveCtx *ctx, SolveProblem *sp,
             if (trc >= 0) {
                 uint32_t sv = tsi.ctx->n_assumptions;
                 tsi.ctx->n_assumptions = 0;
-                SolveOpts so;
+                dvs_solve_opts_t so;
                 memset(&so, 0, sizeof(so));
                 so.max_conflicts = 10000;
                 so.max_restarts = 50;
-                still_unsat = (solver_solve(tsi.ctx, &so) != SOLVE_OK);
+                still_unsat = (dvs_solver_solve(tsi.ctx, &so) != DVS_SOLVE_OK);
                 tsi.ctx->n_assumptions = sv;
             }
             _solver_destroy(&tsi);
@@ -712,7 +712,7 @@ void contra_result_free(ContraResult *result) {
     memset(result, 0, sizeof(*result));
 }
 
-int contra_explain_soft(SolveCtx *ctx, SolveProblem *sp,
+int contra_explain_soft(dvs_ctx_t *ctx, dvs_problem_t *sp,
                          const ContraOpts *opts, ContraSoftDiagResult *result) {
     if (!ctx || !sp || !result) return -1;
     memset(result, 0, sizeof(*result));
@@ -753,12 +753,12 @@ int contra_explain_soft(SolveCtx *ctx, SolveProblem *sp,
          * treated as hard. Walk the original problem's constraint and
          * soft lists. */
         uint32_t orig_pool_used = dvs_pool_used(&sp->pool);
-        size_t buf_size = sizeof(SolveProblem) + orig_pool_used +
+        size_t buf_size = sizeof(dvs_problem_t) + orig_pool_used +
                           (sp->n_constraints + 1) * 64 + 4096;
         void *buf = malloc(buf_size);
         if (!buf) continue;
 
-        SolveProblem *sub = solve_problem_init(buf, buf_size);
+        dvs_problem_t *sub = solve_problem_init(buf, buf_size);
         if (!sub) { free(buf); continue; }
 
         /* Copy pool data */
@@ -779,7 +779,7 @@ int contra_explain_soft(SolveCtx *ctx, SolveProblem *sp,
         sub->softs_head = EXPR_NULL;
 
         /* Add all hard constraints */
-        ExprRef cref = sp->constraints_head;
+        dvs_expr_t cref = sp->constraints_head;
         while (cref != EXPR_NULL) {
             ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(sp, cref);
             problem_add_constraint(sub, cs->root);
@@ -789,7 +789,7 @@ int contra_explain_soft(SolveCtx *ctx, SolveProblem *sp,
         /* Add the target soft constraint as hard.
          * Walk the soft list to find the one at soft_idx. */
         {
-            ExprRef sref = sp->softs_head;
+            dvs_expr_t sref = sp->softs_head;
             uint32_t sidx = 0;
             /* The softs list is LIFO, so the compile order is reversed.
              * The compiler assigns assumption indices from softs_head
@@ -864,11 +864,11 @@ int contra_explain_soft(SolveCtx *ctx, SolveProblem *sp,
 
                 /* Build sub-problem: conflict_hard + S_j */
                 uint32_t orig_pu = dvs_pool_used(&sp->pool);
-                size_t bsz = sizeof(SolveProblem) + orig_pu +
+                size_t bsz = sizeof(dvs_problem_t) + orig_pu +
                              (entry->n_conflict_hard + 1) * 64 + 4096;
                 void *abuf = malloc(bsz);
                 if (!abuf) continue;
-                SolveProblem *asub = solve_problem_init(abuf, bsz);
+                dvs_problem_t *asub = solve_problem_init(abuf, bsz);
                 if (!asub) { free(abuf); continue; }
 
                 uint8_t *ad = (uint8_t *)&asub->pool + sizeof(dvs_pool_t);
@@ -887,7 +887,7 @@ int contra_explain_soft(SolveCtx *ctx, SolveProblem *sp,
                 asub->dists_head = EXPR_NULL;
 
                 /* Add conflict hard constraints */
-                ExprRef cr = sp->constraints_head;
+                dvs_expr_t cr = sp->constraints_head;
                 while (cr != EXPR_NULL) {
                     ConstraintSpec *cs2 = (ConstraintSpec *)POOL_PTR(sp, cr);
                     for (uint32_t k = 0; k < entry->n_conflict_hard; k++) {
@@ -900,7 +900,7 @@ int contra_explain_soft(SolveCtx *ctx, SolveProblem *sp,
                 }
 
                 /* Add the other soft S_j as hard */
-                ExprRef sr = sp->softs_head;
+                dvs_expr_t sr = sp->softs_head;
                 uint32_t si2 = 0;
                 while (sr != EXPR_NULL) {
                     SoftSpec *ss2 = (SoftSpec *)POOL_PTR(sp, sr);
@@ -921,11 +921,11 @@ int contra_explain_soft(SolveCtx *ctx, SolveProblem *sp,
                 } else if (arc >= 0) {
                     uint32_t sv = asi.ctx->n_assumptions;
                     asi.ctx->n_assumptions = 0;
-                    SolveOpts so;
+                    dvs_solve_opts_t so;
                     memset(&so, 0, sizeof(so));
                     so.max_conflicts = 10000;
                     so.max_restarts = 50;
-                    is_unsat = (solver_solve(asi.ctx, &so) != SOLVE_OK);
+                    is_unsat = (dvs_solver_solve(asi.ctx, &so) != DVS_SOLVE_OK);
                     asi.ctx->n_assumptions = sv;
                 }
                 _solver_destroy(&asi);
@@ -1010,7 +1010,7 @@ typedef struct {
     uint8_t  relax_direction;  /* 0=increase, 1=decrease, 2=both */
     uint32_t var_id;           /* variable in the constraint */
     int64_t  original_const;   /* the constant being relaxed */
-    BinOp    op;               /* the comparison operator */
+    dvs_binop_t    op;               /* the comparison operator */
     uint8_t  is_sum;           /* 1 if constraint is sum-based (not simple var-const) */
 } ClassifyResult;
 
@@ -1019,7 +1019,7 @@ typedef struct {
  * Handles: var <= C, var >= C, var < C, var > C, var == C.
  * Returns 0 if classified, -1 if not relaxable.
  */
-static int _classify_constraint(SolveProblem *sp, ExprRef root,
+static int _classify_constraint(dvs_problem_t *sp, dvs_expr_t root,
                                  ClassifyResult *out) {
     memset(out, 0, sizeof(*out));
 
@@ -1054,13 +1054,13 @@ static int _classify_constraint(SolveProblem *sp, ExprRef root,
     if (!is_vc && !is_cv) return -1;
 
     /* Normalize to var-on-left form */
-    BinOp op = e->op;
+    dvs_binop_t op = e->op;
     if (is_cv) {
         switch (op) {
-        case BIN_LTE: op = BIN_GTE; break;
-        case BIN_LT:  op = BIN_GT;  break;
-        case BIN_GTE: op = BIN_LTE; break;
-        case BIN_GT:  op = BIN_LT;  break;
+        case DVS_BIN_LTE: op = DVS_BIN_GTE; break;
+        case DVS_BIN_LT:  op = DVS_BIN_GT;  break;
+        case DVS_BIN_GTE: op = DVS_BIN_LTE; break;
+        case DVS_BIN_GT:  op = DVS_BIN_LT;  break;
         default: break;
         }
     }
@@ -1071,16 +1071,16 @@ static int _classify_constraint(SolveProblem *sp, ExprRef root,
     out->is_relaxable = 1;
 
     switch (op) {
-    case BIN_LTE: case BIN_LT:
+    case DVS_BIN_LTE: case DVS_BIN_LT:
         out->relax_direction = 0;  /* increase constant to widen UB */
         break;
-    case BIN_GTE: case BIN_GT:
+    case DVS_BIN_GTE: case DVS_BIN_GT:
         out->relax_direction = 1;  /* decrease constant to widen LB */
         break;
-    case BIN_EQ:
+    case DVS_BIN_EQ:
         out->relax_direction = 2;  /* both directions */
         break;
-    case BIN_NEQ:
+    case DVS_BIN_NEQ:
         out->is_relaxable = 0;  /* can't relax != */
         return -1;
     default:
@@ -1096,19 +1096,19 @@ static int _classify_constraint(SolveProblem *sp, ExprRef root,
 /**
  * Build a sub-problem from MUS constraints, replacing one constraint's
  * constant with a new value. Returns a malloc'd buffer containing the
- * SolveProblem, or NULL on failure.
+ * dvs_problem_t, or NULL on failure.
  */
-static void *_build_relaxed_subproblem(SolveProblem *orig,
+static void *_build_relaxed_subproblem(dvs_problem_t *orig,
                                         const uint32_t *mus_cids,
                                         uint32_t mus_size,
                                         uint32_t target_cid,
                                         int64_t new_const) {
     uint32_t orig_pool_used = dvs_pool_used(&orig->pool);
-    size_t buf_size = sizeof(SolveProblem) + orig_pool_used + mus_size * 64 + 4096;
+    size_t buf_size = sizeof(dvs_problem_t) + orig_pool_used + mus_size * 64 + 4096;
     void *buf = malloc(buf_size);
     if (!buf) return NULL;
 
-    SolveProblem *sp = solve_problem_init(buf, buf_size);
+    dvs_problem_t *sp = solve_problem_init(buf, buf_size);
     if (!sp) { free(buf); return NULL; }
 
     /* Copy pool data */
@@ -1130,7 +1130,7 @@ static void *_build_relaxed_subproblem(SolveProblem *orig,
     sp->dists_head = EXPR_NULL;
 
     /* Add only the MUS constraints */
-    ExprRef cref = orig->constraints_head;
+    dvs_expr_t cref = orig->constraints_head;
     while (cref != EXPR_NULL) {
         ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(orig, cref);
 
@@ -1141,7 +1141,7 @@ static void *_build_relaxed_subproblem(SolveProblem *orig,
         }
 
         if (in_mus) {
-            ExprRef root = cs->root;
+            dvs_expr_t root = cs->root;
 
             if (cs->constraint_id == target_cid && root != EXPR_NULL) {
                 /* Replace the constant in this constraint */
@@ -1150,11 +1150,11 @@ static void *_build_relaxed_subproblem(SolveProblem *orig,
                     ExprBinary *e = (ExprBinary *)POOL_PTR(sp, root);
 
                     /* Build new expression with modified constant */
-                    ExprRef new_const_ref = expr_const(sp, new_const, 0);
+                    dvs_expr_t new_const_ref = expr_const(sp, new_const, 0);
                     if (new_const_ref == EXPR_NULL) { free(buf); return NULL; }
 
                     ExprKind lk = *(ExprKind *)POOL_PTR(sp, e->lhs);
-                    ExprRef new_root;
+                    dvs_expr_t new_root;
                     if (lk == EXPR_VAR) {
                         /* var op const -> var op new_const */
                         new_root = expr_binary(sp, e->op, e->lhs, new_const_ref);
@@ -1179,7 +1179,7 @@ static void *_build_relaxed_subproblem(SolveProblem *orig,
 /**
  * Binary search for the minimum relaxation of a constraint constant.
  */
-static int _relax_search(SolveProblem *orig,
+static int _relax_search(dvs_problem_t *orig,
                           const uint32_t *mus_cids, uint32_t mus_size,
                           uint32_t target_cid,
                           ClassifyResult *cls,
@@ -1222,7 +1222,7 @@ static int _relax_search(SolveProblem *orig,
      * rules: `x >= -9992` over an unsigned 8-bit x compares unsigned at 32
      * bits, where -9992 is 2^32-9992 -- the opposite of a relaxation. The
      * range edge is the widest relaxation that still means what it says. */
-    for (ExprRef vr = orig->vars_head; vr != EXPR_NULL; ) {
+    for (dvs_expr_t vr = orig->vars_head; vr != EXPR_NULL; ) {
         VarSpec *vs = (VarSpec *)POOL_PTR(orig, vr);
         if (vs->var_id == cls->var_id) {
             if (vs->width >= 1 && vs->width < 64) {
@@ -1242,7 +1242,7 @@ static int _relax_search(SolveProblem *orig,
         void *buf = _build_relaxed_subproblem(orig, mus_cids, mus_size,
                                                target_cid, feasible_val);
         if (!buf) return -1;
-        SolveProblem *sub = (SolveProblem *)buf;
+        dvs_problem_t *sub = (dvs_problem_t *)buf;
 
         SolverInstance si;
         int rc = _solver_create(&si, sub);
@@ -1251,11 +1251,11 @@ static int _relax_search(SolveProblem *orig,
             si.ctx->assumption_active_mask = 0;
             uint32_t saved = si.ctx->n_assumptions;
             si.ctx->n_assumptions = 0;
-            SolveOpts sopts;
+            dvs_solve_opts_t sopts;
             memset(&sopts, 0, sizeof(sopts));
             sopts.max_conflicts = 10000;
             sopts.max_restarts = 50;
-            feasible = (solver_solve(si.ctx, &sopts) == SOLVE_OK);
+            feasible = (dvs_solver_solve(si.ctx, &sopts) == DVS_SOLVE_OK);
             si.ctx->n_assumptions = saved;
         } else if (rc == -2) {
             feasible = 0;
@@ -1284,7 +1284,7 @@ static int _relax_search(SolveProblem *orig,
         void *buf = _build_relaxed_subproblem(orig, mus_cids, mus_size,
                                                target_cid, mid);
         if (!buf) break;
-        SolveProblem *sub = (SolveProblem *)buf;
+        dvs_problem_t *sub = (dvs_problem_t *)buf;
 
         SolverInstance si;
         int rc = _solver_create(&si, sub);
@@ -1292,11 +1292,11 @@ static int _relax_search(SolveProblem *orig,
         if (rc >= 0 && rc != -2) {
             uint32_t saved = si.ctx->n_assumptions;
             si.ctx->n_assumptions = 0;
-            SolveOpts sopts;
+            dvs_solve_opts_t sopts;
             memset(&sopts, 0, sizeof(sopts));
             sopts.max_conflicts = 10000;
             sopts.max_restarts = 50;
-            feasible = (solver_solve(si.ctx, &sopts) == SOLVE_OK);
+            feasible = (dvs_solver_solve(si.ctx, &sopts) == DVS_SOLVE_OK);
             si.ctx->n_assumptions = saved;
         }
         _solver_destroy(&si);
@@ -1316,7 +1316,7 @@ static int _relax_search(SolveProblem *orig,
 
 /* ---- contra_compute_relaxations (T-29) ---- */
 
-int contra_compute_relaxations(SolveCtx *ctx, SolveProblem *sp,
+int contra_compute_relaxations(dvs_ctx_t *ctx, dvs_problem_t *sp,
                                 const uint32_t *mus_ids, uint32_t mus_size,
                                 const ContraOpts *opts, ContraRelaxSuggestion *out) {
     (void)ctx; (void)opts;
@@ -1325,7 +1325,7 @@ int contra_compute_relaxations(SolveCtx *ctx, SolveProblem *sp,
     memset(out, 0, mus_size * sizeof(*out));
 
     /* For each MUS constraint, classify and search for relaxation */
-    ExprRef cref = sp->constraints_head;
+    dvs_expr_t cref = sp->constraints_head;
     while (cref != EXPR_NULL) {
         ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(sp, cref);
 

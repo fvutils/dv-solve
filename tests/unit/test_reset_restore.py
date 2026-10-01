@@ -1,7 +1,7 @@
-"""solver_reset must fully restore variable domains for ALL width tiers.
+"""dvs_solver_reset must fully restore variable domains for ALL width tiers.
 
 Regression test for a tier-1 (width >= 32) reset bug: compile saved a separate
-pristine copy of each tier-1 var's WideBounds64, but solver_reset memcpy'd the
+pristine copy of each tier-1 var's WideBounds64, but dvs_solver_reset memcpy'd the
 whole Variable array — repointing the var at the saved copy, making the restore
 a self-copy no-op and letting the next solve corrupt the saved copy. Result:
 tier-1 vars stayed pinned to their first solved value across resets.

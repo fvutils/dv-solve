@@ -8,21 +8,21 @@
 /* ------------------------------------------------------------------ */
 
 static inline size_t _pool_offset(void) {
-    return offsetof(SolveCtx, pool);
+    return offsetof(dvs_ctx_t, pool);
 }
 
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
 
-SolveCtx *solver_create(void *static_buf, size_t static_size,
+dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
                          dvs_block_alloc_t *block_alloc) {
     if (!static_buf) return NULL;
 
-    size_t min_size = offsetof(SolveCtx, pool) + sizeof(dvs_pool_t) + 1;
+    size_t min_size = offsetof(dvs_ctx_t, pool) + sizeof(dvs_pool_t) + 1;
     if (static_size < min_size) return NULL;
 
-    SolveCtx *ctx        = (SolveCtx *)static_buf;
+    dvs_ctx_t *ctx        = (dvs_ctx_t *)static_buf;
     ctx->vars            = NULL;
     ctx->n_vars          = 0;
     ctx->n_vars_capacity = 0;
@@ -93,7 +93,7 @@ SolveCtx *solver_create(void *static_buf, size_t static_size,
     return ctx;
 }
 
-void solver_destroy(SolveCtx *ctx) {
+void dvs_solver_destroy(dvs_ctx_t *ctx) {
     if (!ctx) return;
     if (ctx->lcg) {
         lcg_destroy((LCGCtx *)ctx->lcg);
@@ -110,47 +110,47 @@ void solver_destroy(SolveCtx *ctx) {
 /* Accessor wrappers                                                   */
 /* ------------------------------------------------------------------ */
 
-int32_t dvs_var_lo32(const SolveCtx *ctx, uint32_t var_id) {
+int32_t dvs_var_lo32(const dvs_ctx_t *ctx, uint32_t var_id) {
     return var_lo32(_ctx_var(ctx, var_id));
 }
 
-int32_t dvs_var_hi32(const SolveCtx *ctx, uint32_t var_id) {
+int32_t dvs_var_hi32(const dvs_ctx_t *ctx, uint32_t var_id) {
     return var_hi32(_ctx_var(ctx, var_id));
 }
 
-int64_t dvs_var_lo64(const SolveCtx *ctx, uint32_t var_id) {
+int64_t dvs_var_lo64(const dvs_ctx_t *ctx, uint32_t var_id) {
     return var_lo64(ctx, _ctx_var(ctx, var_id));
 }
 
-int64_t dvs_var_hi64(const SolveCtx *ctx, uint32_t var_id) {
+int64_t dvs_var_hi64(const dvs_ctx_t *ctx, uint32_t var_id) {
     return var_hi64(ctx, _ctx_var(ctx, var_id));
 }
 
-Variable *solver_get_var(const SolveCtx *ctx, uint32_t var_id) {
+Variable *dvs_solver_get_var(const dvs_ctx_t *ctx, uint32_t var_id) {
     if (!ctx->vars || var_id >= ctx->n_vars) return NULL;
     return &ctx->vars[var_id];
 }
 
-uint32_t dvs_ctx_pool_used(const SolveCtx *ctx) {
+uint32_t dvs_ctx_pool_used(const dvs_ctx_t *ctx) {
     return dvs_pool_used(&ctx->pool);
 }
 
-uint32_t dvs_ctx_decision_level(const SolveCtx *ctx) {
+uint32_t dvs_ctx_decision_level(const dvs_ctx_t *ctx) {
     return ctx->decision_level;
 }
 
-uint64_t dvs_ctx_trail_count(const SolveCtx *ctx) {
+uint64_t dvs_ctx_trail_count(const dvs_ctx_t *ctx) {
     return ctx->trail_count;
 }
 
-uint32_t dvs_prop_constraint_id(const SolveCtx *ctx, uint32_t prop_idx) {
+uint32_t dvs_prop_constraint_id(const dvs_ctx_t *ctx, uint32_t prop_idx) {
     if (!ctx->prop_constraint_id || prop_idx >= ctx->n_prop_refs_capacity)
         return 0;
     return ctx->prop_constraint_id[prop_idx];
 }
 
-void solver_set_value_selector(SolveCtx *ctx,
-                               int64_t (*fn)(SolveCtx *, uint32_t, void *),
+void dvs_solver_set_value_selector(dvs_ctx_t *ctx,
+                               int64_t (*fn)(dvs_ctx_t *, uint32_t, void *),
                                void *data) {
     ctx->value_selector_fn   = fn;
     ctx->value_selector_data = data;
