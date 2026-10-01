@@ -187,6 +187,13 @@ ExprRef builder_expr_in_set(SolveProblemBuilder *b, ExprRef value,
 ExprRef builder_expr_in_ranges(SolveProblemBuilder *b, ExprRef value,
                                uint32_t n_ranges, const ExprRef *los,
                                const ExprRef *his);
+/** INTERNAL (not part of the documented surface): an explicit
+ *  width/signedness conversion node, EXPR_SV_CAST (see zsp_problem.h). Used
+ *  by front ends that build explicit problems, e.g. the SMT-LIB2 front end
+ *  reading an unsigned bit pattern as signed for `bvashr`. */
+ExprRef builder_expr_sv_cast(SolveProblemBuilder *b, ExprRef operand,
+                             uint8_t from_bits, uint8_t to_bits,
+                             uint8_t sign_extend, uint8_t dst_signed);
 ExprRef builder_expr_extend(SolveProblemBuilder *b, ExprRef operand,
                             uint8_t from_bits, uint8_t to_bits,
                             uint8_t sign_extend);

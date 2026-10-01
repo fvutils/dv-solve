@@ -1937,11 +1937,37 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         return (TaggedExpr){ { r, (uint16_t)(hi.te.width + lo.te.width) }, 0, NULL };
     }
 
+    /* ---- bvashr: arithmetic shift right ----
+     * SMT-LIB values are unsigned bit patterns, while BIN_ASHR is arithmetic
+     * only for a SIGNED left operand (SystemVerilog `>>>`). So read the
+     * pattern as signed at its own width (an explicit cast -- the problem is
+     * flagged explicit and never SV-elaborated), shift, and read the result
+     * back as an unsigned pattern. The amount stays an unsigned w-bit value;
+     * any amount >= w leaves only sign bits, exactly as SMT-LIB defines. */
+    if (oplen == 6 && memcmp(op, "bvashr", 6) == 0) {
+        if (s->list.count != 3) return TAGGED_NULL;
+        TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+        if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
+        TaggedExpr k = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+        if (k.te.ref == EXPR_NULL) return TAGGED_NULL;
+        uint16_t w = a.te.width;
+        if (w == 0 || w > 255 || k.te.width != w) {
+            fprintf(fe->err, "error: bvashr operands must share a width\n");
+            return TAGGED_NULL;
+        }
+        ExprRef as = builder_expr_sv_cast(fe->builder, a.te.ref,
+                                          (uint8_t)w, (uint8_t)w, 0, 1);
+        ExprRef sh = builder_expr_binary(fe->builder, BIN_ASHR, as, k.te.ref);
+        ExprRef r  = builder_expr_sv_cast(fe->builder, sh,
+                                          (uint8_t)w, (uint8_t)w, 1, 0);
+        _flag_wide_arith(fe, w);
+        return (TaggedExpr){ { r, w }, 0, NULL };
+    }
+
     /* ---- Signed arithmetic ops: still deferred (comparisons handled above) ---- */
     if ((oplen == 6 && memcmp(op, "bvsdiv", 6) == 0) ||
         (oplen == 6 && memcmp(op, "bvsrem", 6) == 0) ||
-        (oplen == 6 && memcmp(op, "bvsmod", 6) == 0) ||
-        (oplen == 6 && memcmp(op, "bvashr", 6) == 0)) {
+        (oplen == 6 && memcmp(op, "bvsmod", 6) == 0)) {
         fprintf(fe->err, "error: signed operation '%.*s' not yet supported\n",
                 (int)oplen, op);
         return TAGGED_NULL;

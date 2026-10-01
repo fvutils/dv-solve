@@ -1923,6 +1923,26 @@ static int _shift_range(ModIv B, uint8_t w, uint64_t *s0, uint64_t *s1) {
     return 1;
 }
 
+/* The shift-amount range [s0,s1] read from the amount's REAL value. Its
+ * residue mod 2^w (_shift_range) only stands for the value when the amount
+ * var is no wider than w; a wider amount (an 8-bit amount of a 4-bit shift,
+ * a 16-bit one of an 8-bit shift) aliases: 16 is residue 0 mod 16 but shifts
+ * everything out. Any amount >= w acts the same, so values are clamped to w,
+ * which keeps the range exact. */
+static int _shift_amount_range(SolveCtx *ctx, uint32_t bid, ModIv B, uint8_t w,
+                               uint64_t *s0, uint64_t *s1) {
+    const Variable *bv = &ctx->vars[bid];
+    if (bv->width <= w) return _shift_range(B, w, s0, s1);
+    int64_t lo = var_lo64(ctx, bv), hi = var_hi64(ctx, bv);
+    if ((bv->flags & VAR_SIGNED) && lo < 0)
+        return 0;                          /* a negative signed amount */
+    /* (an unsigned 64-bit amount's bounds are unsigned patterns) */
+    uint64_t ulo = (uint64_t)lo, uhi = (uint64_t)hi;
+    *s0 = ulo > w ? w : ulo;
+    *s1 = uhi > w ? w : uhi;
+    return 1;
+}
+
 static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
@@ -1977,7 +1997,7 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
             return PROP_CONFLICT;
     } else if (op == BIN_LSHIFT) {
         uint64_t s0, s1;
-        if (_shift_range(B, w, &s0, &s1)) {
+        if (_shift_amount_range(ctx, bid, B, w, &s0, &s1)) {
             ModIv R = _modiv_shl(A, s0, s1, w);
             if ((res = _tighten_to_modiv(ctx, rid, R, w)) != PROP_OK) return res;
         }
@@ -1993,7 +2013,7 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
         uint64_t bs0, bs1;
         ModIv Rc = _var_modiv(ctx, rid, w);
         ModIv Ac2 = _var_modiv(ctx, aid, w);
-        if (_shift_range(B, w, &bs0, &bs1) && _modiv_single(Rc) && _modiv_single(Ac2)) {
+        if (_shift_amount_range(ctx, bid, B, w, &bs0, &bs1) && _modiv_single(Rc) && _modiv_single(Ac2)) {
             /* Both a and r fixed: rr must equal (a<<s)&mask for some feasible
              * shift s, else conflict. Exact and sound. */
             uint64_t rr = Rc.start;
@@ -2008,7 +2028,7 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
                 }
             }
             if (!any) return PROP_CONFLICT;
-        } else if (_shift_range(B, w, &bs0, &bs1) && _modiv_single(Rc)) {
+        } else if (_shift_amount_range(ctx, bid, B, w, &bs0, &bs1) && _modiv_single(Rc)) {
             uint64_t rr = Rc.start;
             int any = 0;
             /* If any feasible shift is >= w, the result-0 case is reachable,
@@ -3166,6 +3186,14 @@ static PropResult _fire_bounds_lshr_64(Propagator *self, SolveCtx *ctx) {
     int64_t blo = var_lo64(ctx, &ctx->vars[bid]);
     int64_t bhi = var_hi64(ctx, &ctx->vars[bid]);
     int a_signed = (ctx->vars[aid].flags & VAR_SIGNED) != 0;
+
+    /* The amount is an unsigned value. An unsigned 64-bit amount stores a
+     * pattern >= 2^63 as a negative int64: that is a HUGE amount, not a
+     * negative one (clamped to the operand width below). */
+    if (!(ctx->vars[bid].flags & VAR_SIGNED) && ctx->vars[bid].width >= 64) {
+        if (blo < 0) blo = INT64_MAX;
+        if (bhi < 0) bhi = INT64_MAX;
+    }
 
     PropResult res;
 

@@ -10,7 +10,7 @@
  *       variable      its declared width / signedness
  *       constant      sized: (width, is_signed); unsized: see zsp_sv_const_type
  *       + - * / % & | ^        (max operand width, both operands signed)
- *       << >>                  the left operand's type
+ *       << >> >>>              the left operand's type
  *       == != < <= > >= && ||  (1, unsigned)       ! likewise
  *       unary - ~              the operand's type
  *       c ? a : b              like a binary operator over a and b
@@ -24,9 +24,10 @@
  *   - Each operand is first extended to the context width by ITS OWN
  *     signedness, the operation is done at the context width (2's complement
  *     wrap), and the result is read per the context signedness.
- *   - / and % truncate toward zero when signed. >> is a LOGICAL shift of the
- *     context-width bit pattern (SV >>, not >>>). A shift amount is the
- *     unsigned value of its own bit pattern.
+ *   - / and % truncate toward zero when signed. >> (BIN_RSHIFT) is a LOGICAL
+ *     shift of the context-width bit pattern; >>> (BIN_ASHR) is an
+ *     ARITHMETIC shift of it in a signed context and the same as >> in an
+ *     unsigned one. A shift amount is the unsigned value of its own pattern.
  *
  * The engines (CDCL compile, bit-blaster) do not interpret these rules
  * themselves. zsp_sv_elaborate() rewrites a problem into an EXPLICIT form in

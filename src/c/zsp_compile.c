@@ -864,8 +864,12 @@ static int _binop_exact(SolveCtx *ctx, BinOp op, uint32_t r_id,
         if (!rs && (alo < 0 || blo < 0)) return 0;
         return 1;    /* bitwise ops stay inside the operands' common range */
     case BIN_RSHIFT:
-        /* An unsigned operand: floor shift == logical shift. (Elaboration
-         * never leaves a signed `>>` here.) */
+    case BIN_ASHR:
+        /* The bounds_lshr propagator floor-shifts a SIGNED left operand
+         * (= SV `>>>` of its pattern, the only way elaboration leaves a
+         * BIN_ASHR) and logically shifts an unsigned one (`>>`; elaboration
+         * never leaves a signed `>>`). Either way the result stays inside the
+         * left operand's own range. */
         if (!rs && alo < 0) return 0;
         return 1;
     default:
@@ -1035,6 +1039,7 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
         case BIN_BXOR: prop_add_bounds_bxor_64(ctx, r_id, a_id, b_id, 0); return 1;
         case BIN_LSHIFT: prop_add_bounds_shl_64(ctx, r_id, a_id, b_id, 0); return 1;
         case BIN_RSHIFT: prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_ASHR:   prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
         default: break;
         }
     } else {
@@ -1049,6 +1054,7 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
         case BIN_BXOR: prop_add_bounds_bxor_64(ctx, r_id, a_id, b_id, 0); return 1;
         case BIN_LSHIFT: prop_add_bounds_shl_64(ctx, r_id, a_id, b_id, 0); return 1;
         case BIN_RSHIFT: prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_ASHR:   prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
         default: break;
         }
     }
@@ -1182,7 +1188,7 @@ static uint8_t _expr_width(SolveCtx *ctx, SolveProblem *sp, ExprRef ref,
         if (_is_bool_op(eb->op)) return 1;
         /* A shift's result width is the width of the value being shifted;
          * the shift amount is unrelated and must not widen it. */
-        if (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT)
+        if (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT || eb->op == BIN_ASHR)
             return _expr_width(ctx, sp, eb->lhs, depth + 1);
         uint8_t lw = _expr_width(ctx, sp, eb->lhs, depth + 1);
         uint8_t rw = _expr_width(ctx, sp, eb->rhs, depth + 1);
@@ -1232,7 +1238,7 @@ static int _expr_has_signed(SolveCtx *ctx, SolveProblem *sp, ExprRef ref,
     case EXPR_BINARY: {
         ExprBinary *eb = (ExprBinary *)zsp_pool_ptr(&sp->pool, ref);
         if (_is_bool_op(eb->op)) return 0;
-        if (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT)
+        if (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT || eb->op == BIN_ASHR)
             return _expr_has_signed(ctx, sp, eb->lhs, depth + 1);
         return _expr_has_signed(ctx, sp, eb->lhs, depth + 1) ||
                _expr_has_signed(ctx, sp, eb->rhs, depth + 1);
@@ -1281,6 +1287,7 @@ static int _emit_binop_prop(SolveCtx *ctx, BinOp op,
         case BIN_BXOR: prop_add_bounds_bxor_64(ctx, r_id, a_id, b_id, 0); return 1;
         case BIN_LSHIFT: prop_add_bounds_shl_64(ctx, r_id, a_id, b_id, 0); return 1;
         case BIN_RSHIFT: prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_ASHR:   prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
         default: break;
         }
     } else {
@@ -1295,6 +1302,7 @@ static int _emit_binop_prop(SolveCtx *ctx, BinOp op,
         case BIN_BXOR: prop_add_bounds_bxor_64(ctx, r_id, a_id, b_id, 0); return 1;
         case BIN_LSHIFT: prop_add_bounds_shl_64(ctx, r_id, a_id, b_id, 0); return 1;
         case BIN_RSHIFT: prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
+        case BIN_ASHR:   prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
         default: break;
         }
     }
@@ -2000,7 +2008,8 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
          * to a signed 64-bit x was the unsigned 2^64-7 to the 64-bit add
          * propagator, and `x + -7 >= 11` came back unsat. A shift amount is
          * an independent (non-negative) value and keeps the plain path. */
-        int is_shift = (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT);
+        int is_shift = (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT ||
+                        eb->op == BIN_ASHR);
         ExprKind lk_b = *(ExprKind *)zsp_pool_ptr(&sp->pool, eb->lhs);
         ExprKind rk_b = *(ExprKind *)zsp_pool_ptr(&sp->pool, eb->rhs);
         uint8_t b_w = is_shift ? 0 : w;
@@ -2761,6 +2770,7 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                             case BIN_BXOR: prop_add_bounds_bxor_64(ctx, r_id, a_id, b_id, 0); return 1;
                             case BIN_LSHIFT: prop_add_bounds_shl_64(ctx, r_id, a_id, b_id, 0); return 1;
                             case BIN_RSHIFT: prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
+                            case BIN_ASHR:   prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
                             default: break;
                             }
                         } else {
@@ -2775,6 +2785,7 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                             case BIN_BXOR: prop_add_bounds_bxor_64(ctx, r_id, a_id, b_id, 0); return 1;
                             case BIN_LSHIFT: prop_add_bounds_shl_64(ctx, r_id, a_id, b_id, 0); return 1;
                             case BIN_RSHIFT: prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
+                            case BIN_ASHR:   prop_add_bounds_lshr_64(ctx, r_id, a_id, b_id, 0); return 1;
                             default: break;
                             }
                         }

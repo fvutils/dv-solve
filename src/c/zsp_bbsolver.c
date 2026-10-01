@@ -168,7 +168,7 @@ static int bb_signed(zsp_bbsolver_t *S, ExprRef ref, int depth) {
         case BIN_LT: case BIN_LTE: case BIN_GT: case BIN_GTE:
         case BIN_AND: case BIN_OR:
             return 0;
-        case BIN_LSHIFT: case BIN_RSHIFT:
+        case BIN_LSHIFT: case BIN_RSHIFT: case BIN_ASHR:
             return bb_signed(S, b->lhs, depth + 1);
         default:
             return bb_signed(S, b->lhs, depth + 1)
@@ -212,7 +212,7 @@ static uint16_t bb_self_width(zsp_bbsolver_t *S, ExprRef ref, int depth) {
         case BIN_LT: case BIN_LTE: case BIN_GT: case BIN_GTE:
         case BIN_AND: case BIN_OR:
             return 1;
-        case BIN_LSHIFT: case BIN_RSHIFT:
+        case BIN_LSHIFT: case BIN_RSHIFT: case BIN_ASHR:
             return bb_self_width(S, b->lhs, depth + 1);
         default: {
             uint16_t l = bb_self_width(S, b->lhs, depth + 1);
@@ -579,6 +579,22 @@ static int bb_is_andor_node(zsp_bbsolver_t *S, ExprRef rf) {
             ((const ExprBinary *)kk)->op == BIN_OR);
 }
 
+/* Logical shift (left if `shl`) of `l` by the unsigned amount `r`, whose
+ * width may exceed l's: an amount >= 2^l.size is >= l.size, i.e. result 0. */
+static zsp_bv_t bb_shift(zsp_bbsolver_t *S, int shl, zsp_bv_t l, zsp_bv_t r) {
+    if (r.size > l.size) {
+        zsp_bv_t hi = zsp_bb_extract(S->bb, r, r.size - 1, l.size);
+        zsp_bv_t big = zsp_bb_not(S->bb, zsp_bb_eq(S->bb, hi,
+                           zsp_bb_value_u64(S->bb, hi.size, 0)));
+        zsp_bv_t lo = zsp_bb_extract(S->bb, r, l.size - 1, 0);
+        zsp_bv_t sh = shl ? zsp_bb_shl(S->bb, l, lo) : zsp_bb_shr(S->bb, l, lo);
+        return zsp_bb_ite(S->bb, big.bits[0],
+                          zsp_bb_value_u64(S->bb, l.size, 0), sh);
+    }
+    if (r.size != l.size) r = zext_to(S, r, l.size);
+    return shl ? zsp_bb_shl(S->bb, l, r) : zsp_bb_shr(S->bb, l, r);
+}
+
 static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, ExprRef ref,
                           uint16_t hint) {
     /* Comparison / logical ops always produce 1-bit; arithmetic / bitwise
@@ -691,36 +707,26 @@ static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, ExprRef ref,
         return lt;
     }
     case BIN_LSHIFT:
-    case BIN_RSHIFT: {
-        /* `>>` of a SIGNED operand is floor division by 2^b on its integer
-         * value (the CDCL engine and the model validator agree on this). The
-         * blaster below only builds a logical shift at the operand's bit
-         * width, which is a different answer for a negative value, so defer
-         * (ZSP_BB_UNKNOWN) exactly as signed div/mod do. */
+    case BIN_RSHIFT:
+    case BIN_ASHR: {
         /* SV elaboration turns a signed `>>` into an explicit unsigned
-         * (logical) shift between two casts, so a signed operand here means
-         * an un-elaborated problem: defer rather than guess. */
+         * (logical) shift between two casts, so a signed operand of `>>` here
+         * means an un-elaborated problem: defer rather than guess. A `>>>`
+         * (BIN_ASHR) is arithmetic exactly when its operand is signed. */
         if (b->op == BIN_RSHIFT && bb_signed(S, b->lhs, 0))
             S->had_unsupported = 1;
+        int arith = (b->op == BIN_ASHR) && bb_signed(S, b->lhs, 0);
         zsp_bv_t l = bb_expr(S, b->lhs, hint);
         if (S->had_error) return l;
         zsp_bv_t r = bb_expr(S, b->rhs, l.size);
         if (S->had_error) return r;
-        /* The amount is an unsigned value of its own width: compare it at a
-         * width that holds both it and the shifted operand's width. */
-        if (r.size > l.size) {
-            /* amount >= 2^l.size  =>  >= l.size  =>  result 0 */
-            zsp_bv_t hi = zsp_bb_extract(S->bb, r, r.size - 1, l.size);
-            zsp_bv_t big = zsp_bb_not(S->bb, zsp_bb_eq(S->bb, hi,
-                               zsp_bb_value_u64(S->bb, hi.size, 0)));
-            zsp_bv_t lo = zsp_bb_extract(S->bb, r, l.size - 1, 0);
-            zsp_bv_t sh = (b->op == BIN_LSHIFT) ? zsp_bb_shl(S->bb, l, lo)
-                                                : zsp_bb_shr(S->bb, l, lo);
-            return zsp_bb_ite(S->bb, big.bits[0],
-                              zsp_bb_value_u64(S->bb, l.size, 0), sh);
-        }
-        if (r.size != l.size) r = zext_to(S, r, l.size);
-        return (b->op == BIN_LSHIFT) ? zsp_bb_shl(S->bb, l, r) : zsp_bb_shr(S->bb, l, r);
+        if (!arith)
+            return bb_shift(S, b->op == BIN_LSHIFT, l, r);
+        /* Arithmetic shift: ~(~x >> s) when x is negative, x >> s otherwise
+         * -- which also gives all sign bits for s >= width. */
+        zsp_bv_t neg = zsp_bb_not(S->bb, bb_shift(S, 0, zsp_bb_not(S->bb, l), r));
+        zsp_bv_t pos = bb_shift(S, 0, l, r);
+        return zsp_bb_ite(S->bb, l.bits[0], neg, pos);   /* bits[0] = MSB */
     }
     case BIN_ADD:
     case BIN_SUB:

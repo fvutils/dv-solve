@@ -365,7 +365,8 @@ static SvTy _type(SvE *E, ExprRef ref) {
             SvTy l = _type(E, b.lhs), r = _type(E, b.rhs);
             t.w = l.w > r.w ? l.w : r.w;
             t.s = (uint8_t)(l.s && r.s);
-        } else if (b.op == BIN_LSHIFT || b.op == BIN_RSHIFT) {
+        } else if (b.op == BIN_LSHIFT || b.op == BIN_RSHIFT ||
+                   b.op == BIN_ASHR) {
             t = _type(E, b.lhs);
         }
         break;
@@ -477,11 +478,23 @@ static ExprRef _val(SvE *E, ExprRef ref, uint16_t W, uint8_t S) {
             if (E->err) break;
             if (_type(E, l).w < W && _type(E, r).w < W) l = _widen(E, l, W);
             out = (l == b.lhs && r == b.rhs) ? ref : _mk_bin(E, b.op, l, r);
-        } else if (b.op == BIN_LSHIFT || b.op == BIN_RSHIFT) {
+        } else if (b.op == BIN_LSHIFT || b.op == BIN_RSHIFT ||
+                   b.op == BIN_ASHR) {
             /* The amount is self-determined and always read unsigned. */
             SvTy rt = _type(E, b.rhs);
             ExprRef r = _val(E, b.rhs, rt.w, 0);
-            if (b.op == BIN_LSHIFT || !S) {
+            if (b.op == BIN_ASHR) {
+                /* SV `>>>`: in a signed context an ARITHMETIC shift of the
+                 * W-bit pattern (= floor(v / 2^k) of the signed value, which
+                 * the engines compute for a signed left operand); in an
+                 * unsigned context it is exactly `>>`. The engines thus only
+                 * ever see BIN_ASHR with a signed left operand. */
+                ExprRef l = _widen(E, _val(E, b.lhs, W, S), W);
+                if (E->err) break;
+                BinOp op = S ? BIN_ASHR : BIN_RSHIFT;
+                out = (op == b.op && l == b.lhs && r == b.rhs)
+                    ? ref : _mk_bin(E, op, l, r);
+            } else if (b.op == BIN_LSHIFT || !S) {
                 ExprRef l = _widen(E, _val(E, b.lhs, W, S), W);
                 if (E->err) break;
                 out = (l == b.lhs && r == b.rhs) ? ref : _mk_bin(E, b.op, l, r);

@@ -47,6 +47,7 @@ typedef enum {
     BIN_EQ,      BIN_NEQ,  BIN_LT,   BIN_LTE,
     BIN_GT,      BIN_GTE,
     BIN_AND,     BIN_OR,
+    BIN_ASHR,    /* SV `>>>`: arithmetic in a signed context, else as `>>` */
 } BinOp;
 
 /* ------------------------------------------------------------------ */

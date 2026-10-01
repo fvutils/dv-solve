@@ -34,8 +34,10 @@ Semantics (what the reference implements)
   per ITS OWN signedness, then the operation is done at the context width and
   read back per the context signedness (2's complement wrap).
 * ``/`` and ``%`` truncate toward zero when signed. ``>>`` is a LOGICAL shift of
-  the context-width bit pattern (SystemVerilog ``>>``, not ``>>>``). A shift
-  amount is the unsigned value of its own bit pattern.
+  the context-width bit pattern (SystemVerilog ``>>``). ``>>>`` (BIN_ASHR) is
+  an ARITHMETIC shift of it in a signed context (sign bit replicated; a shift
+  by >= the width gives 0 or -1) and the same as ``>>`` in an unsigned one. A
+  shift amount is the unsigned value of its own bit pattern.
 """
 from __future__ import annotations
 
@@ -55,7 +57,7 @@ from dv_solve.ctx import (
 from dv_solve.problem import (
     BIN_ADD, BIN_SUB, BIN_MUL, BIN_DIV, BIN_MOD, BIN_BAND, BIN_BOR, BIN_BXOR,
     BIN_LSHIFT, BIN_RSHIFT, BIN_EQ, BIN_NEQ, BIN_LT, BIN_LTE, BIN_GT, BIN_GTE,
-    BIN_AND, BIN_OR, UN_NEG, UN_NOT, UN_INVERT,
+    BIN_AND, BIN_OR, BIN_ASHR, UN_NEG, UN_NOT, UN_INVERT,
 )
 
 # ------------------------------------------------------------------ #
@@ -64,13 +66,13 @@ from dv_solve.problem import (
 
 ARITH = (BIN_ADD, BIN_SUB, BIN_MUL, BIN_DIV, BIN_MOD, BIN_BAND, BIN_BOR,
          BIN_BXOR)
-SHIFTS = (BIN_LSHIFT, BIN_RSHIFT)
+SHIFTS = (BIN_LSHIFT, BIN_RSHIFT, BIN_ASHR)
 CMPS = (BIN_EQ, BIN_NEQ, BIN_LT, BIN_LTE, BIN_GT, BIN_GTE)
 OPN = {BIN_ADD: "+", BIN_SUB: "-", BIN_MUL: "*", BIN_DIV: "/", BIN_MOD: "%",
        BIN_BAND: "&", BIN_BOR: "|", BIN_BXOR: "^", BIN_LSHIFT: "<<",
        BIN_RSHIFT: ">>", BIN_EQ: "==", BIN_NEQ: "!=", BIN_LT: "<",
        BIN_LTE: "<=", BIN_GT: ">", BIN_GTE: ">=", BIN_AND: "&&",
-       BIN_OR: "||"}
+       BIN_OR: "||", BIN_ASHR: ">>>"}
 
 I32_LO, I32_HI = -(1 << 31), (1 << 31) - 1
 I64_LO, I64_HI = -(1 << 63), (1 << 63) - 1
@@ -214,6 +216,10 @@ def val(n, W, S, env, vt):
             a = val(n.l, W, S, env, vt)
             rw, rs = self_type(n.r, vt)
             k = wrap(val(n.r, rw, rs, env, vt), rw, False)
+            if op == BIN_ASHR and S:
+                # `>>>` in a signed context: arithmetic shift of the signed
+                # W-bit value (Python >> on a negative int floors).
+                return a >> min(k, W)
             if k >= W:
                 return 0
             if op == BIN_LSHIFT:
@@ -530,9 +536,21 @@ def gen_case(R, single_var_exhaustive=False):
     if op in SHIFTS:
         shamts = [0, 1, 3, w - 1, w, w + 1, 31, 32, 33, 63, 64, 70]
         if shape in ("vv", "vv_v"):
+            # A variable amount: various widths and signedness, small values,
+            # values around the width, and (for wide amounts) huge ones --
+            # a negative signed amount reads as a huge unsigned one.
+            yw = R.choice([8, 8, 16, 64])
             ys = R.random() < 0.3
-            y = add_var(8, ys, 12)
-            vars_[-1] = (8, ys, -2 if ys else 0, 9)
+            lo = R.choice([0, 0, max(0, w - 4), 60])
+            if ys and R.random() < 0.4:
+                lo = -2
+            if yw == 64 and R.random() < 0.2:
+                lo = R.choice([1 << 40, (1 << 63) - 20])
+            hi = lo + 11
+            lo_ok, hi_ok = _full(yw, ys)
+            lo, hi = max(lo, lo_ok), min(hi, hi_ok)
+            vars_.append((yw, ys, lo, hi))
+            y = Var(len(vars_) - 1)
             e = Bin(op, x, y)
         else:
             e = Bin(op, x, Const(R.choice(shamts)))
@@ -680,6 +698,36 @@ def test_example_signed_division_truncates():
     _expect(case, sat=True)
     case = Case([_s(8, -8, -8)], Bin(BIN_EQ, Bin(BIN_MOD, Var(0), Const(3)),
                                      Const(-2)))
+    _expect(case, sat=True)
+
+
+def test_example_ashr_signed_is_arithmetic():
+    # x >>> 1 with x == -8 (signed 8-bit): a signed 32-bit context, so the
+    # sign is replicated: -4.
+    case = Case([_s(8, -8, -8)], Bin(BIN_EQ, Bin(BIN_ASHR, Var(0), Const(1)),
+                                     Const(-4)))
+    _expect(case, sat=True)
+    case = Case([_s(8, -8, -8)], Bin(BIN_EQ, Bin(BIN_ASHR, Var(0), Const(1)),
+                                     Const(124)))
+    _expect(case, sat=False)
+    # shifting by >= the context width leaves only the sign: -1 / 0.
+    case = Case([_s(8, -8, -8)], Bin(BIN_EQ, Bin(BIN_ASHR, Var(0), Const(40)),
+                                     Const(-1)))
+    _expect(case, sat=True)
+    case = Case([_s(8, 5, 5)], Bin(BIN_EQ, Bin(BIN_ASHR, Var(0), Const(40)),
+                                   Const(0)))
+    _expect(case, sat=True)
+
+
+def test_example_ashr_unsigned_is_logical():
+    # unsigned 8-bit x == 0xF0: an unsigned context, so >>> is >>.
+    case = Case([_u(8, 0xF0, 0xF0)],
+                Bin(BIN_EQ, Bin(BIN_ASHR, Var(0), Const(4)), Const(0x0F)))
+    _expect(case, sat=True)
+    # an unsigned operand makes the whole context unsigned: logical too.
+    case = Case([_s(8, -8, -8), _u(32, 1, 1)],
+                Bin(BIN_EQ, Bin(BIN_ASHR, Bin(BIN_ADD, Var(0), Var(1)), Const(1)),
+                    Const(0x7FFFFFFC)))
     _expect(case, sat=True)
 
 

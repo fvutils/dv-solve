@@ -163,7 +163,8 @@ static VTy _vtype(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
             VTy b = _vtype(ctx, sp, eb->rhs, skip);
             t.w = a.w > b.w ? a.w : b.w;
             t.s = (uint8_t)(a.s && b.s);
-        } else if (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT) {
+        } else if (eb->op == BIN_LSHIFT || eb->op == BIN_RSHIFT ||
+                   eb->op == BIN_ASHR) {
             t = _vtype(ctx, sp, eb->lhs, skip);
         }
         break;
@@ -312,7 +313,7 @@ static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
             }
             *skip = 1; return 0;
         }
-        if (op == BIN_LSHIFT || op == BIN_RSHIFT) {
+        if (op == BIN_LSHIFT || op == BIN_RSHIFT || op == BIN_ASHR) {
             VI a = _ev(ctx, sp, eb->lhs, W, S, skip);
             VTy rt = _vtype(ctx, sp, eb->rhs, skip);
             if (*skip) return 0;
@@ -320,9 +321,16 @@ static VI _ev(const SolveCtx *ctx, const SolveProblem *sp, ExprRef ref,
             /* The amount is self-determined and read unsigned. */
             VU sh = (VU)_ev(ctx, sp, eb->rhs, rt.w, rt.s, skip) & _mask_for(rt.w);
             if (*skip) return 0;
+            if (op == BIN_ASHR && S) {
+                /* `>>>` in a signed context: arithmetic shift of the
+                 * context-width value, sign replicated; a is already the
+                 * signed W-bit value. >= W bits leaves only the sign. */
+                if (sh >= W) return a < 0 ? -1 : 0;
+                return a >> (int)sh;       /* arithmetic on the signed VI */
+            }
             if (sh >= W) return 0;
             VU ua = (VU)a & M;
-            /* `>>` is LOGICAL on the context-width pattern (SV >>, not >>>). */
+            /* `>>` (and `>>>` unsigned) is LOGICAL on the context-width pattern. */
             return _wrap(op == BIN_LSHIFT ? (ua << (int)sh) : (ua >> (int)sh), W, S);
         }
         switch (op) {
@@ -474,7 +482,7 @@ static void _dump_expr(const SolveCtx *ctx, const SolveProblem *sp,
         ExprBinary *eb = (ExprBinary *)zsp_pool_ptr(&sp->pool, ref);
         static const char *names[] = {
             "+","-","*","/","%","&","|","^","<<",">>",
-            "==","!=","<","<=",">",">=","and","or",
+            "==","!=","<","<=",">",">=","and","or",">>>",
         };
         const char *n = (eb->op < (int)(sizeof(names)/sizeof(names[0])))
                         ? names[eb->op] : "?";

@@ -514,6 +514,25 @@ ExprRef builder_expr_extend(SolveProblemBuilder *b, ExprRef operand,
     return ref;
 }
 
+ExprRef builder_expr_sv_cast(SolveProblemBuilder *b, ExprRef operand,
+                             uint8_t from_bits, uint8_t to_bits,
+                             uint8_t sign_extend, uint8_t dst_signed) {
+    ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprSvCast),
+                                (uint32_t)_Alignof(ExprSvCast));
+    if (ref == EXPR_NULL) return EXPR_NULL;
+
+    uint32_t voff = ref - POOL_HEADER_SZ;
+    uint32_t local = voff - b->current->base_offset;
+    ExprSvCast *n = (ExprSvCast *)_block_ptr_at(b->current, local);
+    n->kind        = EXPR_SV_CAST;
+    n->sign_extend = sign_extend;
+    n->from_bits   = from_bits;
+    n->to_bits     = to_bits;
+    n->dst_signed  = dst_signed;
+    n->operand     = operand;
+    return ref;
+}
+
 ExprRef builder_expr_extract(SolveProblemBuilder *b, ExprRef operand,
                              uint8_t hi_bit, uint8_t lo_bit) {
     ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprExtract),

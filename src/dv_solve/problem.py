@@ -37,6 +37,7 @@ BIN_GT     = 14
 BIN_GTE    = 15
 BIN_AND    = 16
 BIN_OR     = 17
+BIN_ASHR   = 18
 
 UN_NEG    = 0
 UN_NOT    = 1

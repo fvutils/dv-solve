@@ -84,6 +84,17 @@ class _Gen:
 
         choice = self.rng.random()
         if choice < 0.45:                                   # same-width binop
+            if self.rng.random() < 0.15:
+                # bvashr (arithmetic shift right): the amount is mostly a small
+                # constant, sometimes >= the width (all sign bits), sometimes a
+                # term (an arbitrary, usually huge, unsigned amount).
+                if self.rng.random() < 0.7:
+                    k = self.rng.randint(0, width + 2)
+                    k = min(k, (1 << width) - 1)
+                    amt = f"(_ bv{k} {width})"
+                else:
+                    amt = self.term(width, depth - 1)
+                return f"(bvashr {self.term(width, depth-1)} {amt})"
             op = self.rng.choice(_BINOPS)
             return f"({op} {self.term(width, depth-1)} {self.term(width, depth-1)})"
         if choice < 0.55:                                   # bvnot / bvneg
