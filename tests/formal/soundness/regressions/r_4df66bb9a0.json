@@ -1,0 +1,88 @@
+{
+ "why": "B60: builder with clause learning returned a wrong model (ite_value entailment; seed=22 i=1482 door=builder[lcg=1] expect=unsat got=timeout)",
+ "widths": {
+  "a": 1,
+  "x": 5,
+  "y": 5
+ },
+ "cons": [
+  [
+   "bvult",
+   "bool",
+   [
+    "bvmul",
+    5,
+    [
+     "ite",
+     5,
+     [
+      "bvule",
+      "bool",
+      [
+       "const",
+       1,
+       1
+      ],
+      [
+       "var",
+       "a",
+       1
+      ]
+     ],
+     [
+      "var",
+      "y",
+      5
+     ],
+     [
+      "var",
+      "x",
+      5
+     ]
+    ],
+    [
+     "var",
+     "x",
+     5
+    ]
+   ],
+   [
+    "bvmul",
+    5,
+    [
+     "ite",
+     5,
+     [
+      "bvule",
+      "bool",
+      [
+       "const",
+       1,
+       1
+      ],
+      [
+       "var",
+       "a",
+       1
+      ]
+     ],
+     [
+      "var",
+      "y",
+      5
+     ],
+     [
+      "var",
+      "x",
+      5
+     ]
+    ],
+    [
+     "var",
+     "x",
+     5
+    ]
+   ]
+  ]
+ ]
+}

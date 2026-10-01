@@ -2918,12 +2918,17 @@ static int _ensure_compiled(Smt2Frontend *fe) {
         /* Vars[] capacity headroom for yosys-smtbmc-style incremental aux vars. */
         fe->ctx->incremental_capacity_hint = 8192;
         int rc = dvs_solver_compile(fe->ctx, fe->problem);
-        if (rc == 0) {
+        if (rc >= 0) {
+            /* rc > 0 (some constraints left uncompiled; validation and
+             * escalation cover them) is a context like any other. Leaving
+             * `compiled` unset made _flush_aux drop every later assertion:
+             * after `(assert (xor true ...))`, `(assert false)` answered sat
+             * (B58). */
             fe->compiled = 1;
             fe->builder_retained = 0;   /* fe->problem can't be rebuilt in place (B14) */
             fe->has_aux = 0;
             _start_cdcl_retention(fe);
-            return 0;
+            return rc;
         }
         /* Grow-and-retry only on a genuine pool overflow (not a compile-time
          * UNSAT, rc == -2, or other error), and only until the cap. */

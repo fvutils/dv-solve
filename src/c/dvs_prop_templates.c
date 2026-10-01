@@ -2474,11 +2474,16 @@ static PropResult _fire_ite_value_64(Propagator *self, dvs_ctx_t *ctx) {
         if ((res = ctx_tighten_ub64(ctx, rid, hi)) != PROP_OK) return res;
         if ((res = ctx_tighten_lb64(ctx, aid, lo)) != PROP_OK) return res;
         if ((res = ctx_tighten_ub64(ctx, aid, hi)) != PROP_OK) return res;
-        /* Check entailment */
+        /* Entailed only when r and a are both fixed to the same value. A
+         * tightening above can propagate a learnt clause on the spot and
+         * narrow r further than `hi`, so a may still be wider: comparing
+         * a.lo alone retired the propagator with a = [8,9], r = 8, and a
+         * later a = 9 went unenforced -- a wrong model (B60). */
         rlo = var_lo64(ctx, &ctx->vars[rid]);
         rhi = var_hi64(ctx, &ctx->vars[rid]);
         alo = var_lo64(ctx, &ctx->vars[aid]);
-        if (rlo == rhi && alo == rlo) return PROP_ENTAILED;
+        ahi = var_hi64(ctx, &ctx->vars[aid]);
+        if (rlo == rhi && alo == ahi && alo == rlo) return PROP_ENTAILED;
     } else if (clo == 0 && chi == 0) {
         /* cond is false: r == b */
         int64_t lo = i64_max(rlo, blo);
@@ -2491,7 +2496,8 @@ static PropResult _fire_ite_value_64(Propagator *self, dvs_ctx_t *ctx) {
         rlo = var_lo64(ctx, &ctx->vars[rid]);
         rhi = var_hi64(ctx, &ctx->vars[rid]);
         blo = var_lo64(ctx, &ctx->vars[bid]);
-        if (rlo == rhi && blo == rlo) return PROP_ENTAILED;
+        bhi = var_hi64(ctx, &ctx->vars[bid]);
+        if (rlo == rhi && blo == bhi && blo == rlo) return PROP_ENTAILED;   /* see above */
     } else {
         /* cond is undecided: r covers the union of a's and b's ranges.
          * Also back-propagate the condition when r forces a branch:

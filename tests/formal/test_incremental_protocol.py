@@ -80,6 +80,33 @@ def test_push_pop_with_unsat():
     assert _results(out) == ["sat", "unsat", "sat"]
 
 
+@pytest.mark.parametrize("first", ["(xor true (= x (_ bv0 4)))",
+                                   "(ite true true (bvugt x (_ bv3 4)))"])
+def test_asserts_after_a_partly_compiled_check_are_enforced(first):
+    # B58: when compile left part of the first problem uncompiled (validation
+    # and escalation cover that), the frontend never marked the context
+    # compiled, so every later assertion was silently dropped: `false`
+    # answered sat. Found by the soundness campaign's incremental door.
+    cmds = f"""
+(set-logic QF_BV)
+(declare-const x (_ BitVec 4))
+(assert {first})
+(check-sat)
+(push 1)
+(assert (= x (_ bv1 4)))
+(assert (= x (_ bv2 4)))
+(check-sat)
+(pop 1)
+(push 1)
+(assert false)
+(check-sat)
+(pop 1)
+(exit)
+"""
+    out, _, _ = _run_interactive(cmds)
+    assert _results(out) == ["sat", "unsat", "unsat"]
+
+
 def test_check_sat_assuming():
     cmds = """
 (set-logic QF_BV)

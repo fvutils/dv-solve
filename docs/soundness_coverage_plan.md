@@ -299,6 +299,8 @@ stronger at once, and P0's own fixes need them to be trusted.
 | B56: explainers read bounds made after the step they explain | Fixed: analysis rewinds the domains to just before each explained step (§9.8) |
 | B57: `explain_ite_value` explained every narrowing as the result's | Fixed (§9.8) |
 | `bounds_mul_32` ignored a zero factor | Fixed; found by the propagator harness (§9.7) |
+| B58: assertions after a partly compiled first check were dropped | Fixed in the SMT-LIB2 frontend (§9.9) |
+| B60: `ite_value` retired itself with its branch operand still a range | Fixed (§9.10) |
 | Guard-gated propagators: the learnt clause did not cite the guard | Fixed: analysis adds `guard >= 1` for a gated propagator's step |
 | Minimised `get-unsat-core` | Done; tests pass, including 400 brute-force random cores and a 6000-case stress run |
 | Pinned regressions | `tests/formal/test_lcg_soundness.py` (B50 ×2, B51, the livelock); `test_signed_ops.py::test_divrem_of_variables_matches_z3` (B52); `test_bool_ite_constraint.py` and `tests/unit/test_gated_constraints.py` (B53); `tests/c/test_prop_exhaustive.c` (B54, B55, B57, mul) |
@@ -322,7 +324,12 @@ stronger at once, and P0's own fixes need them to be trusted.
    assert the explanation's antecedents, plus the own-bound and guard
    literals analysis adds, and the negation of the explained bound. A
    solution names the faulty explainer, which a bad clause does not.
-4. **Child model validation**: the child's search trusts the propagators to
+4. **Fixed point at `sat`** (forked child, at every `sat` exit): fire every
+   propagator once more on the final assignment. Any that still conflicts or
+   narrows was skipped by the search, for example through a stale
+   "entailed" flag. This is how B60 was pinned down; validation only
+   showed that the model was wrong.
+5. **Child model validation**: the child's search trusts the propagators to
    reject a violating assignment, so before a child "solution" counts as
    evidence it is validated against the original problem. A violation is
    reported as an incomplete propagator (a wrong-model bug of its own); a
@@ -330,8 +337,9 @@ stronger at once, and P0's own fixes need them to be trusted.
 
 A violation aborts the run. Suite runs instead set `DV_STEP_CHECK_LOG` (append
 violations, tagged with `PYTEST_CURRENT_TEST`) and `DV_STEP_CHECK_CONTINUE`.
-`DV_STEP_CHECK_STATS` prints counts at exit and `DV_STEP_CHECK_DUMP` lists the
-propagators with a violation. These are internal test switches of an
+`DV_STEP_CHECK_STATS` prints counts at exit, `DV_STEP_CHECK_DUMP` lists the
+propagators with a violation and `DV_STEP_CHECK_DUMP_SAT` lists them and the
+domains at every `sat` exit. These are internal test switches of an
 instrumented build and are not documented for users.
 
 **Propagator harness** (`tests/c/test_prop_exhaustive.c`, in ctest, ~30 s).
@@ -355,28 +363,89 @@ Validated against history:
 - a deliberately reintroduced B54 is reported as `INVALID explanation from
   _fire_sum_eq_32`.
 
-### P2 — generator (seed version running)
+### P2 — generator, oracle, shrinker (in the repo; metamorphic transforms to do)
 
-A typed QF_BV generator with a Python brute-force evaluator covers:
-- all 14 binary bit-vector operators and both unary ones;
-- `ite` as a value and as a Boolean constraint, including the `x == K` and
-  `x == y` conditions that take the guarded compile paths;
-- extract, concat and both extends;
-- all ten comparisons and the Boolean connectives;
-- shared subterms, same-operand terms and `x == y` aliases;
-- mixed widths from 1 to 8 bits, up to 12 free bits.
+`tests/formal/soundness/`:
 
-It checks sat/unsat against enumeration, every model against the
-constraints, and every 10th answer against z3. Under the step-checker build,
-every learnt clause and explanation is checked as well.
+| File | What it is |
+|---|---|
+| `ir.py` | Problem IR: terms as tuples, bit-exact SMT-LIB evaluation (division by zero included), SMT-LIB2 printer, enumeration |
+| `gen.py` | Constrained-random generator. It covers all 14 binary bit-vector operators and both unary ones; `ite` as a value and as a Boolean constraint (including the `x == K` / `x == y` conditions that take the guarded compile paths); extract, concat and both extends; all ten comparisons and the Boolean connectives; shared subterms, same-operand terms and `x == y` aliases; widths 1–8 with up to 12 free bits. It records the stimulus bins each problem hits. A `builder_safe` mode keeps to the operators whose SystemVerilog meaning equals SMT-LIB's. |
+| `doors.py` | Three front doors: SMT-LIB2 batch; SMT-LIB2 incremental (assert a prefix, check; push, assert the rest, check; pop, check); and the Python builder, solved with clause learning off and on. Every answer and model is judged against enumeration. |
+| `shrink.py` | Delta debugging on the IR. It drops constraints, replaces sub-terms by a child, a variable or 0/1, and lowers constants, keeping each change only while the same door fails the same way. |
+| `campaign.py` | CLI and library: `python -m tests.formal.soundness.campaign --seed S --n N`. It writes each shrunk failure to `regressions/` as JSON plus SMT-LIB2. Run against the step-checker build (`--exe`, `DVS_SOLVER_PATH`), it also counts invalid clauses and explanations as failures. |
+| `test_regressions.py` | Replays every recorded failure through every door. |
+| `test_campaign_smoke.py` | Two fixed seeds × 150 problems in every suite run (~5 s). |
+
+Throughput: 1,500 problems through all three doors in about 21 s per process.
 
 What it found:
 - The first 400 problems found B52.
 - The first run with Boolean `ite` found B53: 47 wrong `unsat` in 10,000.
 - Under the explanation checker it led to B55, B56 and B57.
+- The incremental door found B58 in its first 300 problems.
 
-It is still a scratch script; it moves into `tests/formal/soundness/` with
-the IR and shrinker.
+Since the B58 fix, 12,000 problems through all three doors on the normal
+build show no failures.
+
+Still to do in P2: metamorphic transforms (§3.4); a lowering to the C API
+directly (today it is reached through the Python wrapper); the Verilator
+subset.
+
+### P3 — coverage collection (first measurement)
+
+Stimulus bins: the generator records them per problem, and the campaign
+prints their counts.
+
+Implementation coverage: for now gcov/lcov on an instrumented build, run
+over the propagator harness and a 3,000-problem campaign through all three
+doors. `tests/formal/soundness/coverage_report.py` has the recipe and prints:
+
+| File | Lines | Branches | Functions |
+|---|---|---|---|
+| `dvs_explain.c` | 90% | 77% | 31/32 (every explainer) |
+| `dvs_prop_templates.c` | 92% | 71% | 151/155 |
+| `dvs_propagate.c` | 90% | 76% | 10/12 |
+| `dvs_validate.c` | 77% | 55% | 10/11 |
+| `dvs_lcg.c` | 74% | 55% | 27/34 |
+| `dvs_compile.c` | 69% | 57% | 44/50 |
+| `dvs_search.c` | 57% | 47% | 17/29 |
+| `smt2_frontend.c` | 31% | 25% | 59/132 |
+
+Holes it shows:
+- `_fire_in_ranges_64` is never run: no door generates a 64-bit `inside`
+  with ranges.
+- In clause learning, the uncovered code is trace output, the off-by-default
+  clause minimisation, and two failure paths of the propagator-conflict seed.
+- The SMT-LIB2 frontend's low figure is arrays, datatypes, `define-fun`,
+  `let`, `get-unsat-core` and the Verilator mode, none of which the
+  generator produces yet. These are stimulus coverpoints still to add (§2.1).
+
+Named `DVS_COVER` counters (§4.2) are still to do. They are needed for the
+bins gcov cannot express, such as "learning seed kind × resolution kind".
+
+### Completeness gaps found (sound, but `unknown`)
+
+The doors also measure how often each answers `unknown` on problems that
+small. These are not soundness bugs, but they are coverage holes for users:
+
+| Door | `unknown` rate | Main cause (from shrinking the `unknown` cases) |
+|---|---|---|
+| Python builder | ~38% of builder-safe problems | An inequality whose operand is a `concat` is not compiled (`x < {y, 2'b01}`); only `==` against a concat is. SMT-LIB2 avoids it by flattening the operand first. Also `or` / `ite` over constant Booleans. |
+| SMT-LIB2 incremental | ~8% of checks | After `pop`, a problem on the bitblast engine answers `unknown` (HEAD too) |
+| SMT-LIB2 batch | 0% | — |
+
+Speed gap of the same kind: `bvnot` (and other operators) applied to a
+literal constant is left uncompiled on CDCL, so a problem with a constant
+sub-term such as `(concat (bvnot #b00) #b0000)` is searched under-constrained
+until the 10 s CDCL deadline before bitblast answers. HEAD answered such a
+problem in 0.07 s only through B51's unsound learning; without learning it
+times out too. Tool output pre-folds constants (none in the fixture corpus),
+so the fix, constant folding in the frontend, is queued rather than urgent.
+
+Through the builder, identical sub-terms get separate auxiliary variables:
+`(x*y) > (x*y)` is proved `unsat` by search (0.3 s at 6 bits) rather than
+recognised. Common-subexpression merging in compile would make it immediate.
 
 ---
 
@@ -552,4 +621,43 @@ Coverage lessons:
 - **The harness and the run-time checker disagreed, and that was the
   signal.** Two oracles at different levels (per propagator, whole problem)
   catch different classes. Keep both.
+
+### 9.9 B58: the incremental door's first find
+
+Found within the first 300 problems of the incremental door. If compile left
+part of the first problem uncompiled, the frontend never marked its context
+as compiled. That was harmless for that check, since validation and
+escalation cover uncompiled constraints, but every later assertion was then
+silently dropped, and validation never saw it either. `(assert false)` after
+`(assert (xor true (= x #x0)))` answered `sat`. HEAD has it. It also made a
+popped assertion look enforced on bitblast-routed problems (a wrong `unsat`).
+
+Coverage lessons:
+- **Protocol × compile outcome is a cross.** Push/pop was tested, and
+  partially compiled problems were tested, but never one after the other.
+  The bug lives in the state the first check leaves behind.
+- **Every door needs its own oracle per question.** The incremental door
+  judges every `check-sat` in the script, not just the last.
+
+### 9.10 B60: entailment decided on half the bounds
+
+Found by the builder door with clause learning on (the C API's `use_lcg`).
+It returned `sat` with a model violating `(y*x if a else x*x) < itself`;
+all 1,198 learnt clauses were valid. The new fixed-point check at `sat`
+named the culprit: `ite_value` was marked entailed. It declares itself
+entailed when `r` is fixed and equals the selected branch's lower bound, on
+the assumption that its own tightening has just made the branch equal to
+`r`. But with learning on, a tightening inside the firing can propagate a
+learnt clause on the spot and narrow `r` further. The branch was left at
+`[8, 9]` and the propagator retired, so `y = 9` later went unenforced.
+
+Coverage lessons:
+- **Re-entrancy is a coverpoint.** Clause propagation can run inside any
+  propagator's firing. Every "entailed" test must read all the bounds it
+  depends on after its own tightenings. The per-propagator harness cannot
+  reach this, because it fires propagators in isolation, so the run-time
+  fixed-point check covers it.
+- **The same front door with an option changed is a different door.** The
+  builder with learning on had no test at all; the campaign's builder door
+  now solves every problem with learning off and on.
 

@@ -131,8 +131,13 @@ static int _sc_fork_solve(dvs_ctx_t *ctx, const Literal *assume, uint32_t n,
 
 /* With DV_STEP_CHECK_DUMP, list every live propagator after a violation:
  * name, watched variables, guard. */
+static void _sc_dump_props_always(dvs_ctx_t *ctx);
 static void _sc_dump_props(dvs_ctx_t *ctx) {
     if (!getenv("DV_STEP_CHECK_DUMP")) return;
+    _sc_dump_props_always(ctx);
+}
+
+static void _sc_dump_props_always(dvs_ctx_t *ctx) {
     uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
                    ? ctx->n_props : ctx->n_prop_refs_capacity;
     for (uint32_t i = 0; i < lim; i++) {
@@ -145,6 +150,53 @@ static void _sc_dump_props(dvs_ctx_t *ctx) {
         if (ctx->prop_guard_vars && ctx->prop_guard_vars[i] != EXPR_NULL)
             fprintf(stderr, " guard=v%u", ctx->prop_guard_vars[i]);
         fprintf(stderr, "\n");
+    }
+}
+
+/* At a `sat` exit every propagator must be at a fixed point: fire each once
+ * more (in a forked child, so the state is untouched) and report any that
+ * still conflicts or narrows. A propagator that never fired after its last
+ * input changed -- a stale "entailed" flag, a dropped queue entry -- shows
+ * here as a wrong model the search believed. */
+static void _step_check_sat_exit(dvs_ctx_t *ctx) {
+    if (_sc_in_child) return;
+    fflush(stdout); fflush(stderr);
+    pid_t pid = fork();
+    if (pid < 0) return;
+    if (pid == 0) {
+        _sc_in_child = 1;
+        uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
+                       ? ctx->n_props : ctx->n_prop_refs_capacity;
+        int bad = 0;
+        for (uint32_t i = 0; i < lim; i++) {
+            uint32_t ref = ctx->prop_refs[i];
+            if (ref == EXPR_NULL) continue;
+            Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+            if (ctx->prop_guard_vars && ctx->prop_guard_vars[i] != EXPR_NULL) {
+                const Variable *g = &ctx->vars[ctx->prop_guard_vars[i]];
+                if (var_lo64(ctx, g) == 0) continue;   /* gated off */
+            }
+            uint8_t flags = p->flags;
+            TrailEntry *mark = ctx->trail_top;
+            ctx->current_prop_ref = ref;
+            PropResult r = p->fire(p, ctx);
+            ctx->current_prop_ref = EXPR_NULL;
+            if (r == PROP_CONFLICT || ctx->trail_top != mark) {
+                fprintf(stderr, "[step-check] INVALID sat: prop %u %s not at a fixed point"
+                        " (%s; flags=0x%x%s)\n", i, prop_fire_name(p->fire),
+                        r == PROP_CONFLICT ? "conflict" : "narrows", flags,
+                        (flags & PROP_FLAG_ENTAILED) ? " ENTAILED" : "");
+                bad = 1;
+            }
+        }
+        _exit(bad ? 10 : 20);
+    }
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0) { }
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 10) {
+        Literal none[1];
+        memset(none, 0, sizeof none);
+        _sc_fail(none, 0);
     }
 }
 
@@ -746,6 +798,17 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                 int64_t _hi = var_hi64(ctx, &ctx->vars[_di]);
                 (void)_lo; (void)_hi;
                 assert(_lo == _hi && "DVS_SOLVE_OK but non-singleton domain");
+            }
+#endif
+#ifdef DVS_STEP_CHECK
+            _step_check_sat_exit(ctx);
+            if (getenv("DV_STEP_CHECK_DUMP_SAT")) {
+                for (uint32_t i = 0; i < ctx->n_vars; i++)
+                    fprintf(stderr, " v%u=[%lld,%lld]", i,
+                            (long long)var_lo64(ctx, &ctx->vars[i]),
+                            (long long)var_hi64(ctx, &ctx->vars[i]));
+                fprintf(stderr, "\n");
+                _sc_dump_props_always(ctx);
             }
 #endif
             return DVS_SOLVE_OK;   /* all assigned */
