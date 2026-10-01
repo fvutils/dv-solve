@@ -62,3 +62,11 @@ reference/sv-api
 reference/cli
 reference/environment
 ```
+
+```{toctree}
+:maxdepth: 2
+:caption: Internals
+
+internals/architecture
+internals/propagators
+```

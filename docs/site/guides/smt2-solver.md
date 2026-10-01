@@ -81,9 +81,9 @@ pipe needs. `--batch` and `--interactive` override the default.
 
 `check-sat` prints `sat`, `unsat` or `unknown`. Values are printed in binary:
 
-```text
-((addr #b00000000000000000000000011001000)
- (len #b00001010))
+```{literalinclude} ../../examples/smt2/random.expected
+:language: text
+:lines: 2-
 ```
 
 ## Diagnostics

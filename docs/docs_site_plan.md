@@ -1,7 +1,8 @@
 # dv-solve Documentation Site Plan
 
-Status: D0–D3 DONE and live (2026-09-30); D4 (C + SV) DONE 2026-10-01, with
-`guides/zuspec` and `concepts/diagnosing-unsat` still deferred from D3; D5 next. Comes before `ci_benchmark_publishing_plan.md`:
+Status: D0–D3 DONE and live (2026-09-30); D4 (C + SV) and D5 (hardening)
+DONE 2026-10-01. Still deferred from D3: `guides/zuspec` and
+`concepts/diagnosing-unsat`. Comes before `ci_benchmark_publishing_plan.md`:
 the benchmark pages become a "Results" section of this site later.
 
 Goal: a user-facing doc set, published at `dvkit.org/fvutils/dv-solve/`, that
@@ -168,7 +169,7 @@ workflow is ignored silently.
 | **D2 — Verilator** | `quickstart-verilator`, `guides/verilator`, `concepts/randomization`; resolve §1.4 against stock Verilator 5.046 | guide's example runs with bundled Verilator |
 | **D3 — Python** | `concepts/problem-model`, `soft-constraints`, `diagnosing-unsat`, `reference/python` (autodoc), `reference/status-codes`, `guides/packaging`, `guides/zuspec` | public-module decision made; docstrings on public classes filled in |
 | **D4 — C + SV** | `reference/c-api`, `reference/sv-api`, `guides/systemverilog-dpi` | after the naming decision and the public-header list. *Done 2026-10-01:* hand-written with Sphinx's C domain (no Doxygen/Breathe) and plain SV signatures (no sphinx-systemverilog dependency); C and DPI examples in `docs/examples/c`, `docs/examples/sv-dpi`, executed by `test_doc_examples.py` |
-| **D5 — hardening** | `docs/examples/` + test module; `internals/`; README links to the site | every code block on the site is executed by the test suite |
+| **D5 — hardening** | `docs/examples/` + test module; `internals/`; README links to the site | every code block on the site is executed by the test suite. *Done 2026-10-01:* `tests/unit/test_doc_pages.py` classifies every fenced block (included example, C/SV declaration checked against the header/packages, command run as written, sample output checked, or listed as not runnable with a reason) and fails on an unclassified one; `internals/architecture`, `internals/propagators` (rewritten from the code; `docs/propagators.md` had several rules wrong); README rewritten around the front doors. Writing `internals/` surfaced wrong-answer bugs B43–B49, fixed in the same change |
 
 D0 is deliberately small: it proves the runner, the artifact and the
 publishing path end to end before any real writing, the same way the

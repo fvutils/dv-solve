@@ -13,8 +13,10 @@ A variable has:
 - a **signedness**;
 - a **range**, `lo` to `hi` inclusive, that its value must stay within.
 
-```python
-b.add_var(0, width=8, is_signed=False, lo=0, hi=255)
+```{literalinclude} ../../examples/concepts.py
+:language: python
+:start-after: "# [var]"
+:end-before: "# [/var]"
 ```
 
 The range is itself a constraint. A narrower range than the width allows is a
@@ -25,10 +27,10 @@ cheap way to restrict a variable.
 Expressions are built bottom-up. Each builder method returns a reference (an
 integer) that you pass to other methods:
 
-```python
-x   = b.expr_var(0)
-ten = b.expr_const(10)
-b.add_constraint(b.expr_binary(BIN_GT, x, ten))    # x > 10
+```{literalinclude} ../../examples/concepts.py
+:language: python
+:start-after: "# [expr]"
+:end-before: "# [/expr]"
 ```
 
 ## Expression width and signedness
@@ -115,7 +117,8 @@ Some relations are constraints in their own right. Pass what they return to
 
 - `add_constraint(e)` requires `e` to hold.
 - `add_all_different([id1, id2, ...])` requires the variables to take
-  pairwise different values (SystemVerilog `unique`).
+  pairwise different values (SystemVerilog `unique`): up to 16 variables,
+  each at most 32 bits wide.
 - `add_soft_constraint(e, priority)` asks for `e` to hold where possible.
   See {doc}`soft-constraints`.
 - `add_dist(id, entries)` gives a variable a weighted distribution

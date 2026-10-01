@@ -39,11 +39,19 @@ run exactly, and different seeds give different values.
 ## When the constraints can't be met
 
 If the constraints contradict each other, `randomize()` returns 0, and
-Verilator warns about the constraints involved:
+Verilator warns about the constraints involved. For this class:
+
+```{literalinclude} ../../examples/verilator/bad.sv
+:language: systemverilog
+:lines: 1-5
+```
+
+the simulation prints:
 
 ```text
-%Warning-UNSATCONSTR: bad.sv:3: Unsatisfied constraint: 'constraint c1 { x > 8'd10; }'
-%Warning-UNSATCONSTR: bad.sv:4: Unsatisfied constraint: 'constraint c2 { x < 8'd5; }'
+%Warning-UNSATCONSTR: bad.sv:3: Unsatisfied constraint: 'constraint c1 { x > 10; }'
+%Warning-UNSATCONSTR: bad.sv:4: Unsatisfied constraint: 'constraint c2 { x < 5; }'
+randomize() failed
 ```
 
 dv-solve currently lists every named constraint of the class, not only the

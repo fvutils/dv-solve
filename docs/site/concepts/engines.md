@@ -17,7 +17,8 @@ problems that model checkers generate.
 
 ## How the engine is chosen
 
-For SMT-LIB2 input, the declared logic decides:
+The Python, C and DPI APIs always use the CDCL engine. For SMT-LIB2 input,
+the declared logic decides:
 
 | Logic | Engine |
 |---|---|
@@ -27,8 +28,8 @@ For SMT-LIB2 input, the declared logic decides:
 Some problems go to the bit-blaster whatever the logic, because the CDCL engine
 can't handle them. These include variables wider than 64 bits and some
 operators, such as signed division. When the CDCL engine can't reach an
-answer, dv-solve normally retries the problem with the bit-blaster rather than
-report `unknown`.
+answer on SMT-LIB2 input, dv-solve normally retries the problem with the
+bit-blaster rather than report `unknown`.
 
 ## Choosing an engine yourself
 

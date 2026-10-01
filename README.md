@@ -1,6 +1,23 @@
 # dv-solve
 
-Domain-agnostic CLP(FD) constraint solver. No Zuspec runtime dependency.
+dv-solve is a constraint solver for design verification. It finds values for
+bit-vector variables that satisfy a set of constraints, and when asked for many
+solutions it spreads them across the solution space. That suits it both to
+constrained-random stimulus generation and to answering yes/no questions from
+formal tools. Answers are sound: `sat` and `unsat` are definitive, and when
+dv-solve can't decide a problem it says `unknown` rather than guessing.
+
+**Documentation: <https://dvkit.org/fvutils/dv-solve/>**
+
+## Ways to use it
+
+| If you are... | Use | Start here |
+|---|---|---|
+| Building constraint problems from Python | the `dv_solve` package | [Python quick start](https://dvkit.org/fvutils/dv-solve/getting-started/quickstart-python) |
+| Running SMT-LIB2 files, or plugging a solver into a tool that speaks SMT-LIB2 | the `dv-solve-smt2` executable | [SMT-LIB2 quick start](https://dvkit.org/fvutils/dv-solve/getting-started/quickstart-smt2) |
+| Randomizing SystemVerilog classes in Verilator | `dv-solve-smt2` as Verilator's constraint solver | [Verilator quick start](https://dvkit.org/fvutils/dv-solve/getting-started/quickstart-verilator) |
+| Randomizing from SystemVerilog through DPI, on any simulator | `dvs_dpi_pkg` and `libdv_solve_dpi` | [DPI guide](https://dvkit.org/fvutils/dv-solve/guides/systemverilog-dpi) |
+| Embedding the solver in a C or C++ program | `libdv_solve` and `dv_solve.h` | [C API](https://dvkit.org/fvutils/dv-solve/reference/c-api) |
 
 ## Install
 
@@ -8,11 +25,16 @@ Domain-agnostic CLP(FD) constraint solver. No Zuspec runtime dependency.
 pip install dv-solve
 ```
 
-For Zuspec-powered benchmarks and tests:
+The wheel holds the Python package, the native libraries, the C header and the
+SystemVerilog packages. `dv-solve-smt2` comes from a source build:
 
+```bash
+cmake -S . -B build -DDVS_WITH_CADICAL=OFF
+cmake --build build
 ```
-pip install dv-solve[zuspec]
-```
+
+See [Installation](https://dvkit.org/fvutils/dv-solve/getting-started/install)
+for the details, including the optional CaDiCaL back end.
 
 ## Quick start
 
@@ -32,31 +54,19 @@ with SolveCtx(problem) as ctx:
     print("x =", ctx.get_value(X))
 ```
 
-Documentation: <https://dvkit.org/fvutils/dv-solve/>
-
 ## Public API
 
 | Module | Purpose |
 |---|---|
-| `dv_solve.builder` | `SolveProblemBuilder` — declare variables and constraints |
-| `dv_solve.ctx` | `SolveCtx` — compile and solve; status codes and exceptions |
+| `dv_solve.builder` | `SolveProblemBuilder`: declare variables and constraints |
+| `dv_solve.ctx` | `SolveCtx`: compile and solve; status codes and exceptions |
 | `dv_solve.problem` | operator constants (`BIN_*`, `UN_*`) |
-| `dv_solve` | `get_libdirs()`, `get_incdirs()`, `get_svdirs()`, `get_dpi_lib()` for build systems |
+| `dv_solve` | `get_libs()`, `get_libdirs()`, `get_incdirs()`, `get_svdirs()`, `get_dpi_lib()` for build systems |
 
-Other modules are internal and may change. See the
-[Python API reference](https://dvkit.org/fvutils/dv-solve/reference/python).
+Other modules are internal and may change. The C API is the one header
+`dv_solve.h`; other installed headers are internal. See the
+[reference](https://dvkit.org/fvutils/dv-solve/reference/python).
 
-## Zuspec integration
+## License
 
-Install `zuspec-solver` to wire this solver into `zuspec-dataclasses` randomization
-via the `zuspec.solver.backend` entry point.
-
-## Building the C library
-
-```bash
-cmake -S . -B build
-cmake --build build
-```
-
-The shared library (`libdv_solve.so`) is installed alongside the Python package.
-The public C API is declared in `dv_solve/dv_solve.h`; internal symbols are prefixed `dvs_`.
+Apache-2.0.

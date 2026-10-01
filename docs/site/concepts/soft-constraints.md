@@ -2,11 +2,7 @@
 
 A soft constraint is one the solver keeps when it can and drops when it
 conflicts with other constraints. Hard constraints (`add_constraint`) always
-hold.
-
-```python
-b.add_soft_constraint(expr, priority=0)
-```
+hold. A soft constraint is added with `add_soft_constraint(expr, priority)`.
 
 **Priority 0 is the most important.** When soft constraints conflict, the
 solver drops those with the highest priority number first, until the rest can
