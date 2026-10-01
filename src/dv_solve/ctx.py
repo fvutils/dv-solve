@@ -64,9 +64,9 @@ class CompileIncompleteError(Exception):
     """One or more constraints use a form this engine cannot compile.
 
     Raised by :class:`SolveCtx` rather than silently ignoring the constraint.
-    The message says how many constraints were affected. A common cause is
-    ``UN_NEG`` or ``UN_INVERT`` applied to a variable that is then compared
-    with a constant; write ``-x`` as ``BIN_SUB`` of ``0`` and ``x`` instead.
+    The message says how many constraints were affected. The remaining
+    cases are mostly 64-bit expressions, such as ``>>`` of a signed 64-bit
+    variable.
     """
 
 

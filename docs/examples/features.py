@@ -48,12 +48,19 @@ b.add_constraint(b.expr_binary(BIN_EQ, b.expr_concat(hi, lo, 4), word))
 wv, hv, lov = solve(b, [0, 1, 2])
 assert wv & 0xF == 0xA and (hv << 4 | lov) == wv
 
-# Arithmetic is on integers: a + b == 300 needs no wrap-around at 8 bits.
+# Widths follow SystemVerilog: the constant is 32 bits wide, so the 8-bit sum
+# is evaluated at 32 bits and doesn't wrap. a + b == 300 is satisfiable, and
+# x + 3 < 10 only holds for x up to 6.
 b = SolveProblemBuilder()
 a, c = u8(b, 0), u8(b, 1)
 b.add_constraint(b.expr_binary(BIN_EQ, b.expr_binary(BIN_ADD, a, c), b.expr_const(300)))
 av, cv = solve(b, [0, 1])
 assert av + cv == 300
+
+b = SolveProblemBuilder()
+x = u8(b, 0)
+b.add_constraint(b.expr_binary(BIN_LT, b.expr_binary(BIN_ADD, x, b.expr_const(3)), b.expr_const(10)))
+assert all(solve(b, [0], seed=s)[0] <= 6 for s in range(1, 9))
 
 # All different, plus a sum: three distinct values that add up to 12.
 b = SolveProblemBuilder()

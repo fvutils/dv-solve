@@ -30,10 +30,37 @@ ten = b.expr_const(10)
 b.add_constraint(b.expr_binary(BIN_GT, x, ten))    # x > 10
 ```
 
-**Arithmetic is on integers.** Results are not wrapped to the width of the
-variables involved: for 8-bit `a` and `c`, `a + c == 300` can be satisfied
-(for example by 100 and 200). This matches SystemVerilog, where such an
-expression is evaluated at 32 bits or wider. Division truncates toward zero.
+## Expression width and signedness
+
+Expressions follow SystemVerilog's rules for expression size and sign
+(IEEE 1800, "Expression bit lengths" and "Signed expressions"):
+
+- **Constants are 32-bit signed integers**, like an unsized literal such as
+  `10` or `-3`. A value that doesn't fit in 32 bits is 64 bits wide.
+- **A comparison sets the width** of everything beneath it: both sides are
+  evaluated at the width of the wider side. Arithmetic and bitwise operators,
+  unary `-` and `~`, the left operand of a shift and both arms of `?:` take
+  that width. A shift amount, a condition, and the operands of `&&`, `||`
+  and `!` are sized on their own.
+- **An expression is signed only if all its operands are signed.** One
+  unsigned operand makes the comparison unsigned, as in SystemVerilog.
+- **Arithmetic wraps** at the expression's width. Each operand is first
+  extended to that width according to its own signedness.
+
+Because constants are 32 bits wide, arithmetic on narrow variables doesn't
+wrap at the variables' width. For 8-bit unsigned `x`:
+
+| Constraint | Evaluated as | Satisfied by |
+|---|---|---|
+| `x + 200 == 300` | 32-bit unsigned | `x == 100` |
+| `x + 3 < 10` | 32-bit unsigned | `x` from 0 to 6 |
+| `x < -1` | 32-bit unsigned (`-1` is `0xFFFFFFFF`) | every `x` |
+
+64-bit variables make a 64-bit expression, which wraps at 64 bits.
+
+Division and `%` truncate toward zero; the remainder takes the sign of the
+dividend. `>>` is a logical shift of the expression's bit pattern, as in
+SystemVerilog: for a negative signed operand it does not preserve the sign.
 
 ## Operators
 
@@ -105,6 +132,5 @@ Each part of this example builds and solves one small problem:
   `CompileUnsupportedError`; wider bit-vectors are supported through the
   SMT-LIB2 front end.
 - Some constraint shapes can't be compiled yet and raise
-  `CompileIncompleteError` instead of being ignored. The most common is
-  `UN_NEG` or `UN_INVERT` applied to a variable and then compared with a
-  constant; write `-x` as `BIN_SUB` of `0` and `x` instead.
+  `CompileIncompleteError` instead of being ignored. These are mostly
+  64-bit expressions, such as `>>` of a signed 64-bit variable.
