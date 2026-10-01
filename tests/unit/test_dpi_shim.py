@@ -32,6 +32,15 @@ def _setup_dpi(lib: ctypes.CDLL):
     lib.dvs_dpi_n_uncompiled_h.restype = ctypes.c_int
     lib.dvs_dpi_n_uncompiled_h.argtypes = [ctypes.c_void_p]
 
+    lib.dvs_dpi_pin_var_h.restype = ctypes.c_int
+    lib.dvs_dpi_pin_var_h.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_longlong,
+    ]
+    lib.dvs_dpi_checkpoint_h.restype = ctypes.c_int
+    lib.dvs_dpi_checkpoint_h.argtypes = [ctypes.c_void_p]
+    lib.dvs_dpi_restore_h.restype = None
+    lib.dvs_dpi_restore_h.argtypes = [ctypes.c_void_p, ctypes.c_int]
+
     # Builder functions for constructing test problems
     lib.dvs_builder_create.restype = ctypes.c_void_p
     lib.dvs_builder_create.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
@@ -172,6 +181,111 @@ class TestDpiShim:
         """Invalid base64 returns NULL."""
         ctx = self.lib.dvs_dpi_compile_b64(b"!!!invalid!!!")
         assert ctx is None or ctx == 0
+
+    @pytest.mark.parametrize("corrupt", [
+        lambda g: "",                       # empty
+        lambda g: g[:-1],                   # length not a multiple of 4
+        lambda g: g[:4] + "~" + g[5:],      # byte above 'z' (used to read as 'A')
+        lambda g: g[:4] + "\x7f" + g[5:],
+        lambda g: g[:4] + "=" + g[5:],      # padding in the middle
+        lambda g: g[:4] + "-" + g[5:],      # URL-safe alphabet
+    ])
+    def test_malformed_b64_rejected(self, corrupt):
+        """Characters outside the alphabet, misplaced padding and lengths that
+        are not a multiple of 4 are rejected. The decoder used to read every
+        byte above 'z' as 'A', so a corrupted problem string compiled into a
+        different problem instead of failing."""
+        bad = corrupt(_build_2var_b64(self.lib))
+        assert not self.lib.dvs_dpi_compile_b64(bad.encode("latin-1"))
+
+    def _values(self, ctx):
+        return (self.lib.dvs_dpi_get_value_h(ctx, 0),
+                self.lib.dvs_dpi_get_value_h(ctx, 1))
+
+    def test_reuse_gives_different_solutions(self):
+        """Each solve on a reused handle starts from the constraints, not from
+        the previous solution. It used to start from the previous solution, so
+        every seed returned the first answer again and an SV randomizer
+        produced the same object on every call."""
+        ctx = self.lib.dvs_dpi_compile_b64(_build_2var_b64(self.lib).encode())
+        try:
+            seen = set()
+            for seed in range(1, 21):
+                assert self.lib.dvs_dpi_solve_h(ctx, seed) == 0
+                a, b = self._values(ctx)
+                assert 0 <= a <= b <= 100
+                seen.add((a, b))
+            assert len(seen) >= 10, seen
+            # The same seed still gives the same solution as on a fresh handle.
+            assert self.lib.dvs_dpi_solve_h(ctx, 5) == 0
+            reused = self._values(ctx)
+        finally:
+            self.lib.dvs_dpi_release_h(ctx)
+        fresh = self.lib.dvs_dpi_compile_b64(_build_2var_b64(self.lib).encode())
+        try:
+            assert self.lib.dvs_dpi_solve_h(fresh, 5) == 0
+            assert self._values(fresh) == reused
+        finally:
+            self.lib.dvs_dpi_release_h(fresh)
+
+    def test_checkpoint_limit_leaves_room_to_solve(self):
+        ctx = self.lib.dvs_dpi_compile_b64(_build_2var_b64(self.lib).encode())
+        try:
+            cps = [self.lib.dvs_dpi_checkpoint_h(ctx) for _ in range(40)]
+            assert cps[:31] == list(range(31)) and set(cps[31:]) == {-1}
+            assert self.lib.dvs_dpi_solve_h(ctx, 1) == 0
+        finally:
+            self.lib.dvs_dpi_release_h(ctx)
+
+    def test_pin_lasts_across_solves(self):
+        ctx = self.lib.dvs_dpi_compile_b64(_build_2var_b64(self.lib).encode())
+        try:
+            assert self.lib.dvs_dpi_pin_var_h(ctx, 0, 50) == 0
+            bs = set()
+            for seed in range(1, 11):
+                assert self.lib.dvs_dpi_solve_h(ctx, seed) == 0
+                a, b = self._values(ctx)
+                assert a == 50 and 50 <= b <= 100
+                bs.add(b)
+            assert len(bs) > 1
+        finally:
+            self.lib.dvs_dpi_release_h(ctx)
+
+    def test_pin_after_solve_checks_constraints_not_solution(self):
+        """A pin after a solve is checked against the constraints. It used to
+        be checked against the solved values, so any value other than the
+        last solution was reported as a conflict."""
+        ctx = self.lib.dvs_dpi_compile_b64(_build_2var_b64(self.lib).encode())
+        try:
+            assert self.lib.dvs_dpi_solve_h(ctx, 3) == 0
+            a, _ = self._values(ctx)
+            other = 0 if a != 0 else 1
+            assert self.lib.dvs_dpi_pin_var_h(ctx, 0, other) == 0
+            assert self.lib.dvs_dpi_solve_h(ctx, 4) == 0
+            assert self._values(ctx)[0] == other
+            assert self.lib.dvs_dpi_pin_var_h(ctx, 0, 101) == -2
+        finally:
+            self.lib.dvs_dpi_release_h(ctx)
+
+    def test_checkpoint_restores_more_than_once(self):
+        ctx = self.lib.dvs_dpi_compile_b64(_build_2var_b64(self.lib).encode())
+        try:
+            cp = self.lib.dvs_dpi_checkpoint_h(ctx)
+            assert cp >= 0
+            for pin in (10, 20, 30):
+                assert self.lib.dvs_dpi_pin_var_h(ctx, 0, pin) == 0
+                assert self.lib.dvs_dpi_solve_h(ctx, pin) == 0
+                assert self._values(ctx)[0] == pin
+                self.lib.dvs_dpi_restore_h(ctx, cp)
+            # After the restore no pin remains: var 0 varies again.
+            seen = set()
+            for seed in range(1, 11):
+                assert self.lib.dvs_dpi_solve_h(ctx, seed) == 0
+                seen.add(self._values(ctx)[0])
+            assert len(seen) > 3, seen
+            assert self.lib.dvs_dpi_checkpoint_h(ctx) == cp + 1
+        finally:
+            self.lib.dvs_dpi_release_h(ctx)
 
     def test_seed_determinism(self):
         """Same seed produces same solution."""

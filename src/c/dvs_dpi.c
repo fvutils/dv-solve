@@ -10,45 +10,47 @@
 /* Base64 decoder                                                      */
 /* ------------------------------------------------------------------ */
 
-static const uint8_t _b64_table[256] = {
-    /* 0x00-0x2A */ 64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-                    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-                    64,64,64,64,64,64,64,64,64,64,64,
-    /* '+' 0x2B */ 62,
-    /* 0x2C-0x2E */ 64,64,64,
-    /* '/' 0x2F */ 63,
-    /* '0'-'9' */  52,53,54,55,56,57,58,59,60,61,
-    /* 0x3A-0x40 */ 64,64,64,64,64,64,64,
-    /* 'A'-'Z' */  0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,
-    /* 0x5B-0x60 */ 64,64,64,64,64,64,
-    /* 'a'-'z' */  26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,
-    /* 0x7B-0xFF: all 64 (invalid) -- zero-initialized below */
-};
+static int _b64_val(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
 
-/* Decode base64 string into malloc'd buffer. Returns NULL on error.
-   *out_len receives the decoded byte count. */
+/* Decode a base64 string into a malloc'd buffer. Returns NULL on malformed
+   input: a length that is not a multiple of 4, a character outside the
+   alphabet, or padding anywhere but the last one or two places. A problem
+   buffer that decoded "mostly right" would compile into a different problem,
+   so nothing is guessed. *out_len receives the decoded byte count. */
 static uint8_t *_b64_decode(const char *src, size_t *out_len) {
     if (!src) return NULL;
     size_t slen = strlen(src);
+    if (slen == 0 || slen % 4 != 0) return NULL;
     size_t pad = 0;
-    if (slen >= 1 && src[slen - 1] == '=') pad++;
-    if (slen >= 2 && src[slen - 2] == '=') pad++;
+    if (src[slen - 1] == '=') pad++;
+    if (src[slen - 2] == '=') pad++;
 
     size_t decoded_len = (slen / 4) * 3 - pad;
-    uint8_t *out = (uint8_t *)malloc(decoded_len + 4); /* +4 safety */
+    uint8_t *out = (uint8_t *)malloc(decoded_len + 3);
     if (!out) return NULL;
 
     size_t j = 0;
-    for (size_t i = 0; i < slen; ) {
-        uint32_t a = (i < slen) ? _b64_table[(uint8_t)src[i++]] : 64;
-        uint32_t b = (i < slen) ? _b64_table[(uint8_t)src[i++]] : 64;
-        uint32_t c = (i < slen) ? _b64_table[(uint8_t)src[i++]] : 64;
-        uint32_t d = (i < slen) ? _b64_table[(uint8_t)src[i++]] : 64;
-        if (a > 63 || b > 63) { free(out); return NULL; }
-        uint32_t triple = (a << 18) | (b << 12) | ((c & 63) << 6) | (d & 63);
-        if (j < decoded_len) out[j++] = (triple >> 16) & 0xFF;
-        if (j < decoded_len) out[j++] = (triple >> 8)  & 0xFF;
-        if (j < decoded_len) out[j++] =  triple        & 0xFF;
+    for (size_t i = 0; i < slen; i += 4) {
+        int last = (i + 4 == slen);
+        int v[4];
+        for (int k = 0; k < 4; k++) {
+            unsigned char c = (unsigned char)src[i + k];
+            if (c == '=' && last && k >= 4 - (int)pad) { v[k] = 0; continue; }
+            v[k] = _b64_val(c);
+            if (v[k] < 0) { free(out); return NULL; }
+        }
+        uint32_t triple = ((uint32_t)v[0] << 18) | ((uint32_t)v[1] << 12) |
+                          ((uint32_t)v[2] << 6)  |  (uint32_t)v[3];
+        out[j++] = (triple >> 16) & 0xFF;
+        out[j++] = (triple >> 8)  & 0xFF;
+        out[j++] =  triple        & 0xFF;
     }
 
     *out_len = decoded_len;
@@ -74,7 +76,26 @@ typedef struct {
     uint32_t           n_vars;
     int                solved;       /* 1 if last solve returned DVS_SOLVE_OK */
     int                n_uncompiled; /* constraints dvs_solver_compile could not take */
+    int                search_cp;    /* checkpoint taken before the last search,
+                                      * -1 if there is none to undo */
 } DpiHandle;
+
+/* Undo the previous search, keeping everything before it (pins included).
+ *
+ * A search leaves every variable assigned. Without this, the next
+ * dvs_dpi_solve_h starts from that full assignment and returns it again
+ * whatever the seed, so every randomize_obj() call produced the same object;
+ * and a pin applied after a solve was checked against the solved values
+ * rather than the constraints. Each search therefore runs inside a private
+ * checkpoint, and every operation that changes or reads state for a new
+ * solve rolls it back first. */
+static void _undo_search(DpiHandle *h) {
+    if (h->search_cp >= 0) {
+        dvs_solver_restore(h->ctx, (uint32_t)h->search_cp);
+        h->search_cp = -1;
+    }
+    h->solved = 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* Chandle API implementation                                          */
@@ -130,6 +151,7 @@ void *dvs_dpi_compile_b64(const char *b64_data) {
     h->ctx          = ctx;
     h->n_vars       = ((dvs_problem_t *)buf)->n_vars;
     h->solved       = 0;
+    h->search_cp    = -1;
     /* A POSITIVE dvs_solver_compile return is the count of constraints it could not
      * compile, and this path used to test only `rc < 0` -- so those constraints
      * were dropped and the SV/DPI consumer solved without them, producing
@@ -150,11 +172,16 @@ int dvs_dpi_solve_h(void *ctx, long long seed) {
     if (!ctx) return -1;
     DpiHandle *h = (DpiHandle *)ctx;
 
-    h->solved = 0;
+    _undo_search(h);
+    h->search_cp = dvs_solver_checkpoint(h->ctx);
+    if (h->search_cp < 0) return -1;   /* every checkpoint slot is in use */
 
     dvs_solve_opts_t opts;
     memset(&opts, 0, sizeof(opts));
     opts.seed = (uint64_t)seed;
+    /* DPI callers are randomizing stimulus: break decision ties at random so
+     * solutions spread across the solution space (see dv_solve.h). */
+    opts.fair_pick = 1;
 
     dvs_result_t sr = dvs_solver_solve(h->ctx, &opts);
 
@@ -185,6 +212,7 @@ int dvs_dpi_pin_var_h(void *ctx, int var_id, long long value) {
     DpiHandle *h = (DpiHandle *)ctx;
     if (var_id < 0 || (uint32_t)var_id >= h->n_vars) return -1;
 
+    _undo_search(h);
     int rc = dvs_solver_pin_var(h->ctx, (uint32_t)var_id, (int64_t)value);
     /* dvs_solver_pin_var returns 0 on success, -1 on conflict */
     return (rc == 0) ? 0 : -2;
@@ -193,14 +221,22 @@ int dvs_dpi_pin_var_h(void *ctx, int var_id, long long value) {
 int dvs_dpi_checkpoint_h(void *ctx) {
     if (!ctx) return -1;
     DpiHandle *h = (DpiHandle *)ctx;
+    _undo_search(h);
+    /* Keep one slot free for the checkpoint dvs_dpi_solve_h takes. */
+    if (h->ctx->n_checkpoints + 1 >= MAX_CHECKPOINTS) return -1;
     return dvs_solver_checkpoint(h->ctx);
 }
 
 void dvs_dpi_restore_h(void *ctx, int cp) {
     if (!ctx || cp < 0) return;
     DpiHandle *h = (DpiHandle *)ctx;
+    _undo_search(h);
+    if ((uint32_t)cp >= h->ctx->n_checkpoints) return;
+    /* dvs_solver_restore pops checkpoint cp and every later one. Taking a new
+     * checkpoint straight away puts the same state back at the same index, so
+     * cp stays valid and can be restored again, as this API promises. */
     dvs_solver_restore(h->ctx, (uint32_t)cp);
-    h->solved = 0;  /* restored state has no guaranteed solved values */
+    dvs_solver_checkpoint(h->ctx);
 }
 
 long long dvs_dpi_get_value_h(void *ctx, int var_id) {
