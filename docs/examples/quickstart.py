@@ -5,7 +5,7 @@ from dv_solve.problem import BIN_GT, BIN_LT
 
 b = SolveProblemBuilder()
 
-# Variables are identified by an integer id you choose.
+# Variables are identified by ids 0, 1, 2, ...
 X, LO, HI = 0, 1, 2
 b.add_var(X, width=8, is_signed=False, lo=0, hi=255)
 b.add_var(LO, width=8, is_signed=False, lo=0, hi=255)

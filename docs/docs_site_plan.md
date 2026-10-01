@@ -1,6 +1,7 @@
 # dv-solve Documentation Site Plan
 
-Status: D0, D1, D2 DONE and live (2026-09-30); D3 (Python) next. Comes before `ci_benchmark_publishing_plan.md`:
+Status: D0–D3 DONE and live (2026-09-30); D4 (C + SV) DONE 2026-10-01, with
+`guides/zuspec` and `concepts/diagnosing-unsat` still deferred from D3; D5 next. Comes before `ci_benchmark_publishing_plan.md`:
 the benchmark pages become a "Results" section of this site later.
 
 Goal: a user-facing doc set, published at `dvkit.org/fvutils/dv-solve/`, that
@@ -166,7 +167,7 @@ workflow is ignored silently.
 | **D1 — SMT-LIB2 front door** | `quickstart-smt2`, `guides/smt2-solver`, `reference/cli`, `reference/environment`, `concepts/soundness`, `concepts/engines`, `concepts/randomization-seeds`. `guides/yosys-sby` is deferred: yosys-smtbmc only drives solvers from a fixed list, so today it needs `tests/formal/sby/smtio_dvsolve.patch` applied to yosys — not publishable as a user guide | these are independent of the naming decision, and SMT2 is the most-used surface today |
 | **D2 — Verilator** | `quickstart-verilator`, `guides/verilator`, `concepts/randomization`; resolve §1.4 against stock Verilator 5.046 | guide's example runs with bundled Verilator |
 | **D3 — Python** | `concepts/problem-model`, `soft-constraints`, `diagnosing-unsat`, `reference/python` (autodoc), `reference/status-codes`, `guides/packaging`, `guides/zuspec` | public-module decision made; docstrings on public classes filled in |
-| **D4 — C + SV** | `reference/c-api`, `reference/sv-api`, `guides/systemverilog-dpi` | after the naming decision and the public-header list |
+| **D4 — C + SV** | `reference/c-api`, `reference/sv-api`, `guides/systemverilog-dpi` | after the naming decision and the public-header list. *Done 2026-10-01:* hand-written with Sphinx's C domain (no Doxygen/Breathe) and plain SV signatures (no sphinx-systemverilog dependency); C and DPI examples in `docs/examples/c`, `docs/examples/sv-dpi`, executed by `test_doc_examples.py` |
 | **D5 — hardening** | `docs/examples/` + test module; `internals/`; README links to the site | every code block on the site is executed by the test suite |
 
 D0 is deliberately small: it proves the runner, the artifact and the

@@ -7,15 +7,15 @@ class Packet;
 
   constraint c_align { addr[1:0] == 2'b00; }             // word aligned
   constraint c_len   { len inside {[1:16]}; }
-  constraint c_fit   { addr + len < 32'h0000_1000; }     // inside a 4 KB window
+  constraint c_fit   { addr < 32'h1000; addr + 32'(len) <= 32'h1000; }  // in the first 4 KB
   constraint c_kind  { kind != 0; (kind == 4'd7) -> (len > 8); }
 endclass
 
 module top;
   initial begin
-    Packet p = new;
+    automatic Packet p = new;
     repeat (5) begin
-      if (!p.randomize()) $fatal(1, "randomize() failed");
+      if (p.randomize() == 0) $fatal(1, "randomize() failed");
       $display("addr=%h len=%0d kind=%0d", p.addr, p.len, p.kind);
     end
     $finish;

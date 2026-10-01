@@ -20,7 +20,7 @@ seed=3: x=226 lo=229 hi=238
 
 Build the problem
 : A {py:class}`~dv_solve.builder.SolveProblemBuilder` collects variables and
-  constraints. Each variable has an integer id you choose, a bit width,
+  constraints. Each variable has an id (0, 1, 2, ... in turn), a bit width,
   a signedness and a value range. Constraints are expression trees built from
   `expr_var`, `expr_const` and operators such as `expr_binary`.
 

@@ -7,7 +7,8 @@ and C APIs. (SMT-LIB2 input has its own rules; see {doc}`../guides/smt2-solver`.
 
 A variable has:
 
-- an **id**, a number you choose and use to refer to it;
+- an **id**, which expressions use to refer to it. A problem with *n*
+  variables uses the ids 0 to *n*−1, each declared once;
 - a **width** in bits, from 1 to 64;
 - a **signedness**;
 - a **range**, `lo` to `hi` inclusive, that its value must stay within.
