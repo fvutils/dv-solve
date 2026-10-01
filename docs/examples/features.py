@@ -3,7 +3,7 @@ from collections import Counter
 
 from dv_solve.builder import SolveProblemBuilder
 from dv_solve.ctx import SolveCtx, SOLVE_OK
-from dv_solve.problem import BIN_ADD, BIN_EQ, BIN_GT, BIN_LT
+from dv_solve.problem import BIN_ADD, BIN_ASHR, BIN_EQ, BIN_GT, BIN_LT, BIN_RSHIFT
 
 
 def solve(b, var_ids, seed=1):
@@ -61,6 +61,18 @@ b = SolveProblemBuilder()
 x = u8(b, 0)
 b.add_constraint(b.expr_binary(BIN_LT, b.expr_binary(BIN_ADD, x, b.expr_const(3)), b.expr_const(10)))
 assert all(solve(b, [0], seed=s)[0] <= 6 for s in range(1, 9))
+
+# Shifts: for a signed x of -8, x >>> 1 is -4. x >> 1 is a logical shift of
+# the 32-bit pattern, so it is a large positive number, not -4.
+for op, expect in ((BIN_ASHR, -4), (BIN_RSHIFT, 0x7FFFFFFC)):
+    b = SolveProblemBuilder()
+    b.add_var(0, width=8, is_signed=True, lo=-8, hi=-8)
+    b.add_var(1, width=32, is_signed=True, lo=-(1 << 31), hi=(1 << 31) - 1)
+    b.add_var(2, width=32, is_signed=False, lo=0, hi=(1 << 32) - 1)
+    r = 1 if op == BIN_ASHR else 2
+    shifted = b.expr_binary(op, b.expr_var(0), b.expr_const(1))
+    b.add_constraint(b.expr_binary(BIN_EQ, b.expr_var(r), shifted))
+    assert solve(b, [r]) == [expect]
 
 # All different, plus a sum: three distinct values that add up to 12.
 b = SolveProblemBuilder()

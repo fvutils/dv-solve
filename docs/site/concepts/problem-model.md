@@ -61,6 +61,9 @@ wrap at the variables' width. For 8-bit unsigned `x`:
 Division and `%` truncate toward zero; the remainder takes the sign of the
 dividend. `>>` is a logical shift of the expression's bit pattern, as in
 SystemVerilog: for a negative signed operand it does not preserve the sign.
+`>>>` (`BIN_ASHR`) is an arithmetic shift in a signed expression, copying the
+sign bit in, and the same as `>>` in an unsigned one. Python's `>>` on a
+signed value corresponds to `>>>`.
 
 ## Operators
 
@@ -71,7 +74,7 @@ Binary operators, used with `expr_binary(op, lhs, rhs)`:
 | `BIN_ADD`, `BIN_SUB`, `BIN_MUL` | `+`, `-`, `*` |
 | `BIN_DIV`, `BIN_MOD` | `/`, `%` |
 | `BIN_BAND`, `BIN_BOR`, `BIN_BXOR` | bitwise `&`, `\|`, `^` |
-| `BIN_LSHIFT`, `BIN_RSHIFT` | `<<`, `>>` |
+| `BIN_LSHIFT`, `BIN_RSHIFT`, `BIN_ASHR` | `<<`, `>>`, `>>>` |
 | `BIN_EQ`, `BIN_NEQ` | `==`, `!=` |
 | `BIN_LT`, `BIN_LTE`, `BIN_GT`, `BIN_GTE` | `<`, `<=`, `>`, `>=` |
 | `BIN_AND`, `BIN_OR` | logical `&&`, `\|\|` |

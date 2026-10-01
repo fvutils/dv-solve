@@ -48,7 +48,7 @@ For how problems are expressed, see {doc}`../concepts/problem-model`.
 
 `dv_solve.problem` defines the operator codes for `expr_binary` and
 `expr_unary`: `BIN_ADD`, `BIN_SUB`, `BIN_MUL`, `BIN_DIV`, `BIN_MOD`,
-`BIN_BAND`, `BIN_BOR`, `BIN_BXOR`, `BIN_LSHIFT`, `BIN_RSHIFT`, `BIN_EQ`,
+`BIN_BAND`, `BIN_BOR`, `BIN_BXOR`, `BIN_LSHIFT`, `BIN_RSHIFT`, `BIN_ASHR`, `BIN_EQ`,
 `BIN_NEQ`, `BIN_LT`, `BIN_LTE`, `BIN_GT`, `BIN_GTE`, `BIN_AND`, `BIN_OR`,
 `UN_NEG`, `UN_NOT` and `UN_INVERT`. Their meanings are listed in
 {doc}`../concepts/problem-model`.

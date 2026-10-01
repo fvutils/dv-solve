@@ -57,7 +57,7 @@ Supported bit-vector operators:
 |---|---|
 | arithmetic | `bvadd`, `bvsub`, `bvmul`, `bvneg`, `bvudiv`, `bvurem`, `bvsdiv`, `bvsrem`, `bvsmod` |
 | bitwise | `bvand`, `bvor`, `bvxor`, `bvnot` |
-| shifts | `bvshl`, `bvlshr` |
+| shifts | `bvshl`, `bvlshr`, `bvashr` |
 | comparison | `bvult`, `bvule`, `bvugt`, `bvuge`, `bvslt`, `bvsle`, `bvsgt`, `bvsge` |
 | structure | `concat`, `extract`, `zero_extend`, `sign_extend`, `repeat` |
 
@@ -65,8 +65,7 @@ Also supported: `=`, `distinct`, `ite`, `let`, the Boolean connectives,
 arrays (`select`, `store`, `(as const ...)`) and calls to `define-fun`
 definitions.
 
-Not yet supported (a problem that uses them gets `unknown`): `bvashr`,
-`bvnand`, `bvnor`, `bvxnor`, `bvcomp`, `rotate_left` and `rotate_right`.
+Not yet supported (a problem that uses them gets `unknown`): `bvnand`, `bvnor`, `bvxnor`, `bvcomp`, `rotate_left` and `rotate_right`.
 
 Bit-vector widths up to 128 bits are supported. Constants must fit in 64 bits.
 See {doc}`../concepts/soundness` for what happens beyond these limits.
