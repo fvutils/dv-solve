@@ -36,6 +36,7 @@ SolveProblem *solve_problem_init(void *buf, size_t buf_size) {
     sp->n_dists          = 0;
     sp->dists_head       = EXPR_NULL;
     sp->next_constraint_id = 0;
+    sp->flags            = 0;
 
     size_t pool_buf_size = buf_size - pool_offset;
     if (!zsp_pool_init(&sp->pool, pool_buf_size))
@@ -66,6 +67,7 @@ void solve_problem_reset(SolveProblem *sp) {
     sp->n_dists          = 0;
     sp->dists_head       = EXPR_NULL;
     sp->next_constraint_id = 0;
+    sp->flags            = 0;
     zsp_pool_reset(&sp->pool);
 }
 
@@ -77,16 +79,22 @@ void solve_problem_destroy(SolveProblem *sp) {
 /* Expression builders                                                 */
 /* ------------------------------------------------------------------ */
 
-ExprRef expr_const(SolveProblem *sp, int64_t value, uint8_t is_signed) {
+ExprRef expr_const_sized(SolveProblem *sp, int64_t value, uint8_t is_signed,
+                         uint8_t width) {
     ExprRef ref = _pool_alloc(sp, (uint32_t)sizeof(ExprConst),
                               (uint32_t)_Alignof(ExprConst));
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprConst *n = (ExprConst *)POOL_PTR(sp, ref);
     n->kind      = EXPR_CONST;
     n->is_signed = is_signed;
-    n->_pad[0]   = n->_pad[1] = n->_pad[2] = 0;
+    n->width     = width;
+    n->_pad[0]   = n->_pad[1] = 0;
     n->value     = value;
     return ref;
+}
+
+ExprRef expr_const(SolveProblem *sp, int64_t value, uint8_t is_signed) {
+    return expr_const_sized(sp, value, is_signed, 0);
 }
 
 ExprRef expr_var(SolveProblem *sp, uint32_t var_id) {

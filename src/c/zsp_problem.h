@@ -34,6 +34,8 @@ typedef enum {
     EXPR_CLOG2    = 12, /* r == ceil(log2(x))           */
     EXPR_ARRAY_SELECT = 13, /* r = base[index]              */
     EXPR_IN_RANGES = 14, /* value in [lo0,hi0] U [lo1,hi1] U ... */
+    EXPR_SV_CAST  = 15, /* INTERNAL: explicit width/signedness conversion,
+                         * produced only by SV elaboration (zsp_sv.h) */
 } ExprKind;
 
 /* ------------------------------------------------------------------ */
@@ -64,11 +66,22 @@ typedef enum {
 /* struct.                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Integer literal */
+/** Integer literal
+ *
+ * `width` == 0 is an UNSIZED literal, typed like a SystemVerilog integer
+ * literal: 32 bits, signed, when the value fits in int32; otherwise 32 bits
+ * unsigned when `is_signed` is 0 and the value fits in uint32; otherwise 64
+ * bits (signed if the value is negative or `is_signed` is set). See
+ * zsp_sv_const_type().
+ *
+ * `width` > 0 is a SIZED literal of exactly that many bits; `is_signed`
+ * selects its signedness and `value` supplies its low `width` bits (the
+ * SMT-LIB front end emits these, e.g. #x03 is an 8-bit 3). */
 typedef struct {
     ExprKind kind;       /* EXPR_CONST                           */
     uint8_t  is_signed;  /* non-zero for signed interpretation   */
-    uint8_t  _pad[3];
+    uint8_t  width;      /* 0 = unsized, else the literal's width */
+    uint8_t  _pad[2];
     int64_t  value;      /* bit pattern / signed value           */
 } ExprConst;
 
@@ -143,6 +156,23 @@ typedef struct {
     uint8_t  _pad;
     ExprRef  operand;
 } ExprExtend;
+
+/** INTERNAL explicit conversion (EXPR_SV_CAST), never built by a front end.
+ *
+ * Takes the low `from_bits` bits of `operand`, extends them to `to_bits`
+ * (sign-extending when `sign_extend`), and reads the result as a signed value
+ * when `dst_signed`, else unsigned. SV elaboration inserts it where a
+ * SystemVerilog context changes a value's meaning -- a signed operand used in
+ * an unsigned context -- so the engines downstream never have to infer that
+ * conversion themselves. Same layout as ExprExtend. */
+typedef struct {
+    ExprKind kind;        /* EXPR_SV_CAST     */
+    uint8_t  sign_extend; /* 0=zero, 1=sign   */
+    uint8_t  from_bits;   /* source width     */
+    uint8_t  to_bits;     /* destination width */
+    uint8_t  dst_signed;  /* result signedness */
+    ExprRef  operand;
+} ExprSvCast;
 
 /** Bit-slice extract: result = operand[hi_bit:lo_bit] */
 typedef struct {
@@ -307,9 +337,16 @@ typedef struct {
     uint32_t   n_dists;            /* number of distribution constraints */
     ExprRef    dists_head;         /* head of DistSpec linked list       */
     uint32_t   next_constraint_id; /* auto-incrementing constraint ID counter */
+    uint32_t   flags;             /* ZSP_PROBLEM_F_* */
     zsp_pool_t pool;              /* MUST be last field                */
     /* pool data region follows immediately in the same buffer         */
 } SolveProblem;
+
+/** The problem's expressions are already EXPLICIT: every constant is sized
+ * and every operator's operands already share the width and signedness the
+ * operator works at (SMT-LIB bit-vector semantics). SV elaboration (zsp_sv.h)
+ * is skipped for such a problem. Set by the SMT-LIB2 front end. */
+#define ZSP_PROBLEM_F_EXPLICIT  0x1u
 
 /** Convert a pool offset (ExprRef) to a real pointer. */
 #define POOL_PTR(sp, ref)  zsp_pool_ptr(&(sp)->pool, (ref))
@@ -354,6 +391,9 @@ void solve_problem_destroy(SolveProblem *sp);
 /* ------------------------------------------------------------------ */
 
 ExprRef expr_const(SolveProblem *sp, int64_t value, uint8_t is_signed);
+/** A sized constant of `width` bits (see ExprConst). width 0 == expr_const. */
+ExprRef expr_const_sized(SolveProblem *sp, int64_t value, uint8_t is_signed,
+                         uint8_t width);
 ExprRef expr_var(SolveProblem *sp, uint32_t var_id);
 ExprRef expr_binary(SolveProblem *sp, BinOp op, ExprRef lhs, ExprRef rhs);
 ExprRef expr_unary(SolveProblem *sp, UnaryOp op, ExprRef operand);

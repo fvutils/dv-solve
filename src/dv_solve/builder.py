@@ -185,13 +185,19 @@ class SolveProblemBuilder:
     # Expression builders                                                  #
     # ------------------------------------------------------------------ #
 
-    def expr_const(self, value: int, is_signed: bool = False) -> int:
+    def expr_const(self, value: int, is_signed: bool = False,
+                   width: int = 0) -> int:
         """A constant.
 
         Args:
             value: The value. Must fit in a signed 64-bit integer.
             is_signed: Set for a negative constant.
         """
+        if width:
+            return self._lib.builder_expr_const_sized(
+                self._b, ctypes.c_int64(value),
+                ctypes.c_uint8(1 if is_signed else 0), ctypes.c_uint8(width),
+            )
         return self._lib.builder_expr_const(
             self._b, ctypes.c_int64(value),
             ctypes.c_uint8(1 if is_signed else 0),

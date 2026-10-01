@@ -138,6 +138,7 @@ set(ZSP_SOURCES
     src/c/zsp_checkpoint.c
     src/c/zsp_trail.c
     src/c/zsp_validate.c
+    src/c/zsp_sv.c
     src/c/zsp_placement.c
     src/c/zsp_wiremask.c
     src/c/zsp_costguided.c

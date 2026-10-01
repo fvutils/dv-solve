@@ -215,11 +215,12 @@ def test_xor_shift():
 
 
 def test_unary_invert():
-    # x == ~0x0F (8-bit) == 0xF0
+    # x == ~8'h0F == 0xF0. The constant is SIZED: an unsized 0x0F is a 32-bit
+    # literal (SystemVerilog sizing), so ~0x0F would be 0xFFFFFFF0.
     def build(b):
         b.add_var(0, 8, False, 0, 255)
         b.add_constraint(b.expr_binary(BIN_EQ, b.expr_var(0),
-                         b.expr_unary(UN_INVERT, b.expr_const(0x0F))))
+                         b.expr_unary(UN_INVERT, b.expr_const(0x0F, width=8))))
         return [0]
     assert_sat(build, expect={0: 0xF0})
 
@@ -356,18 +357,19 @@ def test_seed_zero_is_default_deterministic():
 from dv_solve.bvsat import BVSAT_UNKNOWN
 
 
-@pytest.mark.parametrize("op", [BIN_DIV, BIN_MOD])
-def test_guard_signed_divmod_defers(op):
-    """The bit-blaster does unsigned div/mod only; a signed operand must defer
-    (UNKNOWN) rather than silently compute a wrong unsigned quotient."""
+@pytest.mark.parametrize("op,expect", [(BIN_DIV, -3), (BIN_MOD, -1)])
+def test_signed_divmod_truncates(op, expect):
+    """Signed div/mod is bit-blasted with SystemVerilog semantics (truncate
+    toward zero; the remainder takes the dividend's sign): -7 / 2 == -3,
+    -7 % 2 == -1. (It used to defer as UNKNOWN: only unsigned div/mod was
+    encoded.)"""
     def build(b):
-        b.add_var(0, 16, True, -100, 100)   # signed dividend
-        b.add_var(1, 16, False, 0, 100)
+        b.add_var(0, 16, True, -7, -7)       # signed dividend
+        b.add_var(1, 16, True, -100, 100)    # signed result
         b.add_constraint(b.expr_binary(BIN_EQ, b.expr_var(1),
                          b.expr_binary(op, b.expr_var(0), b.expr_const(2))))
-        return []
-    rc, _ = _solve_bvsat(build)
-    assert rc == BVSAT_UNKNOWN, "signed div/mod should defer, got rc=%d" % rc
+        return [1]
+    assert_sat(build, expect={1: expect})
 
 
 def test_guard_unsigned_divmod_not_over_deferred():

@@ -106,6 +106,8 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     # Expression builders
     lib.expr_const.restype  = c.c_uint32
     lib.expr_const.argtypes = [c.c_void_p, c.c_int64, c.c_uint8]
+    lib.expr_const_sized.restype  = c.c_uint32
+    lib.expr_const_sized.argtypes = [c.c_void_p, c.c_int64, c.c_uint8, c.c_uint8]
     lib.expr_var.restype  = c.c_uint32
     lib.expr_var.argtypes = [c.c_void_p, c.c_uint32]
     lib.expr_binary.restype  = c.c_uint32
@@ -288,6 +290,9 @@ def _wire_builder_argtypes(lib: ctypes.CDLL) -> None:
 
     lib.builder_expr_const.restype  = c.c_uint32
     lib.builder_expr_const.argtypes = [c.c_void_p, c.c_int64, c.c_uint8]
+    lib.builder_expr_const_sized.restype  = c.c_uint32
+    lib.builder_expr_const_sized.argtypes = [c.c_void_p, c.c_int64, c.c_uint8,
+                                             c.c_uint8]
 
     lib.builder_expr_var.restype  = c.c_uint32
     lib.builder_expr_var.argtypes = [c.c_void_p, c.c_uint32]

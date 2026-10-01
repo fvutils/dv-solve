@@ -520,6 +520,27 @@ static Smt2ArrayValue *_anode_new(Smt2Frontend *fe, uint8_t akind,
  * same node). Used to hash-cons abstract array nodes so structurally-identical
  * terms -- e.g. (store A i v) written twice, or a define-fun array expanded at
  * two use sites -- map to ONE node, whose reads are then correctly shared. */
+/* An SMT-LIB bit-vector literal of `width` bits.
+ *
+ * The builder API types an UNSIZED constant as a SystemVerilog integer
+ * literal (32-bit signed), which would widen the context of every operator it
+ * meets: `(bvadd x #x03)` over an 8-bit x must wrap at 8 bits. Every
+ * BV-valued constant this front end emits is therefore SIZED. Widths are
+ * bounded by SMT2_MAX_BV_BITS (128), which fits the node's uint8_t. */
+static ExprRef _bv_const(Smt2Frontend *fe, int64_t value, uint16_t width) {
+    if (width == 0 || width > 255)
+        return builder_expr_const(fe->builder, value, 0);
+    return builder_expr_const_sized(fe->builder, value, 0, (uint8_t)width);
+}
+
+/* Mark a problem this front end finalized as already explicit (zsp_sv.h):
+ * SMT-LIB semantics are exact bit-vector semantics, every constant is sized,
+ * so SystemVerilog elaboration must leave it alone. */
+static SolveProblem *_explicit(SolveProblem *p) {
+    if (p) p->flags |= ZSP_PROBLEM_F_EXPLICIT;
+    return p;
+}
+
 static int _same_operand(Smt2Frontend *fe, ExprRef a, ExprRef b) {
     if (a == b) return 1;
     if (a == EXPR_NULL || b == EXPR_NULL) return 0;
@@ -529,7 +550,8 @@ static int _same_operand(Smt2Frontend *fe, ExprRef a, ExprRef b) {
     if (*ka == EXPR_VAR)
         return ((ExprVar *)ka)->var_id == ((ExprVar *)kb)->var_id;
     if (*ka == EXPR_CONST)
-        return ((ExprConst *)ka)->value == ((ExprConst *)kb)->value;
+        return ((ExprConst *)ka)->value == ((ExprConst *)kb)->value &&
+               ((ExprConst *)ka)->width == ((ExprConst *)kb)->width;
     return 0;
 }
 
@@ -942,7 +964,7 @@ static TaggedExpr _array_select(Smt2Frontend *fe, Smt2ArrayValue *arr,
     /* Linear chain from n-2 down to 0; last element is the fallthrough. */
     ExprRef result = arr->elems[n - 1];
     for (int32_t i = (int32_t)n - 2; i >= 0; i--) {
-        ExprRef idx_const = builder_expr_const(fe->builder, (int64_t)i, 0);
+        ExprRef idx_const = _bv_const(fe, (int64_t)i, arr->sort.addr_width);
         ExprRef cond = builder_expr_binary(fe->builder, BIN_EQ, idx, idx_const);
         result = builder_expr_ite(fe->builder, cond, arr->elems[i], result);
     }
@@ -977,11 +999,11 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
     }
 
     if (sexpr_is_symbol(s, "true")) {
-        ExprRef r = builder_expr_const(fe->builder, 1, 0);
+        ExprRef r = _bv_const(fe, 1, 1);
         return (TaggedExpr){ { r, 1 }, 2, NULL };
     }
     if (sexpr_is_symbol(s, "false")) {
-        ExprRef r = builder_expr_const(fe->builder, 0, 0);
+        ExprRef r = _bv_const(fe, 0, 1);
         return (TaggedExpr){ { r, 1 }, 2, NULL };
     }
 
@@ -1066,7 +1088,7 @@ static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
     }
     int64_t  bias_val = (int64_t)(1ULL << (sw - 1));
     uint64_t mask     = (sw < 64) ? (((uint64_t)1 << sw) - 1) : ~0ULL;
-    ExprRef  bias     = builder_expr_const(fe->builder, bias_val, 0);
+    ExprRef  bias     = _bv_const(fe, bias_val, sw);
 
     /* variable side: flip then flatten to a var (materialises the bxor) */
     ExprRef   af  = builder_expr_binary(fe->builder, BIN_BXOR, a.te.ref, bias);
@@ -1078,8 +1100,8 @@ static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
     const void *bp = builder_ref_ptr(fe->builder, b.te.ref);
     if (bp && *(const ExprKind *)bp == EXPR_CONST) {
         int64_t bval = ((const ExprConst *)bp)->value;
-        bref = builder_expr_const(fe->builder,
-                   (int64_t)(((uint64_t)bval ^ (uint64_t)bias_val) & mask), 0);
+        bref = _bv_const(fe,
+                   (int64_t)(((uint64_t)bval ^ (uint64_t)bias_val) & mask), sw);
     } else {
         ExprRef bf = builder_expr_binary(fe->builder, BIN_BXOR, b.te.ref, bias);
         TaggedExpr bff = _flatten_to_var(fe, (TaggedExpr){ { bf, sw }, 0, NULL });
@@ -1110,7 +1132,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                 SMT2_TAINT(fe, "bitvector constant value needs more than 64 bits");
                 return TAGGED_NULL;
             }
-            ExprRef r = builder_expr_const(fe->builder, (int64_t)bv_val, 0);
+            ExprRef r = _bv_const(fe, (int64_t)bv_val, w);
             return (TaggedExpr){ { r, w }, 2, NULL };
         }
         fprintf(fe->err, "error: unexpected indexed identifier\n");
@@ -1149,7 +1171,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             if (!sign && inner.leaf_kind == 2 && new_width < 64) {
                 ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, inner.te.ref);
                 uint64_t v = (uint64_t)ec->value & (((uint64_t)1 << new_width) - 1);
-                ExprRef cr = builder_expr_const(fe->builder, (int64_t)v, 0);
+                ExprRef cr = _bv_const(fe, (int64_t)v, new_width);
                 return (TaggedExpr){ { cr, new_width }, 2, NULL };
             }
 
@@ -1495,7 +1517,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             }
         }
         for (uint32_t j = 0; j < arr->n_elems; j++) {
-            ExprRef j_const = builder_expr_const(fe->builder, (int64_t)j, 0);
+            ExprRef j_const = _bv_const(fe, (int64_t)j, arr->sort.addr_width);
             ExprRef cond = builder_expr_binary(fe->builder, BIN_EQ,
                                                idx_te.te.ref, j_const);
             new_arr->elems[j] = builder_expr_ite(fe->builder, cond,
@@ -1638,7 +1660,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             ExprRef same_sign = builder_expr_binary(fe->builder, BIN_EQ, msb_r, msb_t);
             ExprRef r_plus_t = builder_expr_binary(fe->builder, BIN_ADD, r, T_);
             ExprRef adjusted = builder_expr_ite(fe->builder, same_sign, r, r_plus_t);
-            ExprRef zero = builder_expr_const(fe->builder, 0, 0);
+            ExprRef zero = _bv_const(fe, 0, w);
             ExprRef r_is_zero = builder_expr_binary(fe->builder, BIN_EQ, r, zero);
             ExprRef result = builder_expr_ite(fe->builder, r_is_zero, r, adjusted);
             return (TaggedExpr){ { result, w }, 0, NULL };
@@ -1736,7 +1758,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
          * lands in (-2^w, 0] and `(= (bvneg x) K)` was a spurious `unsat` for
          * every constant K. Built exactly as BINOP_CASE builds bvsub. */
         TaggedExpr z = _flatten_to_var(fe, (TaggedExpr){
-            { builder_expr_const(fe->builder, 0, 0), a.te.width }, 2, NULL });
+            { _bv_const(fe, 0, a.te.width), a.te.width }, 2, NULL });
         if (z.te.ref == EXPR_NULL) return TAGGED_NULL;
         ExprRef r = builder_expr_binary(fe->builder, BIN_SUB, z.te.ref, a.te.ref);
         _flag_wide_arith(fe, a.te.width);
@@ -1751,7 +1773,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (a.leaf_kind == 2) {
             ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, a.te.ref);
             int64_t neg = (ec->value != 0) ? 0 : 1;
-            ExprRef cr = builder_expr_const(fe->builder, neg, 0);
+            ExprRef cr = _bv_const(fe, neg, 1);
             return (TaggedExpr){ { cr, 1 }, 2, NULL };
         }
         ExprRef r = builder_expr_unary(fe->builder, UN_NOT, a.te.ref);
@@ -1775,7 +1797,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                 ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, b.te.ref);
                 if (ec->value == 0) {
                     /* (and ... false ...) -> false */
-                    ExprRef cr = builder_expr_const(fe->builder, 0, 0);
+                    ExprRef cr = _bv_const(fe, 0, 1);
                     return (TaggedExpr){ { cr, 1 }, 2, NULL };
                 }
                 /* (and ... true ...) -> drop this operand */
@@ -1790,7 +1812,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         }
         if (acc.te.ref == EXPR_NULL) {
             /* All operands were literal true */
-            ExprRef cr = builder_expr_const(fe->builder, 1, 0);
+            ExprRef cr = _bv_const(fe, 1, 1);
             return (TaggedExpr){ { cr, 1 }, 2, NULL };
         }
         acc.te.width = 1;
@@ -1808,7 +1830,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                 ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, b.te.ref);
                 if (ec->value != 0) {
                     /* (or ... true ...) -> true */
-                    ExprRef cr = builder_expr_const(fe->builder, 1, 0);
+                    ExprRef cr = _bv_const(fe, 1, 1);
                     return (TaggedExpr){ { cr, 1 }, 2, NULL };
                 }
                 /* (or ... false ...) -> drop this operand */
@@ -1823,7 +1845,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         }
         if (acc.te.ref == EXPR_NULL) {
             /* All operands were literal false */
-            ExprRef cr = builder_expr_const(fe->builder, 0, 0);
+            ExprRef cr = _bv_const(fe, 0, 1);
             return (TaggedExpr){ { cr, 1 }, 2, NULL };
         }
         acc.te.width = 1;
@@ -1948,7 +1970,7 @@ static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s) {
             SMT2_TAINT(fe, "bitvector literal wider than 64 bits (value truncated by the lexer)");
             return TAGGED_NULL;
         }
-        ExprRef r = builder_expr_const(fe->builder, (int64_t)s->bv.value, 0);
+        ExprRef r = _bv_const(fe, (int64_t)s->bv.value, (uint16_t)s->bv.width);
         return (TaggedExpr){ { r, (uint16_t)s->bv.width }, 2, NULL };
     }
     case SEXPR_LIST:
@@ -2788,7 +2810,7 @@ static int _ensure_problem(Smt2Frontend *fe) {
         free(fe->problem);
         fe->problem = NULL;
     }
-    fe->problem = builder_finalize(fe->builder, &fe->problem_size);
+    fe->problem = _explicit(builder_finalize(fe->builder, &fe->problem_size));
     if (!fe->problem) return -1;
     fe->builder_retained = 1;
     fe->problem_dirty    = 0;
@@ -2803,7 +2825,7 @@ static int _ensure_compiled(Smt2Frontend *fe) {
     /* A prior bit-blast-routed solve may have finalized one already (possible
      * when needs_bitblast flips mid-session); free it before overwriting. */
     if (fe->problem) { free(fe->problem); fe->problem = NULL; }
-    fe->problem = builder_finalize(fe->builder, &fe->problem_size);
+    fe->problem = _explicit(builder_finalize(fe->builder, &fe->problem_size));
     if (!fe->problem) return -1;
 
     /* The static ctx pool is a fixed-capacity, relocatable bump allocator by
@@ -2883,7 +2905,7 @@ static int _flush_aux(Smt2Frontend *fe) {
     size_t aux_sz = 0;
     /* Only the items added since the last hand-off: the builder may also hold
      * everything before it (cdcl_retained), which the ctx already has. */
-    SolveProblem *aux = builder_finalize_since(fe->builder, &fe->aux_mark, &aux_sz);
+    SolveProblem *aux = _explicit(builder_finalize_since(fe->builder, &fe->aux_mark, &aux_sz));
     if (!aux) return -1;
     int rc = solver_add_constraint(fe->ctx, aux);
     /* Retain the aux SolveProblem (instead of freeing) so the post-solve
@@ -3451,7 +3473,7 @@ static int _check_sat_array(Smt2Frontend *fe) {
     /* Finalize the BV skeleton with pool headroom for in-place lemmas + reads. */
     uint32_t vu = builder_virtual_used(fe->builder);
     uint32_t reserve = vu > (32u << 20) ? vu : (32u << 20);   /* >= 32 MB slack */
-    fe->problem = builder_finalize_reserve(fe->builder, &fe->problem_size, reserve);
+    fe->problem = _explicit(builder_finalize_reserve(fe->builder, &fe->problem_size, reserve));
     if (!fe->problem) { SMT2_EMIT_UNKNOWN(fe); fflush(fe->out); return -1; }
     builder_reset(fe->builder);
     fe->builder_retained = 0;
@@ -3835,7 +3857,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
              * retained builder holds every assertion (including any not yet
              * handed to CDCL): solve a full copy of it instead. */
             size_t full_sz = 0;
-            SolveProblem *full = builder_finalize(fe->builder, &full_sz);
+            SolveProblem *full = _explicit(builder_finalize(fe->builder, &full_sz));
             if (full) return _check_sat_bitblast_on(fe, full, full);
         }
         if (prc < 0) {
@@ -4057,7 +4079,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
          * check-sat: without it every such randomize() answered `unknown`. */
         if (fe->cdcl_retained && !fe->has_aux) {
             size_t full_sz = 0;
-            SolveProblem *full = builder_finalize(fe->builder, &full_sz);
+            SolveProblem *full = _explicit(builder_finalize(fe->builder, &full_sz));
             if (full) return _check_sat_bitblast_on(fe, full, full);
         }
     }

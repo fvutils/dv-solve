@@ -370,6 +370,13 @@ static PropResult _fire_bounds_ne_32(Propagator *self, SolveCtx *ctx) {
 
 uint32_t prop_add_bounds_ne_32(SolveCtx *ctx, uint32_t x_id, uint32_t y_id,
                                 uint8_t priority) {
+    /* Auto-promote when either side is tier-1: the 32-bit fire reads the int32
+     * lo/hi fields, which are 0/0 on a tier-1 var -- it then saw `x != 0` over
+     * a 64-bit x as a fixed 0 == 0 and reported a conflict (wrong unsat). Same
+     * choke-point approach as prop_add_reification_32. */
+    if (!VAR_IS_TIER0(ctx->vars[x_id].flags) ||
+        !VAR_IS_TIER0(ctx->vars[y_id].flags))
+        return prop_add_bounds_ne_64(ctx, x_id, y_id, priority);
     uint32_t ids[2] = { x_id, y_id };
     return _alloc_prop(ctx, _fire_bounds_ne_32, priority, 2, ids,
                        sizeof(BoundsNE_32_t));
@@ -1602,178 +1609,223 @@ uint32_t prop_add_bvadd_const_64(SolveCtx *ctx, uint32_t r_id, uint32_t x_id,
 /* signed result variable's [lo,hi] for tightening.                    */
 /* ------------------------------------------------------------------ */
 
-/* A modular interval: residues { (start+i) mod M : 0<=i<len }, len in
- * 1..M. len==M means the full domain. start is always in [0, M-1]. */
-typedef struct { uint64_t start; uint64_t len; } ModIv;
+/* A modular interval over residues mod M = 2^w, w in 1..64:
+ *   { (start + i) mod M : 0 <= i <= span }        (full: every residue)
+ * `span` (= length - 1) rather than the length, so that M = 2^64 needs no
+ * 128-bit arithmetic: span <= M - 1 always fits a uint64. */
+typedef struct { uint64_t start; uint64_t span; int full; } ModIv;
 
-/* Convert a variable's current [lo,hi] domain to its modular interval. */
-static ModIv _var_modiv(SolveCtx *ctx, uint32_t id, uint64_t M) {
-    uint64_t mask = M - 1;
+static inline uint64_t _bv_mask(uint8_t w) {
+    return (w >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
+}
+
+static ModIv _modiv_full(void) {
+    ModIv r; r.start = 0; r.span = 0; r.full = 1; return r;
+}
+
+static ModIv _modiv_one(uint64_t v) {
+    ModIv r; r.start = v; r.span = 0; r.full = 0; return r;
+}
+
+/* Number of residues is 1? */
+static inline int _modiv_single(ModIv x) { return !x.full && x.span == 0; }
+
+/* Convert a variable's current [lo,hi] domain to its modular interval. The
+ * domain is contiguous in the var's own order, and `hi - lo` computed in
+ * uint64 is its span for a signed var and for an unsigned one (whose 64-bit
+ * bounds are bit patterns ordered unsigned) alike. */
+static ModIv _var_modiv(SolveCtx *ctx, uint32_t id, uint8_t w) {
+    uint64_t mask = _bv_mask(w);
     int64_t lo = var_lo64(ctx, &ctx->vars[id]);
     int64_t hi = var_hi64(ctx, &ctx->vars[id]);
+    uint64_t span = (uint64_t)hi - (uint64_t)lo;
+    if (span >= mask) return _modiv_full();
     ModIv iv;
-    /* hi >= lo always; hi-lo < M because the domain fits the width. */
-    uint64_t span = (uint64_t)(hi - lo);   /* 0 .. M-1 */
     iv.start = (uint64_t)lo & mask;
-    iv.len   = span + 1;                   /* 1 .. M */
-    if (iv.len > M) iv.len = M;
+    iv.span  = span;
+    iv.full  = 0;
     return iv;
 }
 
-/* Tighten the w-bit result variable `id` so that its residues are
- * confined to the modular interval `iv`. SOUND: only removes residues
- * proven infeasible. Returns PROP_OK / PROP_CONFLICT.
+/* Tighten variable `id` so that its residues mod 2^w are confined to `iv`.
+ * SOUND: only removes values proven infeasible.
  *
- * The variable's domain [lo,hi] occupies a modular interval; we narrow
- * it only when one endpoint can be advanced without dropping a feasible
- * residue. To stay simple and sound we map `iv` to the variable's value
- * space and tighten the lo/hi bounds when iv lies wholly on one side. */
+ * `id` may be narrower than w (an operand extended to the context width).
+ * Its values then occupy at most two residue blocks: the non-negative values
+ * [0, P] at the bottom and, for a signed var, the negative values
+ * [M - half, M - 1] at the top (value = residue - M). We intersect a
+ * non-wrapping `iv` with each block and tighten the var to the value-space
+ * hull of what is left (a sound superset); nothing left is a conflict. */
 static PropResult _tighten_to_modiv(SolveCtx *ctx, uint32_t id,
-                                    ModIv iv, uint64_t M) {
-    if (iv.len >= M) return PROP_OK;   /* full domain: nothing to learn */
-    uint64_t mask = M - 1;
-    int signed_v = (ctx->vars[id].flags & VAR_SIGNED) != 0;
-    uint8_t w = (uint8_t)ctx->vars[id].width;
-
-    int64_t cur_lo = var_lo64(ctx, &ctx->vars[id]);
-    int64_t cur_hi = var_hi64(ctx, &ctx->vars[id]);
-
-    /* iv as a (possibly wrapping) residue interval [a0, a1] mod M. */
+                                    ModIv iv, uint8_t w) {
+    if (iv.full) return PROP_OK;               /* nothing to learn */
+    uint64_t mask = _bv_mask(w);
     uint64_t a0 = iv.start;
-    uint64_t a1 = (iv.start + iv.len - 1) & mask;
-    int iv_wraps = (a1 < a0);
+    uint64_t a1 = (iv.start + iv.span) & mask;
+    if (a1 < a0) return PROP_OK;               /* wraps: keep it simple & sound */
 
-    /* Current domain as residue interval [c0,c1] mod M. */
-    ModIv cur = _var_modiv(ctx, id, M);
-    uint64_t c0 = cur.start;
-    uint64_t c1 = (cur.start + cur.len - 1) & mask;
-    int cur_wraps = (c1 < c0);
+    const Variable *v = &ctx->vars[id];
+    int signed_v = (v->flags & VAR_SIGNED) != 0;
+    uint8_t vw = (uint8_t)v->width;
+    if (vw == 0 || vw > w) return PROP_OK;     /* wider than the modulus: skip */
 
-    /* General modular-interval intersection is not necessarily a single
-     * interval. We only act in the common, sound, easy cases:
-     *  (1) iv does not wrap and the current domain does not wrap: a plain
-     *      interval intersection in residue space; map back to value space.
-     *  (2) otherwise: fall back to bound-based tightening using the value
-     *      space directly when iv is a non-wrapping residue interval that
-     *      maps to a contiguous value interval.
-     * If anything is ambiguous we propagate nothing (sound). */
-    if (iv_wraps) return PROP_OK;          /* keep it simple & sound */
-
-    /* iv is [a0,a1] with a0<=a1 in residue space. Map these residues to
-     * the variable's value space. For an unsigned var, residue==value.
-     * For a signed var, residues in [0, 2^(w-1)-1] are >=0 and residues
-     * in [2^(w-1), 2^w-1] are negative (value = residue - 2^w). */
-    int64_t v_a0, v_a1;
+    int64_t new_lo, new_hi;
     if (!signed_v) {
-        v_a0 = (int64_t)a0;
-        v_a1 = (int64_t)a1;
+        /* Values are residues in [0, vmax]. */
+        uint64_t vmax = _bv_mask(vw);
+        if (a0 > vmax) return PROP_CONFLICT;
+        uint64_t hi = (a1 < vmax) ? a1 : vmax;
+        new_lo = (int64_t)a0;                  /* bit patterns for width 64 */
+        new_hi = (int64_t)hi;
     } else {
-        uint64_t half = (uint64_t)1 << (w - 1);
-        /* If iv straddles the sign boundary it is not a contiguous value
-         * interval; skip (sound). */
-        int a0_neg = (a0 >= half);
-        int a1_neg = (a1 >= half);
-        if (a0_neg != a1_neg) {
-            /* iv covers both negative (high residues) and non-negative
-             * (low residues) values but as a *residue* interval [a0,a1]
-             * (a0<=a1) that means low values then ... no: a0<=a1 with
-             * a0<half<=a1 means non-neg values [a0..half-1] then neg
-             * values [half..a1] — not contiguous in value space. Skip. */
-            return PROP_OK;
+        uint64_t half  = (uint64_t)1 << (vw - 1);
+        uint64_t pmax  = half - 1;                  /* top non-negative residue */
+        uint64_t nmin  = (0 - half) & mask;         /* M - half */
+        uint64_t Mlow  = (w >= 64) ? 0 : ((uint64_t)1 << w);  /* M mod 2^64 */
+        int has_p = (a0 <= pmax);
+        int has_n = (a1 >= nmin);
+        if (!has_p && !has_n) return PROP_CONFLICT;
+        if (has_n) {
+            uint64_t n_lo = (a0 > nmin) ? a0 : nmin;
+            new_lo = (int64_t)(n_lo - Mlow);        /* residue - M */
+        } else {
+            new_lo = (int64_t)a0;
         }
-        v_a0 = a0_neg ? (int64_t)a0 - (int64_t)M : (int64_t)a0;
-        v_a1 = a1_neg ? (int64_t)a1 - (int64_t)M : (int64_t)a1;
+        if (has_p) {
+            new_hi = (int64_t)((a1 < pmax) ? a1 : pmax);
+        } else {
+            new_hi = (int64_t)(a1 - Mlow);
+        }
     }
-    /* v_a0 <= v_a1 now (same sign region, residues ordered). */
-
-    (void)c0; (void)c1; (void)cur_wraps;
+    int64_t cur_lo = var_lo64(ctx, v);
+    int64_t cur_hi = var_hi64(ctx, v);
     PropResult res;
-    if ((res = ctx_tighten_lb64(ctx, id, v_a0 > cur_lo ? v_a0 : cur_lo)) != PROP_OK) return res;
-    if ((res = ctx_tighten_ub64(ctx, id, v_a1 < cur_hi ? v_a1 : cur_hi)) != PROP_OK) return res;
+    if ((res = ctx_tighten_lb64(ctx, id, var_b_max(v, new_lo, cur_lo))) != PROP_OK)
+        return res;
+    if ((res = ctx_tighten_ub64(ctx, id, var_b_min(v, new_hi, cur_hi))) != PROP_OK)
+        return res;
     return PROP_OK;
 }
 
 /* Minkowski sum of two modular intervals (exact). */
-static ModIv _modiv_add(ModIv x, ModIv y, uint64_t M) {
+static ModIv _modiv_add(ModIv x, ModIv y, uint8_t w) {
+    uint64_t mask = _bv_mask(w);
+    if (x.full || y.full) return _modiv_full();
+    uint64_t span;
+    if (__builtin_add_overflow(x.span, y.span, &span) || span >= mask)
+        return _modiv_full();
     ModIv r;
-    /* combined length len_x+len_y-1, capped at M (full). */
-    uint64_t lx = x.len, ly = y.len;
-    if (lx >= M || ly >= M || lx + ly - 1 >= M) { r.start = 0; r.len = M; return r; }
-    r.start = (x.start + y.start) & (M - 1);
-    r.len   = lx + ly - 1;
+    r.start = (x.start + y.start) & mask;
+    r.span  = span;
+    r.full  = 0;
     return r;
 }
 
 /* Negate a modular interval: { (-u) mod M : u in iv } (exact). */
-static ModIv _modiv_neg(ModIv x, uint64_t M) {
+static ModIv _modiv_neg(ModIv x, uint8_t w) {
+    uint64_t mask = _bv_mask(w);
+    if (x.full) return x;
+    uint64_t hi = (x.start + x.span) & mask;
     ModIv r;
-    if (x.len >= M) { r.start = 0; r.len = M; return r; }
-    uint64_t hi = (x.start + x.len - 1) & (M - 1);
-    r.start = ((M - hi) & (M - 1));   /* -hi mod M is the new lowest */
-    r.len   = x.len;
+    r.start = (0 - hi) & mask;            /* -hi mod M is the new lowest */
+    r.span  = x.span;
+    r.full  = 0;
     return r;
 }
 
-/* Product of two modular intervals, bounded soundly. We lift each to its
- * representative non-negative integer interval [start, start+len-1] and
- * take the integer Minkowski product; if its span >= M the result is the
- * full domain, otherwise it reduces to a single modular interval that is
- * a sound superset of the true residue set. */
-static ModIv _modiv_mul(ModIv x, ModIv y, uint64_t M) {
-    ModIv r;
+/* Lift a modular interval to a contiguous INTEGER interval of the same
+ * residues: either [start, start+span] or, when the residues sit in the top
+ * half of the range, [start-M, start+span-M] (their negative, 2's-complement
+ * reading). Picks the one of smaller magnitude so products stay small.
+ * Returns 0 if neither fits an int64. */
+static int _modiv_lift(ModIv x, uint8_t w, int64_t *lo, int64_t *hi) {
+    uint64_t end;
+    int u_ok = !__builtin_add_overflow(x.start, x.span, &end) &&
+               end <= (uint64_t)INT64_MAX;
+    uint64_t half = (uint64_t)1 << (w - 1);
+    int s_ok = (x.start >= half);
+    int64_t slo = 0, shi = 0;
+    if (s_ok) {
+        uint64_t Mlow = (w >= 64) ? 0 : ((uint64_t)1 << w);
+        slo = (int64_t)(x.start - Mlow);        /* start - M, < 0 */
+        if (__builtin_add_overflow(slo, (int64_t)x.span, &shi)) s_ok = 0;
+    }
+    if (u_ok && (!s_ok || end <= (uint64_t)0 - (uint64_t)slo)) {
+        *lo = (int64_t)x.start; *hi = (int64_t)end; return 1;
+    }
+    if (s_ok) { *lo = slo; *hi = shi; return 1; }
+    return 0;
+}
+
+/* Product of two modular intervals, bounded soundly. Each is lifted to an
+ * integer interval of the same residues; the integer Minkowski product
+ * (min/max of the four corner products) reduced mod M is a sound superset
+ * of the true residue set, unless its span reaches M (then: full). */
+static ModIv _modiv_mul(ModIv x, ModIv y, uint8_t w) {
+    uint64_t mask = _bv_mask(w);
     /* A singleton-zero operand forces the product to 0 regardless of the
      * other operand's range (handle before the full-domain shortcut). */
-    if ((x.len == 1 && x.start == 0) || (y.len == 1 && y.start == 0)) {
-        r.start = 0; r.len = 1; return r;
+    if ((_modiv_single(x) && x.start == 0) || (_modiv_single(y) && y.start == 0))
+        return _modiv_one(0);
+    if (_modiv_single(x) && _modiv_single(y))       /* exact, wraps mod 2^w */
+        return _modiv_one((x.start * y.start) & mask);
+    if (x.full || y.full) return _modiv_full();
+    int64_t xl, xh, yl, yh;
+    if (!_modiv_lift(x, w, &xl, &xh) || !_modiv_lift(y, w, &yl, &yh))
+        return _modiv_full();
+    int64_t p[4];
+    if (__builtin_mul_overflow(xl, yl, &p[0]) | __builtin_mul_overflow(xl, yh, &p[1]) |
+        __builtin_mul_overflow(xh, yl, &p[2]) | __builtin_mul_overflow(xh, yh, &p[3]))
+        return _modiv_full();
+    int64_t plo = p[0], phi = p[0];
+    for (int i = 1; i < 4; i++) {
+        if (p[i] < plo) plo = p[i];
+        if (p[i] > phi) phi = p[i];
     }
-    if (x.len >= M || y.len >= M) { r.start = 0; r.len = M; return r; }
-    uint64_t xlo = x.start, xhi = x.start + x.len - 1;
-    uint64_t ylo = y.start, yhi = y.start + y.len - 1;
-    /* All non-negative; products are monotone in both args. */
-    uint64_t plo, phi;
-    int of = __builtin_mul_overflow(xlo, ylo, &plo)
-           | __builtin_mul_overflow(xhi, yhi, &phi);
-    if (of) { r.start = 0; r.len = M; return r; }
-    if (phi - plo >= M - 1) { r.start = 0; r.len = M; return r; }
-    r.start = plo & (M - 1);
-    r.len   = (phi - plo) + 1;
+    uint64_t span = (uint64_t)phi - (uint64_t)plo;
+    if (span >= mask) return _modiv_full();
+    ModIv r;
+    r.start = (uint64_t)plo & mask;
+    r.span  = span;
+    r.full  = 0;
     return r;
 }
 
 /* Shift-left of a modular interval by a shift-amount interval [s0,s1]
  * (s0,s1 are actual non-negative shift counts). Sound superset. */
-static ModIv _modiv_shl(ModIv x, uint64_t s0, uint64_t s1, uint8_t w, uint64_t M) {
-    ModIv r;
+static ModIv _modiv_shl(ModIv x, uint64_t s0, uint64_t s1, uint8_t w) {
+    uint64_t mask = _bv_mask(w);
     /* Any shift >= w produces residue 0 (checked before the full-domain
      * shortcut: even a full-domain operand shifted out is exactly 0). */
-    if (s0 >= w) { r.start = 0; r.len = 1; return r; }   /* all shifts -> 0 */
-    if (x.len >= M) { r.start = 0; r.len = M; return r; }
+    if (s0 >= w) return _modiv_one(0);   /* all shifts -> 0 */
+    if (_modiv_single(x) && s0 == s1)    /* exact, wraps mod 2^w */
+        return _modiv_one((x.start << s0) & mask);
+    if (x.full) return _modiv_full();
     int has_zero = (s1 >= w);
     uint64_t eff_hi = (s1 >= w) ? (uint64_t)(w - 1) : s1;
-    uint64_t xlo = x.start, xhi = x.start + x.len - 1;
+    uint64_t xlo = x.start, xhi;
+    if (__builtin_add_overflow(x.start, x.span, &xhi)) return _modiv_full();
     /* Representative integer interval over shifts [s0, eff_hi]:
      * min value = xlo << s0, max value = xhi << eff_hi (monotone). */
+    if (eff_hi >= 64) return _modiv_full();
     uint64_t plo = xlo << s0;
     uint64_t phi = xhi << eff_hi;
-    /* plo,phi < 2^w << (w-1) <= 2^(2w-1) <= 2^125 for w<=63: fits u64?
-     * Not necessarily. Guard against overflow by checking the shift. */
-    if (eff_hi >= 64 || (xhi != 0 && (phi >> eff_hi) != xhi)) {
-        r.start = 0; r.len = M; return r;   /* overflow: full domain */
-    }
+    if (xhi != 0 && (phi >> eff_hi) != xhi) return _modiv_full();  /* overflow */
+    if (xlo != 0 && (plo >> s0) != xlo) return _modiv_full();
     ModIv shifted;
-    if (phi - plo >= M - 1) { shifted.start = 0; shifted.len = M; }
-    else { shifted.start = plo & (M - 1); shifted.len = (phi - plo) + 1; }
+    if (phi - plo >= mask) return _modiv_full();
+    shifted.start = plo & mask;
+    shifted.span  = phi - plo;
+    shifted.full  = 0;
     if (!has_zero) return shifted;
-    if (shifted.len >= M) return shifted;
     /* Union {0} with `shifted`. If 0 already inside, no change. Else we
      * cannot represent a non-contiguous union as one modular interval, so
      * fall back to the full domain (sound, weak). */
     uint64_t s_lo = shifted.start;
-    uint64_t s_hi = (shifted.start + shifted.len - 1) & (M - 1);
-    int zero_in = (s_lo <= s_hi) ? (0 >= s_lo && 0 <= s_hi)
-                                 : (0 >= s_lo || 0 <= s_hi);
-    if (zero_in) { r = shifted; return r; }
-    r.start = 0; r.len = M; return r;
+    uint64_t s_hi = (shifted.start + shifted.span) & mask;
+    int zero_in = (s_lo <= s_hi) ? (s_lo == 0) : 1;
+    if (zero_in) return shifted;
+    return _modiv_full();
 }
 
 /* Extended GCD: returns g = gcd(a,b), sets *x,*y with a*x + b*y = g. */
@@ -1796,11 +1848,17 @@ static uint64_t _egcd(uint64_t a, uint64_t b, int64_t *x, int64_t *y) {
  * gcd(k,M) residues (none if g ∤ rr). We pin `a` only when the solution is
  * unique (g==1) or pin/narrow the operand to the bounding range of its
  * feasible solution set (enumerated when g is small). g>1 with a large
- * enumeration cost is skipped (sound, weaker). */
+ * enumeration cost is skipped (sound, weaker).
+ *
+ * Width 64 (M = 2^64 does not fit the uint64 modular helpers) is skipped:
+ * the forward rule still decides a fully-fixed product, which keeps the
+ * search complete. */
 #define BV_MUL_BACK_MAX_SOLS 4096u
 static PropResult _bv_mul_back_singleton(SolveCtx *ctx, uint32_t aid,
-                                         uint64_t k, ModIv R, uint64_t M) {
-    if (R.len != 1) return PROP_OK;       /* only when r is fixed */
+                                         uint64_t k, ModIv R, uint8_t w) {
+    if (!_modiv_single(R)) return PROP_OK;   /* only when r is fixed */
+    if (w >= 64) return PROP_OK;
+    uint64_t M = (uint64_t)1 << w;
     uint64_t rr = R.start;
     k &= (M - 1);
     if (k == 0) {
@@ -1822,32 +1880,38 @@ static PropResult _bv_mul_back_singleton(SolveCtx *ctx, uint32_t aid,
     if (inv < 0) inv += (int64_t)Mg;
     uint64_t a0 = zsp_mulmod_u64(rr / g, (uint64_t)inv, Mg);
 
-    if (g == 1) {                         /* unique solution */
-        ModIv Aiv; Aiv.start = a0 % M; Aiv.len = 1;
-        return _tighten_to_modiv(ctx, aid, Aiv, M);
-    }
+    if (g == 1)                           /* unique solution */
+        return _tighten_to_modiv(ctx, aid, _modiv_one(a0 % M), w);
     if (g > BV_MUL_BACK_MAX_SOLS) return PROP_OK;  /* too many: skip (sound) */
 
-    /* Enumerate the g feasible residues; map each to the operand's value
-     * space and keep those inside the current domain. Tighten the operand's
-     * bounds to [min_feasible, max_feasible]; empty -> conflict. */
-    int      signed_v = (ctx->vars[aid].flags & VAR_SIGNED) != 0;
-    uint8_t  w        = (uint8_t)ctx->vars[aid].width;
-    uint64_t half     = (uint64_t)1 << (w - 1);
-    int64_t  cur_lo   = var_lo64(ctx, &ctx->vars[aid]);
-    int64_t  cur_hi   = var_hi64(ctx, &ctx->vars[aid]);
+    /* Enumerate the g feasible residues; tighten the operand to the hull of
+     * those inside its domain; none -> conflict. */
+    int      found = 0;
+    PropResult res;
     int64_t  fmin = 0, fmax = 0;
-    int      have = 0;
+    const Variable *v = &ctx->vars[aid];
+    int      signed_v = (v->flags & VAR_SIGNED) != 0;
+    uint8_t  vw = (uint8_t)v->width;
+    if (vw == 0 || vw > w) return PROP_OK;
+    int64_t  cur_lo = var_lo64(ctx, v);
+    int64_t  cur_hi = var_hi64(ctx, v);
     for (uint64_t t = 0; t < g; t++) {
-        uint64_t res = (a0 + t * Mg) & (M - 1);
-        int64_t  val = (signed_v && res >= half) ? (int64_t)res - (int64_t)M
-                                                 : (int64_t)res;
+        uint64_t r0 = (a0 + t * Mg) & (M - 1);
+        int64_t  val;
+        if (signed_v) {
+            uint64_t half = (uint64_t)1 << (vw - 1);
+            if (r0 < half)                 val = (int64_t)r0;
+            else if (r0 >= M - half)       val = (int64_t)r0 - (int64_t)M;
+            else                           continue;   /* not a value of v */
+        } else {
+            if (r0 > _bv_mask(vw)) continue;
+            val = (int64_t)r0;
+        }
         if (val < cur_lo || val > cur_hi) continue;
-        if (!have) { fmin = fmax = val; have = 1; }
+        if (!found) { fmin = fmax = val; found = 1; }
         else { if (val < fmin) fmin = val; if (val > fmax) fmax = val; }
     }
-    if (!have) return PROP_CONFLICT;      /* no feasible operand value */
-    PropResult res;
+    if (!found) return PROP_CONFLICT;     /* no feasible operand value */
     if ((res = ctx_tighten_lb64(ctx, aid, fmin)) != PROP_OK) return res;
     if ((res = ctx_tighten_ub64(ctx, aid, fmax)) != PROP_OK) return res;
     return PROP_OK;
@@ -1858,9 +1922,10 @@ static PropResult _bv_mul_back_singleton(SolveCtx *ctx, uint32_t aid,
  * unsigned value of the shift operand). Returns 1 if the patterns form a
  * contiguous range [s0,s1]; 0 if they wrap (non-contiguous) and the caller
  * should fall back to the full domain (sound). */
-static int _shift_range(ModIv B, uint64_t M, uint64_t *s0, uint64_t *s1) {
-    if (B.len >= M) { *s0 = 0; *s1 = M - 1; return 1; }
-    uint64_t hi = (B.start + B.len - 1) & (M - 1);
+static int _shift_range(ModIv B, uint8_t w, uint64_t *s0, uint64_t *s1) {
+    uint64_t mask = _bv_mask(w);
+    if (B.full) { *s0 = 0; *s1 = mask; return 1; }
+    uint64_t hi = (B.start + B.span) & mask;
     if (hi < B.start) return 0;   /* wraps: non-contiguous pattern set */
     *s0 = B.start;
     *s1 = hi;
@@ -1874,52 +1939,56 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
     uint32_t       bid = ws->var_ids[2];
     BvBin_64_t    *bp  = (BvBin_64_t *)self;
     uint8_t        w   = bp->width;
-    if (w == 0 || w >= 64) return PROP_OK;
-    uint64_t M = (uint64_t)1 << w;
+    if (w == 0 || w > 64) return PROP_OK;
+    uint64_t mask = _bv_mask(w);
 
-    ModIv A = _var_modiv(ctx, aid, M);
-    ModIv B = _var_modiv(ctx, bid, M);
+    ModIv A = _var_modiv(ctx, aid, w);
+    ModIv B = _var_modiv(ctx, bid, w);
     PropResult res;
 
     if (op == BIN_ADD) {
-        ModIv R = _modiv_add(A, B, M);
-        if ((res = _tighten_to_modiv(ctx, rid, R, M)) != PROP_OK) return res;
+        ModIv R = _modiv_add(A, B, w);
+        if ((res = _tighten_to_modiv(ctx, rid, R, w)) != PROP_OK) return res;
         /* Backward: a = r - b, b = r - a. */
-        ModIv Rc = _var_modiv(ctx, rid, M);
-        ModIv Anew = _modiv_add(Rc, _modiv_neg(B, M), M);
-        if ((res = _tighten_to_modiv(ctx, aid, Anew, M)) != PROP_OK) return res;
-        ModIv Ac = _var_modiv(ctx, aid, M);
-        ModIv Bnew = _modiv_add(Rc, _modiv_neg(Ac, M), M);
-        if ((res = _tighten_to_modiv(ctx, bid, Bnew, M)) != PROP_OK) return res;
+        ModIv Rc = _var_modiv(ctx, rid, w);
+        ModIv Anew = _modiv_add(Rc, _modiv_neg(B, w), w);
+        if ((res = _tighten_to_modiv(ctx, aid, Anew, w)) != PROP_OK) return res;
+        ModIv Ac = _var_modiv(ctx, aid, w);
+        ModIv Bnew = _modiv_add(Rc, _modiv_neg(Ac, w), w);
+        if ((res = _tighten_to_modiv(ctx, bid, Bnew, w)) != PROP_OK) return res;
     } else if (op == BIN_SUB) {
-        ModIv R = _modiv_add(A, _modiv_neg(B, M), M);
-        if ((res = _tighten_to_modiv(ctx, rid, R, M)) != PROP_OK) return res;
+        ModIv R = _modiv_add(A, _modiv_neg(B, w), w);
+        if ((res = _tighten_to_modiv(ctx, rid, R, w)) != PROP_OK) return res;
         /* Backward: a = r + b, b = a - r. */
-        ModIv Rc = _var_modiv(ctx, rid, M);
-        ModIv Anew = _modiv_add(Rc, B, M);
-        if ((res = _tighten_to_modiv(ctx, aid, Anew, M)) != PROP_OK) return res;
-        ModIv Ac = _var_modiv(ctx, aid, M);
-        ModIv Bnew = _modiv_add(Ac, _modiv_neg(Rc, M), M);
-        if ((res = _tighten_to_modiv(ctx, bid, Bnew, M)) != PROP_OK) return res;
+        ModIv Rc = _var_modiv(ctx, rid, w);
+        ModIv Anew = _modiv_add(Rc, B, w);
+        if ((res = _tighten_to_modiv(ctx, aid, Anew, w)) != PROP_OK) return res;
+        ModIv Ac = _var_modiv(ctx, aid, w);
+        ModIv Bnew = _modiv_add(Ac, _modiv_neg(Rc, w), w);
+        if ((res = _tighten_to_modiv(ctx, bid, Bnew, w)) != PROP_OK) return res;
     } else if (op == BIN_MUL) {
-        ModIv R = _modiv_mul(A, B, M);
-        if ((res = _tighten_to_modiv(ctx, rid, R, M)) != PROP_OK) return res;
+        ModIv R = _modiv_mul(A, B, w);
+        if ((res = _tighten_to_modiv(ctx, rid, R, w)) != PROP_OK) return res;
         /* Backward: when one operand is a singleton constant, derive the
          * other operand from r. This detects infeasible r values (e.g. r
          * odd while the constant is even) so the search stays complete. */
-        ModIv Rc = _var_modiv(ctx, rid, M);
-        ModIv Ac = _var_modiv(ctx, aid, M);
-        ModIv Bc = _var_modiv(ctx, bid, M);
-        if (Bc.len == 1) {
-            if ((res = _bv_mul_back_singleton(ctx, aid, Bc.start, Rc, M)) != PROP_OK) return res;
-        } else if (Ac.len == 1) {
-            if ((res = _bv_mul_back_singleton(ctx, bid, Ac.start, Rc, M)) != PROP_OK) return res;
+        ModIv Rc = _var_modiv(ctx, rid, w);
+        ModIv Ac = _var_modiv(ctx, aid, w);
+        ModIv Bc = _var_modiv(ctx, bid, w);
+        if (_modiv_single(Bc)) {
+            if ((res = _bv_mul_back_singleton(ctx, aid, Bc.start, Rc, w)) != PROP_OK) return res;
+        } else if (_modiv_single(Ac)) {
+            if ((res = _bv_mul_back_singleton(ctx, bid, Ac.start, Rc, w)) != PROP_OK) return res;
         }
+        /* Everything fixed: the product is decided exactly. */
+        if (_modiv_single(Rc) && _modiv_single(Ac) && _modiv_single(Bc) &&
+            ((Ac.start * Bc.start) & mask) != Rc.start)
+            return PROP_CONFLICT;
     } else if (op == BIN_LSHIFT) {
         uint64_t s0, s1;
-        if (_shift_range(B, M, &s0, &s1)) {
-            ModIv R = _modiv_shl(A, s0, s1, w, M);
-            if ((res = _tighten_to_modiv(ctx, rid, R, M)) != PROP_OK) return res;
+        if (_shift_range(B, w, &s0, &s1)) {
+            ModIv R = _modiv_shl(A, s0, s1, w);
+            if ((res = _tighten_to_modiv(ctx, rid, R, w)) != PROP_OK) return res;
         }
         /* Backward (keeps the search complete when r is a decision var):
          * when r is fixed to rr, rr must be producible by SOME feasible
@@ -1931,9 +2000,9 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
          * unsound). When the shift is a singleton s and rr is producible we
          * additionally pin a for s==0 (a==rr). */
         uint64_t bs0, bs1;
-        ModIv Rc = _var_modiv(ctx, rid, M);
-        ModIv Ac2 = _var_modiv(ctx, aid, M);
-        if (_shift_range(B, M, &bs0, &bs1) && Rc.len == 1 && Ac2.len == 1) {
+        ModIv Rc = _var_modiv(ctx, rid, w);
+        ModIv Ac2 = _var_modiv(ctx, aid, w);
+        if (_shift_range(B, w, &bs0, &bs1) && _modiv_single(Rc) && _modiv_single(Ac2)) {
             /* Both a and r fixed: rr must equal (a<<s)&mask for some feasible
              * shift s, else conflict. Exact and sound. */
             uint64_t rr = Rc.start;
@@ -1944,11 +2013,11 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
             if (!any) {
                 uint64_t hi_s = (bs1 > (uint64_t)(w - 1)) ? (uint64_t)(w - 1) : bs1;
                 for (uint64_t s = bs0; s <= hi_s; s++) {
-                    if (((av << s) & (M - 1)) == rr) { any = 1; break; }
+                    if (((av << s) & mask) == rr) { any = 1; break; }
                 }
             }
             if (!any) return PROP_CONFLICT;
-        } else if (_shift_range(B, M, &bs0, &bs1) && Rc.len == 1) {
+        } else if (_shift_range(B, w, &bs0, &bs1) && _modiv_single(Rc)) {
             uint64_t rr = Rc.start;
             int any = 0;
             /* If any feasible shift is >= w, the result-0 case is reachable,
@@ -1966,8 +2035,8 @@ static PropResult _fire_bvbin_64(Propagator *self, SolveCtx *ctx, int op) {
             }
             if (!any) return PROP_CONFLICT;
             if (bs0 == bs1 && bs0 == 0) {        /* shift 0: a == rr */
-                ModIv Aiv; Aiv.start = rr; Aiv.len = 1;
-                if ((res = _tighten_to_modiv(ctx, aid, Aiv, M)) != PROP_OK) return res;
+                if ((res = _tighten_to_modiv(ctx, aid, _modiv_one(rr), w)) != PROP_OK)
+                    return res;
             }
         }
     }
@@ -2755,53 +2824,28 @@ static PropResult _fire_bounds_band_64(Propagator *self, SolveCtx *ctx) {
         return PROP_OK;
     }
 
-    /* Upper bound: r <= min(a_hi, b_hi) since AND can only clear bits */
-    int64_t r_hi_new = i64_min(ahi, bhi);
-    if ((res = ctx_tighten_ub64(ctx, rid, r_hi_new)) != PROP_OK) return res;
-
-    /* Lower bound: only tighten when the AND result is guaranteed.
-     * AND is non-monotone so a_lo & b_lo is NOT a valid lower bound.
-     * Example: a in [10,200], b=15 -> a&b ranges from 0 to 15.
-     * We only set r_lo = 0 if it helps (non-negative operands). */
-    if (alo >= 0 && blo >= 0) {
-        if ((res = ctx_tighten_lb64(ctx, rid, 0)) != PROP_OK) return res;
+    /* Bounds of a & b, sound for SIGNED (2's complement) operands too.
+     * AND only clears bits. A non-negative operand keeps the result in
+     * [0, that operand]. When both are negative the sign bit survives and
+     * clearing any other bit only lowers the value, so r <= min(a, b) < 0.
+     * (`r <= min(a_hi, b_hi)` with mixed signs is wrong: 0 & -56 == 0.)
+     * AND is not monotone, so a_lo & b_lo is NOT a lower bound. */
+    if (alo >= 0) {
+        if ((res = ctx_tighten_lb64(ctx, rid, 0))   != PROP_OK) return res;
+        if ((res = ctx_tighten_ub64(ctx, rid, ahi)) != PROP_OK) return res;
     }
-
-    /* Singleton a: r = a_val & b, so r <= a_val */
-    if (alo == ahi) {
-        if ((res = ctx_tighten_ub64(ctx, rid, alo)) != PROP_OK) return res;
+    if (blo >= 0) {
+        if ((res = ctx_tighten_lb64(ctx, rid, 0))   != PROP_OK) return res;
+        if ((res = ctx_tighten_ub64(ctx, rid, bhi)) != PROP_OK) return res;
     }
-    /* Singleton b: r = a & b_val, so r <= b_val */
-    if (blo == bhi) {
-        if ((res = ctx_tighten_ub64(ctx, rid, blo)) != PROP_OK) return res;
+    if (ahi < 0 && bhi < 0) {
+        if ((res = ctx_tighten_ub64(ctx, rid, i64_min(ahi, bhi))) != PROP_OK)
+            return res;
     }
-
-    /* Backward: when r and b are singletons, constrain a.
-     * r = a & mask. Bits set in r must also be set in a.
-     * Bits clear in mask cannot be set in a (irrelevant for bounds).
-     * For bounds propagation with singleton r and b:
-     * a must have all bits of r set: a_lo |= r_val (set required bits) */
-    {
-        int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
-        int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
-        if (rlo == rhi && blo == bhi && blo > 0) {
-            /* Bits in r must be set in a; bits outside mask are free.
-             * a_lo: ensure bits of r are present.
-             * We can also narrow a_hi: clear bits in a that are outside mask
-             * and would push the result above r. */
-            int64_t r_val = rlo;
-            int64_t mask = blo;
-            /* Forward-compute exact check: for each bit in mask that is NOT
-             * in r, that bit in a could be 0 or 1 (won't affect r).
-             * For each bit in mask that IS in r, that bit in a MUST be 1.
-             * Backward tighten: set the mandatory bits in a_lo. */
-            alo = var_lo64(ctx, &ctx->vars[aid]);
-            int64_t new_alo = alo | r_val;  /* bits required by r */
-            if (new_alo > alo) {
-                if ((res = ctx_tighten_lb64(ctx, aid, new_alo)) != PROP_OK) return res;
-            }
-        }
-    }
+    /* (A backward rule `a_lo |= r` once r and b were fixed used to live here.
+     * It is unsound: the least a >= a_lo that has r's bits set is not a_lo | r
+     * -- a_lo = 5, r = 2 gives 7, skipping the solution 6. The singleton case
+     * above decides a fully-fixed a & b exactly, which keeps search complete.) */
 
     return PROP_OK;
 }
@@ -2848,11 +2892,12 @@ static PropResult _fire_bounds_bor_64(Propagator *self, SolveCtx *ctx) {
         if ((res = ctx_tighten_lb64(ctx, rid, r_lb)) != PROP_OK) return res;
     }
 
-    /* Singleton: r >= singleton_val */
-    if (alo == ahi && alo >= 0) {
+    /* Singleton: r >= singleton_val -- only when the OTHER operand cannot
+     * be negative: a | b with b < 0 is itself negative, below a. */
+    if (alo == ahi && alo >= 0 && blo >= 0) {
         if ((res = ctx_tighten_lb64(ctx, rid, alo)) != PROP_OK) return res;
     }
-    if (blo == bhi && blo >= 0) {
+    if (blo == bhi && blo >= 0 && alo >= 0) {
         if ((res = ctx_tighten_lb64(ctx, rid, blo)) != PROP_OK) return res;
     }
 

@@ -354,8 +354,8 @@ void builder_free_problem(SolveProblemBuilder *b, SolveProblem *sp, size_t size)
 /* Expression builders                                                 */
 /* ------------------------------------------------------------------ */
 
-ExprRef builder_expr_const(SolveProblemBuilder *b, int64_t value,
-                           uint8_t is_signed) {
+ExprRef builder_expr_const_sized(SolveProblemBuilder *b, int64_t value,
+                                 uint8_t is_signed, uint8_t width) {
     ExprRef ref = builder_alloc(b, (uint32_t)sizeof(ExprConst),
                                 (uint32_t)_Alignof(ExprConst));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -366,9 +366,15 @@ ExprRef builder_expr_const(SolveProblemBuilder *b, int64_t value,
     ExprConst *n = (ExprConst *)_block_ptr_at(b->current, local);
     n->kind      = EXPR_CONST;
     n->is_signed = is_signed;
-    n->_pad[0] = n->_pad[1] = n->_pad[2] = 0;
+    n->width     = width;
+    n->_pad[0] = n->_pad[1] = 0;
     n->value     = value;
     return ref;
+}
+
+ExprRef builder_expr_const(SolveProblemBuilder *b, int64_t value,
+                           uint8_t is_signed) {
+    return builder_expr_const_sized(b, value, is_signed, 0);
 }
 
 ExprRef builder_expr_var(SolveProblemBuilder *b, uint32_t var_id) {

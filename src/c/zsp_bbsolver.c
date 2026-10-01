@@ -13,6 +13,7 @@
 #include "zsp_bvdom.h"
 #include "zsp_pool.h"
 #include "zsp_sat.h"
+#include "zsp_sv.h"
 #include "zsp_thread.h"
 
 /* ----------------------------- types -------------------------------------- */
@@ -38,6 +39,10 @@ typedef struct {
 struct zsp_bbsolver_s {
     zsp_alloc_t    *alloc;
     SolveProblem   *problem;
+    /* The caller's problem when `problem` is an SV-elaborated copy we own
+     * (zsp_sv_elaborate); NULL when `problem` is the caller's. */
+    SolveProblem   *orig_problem;
+    uint32_t        orig_synced;   /* orig_problem->pool.used already copied */
     zsp_aig_t      *aig;
     zsp_sat_t      *sat;
     zsp_aig_cnf_t  *cnf;
@@ -132,48 +137,26 @@ static void assert_top(zsp_bbsolver_t *S, zsp_aig_node_t node) {
 
 static uint16_t max_w(uint16_t a, uint16_t b) { return a > b ? a : b; }
 
-/* True if `ref`'s value should be interpreted as signed — i.e. its subtree
- * references a signed variable / constant / sign-extend. Used by the div/mod
- * guard: the bit-blaster only implements *unsigned* division/modulo, so a
- * signed operand would silently produce a wrong quotient. We conservatively
- * treat "contains a signed leaf" as signed and defer (ZSP_BB_UNKNOWN). */
-static int subtree_is_signed(zsp_bbsolver_t *S, ExprRef ref, int depth) {
-    if (ref == EXPR_NULL || depth > 256) return 0;
+/* Self-determined signedness of `ref` under the SystemVerilog typing rules
+ * (zsp_sv.h): a variable / sized constant has its own; arithmetic and bitwise
+ * ops are signed only when both operands are; a shift takes its left operand's;
+ * comparisons and connectives are unsigned 1-bit; an extend keeps its operand's;
+ * an SV cast names its own; extract / concat are unsigned.
+ *
+ * The problem is SV-elaborated before it is bit-blasted, so every operator's
+ * operands already share one signedness -- this is what the operator works
+ * in, and what a narrower operand is extended by. (An SMT-LIB problem has no
+ * signed leaves at all, so everything there is unsigned, as before.) */
+static int bb_signed(zsp_bbsolver_t *S, ExprRef ref, int depth) {
+    if (ref == EXPR_NULL || depth > 4096) return 0;
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
-    case EXPR_CONST: return ((ExprConst *)kp)->is_signed != 0;
-    case EXPR_VAR: {
-        uint32_t id = ((ExprVar *)kp)->var_id;
-        return id < S->n_vars && S->vars[id].is_signed;
+    case EXPR_CONST: {
+        uint16_t w; uint8_t sg;
+        zsp_sv_const_type((ExprConst *)kp, &w, &sg);
+        return sg;
     }
-    case EXPR_BINARY: {
-        ExprBinary *b = (ExprBinary *)kp;
-        return subtree_is_signed(S, b->lhs, depth + 1)
-            || subtree_is_signed(S, b->rhs, depth + 1);
-    }
-    case EXPR_UNARY:
-        return subtree_is_signed(S, ((ExprUnary *)kp)->operand, depth + 1);
-    case EXPR_EXTEND:
-        return ((ExprExtend *)kp)->sign_extend != 0;
-    default:
-        return 0;
-    }
-}
-
-/* Whether the *value produced by* `ref` should be interpreted as signed when
- * width-extending it (e.g. when a `(= var expr)` substitution feeds a narrower
- * expr into a wider variable). This differs from subtree_is_signed: a
- * relational / equality / logical-connective op yields a 1-bit unsigned boolean
- * (0/1) *regardless* of its operands' signedness — sign-extending that boolean
- * would turn a true result (1) into all-ones (e.g. an int8 `eq` becoming -1).
- * Value-producing ops inherit signedness from their operands. */
-static int result_is_signed(zsp_bbsolver_t *S, ExprRef ref, int depth) {
-    if (ref == EXPR_NULL || depth > 256) return 0;
-    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
-    if (!kp) return 0;
-    switch (*kp) {
-    case EXPR_CONST: return ((ExprConst *)kp)->is_signed != 0;
     case EXPR_VAR: {
         uint32_t id = ((ExprVar *)kp)->var_id;
         return id < S->n_vars && S->vars[id].is_signed;
@@ -181,26 +164,87 @@ static int result_is_signed(zsp_bbsolver_t *S, ExprRef ref, int depth) {
     case EXPR_BINARY: {
         ExprBinary *b = (ExprBinary *)kp;
         switch (b->op) {
-        /* Boolean-producing: comparisons and the logical connectives (the
-         * bitwise forms are BIN_BAND/BIN_BOR/BIN_BXOR, handled below). */
         case BIN_EQ: case BIN_NEQ:
         case BIN_LT: case BIN_LTE: case BIN_GT: case BIN_GTE:
         case BIN_AND: case BIN_OR:
             return 0;
+        case BIN_LSHIFT: case BIN_RSHIFT:
+            return bb_signed(S, b->lhs, depth + 1);
         default:
-            return result_is_signed(S, b->lhs, depth + 1)
-                || result_is_signed(S, b->rhs, depth + 1);
+            return bb_signed(S, b->lhs, depth + 1)
+                && bb_signed(S, b->rhs, depth + 1);
         }
     }
     case EXPR_UNARY: {
         ExprUnary *u = (ExprUnary *)kp;
-        if (u->op == UN_NOT) return 0;   /* logical NOT → boolean */
-        return result_is_signed(S, u->operand, depth + 1);
+        if (u->op == UN_NOT) return 0;
+        return bb_signed(S, u->operand, depth + 1);
+    }
+    case EXPR_ITE: {
+        ExprITE *e = (ExprITE *)kp;
+        return bb_signed(S, e->then_e, depth + 1)
+            && bb_signed(S, e->else_e, depth + 1);
     }
     case EXPR_EXTEND:
-        return ((ExprExtend *)kp)->sign_extend != 0;
+        return bb_signed(S, ((ExprExtend *)kp)->operand, depth + 1);
+    case EXPR_SV_CAST:
+        return ((ExprSvCast *)kp)->dst_signed != 0;
     default:
         return 0;
+    }
+}
+
+/* Self-determined width of `ref` (0 = an unsized constant, which adapts). */
+static uint16_t bb_self_width(zsp_bbsolver_t *S, ExprRef ref, int depth) {
+    if (ref == EXPR_NULL || depth > 4096) return 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp) return 0;
+    switch (*kp) {
+    case EXPR_CONST: return ((ExprConst *)kp)->width;
+    case EXPR_VAR: {
+        uint32_t id = ((ExprVar *)kp)->var_id;
+        return id < S->n_vars ? S->vars[id].width : 0;
+    }
+    case EXPR_BINARY: {
+        ExprBinary *b = (ExprBinary *)kp;
+        switch (b->op) {
+        case BIN_EQ: case BIN_NEQ:
+        case BIN_LT: case BIN_LTE: case BIN_GT: case BIN_GTE:
+        case BIN_AND: case BIN_OR:
+            return 1;
+        case BIN_LSHIFT: case BIN_RSHIFT:
+            return bb_self_width(S, b->lhs, depth + 1);
+        default: {
+            uint16_t l = bb_self_width(S, b->lhs, depth + 1);
+            uint16_t r = bb_self_width(S, b->rhs, depth + 1);
+            return l > r ? l : r;
+        }
+        }
+    }
+    case EXPR_UNARY: {
+        ExprUnary *u = (ExprUnary *)kp;
+        if (u->op == UN_NOT) return 1;
+        return bb_self_width(S, u->operand, depth + 1);
+    }
+    case EXPR_ITE: {
+        ExprITE *e = (ExprITE *)kp;
+        uint16_t t = bb_self_width(S, e->then_e, depth + 1);
+        uint16_t f = bb_self_width(S, e->else_e, depth + 1);
+        return t > f ? t : f;
+    }
+    case EXPR_EXTEND: return ((ExprExtend *)kp)->to_bits;
+    case EXPR_SV_CAST: return ((ExprSvCast *)kp)->to_bits;
+    case EXPR_EXTRACT: {
+        ExprExtract *x = (ExprExtract *)kp;
+        return (uint16_t)(x->hi_bit - x->lo_bit + 1);
+    }
+    case EXPR_CONCAT: {
+        ExprConcat *c = (ExprConcat *)kp;
+        uint16_t h = bb_self_width(S, c->hi, depth + 1);
+        return h ? (uint16_t)(h + c->lo_width) : 0;
+    }
+    default:
+        return 1;
     }
 }
 
@@ -212,6 +256,14 @@ static zsp_bv_t zext_to(zsp_bbsolver_t *S, zsp_bv_t v, uint16_t target) {
 static zsp_bv_t sext_to(zsp_bbsolver_t *S, zsp_bv_t v, uint16_t target) {
     if (v.size >= target) return v;
     return zsp_bb_sign_ext(S->bb, v, (uint32_t)(target - v.size));
+}
+
+/* Extend the value of `ref` (already blasted to `v`) to `target` bits by
+ * ref's OWN signedness -- the SV rule for an operand of a wider context. */
+static zsp_bv_t ext_ref(zsp_bbsolver_t *S, zsp_bv_t v, ExprRef ref,
+                        uint16_t target) {
+    if (v.size >= target) return v;
+    return bb_signed(S, ref, 0) ? sext_to(S, v, target) : zext_to(S, v, target);
 }
 
 /* Forward decl — needed because bv_for_var may recurse through bb_expr. */
@@ -288,6 +340,8 @@ static int subst_reaches_var(zsp_bbsolver_t *S,
     }
     case EXPR_EXTEND:
         return subst_reaches_var(S, ((ExprExtend *)kp)->operand, target_var, visited);
+    case EXPR_SV_CAST:
+        return subst_reaches_var(S, ((ExprSvCast *)kp)->operand, target_var, visited);
     case EXPR_EXTRACT:
         return subst_reaches_var(S, ((ExprExtract *)kp)->operand, target_var, visited);
     case EXPR_CONCAT: {
@@ -309,6 +363,10 @@ static int try_record_subst(zsp_bbsolver_t *S, ExprRef vref, ExprRef eref) {
     ExprVar *v = (ExprVar *)vk;
     if (v->var_id >= S->n_vars) return 0;
     if (S->subst[v->var_id] != EXPR_NULL) return 0;
+    /* `v == e` DEFINES v only when e is no wider than v (v then equals e
+     * extended by e's own signedness). A wider e makes it a comparison in e's
+     * width -- v is extended, e's high bits must match -- not a definition. */
+    if (bb_self_width(S, eref, 0) > S->vars[v->var_id].width) return 0;
     /* Transitive cycle check: would substituting create a cycle in the
      * subst graph reachable from this var? */
     memset(S->resolving, 0, S->n_vars);
@@ -426,9 +484,7 @@ static zsp_bv_t bv_for_var(zsp_bbsolver_t *S, uint32_t var_id) {
                      * variable's: a boolean result (e.g. `var == (a == 5)`) is
                      * unsigned 0/1 and must zero-extend even into a signed var,
                      * else true (1) becomes all-ones (-1). */
-                    e = result_is_signed(S, S->subst[var_id], 0)
-                            ? sext_to(S, e, v->width)
-                            : zext_to(S, e, v->width);
+                    e = ext_ref(S, e, S->subst[var_id], v->width);
                 } else if (e.size > v->width) {
                     e = zsp_bb_extract(S->bb, e, v->width - 1, 0);
                 }
@@ -488,6 +544,8 @@ static zsp_bv_t bb_value_i64(zsp_bbsolver_t *S, uint16_t w, int64_t value,
 }
 
 static zsp_bv_t bb_const(zsp_bbsolver_t *S, const ExprConst *c, uint16_t hint) {
+    /* A sized constant is exactly its own width. */
+    if (c->width) return bb_value_i64(S, c->width, c->value, c->is_signed);
     /* A width-less constant defaults to 64 bits — the engine's int64 value
      * domain — NOT 32: a constant carrying a full 64-bit pattern (e.g. a limb of
      * a wide >64-bit literal, requested by bb_concat with hint=0) must not be
@@ -600,8 +658,8 @@ static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, ExprRef ref,
         zsp_bv_t r = bb_expr(S, b->rhs, l.size);
         if (S->had_error) return r;
         uint16_t w = max_w(l.size, r.size);
-        if (l.size < w) l = zext_to(S, l, w);
-        if (r.size < w) r = zext_to(S, r, w);
+        l = ext_ref(S, l, b->lhs, w);
+        r = ext_ref(S, r, b->rhs, w);
         zsp_bv_t eq = zsp_bb_eq(S->bb, l, r);
         if (b->op == BIN_NEQ) eq = zsp_bb_not(S->bb, eq);
         return eq;
@@ -614,21 +672,12 @@ static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, ExprRef ref,
         if (S->had_error) return l;
         zsp_bv_t r = bb_expr(S, b->rhs, l.size);
         if (S->had_error) return r;
-        /* Determine signedness: peek at lhs ExprKind for an EXPR_VAR. */
-        ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, b->lhs);
-        int is_signed = 0;
-        if (kp && *kp == EXPR_VAR) {
-            ExprVar *vv = (ExprVar *)kp;
-            if (vv->var_id < S->n_vars) is_signed = S->vars[vv->var_id].is_signed;
-        }
+        /* SV: the comparison is signed only when both sides are; each side
+         * is first extended by its own signedness. */
+        int is_signed = bb_signed(S, b->lhs, 0) && bb_signed(S, b->rhs, 0);
         uint16_t w = max_w(l.size, r.size);
-        if (is_signed) {
-            if (l.size < w) l = sext_to(S, l, w);
-            if (r.size < w) r = sext_to(S, r, w);
-        } else {
-            if (l.size < w) l = zext_to(S, l, w);
-            if (r.size < w) r = zext_to(S, r, w);
-        }
+        l = ext_ref(S, l, b->lhs, w);
+        r = ext_ref(S, r, b->rhs, w);
         zsp_bv_t lt;
         switch (b->op) {
         case BIN_LT:  lt = is_signed ? zsp_bb_slt(S->bb, l, r) : zsp_bb_ult(S->bb, l, r); break;
@@ -648,12 +697,28 @@ static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, ExprRef ref,
          * blaster below only builds a logical shift at the operand's bit
          * width, which is a different answer for a negative value, so defer
          * (ZSP_BB_UNKNOWN) exactly as signed div/mod do. */
-        if (b->op == BIN_RSHIFT && subtree_is_signed(S, b->lhs, 0))
+        /* SV elaboration turns a signed `>>` into an explicit unsigned
+         * (logical) shift between two casts, so a signed operand here means
+         * an un-elaborated problem: defer rather than guess. */
+        if (b->op == BIN_RSHIFT && bb_signed(S, b->lhs, 0))
             S->had_unsupported = 1;
         zsp_bv_t l = bb_expr(S, b->lhs, hint);
         if (S->had_error) return l;
         zsp_bv_t r = bb_expr(S, b->rhs, l.size);
         if (S->had_error) return r;
+        /* The amount is an unsigned value of its own width: compare it at a
+         * width that holds both it and the shifted operand's width. */
+        if (r.size > l.size) {
+            /* amount >= 2^l.size  =>  >= l.size  =>  result 0 */
+            zsp_bv_t hi = zsp_bb_extract(S->bb, r, r.size - 1, l.size);
+            zsp_bv_t big = zsp_bb_not(S->bb, zsp_bb_eq(S->bb, hi,
+                               zsp_bb_value_u64(S->bb, hi.size, 0)));
+            zsp_bv_t lo = zsp_bb_extract(S->bb, r, l.size - 1, 0);
+            zsp_bv_t sh = (b->op == BIN_LSHIFT) ? zsp_bb_shl(S->bb, l, lo)
+                                                : zsp_bb_shr(S->bb, l, lo);
+            return zsp_bb_ite(S->bb, big.bits[0],
+                              zsp_bb_value_u64(S->bb, l.size, 0), sh);
+        }
         if (r.size != l.size) r = zext_to(S, r, l.size);
         return (b->op == BIN_LSHIFT) ? zsp_bb_shl(S->bb, l, r) : zsp_bb_shr(S->bb, l, r);
     }
@@ -669,8 +734,8 @@ static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, ExprRef ref,
         if (S->had_error) return r;
         uint16_t w = max_w(l.size, r.size);
         if (hint > w) w = hint;
-        if (l.size < w) l = zext_to(S, l, w);
-        if (r.size < w) r = zext_to(S, r, w);
+        l = ext_ref(S, l, b->lhs, w);
+        r = ext_ref(S, r, b->rhs, w);
         switch (b->op) {
         case BIN_ADD:  return zsp_bb_add(S->bb, l, r);
         case BIN_SUB:  return zsp_bb_sub(S->bb, l, r);
@@ -690,18 +755,35 @@ static zsp_bv_t bb_binary(zsp_bbsolver_t *S, const ExprBinary *b, ExprRef ref,
          * so check() returns ZSP_BB_UNKNOWN and the caller defers (the primary
          * engine / Boolector handle signed div correctly) rather than computing
          * a wrong unsigned quotient. */
-        if (subtree_is_signed(S, b->lhs, 0) || subtree_is_signed(S, b->rhs, 0))
-            S->had_unsupported = 1;
+        int sgn = bb_signed(S, b->lhs, 0) && bb_signed(S, b->rhs, 0);
         zsp_bv_t l = bb_expr(S, b->lhs, hint);
         if (S->had_error) return l;
         zsp_bv_t r = bb_expr(S, b->rhs, l.size > hint ? l.size : hint);
         if (S->had_error) return r;
         uint16_t w = max_w(l.size, r.size);
         if (hint > w) w = hint;
-        if (l.size < w) l = zext_to(S, l, w);
-        if (r.size < w) r = zext_to(S, r, w);
-        return (b->op == BIN_DIV) ? zsp_bb_udiv(S->bb, l, r)
-                                  : zsp_bb_urem(S->bb, l, r);
+        l = ext_ref(S, l, b->lhs, w);
+        r = ext_ref(S, r, b->rhs, w);
+        if (!sgn)
+            return (b->op == BIN_DIV) ? zsp_bb_udiv(S->bb, l, r)
+                                      : zsp_bb_urem(S->bb, l, r);
+        /* Signed: truncate toward zero. Divide the magnitudes; the quotient
+         * is negative when the signs differ, the remainder takes the
+         * dividend's sign. MIN / -1 wraps to MIN, its remainder is 0. */
+        {
+            zsp_aig_node_t sa = l.bits[0], sb = r.bits[0];   /* MSB-first */
+            zsp_bv_t al = zsp_bb_ite(S->bb, sa, zsp_bb_neg(S->bb, l), l);
+            zsp_bv_t ar = zsp_bb_ite(S->bb, sb, zsp_bb_neg(S->bb, r), r);
+            if (b->op == BIN_DIV) {
+                zsp_bv_t q = zsp_bb_udiv(S->bb, al, ar);
+                zsp_bv_t diff = zsp_bb_xor(S->bb,
+                    zsp_bb_extract(S->bb, l, w - 1, w - 1),
+                    zsp_bb_extract(S->bb, r, w - 1, w - 1));
+                return zsp_bb_ite(S->bb, diff.bits[0], zsp_bb_neg(S->bb, q), q);
+            }
+            zsp_bv_t m = zsp_bb_urem(S->bb, al, ar);
+            return zsp_bb_ite(S->bb, sa, zsp_bb_neg(S->bb, m), m);
+        }
     }
     default:
         return err_bv(S, "unknown BinOp");
@@ -738,8 +820,8 @@ static zsp_bv_t bb_ite(zsp_bbsolver_t *S, const ExprITE *e, uint16_t hint) {
     if (S->had_error) return f;
     uint16_t w = max_w(t.size, f.size);
     if (hint > w) w = hint;
-    if (t.size < w) t = zext_to(S, t, w);
-    if (f.size < w) f = zext_to(S, f, w);
+    t = ext_ref(S, t, e->then_e, w);
+    f = ext_ref(S, f, e->else_e, w);
     return zsp_bb_ite(S->bb, c.bits[0], t, f);
 }
 
@@ -753,21 +835,12 @@ static zsp_bv_t bb_in_range(zsp_bbsolver_t *S, const ExprInRange *r) {
     zsp_bv_t hi = bb_expr(S, r->hi, v.size);
     if (S->had_error) return hi;
     uint16_t w = max_w(max_w(v.size, lo.size), hi.size);
-    int is_signed = 0;
-    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, r->value);
-    if (kp && *kp == EXPR_VAR) {
-        ExprVar *vv = (ExprVar *)kp;
-        if (vv->var_id < S->n_vars) is_signed = S->vars[vv->var_id].is_signed;
-    }
-    if (is_signed) {
-        if (v.size  < w) v  = sext_to(S, v,  w);
-        if (lo.size < w) lo = sext_to(S, lo, w);
-        if (hi.size < w) hi = sext_to(S, hi, w);
-    } else {
-        if (v.size  < w) v  = zext_to(S, v,  w);
-        if (lo.size < w) lo = zext_to(S, lo, w);
-        if (hi.size < w) hi = zext_to(S, hi, w);
-    }
+    /* Elaboration keeps a membership node only when every bound shares the
+     * value's signedness, so one flag orders all three. */
+    int is_signed = bb_signed(S, r->value, 0);
+    v  = ext_ref(S, v,  r->value, w);
+    lo = ext_ref(S, lo, r->lo, w);
+    hi = ext_ref(S, hi, r->hi, w);
     /* v >= lo  <=>  NOT (v <_u lo)   (and signed analog) */
     zsp_bv_t v_lt_lo = is_signed ? zsp_bb_slt(S->bb, v, lo) : zsp_bb_ult(S->bb, v, lo);
     zsp_bv_t hi_lt_v = is_signed ? zsp_bb_slt(S->bb, hi, v) : zsp_bb_ult(S->bb, hi, v);
@@ -787,8 +860,8 @@ static zsp_bv_t bb_in_set(zsp_bbsolver_t *S, ExprRef ref) {
         zsp_bv_t ei = bb_expr(S, elems[i], v.size);
         if (S->had_error) return ei;
         uint16_t w = max_w(v.size, ei.size);
-        zsp_bv_t vw = v.size < w ? zext_to(S, v, w) : v;
-        zsp_bv_t ew = ei.size < w ? zext_to(S, ei, w) : ei;
+        zsp_bv_t vw = ext_ref(S, v, node->value, w);
+        zsp_bv_t ew = ext_ref(S, ei, elems[i], w);
         zsp_bv_t eq = zsp_bb_eq(S->bb, vw, ew);
         if (i == 0) acc = eq;
         else        acc = zsp_bb_or(S->bb, acc, eq);
@@ -807,12 +880,7 @@ static zsp_bv_t bb_in_ranges(zsp_bbsolver_t *S, ExprRef ref) {
     ExprRef *his = expr_in_ranges_his(S->problem, ref);
     zsp_bv_t v = bb_expr(S, node->value, 0);
     if (S->had_error) return v;
-    int is_signed = 0;
-    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, node->value);
-    if (kp && *kp == EXPR_VAR) {
-        ExprVar *vv = (ExprVar *)kp;
-        if (vv->var_id < S->n_vars) is_signed = S->vars[vv->var_id].is_signed;
-    }
+    int is_signed = bb_signed(S, node->value, 0);
     zsp_bv_t acc = { NULL, 0 };
     for (uint32_t i = 0; i < node->n_ranges; i++) {
         zsp_bv_t lo = bb_expr(S, los[i], v.size);
@@ -820,16 +888,9 @@ static zsp_bv_t bb_in_ranges(zsp_bbsolver_t *S, ExprRef ref) {
         zsp_bv_t hi = bb_expr(S, his[i], v.size);
         if (S->had_error) return hi;
         uint16_t w = max_w(max_w(v.size, lo.size), hi.size);
-        zsp_bv_t vw = v, lw = lo, hw = hi;
-        if (is_signed) {
-            if (vw.size < w) vw = sext_to(S, vw, w);
-            if (lw.size < w) lw = sext_to(S, lw, w);
-            if (hw.size < w) hw = sext_to(S, hw, w);
-        } else {
-            if (vw.size < w) vw = zext_to(S, vw, w);
-            if (lw.size < w) lw = zext_to(S, lw, w);
-            if (hw.size < w) hw = zext_to(S, hw, w);
-        }
+        zsp_bv_t vw = ext_ref(S, v, node->value, w);
+        zsp_bv_t lw = ext_ref(S, lo, los[i], w);
+        zsp_bv_t hw = ext_ref(S, hi, his[i], w);
         zsp_bv_t v_lt_lo = is_signed ? zsp_bb_slt(S->bb, vw, lw) : zsp_bb_ult(S->bb, vw, lw);
         zsp_bv_t hi_lt_v = is_signed ? zsp_bb_slt(S->bb, hw, vw) : zsp_bb_ult(S->bb, hw, vw);
         zsp_bv_t in_i = zsp_bb_and(S->bb, zsp_bb_not(S->bb, v_lt_lo),
@@ -841,14 +902,18 @@ static zsp_bv_t bb_in_ranges(zsp_bbsolver_t *S, ExprRef ref) {
 }
 
 static zsp_bv_t bb_extend(zsp_bbsolver_t *S, const ExprExtend *e) {
+    /* Also EXPR_SV_CAST (same layout): the bits are the same, only the
+     * signedness the result is read with differs, and bb_signed knows it. */
     zsp_bv_t op = bb_expr(S, e->operand, e->from_bits);
     if (S->had_error) return op;
     if (op.size > e->from_bits) {
         /* Truncate down — shouldn't happen but be safe. */
         op = zsp_bb_extract(S->bb, op, e->from_bits - 1, 0);
     } else if (op.size < e->from_bits) {
-        op = zext_to(S, op, e->from_bits);
+        op = ext_ref(S, op, e->operand, e->from_bits);
     }
+    if (e->to_bits < e->from_bits)
+        return zsp_bb_extract(S->bb, op, e->to_bits - 1, 0);
     uint32_t n = (uint32_t)e->to_bits - (uint32_t)e->from_bits;
     if (n == 0) return op;
     return e->sign_extend ? zsp_bb_sign_ext(S->bb, op, n)
@@ -906,6 +971,7 @@ static zsp_bv_t bb_expr(zsp_bbsolver_t *S, ExprRef ref, uint16_t hint_width) {
     case EXPR_IN_SET:   out = bb_in_set(S, ref); break;
     case EXPR_IN_RANGES: out = bb_in_ranges(S, ref); break;
     case EXPR_EXTEND:   out = bb_extend(S, (ExprExtend *)kp); break;
+    case EXPR_SV_CAST:  out = bb_extend(S, (ExprExtend *)(void *)kp); break;
     case EXPR_EXTRACT:  out = bb_extract(S, (ExprExtract *)kp); break;
     case EXPR_CONCAT:   out = bb_concat(S, (ExprConcat *)kp); break;
     case EXPR_SUM:
@@ -1034,6 +1100,18 @@ static zsp_bbsolver_t *bbsolver_new_ex(zsp_alloc_t *alloc, SolveProblem *problem
     if (!S) return NULL;
     memset(S, 0, sizeof(*S));
     S->alloc = alloc;
+    /* Builder-API expressions follow SystemVerilog sizing rules: blast the
+     * elaborated form, where those rules are explicit (zsp_sv.h). An SMT-LIB
+     * problem is flagged explicit already and is used as-is. */
+    {
+        int err = 0;
+        SolveProblem *esp = zsp_sv_elaborate(problem, NULL, NULL, &err);
+        if (esp != problem) {
+            S->orig_problem = problem;
+            S->orig_synced = problem->pool.used;
+        }
+        problem = esp;
+    }
     S->problem = problem;
     S->aig = zsp_aig_new(alloc);
     S->sat = bb_new_sat(alloc, prefer_cadical);
@@ -1094,6 +1172,7 @@ zsp_bbsolver_t *zsp_bbsolver_new_backend(zsp_alloc_t *alloc,
 
 void zsp_bbsolver_free(zsp_bbsolver_t *S) {
     if (!S) return;
+    if (S->orig_problem) zsp_sv_release(S->orig_problem, S->problem);
     if (S->bb)  zsp_bitblast_free(S->bb);
     if (S->cnf) zsp_aig_cnf_free(S->cnf);
     if (S->sat) zsp_sat_free(S->sat);
@@ -2084,6 +2163,15 @@ static void bb_grow_vars(zsp_bbsolver_t *S) {
 
 int zsp_bbsolver_assert(zsp_bbsolver_t *S, ExprRef pred_ref) {
     if (!S || !S->problem || pred_ref == EXPR_NULL) return ZSP_BB_ERROR;
+    /* Blasting an SV-elaborated private copy: bring it up to date with the
+     * caller's problem and elaborate the new predicate into it. */
+    if (S->orig_problem) {
+        ExprRef er;
+        if (zsp_sv_elaborate_more(&S->problem, S->orig_problem,
+                                  &S->orig_synced, pred_ref, &er) != 0)
+            return ZSP_BB_ERROR;
+        pred_ref = er;
+    }
     /* Adding clauses after a solve is only legal on an incremental backend;
      * kissat aborts on add-after-solve. Non-incremental callers must free +
      * rebuild instead (the current frontend behavior). */

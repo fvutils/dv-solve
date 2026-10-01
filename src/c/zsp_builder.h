@@ -169,6 +169,10 @@ void *builder_ref_ptr(const SolveProblemBuilder *b, ExprRef ref);
 
 ExprRef builder_expr_const(SolveProblemBuilder *b, int64_t value,
                            uint8_t is_signed);
+/** A sized constant of `width` bits (see ExprConst in zsp_problem.h).
+ *  width 0 is the same as builder_expr_const (an unsized literal). */
+ExprRef builder_expr_const_sized(SolveProblemBuilder *b, int64_t value,
+                                 uint8_t is_signed, uint8_t width);
 ExprRef builder_expr_var(SolveProblemBuilder *b, uint32_t var_id);
 ExprRef builder_expr_binary(SolveProblemBuilder *b, BinOp op,
                             ExprRef lhs, ExprRef rhs);

@@ -2,21 +2,20 @@
 and unsigned operands, through the builder API, against Python reference
 semantics.
 
-Reference semantics (the builder evaluates expressions over INTEGERS):
+Reference semantics: SystemVerilog expression sizing and signedness, as
+implemented by the reference evaluator in test_sv_width_semantics.py (see its
+docstring). In particular:
 
-* ``a / b``  -- truncates toward zero (C / SystemVerilog): -8 / 3 == -2.
-* ``a % b``  -- remainder takes the sign of the dividend: -8 % 3 == -2.
-* ``a >> k`` -- floor(a / 2^k). For an unsigned (non-negative) operand that is
-  the logical shift; for a SIGNED operand it is an arithmetic shift of the
-  integer value (Python ``>>``, SV ``>>>``): -8 >> 1 == -4. This is the only
-  width-independent meaning of ``>>`` on a negative integer, and it is what
-  the CDCL propagator (_fire_bounds_lshr_64) and the model validator
-  (zsp_validate.c) implement. The bit-blast engine defers (unknown) on a
-  signed ``>>`` rather than answer differently.
-* ``a << k``, ``+``, ``-``, ``*`` -- plain integer arithmetic, checked only
-  where the result stays inside the operand's own range (whether an
-  out-of-range result wraps is a width-context question, not a signedness
-  one, and is covered by test_modular_arith_diff.py).
+* ``a / b``  -- truncates toward zero when signed: -8 / 3 == -2.
+* ``a % b``  -- the remainder takes the sign of the dividend: -8 % 3 == -2.
+* ``a >> k`` -- a LOGICAL shift of the context-width bit pattern (SV ``>>``).
+  A signed -8 (8-bit) shifted right by an unsized 1 is evaluated in a 32-bit
+  context (the literal is 32 bits): 0xFFFFFFF8 >> 1 == 0x7FFFFFFC. (Until the
+  SV-sizing change this test encoded an arithmetic, floor shift: -4.)
+* Constants are unsized SV integer literals (32-bit signed when they fit), so
+  e.g. ``x + 1`` over an 8-bit x is evaluated at 32 bits, and ``r == expr``
+  with r signed 64-bit at 64 bits; an unsigned operand makes the whole
+  context unsigned.
 
 For every generated case the expected satisfiability is computed by
 enumerating the (small) operand domains in Python. dv-solve must never
@@ -45,7 +44,12 @@ import random
 import pytest
 
 from dv_solve.builder import SolveProblemBuilder
-from dv_solve.ctx import SolveCtx, SOLVE_OK, SOLVE_UNSAT
+
+from .test_sv_width_semantics import (
+    Var as _V, Const as _C, Bin as _B, DivZero as _DivZero,
+    self_type as _self_type, val as _val, truth as _truth, wrap as _wrap,
+)
+from dv_solve.ctx import SolveCtx, SOLVE_OK, SOLVE_UNSAT, CompileIncompleteError
 from dv_solve.problem import (
     BIN_ADD, BIN_SUB, BIN_MUL, BIN_DIV, BIN_MOD, BIN_LSHIFT, BIN_RSHIFT,
     BIN_EQ, BIN_NEQ, BIN_LT, BIN_LTE, BIN_GT, BIN_GTE,
@@ -129,14 +133,63 @@ class Case:
         yw, ys, ylo, yhi = self.y
         return [(x, yv) for x in xs for yv in range(ylo, yhi + 1)]
 
+    # -- SystemVerilog reference ------------------------------------- #
+
+    def _vt(self):
+        vt = {0: (self.w, self.s), 1: (64, True)}
+        if self.shape == "vv":
+            vt[2] = (self.y[0], self.y[1])
+        return vt
+
+    def _expr(self):
+        x = _V(0)
+        if self.shape == "vv":
+            return _B(self.op, x, _V(2))
+        k = _C(self.k, is_signed=self.k < 0)
+        return _B(self.op, x, k) if self.shape == "vc" else _B(self.op, k, x)
+
+    def _root(self):
+        if self.cmp is None:
+            return _B(BIN_EQ, _V(1), self._expr())
+        return _B(self.cmp, self._expr(), _C(self.c, is_signed=self.c < 0))
+
+    def _env(self, a, b, r=0):
+        x, y = (a, b) if self.shape != "cv" else (b, a)
+        return {0: x, 1: r, 2: y}
+
     def values(self):
-        return [ref(self.op, a, b) for a, b in self.pairs()]
+        """The expression's value in its own (self-determined) type, per
+        operand pair; None where it divides by zero."""
+        vt, e = self._vt(), self._expr()
+        w, sg = _self_type(e, vt)
+        out = []
+        for a, b in self.pairs():
+            try:
+                out.append(_val(e, w, sg, self._env(a, b), vt))
+            except _DivZero:
+                out.append(None)
+        return out
+
+    def _r_for(self, a, b):
+        """For `r == expr`: the r (signed 64-bit) that satisfies it."""
+        vt, e = self._vt(), self._expr()
+        ew, es = _self_type(e, vt)
+        cw, cs = max(64, ew), es          # r is signed: context signed iff e is
+        v = _val(e, cw, cs, self._env(a, b), vt)
+        return _wrap(v, 64, True)
 
     def expected_sat(self):
-        vals = self.values()
-        if self.cmp is None:
-            return any(R_LO <= v <= R_HI for v in vals)
-        return any(CMP[self.cmp](v, self.c) for v in vals)
+        vt, root = self._vt(), self._root()
+        for a, b in self.pairs():
+            try:
+                if self.cmp is None:
+                    if R_LO <= self._r_for(a, b) <= R_HI:
+                        return True
+                elif _truth(root, self._env(a, b), vt):
+                    return True
+            except _DivZero:
+                pass
+        return False
 
     def __str__(self):
         e = {"vc": "x %s %d" % (OPN[self.op], self.k),
@@ -180,33 +233,19 @@ class Case:
         yv = ctx.get_value(2) if self.shape == "vv" else None
         if not (self.xlo <= xv <= self.xhi):
             return "x=%d outside its domain" % xv
-        a, b = {"vc": (xv, self.k), "cv": (self.k, xv), "vv": (xv, yv)}[self.shape]
-        v = ref(self.op, a, b)
-        if v is None:
+        rv = ctx.get_value(1) if self.cmp is None else 0
+        env = {0: xv, 1: rv, 2: yv}
+        try:
+            ok = _truth(self._root(), env, self._vt())
+        except _DivZero:
             return "model x=%s y=%s divides by zero" % (xv, yv)
-        if self.cmp is None:
-            rv = ctx.get_value(1)
-            if rv != v:
-                return "model x=%s y=%s r=%s, expected r=%s" % (xv, yv, rv, v)
-        elif not CMP[self.cmp](v, self.c):
-            return "model x=%s y=%s gives %s" % (xv, yv, v)
+        if not ok:
+            return "model x=%s y=%s r=%s violates %s" % (xv, yv, rv, self)
         return None
 
     def validator_applies(self):
-        """The model validator evaluates at the SV context width with SV's
-        "one unsigned operand makes the op unsigned" rule. It agrees with the
-        integer reference only when every value fits the operand width and
-        the operands share a signedness -- check it there."""
-        if self.shape == "vv" and self.y[1] != self.s:
-            return False
-        if not self.s and ((self.shape != "vv" and self.k < 0) or
-                           (self.c is not None and self.c < 0)):
-            return False     # unsigned var beside a negative (signed) constant
-        if self.cmp is None:
-            return True
-        lo, hi = _rng(self.w, self.s)
-        extra = [self.c] + ([self.k] if self.shape != "vv" else [])
-        return all(lo <= v <= hi for v in self.values() + extra)
+        """The model validator implements the same SV rules: always check."""
+        return True
 
 
 def run_case(case: Case):
@@ -390,11 +429,25 @@ def test_repro_signed_mod_vs_const():
 
 
 def test_repro_signed_rshift():
-    assert _solve(Case(8, True, -8, -8, BIN_RSHIFT, "vc", k=1)) == (SOLVE_OK, -4)
-    assert _solve(Case(8, True, -8, -8, BIN_RSHIFT, "vc", k=1, cmp=BIN_EQ, c=-4))[0] == SOLVE_OK
+    # SV `>>` is logical on the context-width pattern. `(x >> 1) CMP c`: the
+    # context is 32-bit signed (both literals are 32-bit ints), so -8 is
+    # 0xFFFFFFF8 and shifts to 0x7FFFFFFC.
+    assert _solve(Case(8, True, -8, -8, BIN_RSHIFT, "vc", k=1, cmp=BIN_EQ, c=0x7FFFFFFC))[0] == SOLVE_OK
+    assert _solve(Case(8, True, -8, -8, BIN_RSHIFT, "vc", k=1, cmp=BIN_EQ, c=-4))[0] == SOLVE_UNSAT
     assert _solve(Case(8, True, -8, -8, BIN_RSHIFT, "vc", k=1, cmp=BIN_EQ, c=124))[0] == SOLVE_UNSAT
-    assert _solve(Case(8, True, -7, -7, BIN_RSHIFT, "vc", k=1)) == (SOLVE_OK, -4)
-    assert _solve(Case(64, True, I64_LO, I64_LO, BIN_RSHIFT, "vc", k=70)) == (SOLVE_OK, -1)
+    assert _solve(Case(8, True, -7, -7, BIN_RSHIFT, "vc", k=1, cmp=BIN_EQ, c=0x7FFFFFFC))[0] == SOLVE_OK
+    # `r == x >> 1` with r signed 64-bit: a 64-bit context, 2^63 - 4 -- outside
+    # r's [-2^62, 2^62] domain here, so no solution. (The CDCL engine has no
+    # exact logical shift of a 64-bit pattern >= 2^63 and may decline.)
+    try:
+        assert _solve(Case(8, True, -8, -8, BIN_RSHIFT, "vc", k=1))[0] == SOLVE_UNSAT
+    except CompileIncompleteError:
+        pass
+    # A non-negative operand shifts the same way under either reading.
+    assert _solve(Case(8, True, 9, 9, BIN_RSHIFT, "vc", k=1)) == (SOLVE_OK, 4)
+    # Shifting by >= the (32-bit) context width clears every bit.
+    assert _solve(Case(32, True, -(1 << 31), -(1 << 31), BIN_RSHIFT, "vc", k=40,
+                       cmp=BIN_EQ, c=0))[0] == SOLVE_OK
 
 
 def test_repro_int64_min_div_minus_one_no_crash():

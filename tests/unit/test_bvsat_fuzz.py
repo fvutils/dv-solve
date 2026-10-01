@@ -231,23 +231,27 @@ def test_primary_always_false_strict_compare_is_unsat(w, signed):
     functions (`_var_repr_min` / `_var_repr_max`)."""
     from dv_solve.problem import BIN_GT, BIN_LT
     vmin, vmax = _repr_range(w, signed)
+    # The constants are written with the variable's signedness: under the
+    # builder's SystemVerilog rules an unsized constant >= 2^31 with
+    # is_signed=False is an UNSIGNED literal, which would make `v > max` an
+    # unsigned comparison (satisfiable by any negative v).
 
     # `v < vmin`  (impossible) — both operand orders.
     assert _primary_is_unsat(
         [(0, w, signed, vmin, vmax)],
-        [(BIN_LT, lambda b: b.expr_var(0), lambda b: b.expr_const(vmin))],
+        [(BIN_LT, lambda b: b.expr_var(0), lambda b: b.expr_const(vmin, is_signed=signed))],
     ), "v < min should be UNSAT (w=%d signed=%s)" % (w, signed)
 
     # `vmin > v`  (same predicate, const on the left → exercises the swap).
     assert _primary_is_unsat(
         [(0, w, signed, vmin, vmax)],
-        [(BIN_GT, lambda b: b.expr_const(vmin), lambda b: b.expr_var(0))],
+        [(BIN_GT, lambda b: b.expr_const(vmin, is_signed=signed), lambda b: b.expr_var(0))],
     ), "min > v should be UNSAT (w=%d signed=%s)" % (w, signed)
 
     # `v > vmax`  (impossible) — the symmetric lower-bound edge.
     assert _primary_is_unsat(
         [(0, w, signed, vmin, vmax)],
-        [(BIN_GT, lambda b: b.expr_var(0), lambda b: b.expr_const(vmax))],
+        [(BIN_GT, lambda b: b.expr_var(0), lambda b: b.expr_const(vmax, is_signed=signed))],
     ), "v > max should be UNSAT (w=%d signed=%s)" % (w, signed)
 
 
@@ -265,11 +269,11 @@ def test_primary_tight_edge_compare_is_sat(w, signed):
     # `v < vmin+1` → v == vmin (SAT).
     assert not _primary_is_unsat(
         [(0, w, signed, vmin, vmax)],
-        [(BIN_LT, lambda b: b.expr_var(0), lambda b: b.expr_const(vmin + 1))],
+        [(BIN_LT, lambda b: b.expr_var(0), lambda b: b.expr_const(vmin + 1, is_signed=signed))],
     ), "v < min+1 should be SAT (w=%d signed=%s)" % (w, signed)
 
     # `v > vmax-1` → v == vmax (SAT).
     assert not _primary_is_unsat(
         [(0, w, signed, vmin, vmax)],
-        [(BIN_GT, lambda b: b.expr_var(0), lambda b: b.expr_const(vmax - 1))],
+        [(BIN_GT, lambda b: b.expr_var(0), lambda b: b.expr_const(vmax - 1, is_signed=signed))],
     ), "v > max-1 should be SAT (w=%d signed=%s)" % (w, signed)

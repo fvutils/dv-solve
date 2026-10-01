@@ -1217,6 +1217,26 @@ static int _relax_search(SolveProblem *orig,
         return -1;
     }
 
+    /* Keep the probe inside the variable's representable range. A constant
+     * beyond it does not mean "no bound" under the builder's SystemVerilog
+     * rules: `x >= -9992` over an unsigned 8-bit x compares unsigned at 32
+     * bits, where -9992 is 2^32-9992 -- the opposite of a relaxation. The
+     * range edge is the widest relaxation that still means what it says. */
+    for (ExprRef vr = orig->vars_head; vr != EXPR_NULL; ) {
+        VarSpec *vs = (VarSpec *)POOL_PTR(orig, vr);
+        if (vs->var_id == cls->var_id) {
+            if (vs->width >= 1 && vs->width < 64) {
+                int64_t vmin = vs->is_signed ? -((int64_t)1 << (vs->width - 1)) : 0;
+                int64_t vmax = vs->is_signed ? ((int64_t)1 << (vs->width - 1)) - 1
+                                             : (int64_t)(((uint64_t)1 << vs->width) - 1);
+                if (feasible_val < vmin) feasible_val = vmin;
+                if (feasible_val > vmax) feasible_val = vmax;
+            }
+            break;
+        }
+        vr = vs->next;
+    }
+
     /* Verify the feasible end is actually feasible */
     {
         void *buf = _build_relaxed_subproblem(orig, mus_cids, mus_size,

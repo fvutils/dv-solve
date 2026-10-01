@@ -4,6 +4,7 @@
 #include "zsp_ctx.h"
 #include "zsp_propagator.h"
 #include "zsp_problem.h"
+#include "zsp_sv.h"
 
 /* ------------------------------------------------------------------ */
 /* Internal helpers                                                    */
@@ -206,10 +207,15 @@ static int _compile_var_const_cmp(SolveCtx *ctx, BinOp op,
                 return 1;
             }
         }
-        /* General case: create a const-var and add an NE propagator. */
+        /* General case: create a const-var and add an NE propagator. The
+         * constant is held at its own value (a tier-0 int32 slot would
+         * truncate an unsigned 32-bit constant >= 2^31). */
         if (ctx->n_vars < ctx->n_vars_capacity) {
             uint32_t cv_id = ctx->n_vars;
-            _init_tier0(&ctx->vars[cv_id], 32, 0, cv, cv);
+            if (_init_const_singleton(ctx, &ctx->vars[cv_id], cv,
+                    ctx->vars[vid].flags & VAR_SIGNED,
+                    ctx->vars[vid].width) != 0)
+                return 0;
             ctx->n_vars = cv_id + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
             prop_add_bounds_ne_32(ctx, vid, cv_id, 0);
@@ -409,6 +415,14 @@ static int _classify_or_leaf(SolveProblem *sp, ExprRef ref,
     *truth = 0;
     if (ref == EXPR_NULL) return 0;
     ExprKind k = *(ExprKind *)zsp_pool_ptr(&sp->pool, ref);
+
+    /* A constant leaf: SV elaboration folds a comparison its variable's range
+     * already decides (`u8 x < 300`) to a constant. */
+    if (k == EXPR_CONST) {
+        *truth_known = 1;
+        *truth = ((ExprConst *)zsp_pool_ptr(&sp->pool, ref))->value != 0;
+        return 0;
+    }
 
     /* (not X): flip and recurse. */
     if (k == EXPR_UNARY) {
@@ -640,6 +654,23 @@ static int _compile_gated_constraint(SolveCtx *ctx, SolveProblem *sp,
             if (_var_needs_wide(ctx, vid) &&
                 (cv <= (int64_t)INT32_MIN || cv >= (int64_t)INT32_MAX))
                 return 0;
+            if (cv <= (int64_t)INT32_MIN || cv >= (int64_t)INT32_MAX) {
+                /* A tier-0 var's whole range lies strictly inside int32, so
+                 * the comparison is decided: true needs nothing, false means
+                 * the guard can never hold. */
+                BinOp fop = e->op;
+                if (is_cv) fop = (BinOp)_swap_cmp(fop);
+                int below = cv <= (int64_t)INT32_MIN;   /* cv < every value */
+                int truth;
+                switch (fop) {
+                case BIN_EQ:  truth = 0; break;
+                case BIN_NEQ: truth = 1; break;
+                case BIN_LT: case BIN_LTE: truth = !below; break;
+                default:      truth = below; break;   /* GT / GTE */
+                }
+                if (truth) return 1;
+                return (ctx_tighten_ub64(ctx, guard_id, 0) == PROP_CONFLICT) ? -1 : 1;
+            }
             BinOp op = e->op;
             if (is_cv) {
                 switch (op) {
@@ -685,6 +716,152 @@ static int _compile_gated_constraint(SolveCtx *ctx, SolveProblem *sp,
     return rc;
 }
 
+static int _init_aux_tiered(SolveCtx *ctx, Variable *v, uint16_t width,
+                            uint8_t flags, int64_t lo, int64_t hi);
+
+/** Materialise the constant `ref` as a one-value variable.
+ *
+ * A SIZED constant -- the only kind SV elaboration leaves in a value position
+ * -- already carries the width and signedness of the context it is used in,
+ * so the variable gets exactly that type. An unsized one keeps the historical
+ * shape (_init_const_singleton at `width`).
+ *
+ * @return the var id, or EXPR_NULL if it cannot be represented / no room. */
+static uint32_t _const_singleton_var(SolveCtx *ctx, SolveProblem *sp,
+                                     ExprRef ref, uint16_t width) {
+    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    ExprConst *ec = (ExprConst *)zsp_pool_ptr(&sp->pool, ref);
+    uint32_t id = ctx->n_vars;
+    Variable *v = &ctx->vars[id];
+    if (ec->width) {
+        if (_init_aux_tiered(ctx, v, ec->width,
+                             (uint8_t)(VAR_AUX | (ec->is_signed ? VAR_SIGNED : 0)),
+                             ec->value, ec->value) != 0)
+            return EXPR_NULL;
+    } else if (_init_const_singleton(ctx, v, ec->value, 0, width) != 0) {
+        return EXPR_NULL;
+    }
+    ctx->n_vars = id + 1;
+    if (ctx->watcher_heads) ctx->watcher_heads[id] = EXPR_NULL;
+    return id;
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Is `r = a op b` exactly representable by the propagator we emit?    */
+
+static int _is_bool_op(BinOp op);
+/* ------------------------------------------------------------------ */
+
+/* The current domain of a variable as a true (unwrapped) integer interval. */
+static void _rng128(const SolveCtx *ctx, uint32_t id, __int128 *lo, __int128 *hi) {
+    const Variable *v = &ctx->vars[id];
+    int64_t l = var_lo64(ctx, v), h = var_hi64(ctx, v);
+    if (!(v->flags & VAR_SIGNED) && v->width >= 64) {
+        *lo = (__int128)(uint64_t)l;
+        *hi = (__int128)(uint64_t)h;
+    } else {
+        *lo = l;
+        *hi = h;
+    }
+}
+
+/** Can the propagator for `r = a op b` be trusted to produce the SV result?
+ *
+ * The bv* templates (ADD/SUB/MUL/SHL, result width 1..64) wrap modulo 2^w and
+ * are exact. Every other operator is propagated as INTEGER arithmetic on the stored values, which equals the SV
+ * (wrapping) result only while the true result stays inside r's range and no
+ * value involved is an unsigned 64-bit pattern >= 2^63 (int64 storage reads
+ * those as negative). Signed `/` and `%` additionally overflow on MIN / -1.
+ *
+ * When exact, *out_lo/*out_hi receive the result's integer range, which the
+ * caller may use as r's initial domain. Domains only shrink, so deciding this
+ * at compile time is sound. When not exact the caller must decline: leaving
+ * the constraint uncompiled is honest, a non-wrapping propagator is wrong.
+ */
+static int _binop_exact(SolveCtx *ctx, BinOp op, uint32_t r_id,
+                        uint32_t a_id, uint32_t b_id,
+                        __int128 *out_lo, __int128 *out_hi) {
+    const Variable *rv = &ctx->vars[r_id];
+    uint16_t w = rv->width;
+    int rs = (rv->flags & VAR_SIGNED) != 0;
+    int modular = (op == BIN_ADD || op == BIN_SUB || op == BIN_MUL ||
+                   op == BIN_LSHIFT);
+    __int128 alo, ahi, blo, bhi;
+    _rng128(ctx, a_id, &alo, &ahi);
+    _rng128(ctx, b_id, &blo, &bhi);
+    *out_lo = 1; *out_hi = 0;      /* "no range" */
+    if (w >= 1 && w <= 64 && modular) return 1;
+    if (w == 0 || w > 64) return 0;
+
+    __int128 rmin, rmax;
+    if (rs) {
+        rmin = -((__int128)1 << (w - 1));
+        rmax = ((__int128)1 << (w - 1)) - 1;
+    } else {
+        rmin = 0;
+        rmax = ((__int128)1 << w) - 1;
+        if (rmax > (__int128)INT64_MAX) rmax = INT64_MAX;   /* int64 storage */
+    }
+    const __int128 BIG = (__int128)1 << 63;
+    /* Every value must have an honest int64 spelling. */
+    if (alo < -BIG || ahi >= BIG || blo < -BIG || bhi >= BIG) return 0;
+
+    __int128 lo, hi;
+    switch (op) {
+    case BIN_ADD: lo = alo + blo; hi = ahi + bhi; break;
+    case BIN_SUB: lo = alo - bhi; hi = ahi - blo; break;
+    case BIN_MUL: {
+        __int128 p[4] = { alo * blo, alo * bhi, ahi * blo, ahi * bhi };
+        lo = hi = p[0];
+        for (int i = 1; i < 4; i++) {
+            if (p[i] < lo) lo = p[i];
+            if (p[i] > hi) hi = p[i];
+        }
+        break;
+    }
+    case BIN_LSHIFT: {
+        if (blo < 0) return 0;
+        if (bhi >= 63) {
+            if (alo == 0 && ahi == 0) { lo = hi = 0; break; }
+            return 0;
+        }
+        __int128 c[4] = { alo << (int)blo, alo << (int)bhi,
+                          ahi << (int)blo, ahi << (int)bhi };
+        lo = hi = c[0];
+        for (int i = 1; i < 4; i++) {
+            if (c[i] < lo) lo = c[i];
+            if (c[i] > hi) hi = c[i];
+        }
+        break;
+    }
+    case BIN_DIV:
+    case BIN_MOD: {
+        int sgn = (ctx->vars[a_id].flags & VAR_SIGNED) ||
+                  (ctx->vars[b_id].flags & VAR_SIGNED);
+        /* Signed: the div/mod propagators wrap MIN / -1 to the result width
+         * themselves (sv_wrap_signed); |a/b| <= |a|, |a%b| <= |a| otherwise.
+         * Unsigned: exact while every value has an honest int64 spelling. */
+        if (!sgn && (alo < 0 || blo < 0)) return 0;
+        (void)rmin;
+        return 1;
+    }
+    case BIN_BAND: case BIN_BOR: case BIN_BXOR:
+        if (!rs && (alo < 0 || blo < 0)) return 0;
+        return 1;    /* bitwise ops stay inside the operands' common range */
+    case BIN_RSHIFT:
+        /* An unsigned operand: floor shift == logical shift. (Elaboration
+         * never leaves a signed `>>` here.) */
+        if (!rs && alo < 0) return 0;
+        return 1;
+    default:
+        return 1;
+    }
+    if (lo < rmin || hi > rmax) return 0;
+    *out_lo = lo; *out_hi = hi;
+    return 1;
+}
+
 /* Helper: compile r_id == BinaryExpr(expr_ref) without allocating in sp pool.
  * Used when the sp pool may be full (e.g. after builder finalization). */
 static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
@@ -704,30 +881,27 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
 
     /* A reified const operand is materialised as a tier-0 (int32) singleton; a
      * value outside int32 range cannot be stored there, so defer such a reified
-     * comparison to the complete BV-SAT engine rather than compile it unsoundly. */
-    if ((has_var_const || has_const_var) && (cv < INT32_MIN || cv > INT32_MAX))
+     * comparison to the complete BV-SAT engine rather than compile it unsoundly.
+     * A SIZED constant (SV elaboration emits nothing else) is materialised at
+     * its own width and signedness instead, which holds any value. */
+    ExprRef const_ref = has_var_const ? binop->rhs
+                      : (has_const_var ? binop->lhs : EXPR_NULL);
+    int const_sized = const_ref != EXPR_NULL &&
+        ((ExprConst *)zsp_pool_ptr(&sp->pool, const_ref))->width != 0;
+    if ((has_var_const || has_const_var) && !const_sized &&
+        (cv < INT32_MIN || cv > INT32_MAX))
         return 0;
 
     /* Promote constants to const-variables */
     if (has_var_const && !has_var_var) {
-        if (ctx->n_vars < ctx->n_vars_capacity) {
-            b_id = ctx->n_vars;
-            Variable *cvv = &ctx->vars[b_id];
-            if (_init_const_singleton(ctx, cvv, cv, 0, 32) != 0) return 0;
-            ctx->n_vars = b_id + 1;
-            if (ctx->watcher_heads) ctx->watcher_heads[b_id] = EXPR_NULL;
-            has_var_var = 1;
-        }
+        b_id = _const_singleton_var(ctx, sp, binop->rhs, 32);
+        if (b_id == EXPR_NULL) return 0;
+        has_var_var = 1;
     }
     if (has_const_var && !has_var_var) {
-        if (ctx->n_vars < ctx->n_vars_capacity) {
-            a_id = ctx->n_vars;
-            Variable *cvv = &ctx->vars[a_id];
-            if (_init_const_singleton(ctx, cvv, cv, 0, 32) != 0) return 0;
-            ctx->n_vars = a_id + 1;
-            if (ctx->watcher_heads) ctx->watcher_heads[a_id] = EXPR_NULL;
-            has_var_var = 1;
-        }
+        a_id = _const_singleton_var(ctx, sp, binop->lhs, 32);
+        if (a_id == EXPR_NULL) return 0;
+        has_var_var = 1;
     }
 
     if (!has_var_var) return 0;
@@ -754,7 +928,8 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
             b_cv - 1 >= INT32_MIN && b_cv - 1 <= INT32_MAX &&
             ctx->n_vars < ctx->n_vars_capacity) {
             uint32_t bm1 = ctx->n_vars;
-            _init_tier0(&ctx->vars[bm1], 32, 0, b_cv - 1, b_cv - 1);
+            _init_tier0(&ctx->vars[bm1], 32, (b_cv - 1 < 0) ? VAR_SIGNED : 0,
+                        b_cv - 1, b_cv - 1);
             ctx->n_vars = bm1 + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[bm1] = EXPR_NULL;
             prop_add_reification_32(ctx, r_id, a_id, bm1, 0);
@@ -768,7 +943,8 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
             a_cv - 1 >= INT32_MIN && a_cv - 1 <= INT32_MAX &&
             ctx->n_vars < ctx->n_vars_capacity) {
             uint32_t am1 = ctx->n_vars;
-            _init_tier0(&ctx->vars[am1], 32, 0, a_cv - 1, a_cv - 1);
+            _init_tier0(&ctx->vars[am1], 32, (a_cv - 1 < 0) ? VAR_SIGNED : 0,
+                        a_cv - 1, a_cv - 1);
             ctx->n_vars = am1 + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[am1] = EXPR_NULL;
             prop_add_reification_32(ctx, r_id, b_id, am1, 0);
@@ -777,6 +953,13 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
         break;
     }
     default: break;
+    }
+
+    /* Arithmetic: only when the propagator computes the SV result exactly. */
+    if (!_is_bool_op(binop->op)) {
+        __int128 elo, ehi;
+        if (!_binop_exact(ctx, binop->op, r_id, a_id, b_id, &elo, &ehi))
+            return 0;
     }
 
     /* Modular BV add/sub with a constant operand: route to the wrap-aware
@@ -808,12 +991,12 @@ static int _compile_binexpr_eq_var(SolveCtx *ctx, SolveProblem *sp,
         }
     }
 
-    /* Modular fixed-width var-var ADD/SUB/MUL/LSHIFT (widths 1..63):
+    /* Modular fixed-width var-var ADD/SUB/MUL/LSHIFT (widths 1..64):
      * route through the wrap-aware bit-vector propagators so that results
      * that exceed the result width wrap mod 2^width (sound 2's-complement
-     * semantics) for both signed and unsigned result variables. Width 64
-     * and the bitwise/div/mod cases keep the legacy bounds propagators. */
-    if (r_w >= 1 && r_w <= 63) {
+     * semantics) for both signed and unsigned result variables. The
+     * bitwise/div/mod cases keep the legacy bounds propagators. */
+    if (r_w >= 1 && r_w <= 64) {
         switch (binop->op) {
         case BIN_ADD:    prop_add_bvadd_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
         case BIN_SUB:    prop_add_bvsub_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
@@ -958,11 +1141,14 @@ static uint8_t _expr_width(SolveCtx *ctx, SolveProblem *sp, ExprRef ref,
         return (uint8_t)ctx->vars[vid].width;
     }
     case EXPR_CONST:
-        return 0;   /* adapts to context */
+        /* A sized constant has its own width; an unsized one adapts. */
+        return ((ExprConst *)zsp_pool_ptr(&sp->pool, ref))->width;
     case EXPR_EXTEND: {
         ExprExtend *ee = (ExprExtend *)zsp_pool_ptr(&sp->pool, ref);
         return (uint8_t)ee->to_bits;
     }
+    case EXPR_SV_CAST:
+        return ((ExprSvCast *)zsp_pool_ptr(&sp->pool, ref))->to_bits;
     case EXPR_EXTRACT: {
         ExprExtract *ex = (ExprExtract *)zsp_pool_ptr(&sp->pool, ref);
         return (uint8_t)(ex->hi_bit - ex->lo_bit + 1);
@@ -1011,8 +1197,16 @@ static int _expr_has_signed(SolveCtx *ctx, SolveProblem *sp, ExprRef ref,
         if (vid >= ctx->n_vars_capacity) return 0;
         return (ctx->vars[vid].flags & VAR_SIGNED) != 0;
     }
+    case EXPR_CONST: {
+        ExprConst *ec = (ExprConst *)zsp_pool_ptr(&sp->pool, ref);
+        return ec->width != 0 && ec->is_signed != 0;
+    }
     case EXPR_EXTEND:
-        return ((ExprExtend *)zsp_pool_ptr(&sp->pool, ref))->sign_extend != 0;
+        /* An extend keeps its operand's signedness (zsp_sv.h). */
+        return _expr_has_signed(ctx, sp,
+            ((ExprExtend *)zsp_pool_ptr(&sp->pool, ref))->operand, depth + 1);
+    case EXPR_SV_CAST:
+        return ((ExprSvCast *)zsp_pool_ptr(&sp->pool, ref))->dst_signed != 0;
     case EXPR_UNARY:
         return _expr_has_signed(ctx, sp,
             ((ExprUnary *)zsp_pool_ptr(&sp->pool, ref))->operand, depth + 1);
@@ -1040,7 +1234,7 @@ static int _expr_has_signed(SolveCtx *ctx, SolveProblem *sp, ExprRef ref,
  * comparison-operand path in `_compile_constraint` each had inline; the
  * recursive materialiser needs the same mapping and must not acquire a third
  * copy that drifts from the other two. Modular fixed-width ADD/SUB/MUL/SHL
- * come first (widths 1..63) so results that exceed the result width wrap
+ * come first (widths 1..64) so results that exceed the result width wrap
  * mod 2^width rather than being treated as unbounded integer arithmetic.
  *
  * @return 1 if a propagator was added, 0 if the operator has no propagator.
@@ -1048,7 +1242,7 @@ static int _expr_has_signed(SolveCtx *ctx, SolveProblem *sp, ExprRef ref,
 static int _emit_binop_prop(SolveCtx *ctx, BinOp op,
                              uint32_t r_id, uint32_t a_id, uint32_t b_id) {
     uint16_t r_w = ctx->vars[r_id].width;
-    if (r_w >= 1 && r_w <= 63) {
+    if (r_w >= 1 && r_w <= 64) {
         switch (op) {
         case BIN_ADD:    prop_add_bvadd_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
         case BIN_SUB:    prop_add_bvsub_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
@@ -1399,6 +1593,9 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
             }
         }
 
+        /* The constant sits beside the var in a reification propagator, so
+         * it is read in the var's order: give it the var's signedness. */
+        uint8_t cv_f = (uint8_t)(VAR_AUX | (ctx->vars[cmp_vid].flags & VAR_SIGNED));
         if (eff == BIN_EQ) {
             if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
             uint32_t gid = ctx->n_vars;
@@ -1406,7 +1603,7 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
             ctx->n_vars = gid + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[gid] = EXPR_NULL;
             uint32_t cvc_id = ctx->n_vars;
-            if (_init_aux_tiered(ctx, &ctx->vars[cvc_id], cv_w, VAR_AUX,
+            if (_init_aux_tiered(ctx, &ctx->vars[cvc_id], cv_w, cv_f,
                                  cmp_cv, cmp_cv) != 0)
                 return EXPR_NULL;   /* B24 */
             ctx->n_vars = cvc_id + 1;
@@ -1431,7 +1628,7 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
             ctx->n_vars = geq + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[geq] = EXPR_NULL;
             uint32_t cvc_id = ctx->n_vars;
-            if (_init_aux_tiered(ctx, &ctx->vars[cvc_id], cv_w, VAR_AUX,
+            if (_init_aux_tiered(ctx, &ctx->vars[cvc_id], cv_w, cv_f,
                                  cmp_cv, cmp_cv) != 0)
                 return EXPR_NULL;   /* B24 */
             ctx->n_vars = cvc_id + 1;
@@ -1454,7 +1651,7 @@ static uint32_t _bool_to_var(SolveCtx *ctx, SolveProblem *sp, ExprRef ref) {
 
         if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
         uint32_t cmp_const = ctx->n_vars;
-        if (_init_aux_tiered(ctx, &ctx->vars[cmp_const], cv_w, VAR_AUX, k, k) != 0)
+        if (_init_aux_tiered(ctx, &ctx->vars[cmp_const], cv_w, cv_f, k, k) != 0)
             return EXPR_NULL;   /* B24 */
         ctx->n_vars = cmp_const + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[cmp_const] = EXPR_NULL;
@@ -1524,6 +1721,7 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
     }
     if (k == EXPR_CONST) {
         ExprConst *ec = (ExprConst *)zsp_pool_ptr(&sp->pool, ref);
+        if (ec->width) return _const_singleton_var(ctx, sp, ref, ec->width);
         if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
         uint32_t cv_id = ctx->n_vars;
         uint8_t w = width ? width : 32;
@@ -1645,29 +1843,113 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
         }
         return r_id;
     }
-    if (k == EXPR_EXTEND) {
-        ExprExtend *ee = (ExprExtend *)zsp_pool_ptr(&sp->pool, ref);
-        uint32_t src_id = _value_to_var(ctx, sp, ee->operand, ee->from_bits);
+    if (k == EXPR_EXTEND || k == EXPR_SV_CAST) {
+        /* ExprExtend and ExprSvCast share a layout. The result takes the low
+         * `from_bits` bits of the operand, extends them to `to_bits` (sign or
+         * zero), and reads them as signed or unsigned: an extend keeps the
+         * operand's signedness (zsp_sv.h), a cast names its own. */
+        ExprExtend ee = *(ExprExtend *)zsp_pool_ptr(&sp->pool, ref);
+        uint8_t src_signed = _expr_has_signed(ctx, sp, ee.operand, 0) ? 1 : 0;
+        uint8_t dst_signed = (k == EXPR_SV_CAST)
+            ? ((ExprSvCast *)zsp_pool_ptr(&sp->pool, ref))->dst_signed
+            : src_signed;
+        uint8_t from = ee.from_bits, to = ee.to_bits;
+        if (from == 0 || to == 0 || to > 64 || from > to) return EXPR_NULL;
+        uint32_t src_id = _value_to_var(ctx, sp, ee.operand, from);
         if (src_id == EXPR_NULL) return EXPR_NULL;
-        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
-        uint32_t r_id = ctx->n_vars;
-        int64_t max_val = (ee->to_bits >= 64) ? (int64_t)UINT64_MAX
-                                              : (int64_t)((1ULL << ee->to_bits) - 1);
-        int64_t min_val = ee->sign_extend ? -((int64_t)1 << (ee->from_bits - 1)) : 0;
-        if (ee->sign_extend) {
-            max_val = ((int64_t)1 << (ee->from_bits - 1)) - 1;
+        /* The operand must be exactly `from` bits wide for "its value" and
+         * "its low from bits" to be the same number. */
+        if (ctx->vars[src_id].width != from) return EXPR_NULL;
+        if (((ctx->vars[src_id].flags & VAR_SIGNED) != 0) != (src_signed != 0))
+            return EXPR_NULL;
+
+        /* Is the result the operand's VALUE for every value the operand can
+         * take? Step 1 (extension) keeps v when it extends by v's own
+         * signedness, or when v is non-negative and below 2^(from-1). Step 2
+         * (reading at `to` bits per dst_signed) keeps it when it fits. Then a
+         * bounds-equality link is exact. Domains only shrink, so deciding
+         * this on the compile-time domain is sound. */
+        int64_t slo = (int64_t)var_lo64(ctx, &ctx->vars[src_id]);
+        int64_t shi = (int64_t)var_hi64(ctx, &ctx->vars[src_id]);
+        int src_u64 = !src_signed && ctx->vars[src_id].width >= 64;
+        int ok1 = ((ee.sign_extend != 0) == (src_signed != 0)) ||
+                  (!src_u64 && slo >= 0 &&
+                   (from >= 64 || shi < ((int64_t)1 << (from - 1))));
+        int ok2 = dst_signed
+            ? (!src_u64 && (to >= 64 || shi <= ((int64_t)1 << (to - 1)) - 1))
+            : (src_u64 || slo >= 0);
+        int preserve = ok1 && ok2;
+
+        uint32_t r_id;
+        int64_t rlo, rhi;
+        if (dst_signed) {
+            rhi = (to >= 64) ? INT64_MAX : (((int64_t)1 << (to - 1)) - 1);
+            rlo = (to >= 64) ? INT64_MIN : -rhi - 1;
+        } else {
+            rlo = 0;
+            rhi = (to >= 64) ? (int64_t)UINT64_MAX : (int64_t)((1ULL << to) - 1);
         }
-        if (_init_aux_tiered(ctx, &ctx->vars[r_id], ee->to_bits,
-                             (uint8_t)(VAR_AUX | (ee->sign_extend ? VAR_SIGNED : 0)),
-                             min_val, max_val) != 0)
-            return EXPR_NULL;   /* B24 */
+        if (preserve) {
+            if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+            r_id = ctx->n_vars;
+            if (_init_aux_tiered(ctx, &ctx->vars[r_id], to,
+                                 (uint8_t)(VAR_AUX | (dst_signed ? VAR_SIGNED : 0)),
+                                 rlo, rhi) != 0)
+                return EXPR_NULL;   /* B24 */
+            ctx->n_vars = r_id + 1;
+            if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
+            int wide = _var_needs_wide(ctx, r_id) || _var_needs_wide(ctx, src_id);
+            if (wide) prop_add_bounds_eq_64(ctx, r_id, src_id, 0);
+            else      prop_add_bounds_eq_32(ctx, r_id, src_id, 0);
+            /* r IS the operand's value: start it on the operand's domain, so an
+             * operator above sees the real range at compile time. */
+            if (!src_u64) {
+                if (ctx_tighten_lb64(ctx, r_id, slo) == PROP_CONFLICT ||
+                    ctx_tighten_ub64(ctx, r_id, shi) == PROP_CONFLICT)
+                    return EXPR_NULL;
+            }
+            return r_id;
+        }
+
+        /* A value-CHANGING conversion is a congruence mod 2^width: the
+         * result is the unique value of its type congruent to the operand.
+         * The modular bv add propagator with a zero addend states exactly
+         * that, so chain one per step (widths 1..64). */
+        if (to > 64) return EXPR_NULL;
+        uint32_t cur = src_id;
+        if (ee.sign_extend != src_signed && from < to) {
+            /* Reinterpret the operand's `from`-bit pattern with the extension's
+             * signedness first, so the next step extends it the right way. */
+            if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+            uint32_t mid = ctx->n_vars;
+            int64_t mlo, mhi;
+            if (ee.sign_extend) {
+                mhi = ((int64_t)1 << (from - 1)) - 1; mlo = -mhi - 1;
+            } else {
+                mlo = 0; mhi = (int64_t)((1ULL << from) - 1);
+            }
+            if (_init_aux_tiered(ctx, &ctx->vars[mid], from,
+                                 (uint8_t)(VAR_AUX | (ee.sign_extend ? VAR_SIGNED : 0)),
+                                 mlo, mhi) != 0)
+                return EXPR_NULL;
+            ctx->n_vars = mid + 1;
+            if (ctx->watcher_heads) ctx->watcher_heads[mid] = EXPR_NULL;
+            uint32_t z = _const_guard(ctx, 0);
+            if (z == EXPR_NULL) return EXPR_NULL;
+            prop_add_bvadd_64(ctx, mid, cur, z, from, 0);
+            cur = mid;
+        }
+        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        r_id = ctx->n_vars;
+        if (_init_aux_tiered(ctx, &ctx->vars[r_id], to,
+                             (uint8_t)(VAR_AUX | (dst_signed ? VAR_SIGNED : 0)),
+                             rlo, rhi) != 0)
+            return EXPR_NULL;
         ctx->n_vars = r_id + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
-        /* Zero-extend: r's value == src's value (since src ∈ [0, 2^from-1]).
-         * Sign-extend: r's value == src's signed value (same int64 repr). */
-        int wide = _var_needs_wide(ctx, r_id) || _var_needs_wide(ctx, src_id);
-        if (wide) prop_add_bounds_eq_64(ctx, r_id, src_id, 0);
-        else      prop_add_bounds_eq_32(ctx, r_id, src_id, 0);
+        uint32_t z = _const_guard(ctx, 0);
+        if (z == EXPR_NULL) return EXPR_NULL;
+        prop_add_bvadd_64(ctx, r_id, cur, z, to, 0);
         return r_id;
     }
     if (k == EXPR_BINARY) {
@@ -1748,6 +2030,19 @@ static uint32_t _value_to_var(SolveCtx *ctx, SolveProblem *sp,
         ctx->n_vars = r_id + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
 
+        {
+            /* Integer propagators are exact only without wrap; give r the
+             * exact result range when there is one (tighter nested ranges
+             * keep the next operator up exact too). */
+            __int128 elo, ehi;
+            if (!_binop_exact(ctx, eb->op, r_id, a_id, b_id, &elo, &ehi))
+                return EXPR_NULL;
+            if (elo <= ehi) {
+                if (ctx_tighten_lb64(ctx, r_id, (int64_t)elo) == PROP_CONFLICT ||
+                    ctx_tighten_ub64(ctx, r_id, (int64_t)ehi) == PROP_CONFLICT)
+                    return EXPR_NULL;
+            }
+        }
         if (!_emit_binop_prop(ctx, eb->op, r_id, a_id, b_id))
             return EXPR_NULL;   /* operator with no propagator: leave uncompiled */
         return r_id;
@@ -1777,6 +2072,7 @@ static uint32_t _const_to_var_like(SolveCtx *ctx, SolveProblem *sp,
                                    ExprRef ref, uint8_t width, uint32_t peer,
                                    int is_cmp) {
     ExprConst *ec = (ExprConst *)zsp_pool_ptr(&sp->pool, ref);
+    if (ec->width) return _const_singleton_var(ctx, sp, ref, ec->width);
     if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
     uint8_t flags = VAR_AUX;
     if ((ctx->vars[peer].flags & VAR_SIGNED) || (is_cmp && ec->value < 0))
@@ -2018,13 +2314,19 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
             int64_t lc, rc;
             if (_is_const(sp, e->lhs, &lc) && _is_const(sp, e->rhs, &rc)) {
                 int truth;
+                /* Two sized UNSIGNED constants (an SV unsigned context) order
+                 * as unsigned: a 64-bit one may hold a pattern >= 2^63. */
+                int uns = ((ExprConst *)zsp_pool_ptr(&sp->pool, e->lhs))->width &&
+                          !((ExprConst *)zsp_pool_ptr(&sp->pool, e->lhs))->is_signed &&
+                          ((ExprConst *)zsp_pool_ptr(&sp->pool, e->rhs))->width &&
+                          !((ExprConst *)zsp_pool_ptr(&sp->pool, e->rhs))->is_signed;
                 switch (e->op) {
                 case BIN_EQ:  truth = (lc == rc); break;
                 case BIN_NEQ: truth = (lc != rc); break;
-                case BIN_LT:  truth = (lc <  rc); break;
-                case BIN_LTE: truth = (lc <= rc); break;
-                case BIN_GT:  truth = (lc >  rc); break;
-                case BIN_GTE: truth = (lc >= rc); break;
+                case BIN_LT:  truth = uns ? ((uint64_t)lc <  (uint64_t)rc) : (lc <  rc); break;
+                case BIN_LTE: truth = uns ? ((uint64_t)lc <= (uint64_t)rc) : (lc <= rc); break;
+                case BIN_GT:  truth = uns ? ((uint64_t)lc >  (uint64_t)rc) : (lc >  rc); break;
+                case BIN_GTE: truth = uns ? ((uint64_t)lc >= (uint64_t)rc) : (lc >= rc); break;
                 case BIN_AND: truth = (lc != 0 && rc != 0); break;
                 case BIN_OR:  truth = (lc != 0 || rc != 0); break;
                 default: truth = 1; break;
@@ -2216,6 +2518,22 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                     var_side = e->lhs; expr_side = e->rhs;
                 } else if (lk == EXPR_BINARY && rk == EXPR_VAR) {
                     var_side = e->rhs; expr_side = e->lhs;
+                }
+                /* `r == a op b` computes `a op b` in r: the operator wraps at
+                 * r's width. That is the operator's own (SV context) width only
+                 * when r is exactly that wide; a narrower r is merely compared
+                 * with the wider result -- leave that to the generic path. */
+                if (var_side != EXPR_NULL) {
+                    ExprBinary *xb = (ExprBinary *)zsp_pool_ptr(&sp->pool, expr_side);
+                    ExprVar *xv = (ExprVar *)zsp_pool_ptr(&sp->pool, var_side);
+                    if (!_is_bool_op(xb->op) &&
+                        ctx->vars[_resolve(ctx, xv->var_id)].width !=
+                            _expr_width(ctx, sp, expr_side, 0)) {
+                        var_side = EXPR_NULL; expr_side = EXPR_NULL;
+                    }
+                }
+                if (var_side != EXPR_NULL) {
+                    /* handled below */
                 } else if (lk == EXPR_BINARY && rk == EXPR_CONST) {
                     /* BinOp(...) == const: create a temp variable pinned to
                      * the constant, then directly compile BinOp with that
@@ -2234,15 +2552,25 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                          * (wrong sat), and `(x / -1) == 0` at x == INT64_MIN
                          * wrapped 2^63 to 0. Give it the expression's width,
                          * and its signedness (see _expr_has_signed). */
-                        if (_init_const_singleton(ctx, rv, pin_val,
+                        int pin_rc;
+                        if (rhs_c->width)
+                            pin_rc = _init_aux_tiered(ctx, rv, rhs_c->width,
+                                (uint8_t)(VAR_AUX | (rhs_c->is_signed ? VAR_SIGNED : 0)),
+                                pin_val, pin_val);
+                        else
+                            pin_rc = _init_const_singleton(ctx, rv, pin_val,
                                 _expr_has_signed(ctx, sp, e->lhs, 0) ? VAR_SIGNED : 0,
-                                _expr_width(ctx, sp, e->lhs, 0)) != 0)
-                            return 0;
-                        ctx->n_vars = r_id + 1;
-                        if (ctx->watcher_heads)
-                            ctx->watcher_heads[r_id] = EXPR_NULL;
-                        /* Directly compile: r_id == BinExpr(lhs) */
-                        return _compile_binexpr_eq_var(ctx, sp, e->lhs, r_id);
+                                _expr_width(ctx, sp, e->lhs, 0));
+                        if (pin_rc == 0) {
+                            ctx->n_vars = r_id + 1;
+                            if (ctx->watcher_heads)
+                                ctx->watcher_heads[r_id] = EXPR_NULL;
+                            /* Directly compile: r_id == BinExpr(lhs). Shapes
+                             * it does not take fall through to the generic
+                             * comparison below. */
+                            int brc = _compile_binexpr_eq_var(ctx, sp, e->lhs, r_id);
+                            if (brc != 0) return brc;
+                        }
                     }
                 } else if (lk == EXPR_CONST && rk == EXPR_BINARY) {
                     /* const == BinOp(...): symmetric */
@@ -2251,14 +2579,22 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                     if (ctx->n_vars < ctx->n_vars_capacity) {
                         uint32_t r_id = ctx->n_vars;
                         Variable *rv = &ctx->vars[r_id];
-                        if (_init_const_singleton(ctx, rv, pin_val,
+                        int pin_rc;
+                        if (lhs_c->width)
+                            pin_rc = _init_aux_tiered(ctx, rv, lhs_c->width,
+                                (uint8_t)(VAR_AUX | (lhs_c->is_signed ? VAR_SIGNED : 0)),
+                                pin_val, pin_val);
+                        else
+                            pin_rc = _init_const_singleton(ctx, rv, pin_val,
                                 _expr_has_signed(ctx, sp, e->rhs, 0) ? VAR_SIGNED : 0,
-                                _expr_width(ctx, sp, e->rhs, 0)) != 0)
-                            return 0;   /* width: see the lhs case above */
-                        ctx->n_vars = r_id + 1;
-                        if (ctx->watcher_heads)
-                            ctx->watcher_heads[r_id] = EXPR_NULL;
-                        return _compile_binexpr_eq_var(ctx, sp, e->rhs, r_id);
+                                _expr_width(ctx, sp, e->rhs, 0));
+                        if (pin_rc == 0) {   /* width: see the lhs case above */
+                            ctx->n_vars = r_id + 1;
+                            if (ctx->watcher_heads)
+                                ctx->watcher_heads[r_id] = EXPR_NULL;
+                            int brc = _compile_binexpr_eq_var(ctx, sp, e->rhs, r_id);
+                            if (brc != 0) return brc;
+                        }
                     }
                 }
             }
@@ -2364,6 +2700,12 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                         }
                     }
                     if (has_var_var) {
+                        __int128 elo, ehi;
+                        if (!_binop_exact(ctx, binop->op, r_id, a_id, b_id,
+                                          &elo, &ehi))
+                            has_var_var = 0;   /* not exact: generic path */
+                    }
+                    if (has_var_var) {
                         /* Modular fixed-width ADD/SUB/MUL/SHL first, exactly as
                          * the primary _compile_binary route does. Without this
                          * the arithmetic below is plain INTEGER arithmetic, so
@@ -2375,7 +2717,7 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                          * bug showed only for widths >= 32, where the two
                          * routes diverge. B27. */
                         uint16_t rw_mod = ctx->vars[r_id].width;
-                        if (rw_mod >= 1 && rw_mod <= 63) {
+                        if (rw_mod >= 1 && rw_mod <= 64) {
                             switch (binop->op) {
                             case BIN_ADD:
                                 prop_add_bvadd_64(ctx, r_id, a_id, b_id, (uint8_t)rw_mod, 0); return 1;
@@ -2484,7 +2826,10 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                     if (ctx->n_vars < ctx->n_vars_capacity) {
                         uint32_t cv_id = ctx->n_vars;
                         Variable *cvv = &ctx->vars[cv_id];
-                        _init_tier0(cvv, 32, 0, cmp_cv, cmp_cv);
+                        if (_init_const_singleton(ctx, cvv, cmp_cv,
+                                ctx->vars[_resolve(ctx, cmp_vid)].flags & VAR_SIGNED,
+                                ctx->vars[_resolve(ctx, cmp_vid)].width) != 0)
+                            return 0;
                         ctx->n_vars = cv_id + 1;
                         if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
                         prop_add_reification_eq_32(ctx, gid, cmp_vid, cv_id, 0);
@@ -2706,7 +3051,16 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
                  * these). Without this fallback, the EQ binding
                  * dropped silently and the validator flagged the
                  * resulting model as a (zext ...) mismatch. */
-                uint32_t operand_id = _value_to_var(ctx, sp, ext->operand, ext->from_bits);
+                /* This handler equates r with the operand's VALUE, which is
+                 * the extension's value only when the extension preserves it:
+                 * zero-extending an unsigned operand, or sign-extending a
+                 * signed one, of exactly `from_bits` bits. Anything else goes
+                 * to the generic path (_value_to_var's extend arm). */
+                int ext_sgn = _expr_has_signed(ctx, sp, ext->operand, 0);
+                uint32_t operand_id = EXPR_NULL;
+                if ((ext->sign_extend != 0) == (ext_sgn != 0) &&
+                    _expr_width(ctx, sp, ext->operand, 0) == ext->from_bits)
+                    operand_id = _value_to_var(ctx, sp, ext->operand, ext->from_bits);
                 if (operand_id != EXPR_NULL) {
                     if (!ext->sign_extend) {
                         /* Zero-extend: r in [0, (1<<from_bits)-1]; r == operand
@@ -3029,13 +3383,18 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
 
         /* Extract constant values from the element ExprRefs */
         int32_t *vals = (int32_t *)__builtin_alloca(ne * sizeof(int32_t));
+        int64_t *vals64 = (int64_t *)__builtin_alloca(ne * sizeof(int64_t));
+        int fits32 = 1;
         for (uint32_t i = 0; i < ne; i++) {
             int64_t cv;
             if (!_is_const(sp, elem_refs[i], &cv)) return 0;
+            vals64[i] = cv;
+            if (cv < INT32_MIN || cv > INT32_MAX) fits32 = 0;
             vals[i] = (int32_t)cv;
         }
 
-        uint32_t ref = prop_add_in_set_32(ctx, vid, ne, vals, 0);
+        uint32_t ref = fits32 ? prop_add_in_set_32(ctx, vid, ne, vals, 0)
+                              : prop_add_in_set_64(ctx, vid, ne, vals64, 0);
         return (ref != EXPR_NULL) ? 1 : 0;
     }
 
@@ -3337,17 +3696,23 @@ static int _compile_constraint(SolveCtx *ctx, SolveProblem *sp, ExprRef root) {
  * (including those nested inside BIN_AND) into the alias table.
  * This lets the compile-time UNSAT check detect contradictions like
  * eq(x,y) + ne(x,y) via alias resolution before search. */
-static void _collect_eq_aliases(uint32_t *alias, SolveProblem *sp, ExprRef ref) {
+static void _collect_eq_aliases(const SolveCtx *ctx, uint32_t *alias,
+                                SolveProblem *sp, ExprRef ref) {
     if (ref == EXPR_NULL) return;
     ExprKind k = *(ExprKind *)zsp_pool_ptr(&sp->pool, ref);
     if (k != EXPR_BINARY) return;
     ExprBinary *e = (ExprBinary *)zsp_pool_ptr(&sp->pool, ref);
     if (e->op == BIN_AND) {
-        _collect_eq_aliases(alias, sp, e->lhs);
-        _collect_eq_aliases(alias, sp, e->rhs);
+        _collect_eq_aliases(ctx, alias, sp, e->lhs);
+        _collect_eq_aliases(ctx, alias, sp, e->rhs);
     } else if (e->op == BIN_EQ) {
         uint32_t lid, rid;
-        if (_is_var(sp, e->lhs, &lid) && _is_var(sp, e->rhs, &rid))
+        /* `x == y` makes x and y the same VALUE only when they read their
+         * bits the same way; across signedness SV compares a reinterpreted
+         * value (and elaboration wraps one side in a cast anyway). */
+        if (_is_var(sp, e->lhs, &lid) && _is_var(sp, e->rhs, &rid) &&
+            lid < ctx->n_vars && rid < ctx->n_vars &&
+            (ctx->vars[lid].flags & VAR_SIGNED) == (ctx->vars[rid].flags & VAR_SIGNED))
             _alias_union(alias, lid, rid);
     }
 }
@@ -3356,7 +3721,24 @@ static void _collect_eq_aliases(uint32_t *alias, SolveProblem *sp, ExprRef ref) 
 /* solver_compile                                                      */
 /* ------------------------------------------------------------------ */
 
+static int _solver_compile_body(SolveCtx *ctx, SolveProblem *sp);
+
+/* Builder-API expressions follow SystemVerilog sizing and signedness rules
+ * (zsp_sv.h). Every compile path below works on the ELABORATED problem, in
+ * which those rules have been made explicit -- constants sized at the type
+ * they are used at, value-changing conversions spelled out as EXPR_SV_CAST --
+ * so no propagator has to infer a context. The copy (if one was needed) lives
+ * only for the duration of the compile: nothing the context keeps points into
+ * the problem pool. */
 int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
+    int err = 0;
+    SolveProblem *esp = zsp_sv_elaborate(sp, NULL, NULL, &err);
+    int rc = _solver_compile_body(ctx, esp);
+    zsp_sv_release(sp, esp);
+    return rc;
+}
+
+static int _solver_compile_body(SolveCtx *ctx, SolveProblem *sp) {
     uint32_t n = sp->n_vars;
     if (n == 0) {
         ctx->vars   = NULL;
@@ -3533,7 +3915,7 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
             ExprRef scan = sp->constraints_head;
             while (scan != EXPR_NULL) {
                 ConstraintSpec *cs = (ConstraintSpec *)zsp_pool_ptr(&sp->pool, scan);
-                _collect_eq_aliases(ctx->var_alias, sp, cs->root);
+                _collect_eq_aliases(ctx, ctx->var_alias, sp, cs->root);
                 scan = cs->next;
             }
 
@@ -3551,6 +3933,19 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
                         if (new_lo > new_hi) return -2; /* UNSAT */
                         rv->lo = (int32_t)new_lo;
                         rv->hi = (int32_t)new_hi;
+                    } else {
+                        /* A tier-1 side (32-bit unsigned or 64-bit) used to be
+                         * skipped, so the root kept its own domain and every
+                         * read of the aliased var returned values outside the
+                         * var's declared range (`u32 x in [0,11] == u64 y in
+                         * [2^31-8, 2^31+7]` came back sat at 0, 0). Same
+                         * signedness is guaranteed (above), so tightening the
+                         * root by the alias's bounds -- the sign-aware 64-bit
+                         * tighteners order unsigned 64-bit patterns right -- is
+                         * the intersection. */
+                        if (ctx_tighten_lb64(ctx, root_id, var_lo64(ctx, iv)) == PROP_CONFLICT ||
+                            ctx_tighten_ub64(ctx, root_id, var_hi64(ctx, iv)) == PROP_CONFLICT)
+                            return -2;   /* UNSAT */
                     }
                     /* Mark aliased var as singleton pointing to root value.
                      * It won't be in the unassigned set. */
@@ -3656,6 +4051,27 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
                                     }
                                 }
                                 /* Create implication propagators gated by avar_id */
+                                if (scv <= (int64_t)INT32_MIN || scv >= (int64_t)INT32_MAX) {
+                                    int64_t b = scv;
+                                    int ub = -1, both = 0;
+                                    switch (sop) {
+                                    case BIN_EQ:  both = 1; break;
+                                    case BIN_LTE: ub = 1; break;
+                                    case BIN_LT:  ub = 1; b = scv - 1; break;
+                                    case BIN_GTE: ub = 0; break;
+                                    case BIN_GT:  ub = 0; b = scv + 1; break;
+                                    default: break;
+                                    }
+                                    if (both) {
+                                        prop_add_implication_64(ctx, avar_id, svid, b, 1, 0);
+                                        prop_add_implication_64(ctx, avar_id, svid, b, 0, 0);
+                                        soft_compiled = 1;
+                                    } else if (ub >= 0) {
+                                        prop_add_implication_64(ctx, avar_id, svid, b, (uint8_t)ub, 0);
+                                        soft_compiled = 1;
+                                    }
+                                    sop = BIN_AND;   /* handled: skip the int32 switch */
+                                }
                                 switch (sop) {
                                 case BIN_EQ:
                                     prop_add_implication_32(ctx, avar_id, svid, (int32_t)scv, 1, 0);
@@ -3897,7 +4313,26 @@ int solver_compile(SolveCtx *ctx, SolveProblem *sp) {
 /* solver_add_constraint — incremental constraint addition            */
 /* ------------------------------------------------------------------ */
 
+static int _solver_add_constraint_body(SolveCtx *ctx, SolveProblem *aux_sp);
+
+/* Type of a variable the incremental problem references but does not declare. */
+static int _ctx_var_type(void *ud, uint32_t vid, uint16_t *w, uint8_t *sgn) {
+    SolveCtx *ctx = (SolveCtx *)ud;
+    if (vid >= ctx->n_vars) return -1;
+    *w = ctx->vars[vid].width;
+    *sgn = (ctx->vars[vid].flags & VAR_SIGNED) ? 1 : 0;
+    return 0;
+}
+
 int solver_add_constraint(SolveCtx *ctx, SolveProblem *aux_sp) {
+    int err = 0;
+    SolveProblem *esp = zsp_sv_elaborate(aux_sp, _ctx_var_type, ctx, &err);
+    int rc = _solver_add_constraint_body(ctx, esp);
+    zsp_sv_release(aux_sp, esp);
+    return rc;
+}
+
+static int _solver_add_constraint_body(SolveCtx *ctx, SolveProblem *aux_sp) {
     int n_uncompiled = 0;
 
     /* ---- Add new variables ----
