@@ -137,7 +137,12 @@ typedef struct {
 #define DVS_COMPILE_OK                  0
 #define DVS_COMPILE_NOMEM             (-1)  /* the context buffer is too small */
 #define DVS_COMPILE_UNSAT             (-2)  /* no solution exists              */
-#define DVS_COMPILE_UNSUPPORTED_WIDTH (-3)  /* a variable is wider than 64 bits */
+#define DVS_COMPILE_UNSUPPORTED_WIDTH (-3)  /* a variable is wider than 64 bits,
+                                             * or an expression wider than 255
+                                             * bits or nested too deeply     */
+#define DVS_COMPILE_BAD_VAR           (-4)  /* variable ids are not 0..n-1, each
+                                             * declared once, or an expression
+                                             * names an undeclared variable  */
 
 /* ------------------------------------------------------------------ */
 /* Building a problem                                                  */
@@ -162,8 +167,9 @@ void dvs_builder_reset(dvs_builder_t *b);
 /**
  * Declare variable `var_id`.
  *
- * @param var_id     Your id for the variable, used in dvs_builder_expr_var()
- *                   and dvs_solver_get_value().
+ * @param var_id     The variable's id, used in dvs_builder_expr_var() and
+ *                   dvs_solver_get_value(). A problem with n variables uses
+ *                   the ids 0 to n-1, each declared once.
  * @param width      Width in bits, 1 to 64.
  * @param is_signed  1 if the variable is signed.
  * @param lo, hi     The variable's value must lie in [lo, hi].
@@ -304,10 +310,10 @@ void dvs_solver_destroy(dvs_ctx_t *ctx);
  * context is destroyed.
  *
  * @return  DVS_COMPILE_OK; DVS_COMPILE_UNSAT if no solution exists;
- *          DVS_COMPILE_NOMEM or DVS_COMPILE_UNSUPPORTED_WIDTH on failure; or
- *          a positive count of constraints that could not be compiled. A
- *          solve after a positive return would ignore those constraints, so
- *          treat it as an error.
+ *          DVS_COMPILE_NOMEM, DVS_COMPILE_UNSUPPORTED_WIDTH or
+ *          DVS_COMPILE_BAD_VAR on failure; or a positive count of
+ *          constraints that could not be compiled. A solve after a positive
+ *          return would ignore those constraints, so treat it as an error.
  */
 int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *p);
 
@@ -326,7 +332,8 @@ int64_t dvs_solver_get_value(const dvs_ctx_t *ctx, uint32_t var_id);
 void dvs_solver_get_values(const dvs_ctx_t *ctx, uint32_t n,
                            const uint32_t *var_ids, int64_t *out);
 
-/** Clear the previous solution so dvs_solver_solve() can run again. */
+/** Clear the previous solution so dvs_solver_solve() can run again. Call it
+ *  before every solve after the first; it also removes pins. */
 void dvs_solver_reset(dvs_ctx_t *ctx);
 
 /**
@@ -350,8 +357,8 @@ int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
  * Add the constraints of problem `p` to an already compiled context. `p`
  * must stay valid until the context is destroyed.
  *
- * @return  0; -1 if the context buffer is too small; -2 if no solution
- *          remains.
+ * @return  The same codes as dvs_solver_compile(). `p` may name variables
+ *          the context already has without declaring them.
  */
 int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *p);
 
@@ -363,8 +370,9 @@ int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *p);
  */
 int dvs_solver_checkpoint(dvs_ctx_t *ctx);
 
-/** Return to the state saved by dvs_solver_checkpoint(), dropping constraints
- *  added since. */
+/** Return to the state saved by dvs_solver_checkpoint(), dropping pins and
+ *  constraints added since. Checkpoint `cp` and every later one are
+ *  discarded; take a new checkpoint to restore to the same state again. */
 void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp);
 
 /**

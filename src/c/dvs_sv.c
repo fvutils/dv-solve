@@ -77,6 +77,8 @@ typedef struct {
     uint32_t  memo_n;
 
     int       err;
+    int       oom;             /* err was caused by running out of memory */
+    int       unknown_var;     /* err was caused by an undeclared variable */
     int       depth;
 } SvE;
 
@@ -118,7 +120,7 @@ static void _memo_put(SvE *E, uint64_t k, uint32_t v) {
     if ((E->memo_n + 1) * 2 > E->memo_cap) {
         uint32_t nc = E->memo_cap ? E->memo_cap * 2 : 1024;
         SvMemo *nm = (SvMemo *)calloc(nc, sizeof(SvMemo));
-        if (!nm) { E->err = 1; return; }
+        if (!nm) { E->err = E->oom = 1; return; }
         for (uint32_t i = 0; i < E->memo_cap; i++) {
             if (!E->memo[i].used) continue;
             uint32_t j = _hash(E->memo[i].key) & (nc - 1);
@@ -151,10 +153,10 @@ static dvs_expr_t _alloc(SvE *E, uint32_t bytes, uint32_t align) {
         uint32_t base = E->src->pool.capacity > used ? E->src->pool.capacity : used;
         base = (base + 15u) & ~15u;
         size_t cap = (size_t)base + used / 2 + 4096;
-        if (cap > 0xF0000000u) { E->err = 1; return EXPR_NULL; }
+        if (cap > 0xF0000000u) { E->err = E->oom = 1; return EXPR_NULL; }
         size_t total = sizeof(dvs_problem_t) + cap;
         dvs_problem_t *d = (dvs_problem_t *)malloc(total);
-        if (!d) { E->err = 1; return EXPR_NULL; }
+        if (!d) { E->err = E->oom = 1; return EXPR_NULL; }
         memcpy(d, E->src, sizeof(dvs_problem_t) + used);
         d->pool.capacity = (uint32_t)cap;
         d->pool.used = base;
@@ -168,9 +170,9 @@ static dvs_expr_t _alloc(SvE *E, uint32_t bytes, uint32_t align) {
     if ((uint64_t)base + bytes > d->pool.capacity) {
         size_t cap = (size_t)d->pool.capacity * 2;
         if (cap < (size_t)base + bytes + 4096) cap = (size_t)base + bytes + 4096;
-        if (cap > 0xF0000000u) { E->err = 1; return EXPR_NULL; }
+        if (cap > 0xF0000000u) { E->err = E->oom = 1; return EXPR_NULL; }
         dvs_problem_t *nd = (dvs_problem_t *)realloc(d, sizeof(dvs_problem_t) + cap);
-        if (!nd) { E->err = 1; return EXPR_NULL; }
+        if (!nd) { E->err = E->oom = 1; return EXPR_NULL; }
         nd->pool.capacity = (uint32_t)cap;
         E->dst = d = nd;
         E->dst_bytes = sizeof(dvs_problem_t) + cap;
@@ -336,7 +338,7 @@ static SvTy _var_type(SvE *E, uint32_t vid) {
         uint16_t w; uint8_t s;
         if (E->vfn(E->vud, vid, &w, &s) == 0) { t.w = w; t.s = s ? 1 : 0; return t; }
     }
-    E->err = 1;   /* unknown variable: cannot type the expression */
+    E->err = E->unknown_var = 1;   /* cannot type the expression */
     t.w = 1;
     return t;
 }
@@ -744,7 +746,7 @@ static dvs_expr_t _in(SvE *E, dvs_expr_t ref) {
     if (n == 0) return ref;
     dvs_expr_t *it = (dvs_expr_t *)malloc(n * sizeof(dvs_expr_t));
     dvs_expr_t *nw = (dvs_expr_t *)malloc(n * sizeof(dvs_expr_t));
-    if (!it || !nw) { free(it); free(nw); E->err = 1; return EXPR_NULL; }
+    if (!it || !nw) { free(it); free(nw); E->err = E->oom = 1; return EXPR_NULL; }
     memcpy(it, (char *)_P(E, ref) + (k == EXPR_IN_SET ? sizeof(ExprInSet)
                                                       : sizeof(ExprInRanges)),
            n * sizeof(dvs_expr_t));
@@ -883,7 +885,7 @@ dvs_problem_t *dvs_sv_elaborate(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
         E.vw = (uint16_t *)calloc(E.nv, sizeof(uint16_t));
         E.vs = (uint8_t *)calloc(E.nv, 1);
         E.vk = (uint8_t *)calloc(E.nv, 1);
-        if (!E.vw || !E.vs || !E.vk) E.err = 1;
+        if (!E.vw || !E.vs || !E.vk) E.err = E.oom = 1;
         for (dvs_expr_t c = sp->vars_head; c != EXPR_NULL && !E.err; ) {
             VarSpec *v = (VarSpec *)POOL_PTR(sp, c);
             E.vw[v->var_id] = v->width;
@@ -916,7 +918,9 @@ dvs_problem_t *dvs_sv_elaborate(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
     free(E.memo);
     if (E.err) {
         free(E.dst);
-        if (err) *err = 1;
+        if (err) *err = E.unknown_var ? DVS_SV_ERR_UNKNOWN_VAR
+                      : E.oom         ? DVS_SV_ERR_NOMEM
+                      :                 DVS_SV_ERR_UNSUPPORTED;
         return sp;
     }
     if (!E.dst) return sp;
@@ -967,7 +971,7 @@ int dvs_sv_elaborate_more(dvs_problem_t **elab, const dvs_problem_t *orig,
         E.vw = (uint16_t *)calloc(E.nv, sizeof(uint16_t));
         E.vs = (uint8_t *)calloc(E.nv, 1);
         E.vk = (uint8_t *)calloc(E.nv, 1);
-        if (!E.vw || !E.vs || !E.vk) E.err = 1;
+        if (!E.vw || !E.vs || !E.vk) E.err = E.oom = 1;
         for (dvs_expr_t c = d->vars_head; c != EXPR_NULL && !E.err; ) {
             VarSpec *v = (VarSpec *)POOL_PTR(d, c);
             E.vw[v->var_id] = v->width;

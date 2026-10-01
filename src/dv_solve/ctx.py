@@ -47,8 +47,9 @@ class _SolveOpts(ctypes.Structure):
     ]
 
 
-# Mirrors DVS_COMPILE_UNSUPPORTED_WIDTH in dv_solve.h.
+# Mirror DVS_COMPILE_UNSUPPORTED_WIDTH and DVS_COMPILE_BAD_VAR in dv_solve.h.
 _COMPILE_UNSUPPORTED_WIDTH = -3
+_COMPILE_BAD_VAR = -4
 
 
 class CompileUnsatError(Exception):
@@ -71,9 +72,10 @@ class CompileIncompleteError(Exception):
 
 
 class CompileUnsupportedError(CompileIncompleteError):
-    """The problem declares a variable wider than 64 bits.
+    """The problem is larger than the API supports.
 
-    The Python API supports variables up to 64 bits wide. Wider bit-vectors
+    The Python API supports variables up to 64 bits wide, expressions up to
+    255 bits wide, and expressions nested up to 20000 deep. Wider bit-vectors
     are supported through the SMT-LIB2 front end (``dv-solve-smt2``).
     """
 
@@ -143,9 +145,16 @@ class SolveCtx:
             lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             raise CompileUnsupportedError(
-                "problem declares a variable wider than 64 bits, which the "
-                "propagator engine cannot search; use the bit-blasting engine "
-                "(dv_solve.bvsat.BVSatCtx) for this problem"
+                "problem declares a variable wider than 64 bits, or builds an "
+                "expression wider than 255 bits or nested more than 20000 "
+                "deep; wider bit-vectors are supported through SMT-LIB2"
+            )
+        if rc == _COMPILE_BAD_VAR:
+            lib.dvs_block_alloc_destroy(self._ba)
+            self._ba = None
+            raise ValueError(
+                "variable ids must be 0..n-1, each declared once with add_var, "
+                "and every variable an expression names must be declared"
             )
         if rc < 0:
             lib.dvs_block_alloc_destroy(self._ba)
@@ -263,7 +272,9 @@ class SolveCtx:
     def add_constraint(self, aux_problem) -> int:
         """Add constraints from an auxiliary SolveProblem to this context.
 
-        Returns 0 on success, -1 if capacity exceeded, -2 if UNSAT.
+        Returns 0 on success, -1 if capacity exceeded, -2 if UNSAT, -3 for
+        an unsupported width, -4 for an undeclared variable, or a positive
+        count of constraints that could not be compiled.
         """
         sp_ptr = getattr(aux_problem, "_sp", None)
         if sp_ptr is None:

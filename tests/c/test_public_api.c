@@ -119,6 +119,17 @@ int main(void) {
     dvs_solver_destroy(ctx);
     dvs_builder_free_problem(b, p, sz);
 
+    /* An expression naming an undeclared variable is refused. */
+    dvs_builder_reset(b);
+    dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_GT,
+        dvs_builder_expr_var(b, 0), dvs_builder_expr_var(b, 3)));
+    p = dvs_builder_finalize(b, &sz);
+    ctx = dvs_solver_create(buf, CTX_SIZE, ba);
+    CHECK(dvs_solver_compile(ctx, p) == DVS_COMPILE_BAD_VAR);
+    dvs_solver_destroy(ctx);
+    dvs_builder_free_problem(b, p, sz);
+
     dvs_builder_destroy(b);
     dvs_block_alloc_destroy(ba);
     free(buf);

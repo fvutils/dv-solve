@@ -76,8 +76,13 @@ typedef int (*dvs_sv_var_type_fn)(void *ud, uint32_t var_id,
  * new nodes, with the roots replaced -- that the caller releases with
  * dvs_sv_release(). Every dvs_expr_t of `sp` is valid in the copy.
  *
- * On failure (out of memory, a width the node formats cannot hold, a variable
- * of unknown type) returns `sp` unchanged and sets *err non-zero. */
+ * On failure returns `sp` unchanged and sets *err to a DVS_SV_ERR_* code. The
+ * caller must then refuse the problem: `sp` itself is NOT in explicit form, and
+ * an engine that used it would apply different sizing rules from the ones the
+ * problem was written for. */
+#define DVS_SV_ERR_UNSUPPORTED  1  /* a width over 255 bits, or nesting too deep */
+#define DVS_SV_ERR_NOMEM        2
+#define DVS_SV_ERR_UNKNOWN_VAR  3  /* an expression names an undeclared variable */
 dvs_problem_t *dvs_sv_elaborate(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
                                void *ud, int *err);
 

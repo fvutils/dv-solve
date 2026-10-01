@@ -121,8 +121,9 @@ class SolveProblemBuilder:
         """Declare a variable.
 
         Args:
-            var_id: Identifier you choose for the variable. Expressions and
-                :meth:`SolveCtx.get_value` refer to it by this id.
+            var_id: The variable's id, which expressions and
+                :meth:`SolveCtx.get_value` use to refer to it. A problem with
+                n variables uses the ids 0 to n-1, each declared once.
             width: Width in bits, 1 to 64.
             is_signed: Whether the variable holds signed values.
             lo: Smallest value the variable may take.

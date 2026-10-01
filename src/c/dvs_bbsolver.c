@@ -1112,6 +1112,12 @@ static dvs_bbsolver_t *bbsolver_new_ex(dvs_alloc_t *alloc, dvs_problem_t *proble
     {
         int err = 0;
         dvs_problem_t *esp = dvs_sv_elaborate(problem, NULL, NULL, &err);
+        if (err) {
+            /* Not in explicit form: blasting it would apply different sizing
+             * rules from the problem's, or read an undeclared variable. */
+            xfree(alloc, S, sizeof(*S));
+            return NULL;
+        }
         if (esp != problem) {
             S->orig_problem = problem;
             S->orig_synced = problem->pool.used;

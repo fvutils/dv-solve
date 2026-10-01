@@ -3755,9 +3755,22 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp);
  * so no propagator has to infer a context. The copy (if one was needed) lives
  * only for the duration of the compile: nothing the context keeps points into
  * the problem pool. */
+/* A problem that cannot be elaborated must be refused, not compiled as it
+ * stands: un-elaborated, its expressions would be read under different sizing
+ * rules from the ones they were written for, and an undeclared variable would
+ * silently be a zero-initialised slot. */
+static int _elab_error_code(int err) {
+    switch (err) {
+    case DVS_SV_ERR_NOMEM:       return DVS_COMPILE_NOMEM;
+    case DVS_SV_ERR_UNKNOWN_VAR: return DVS_COMPILE_BAD_VAR;
+    default:                     return DVS_COMPILE_UNSUPPORTED_WIDTH;
+    }
+}
+
 int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     int err = 0;
     dvs_problem_t *esp = dvs_sv_elaborate(sp, NULL, NULL, &err);
+    if (err) return _elab_error_code(err);
     int rc = _solver_compile_body(ctx, esp);
     dvs_sv_release(sp, esp);
     return rc;
@@ -3811,12 +3824,13 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         VarSpec *vs = (VarSpec *)dvs_pool_ptr(&sp->pool, ref);
         uint32_t id = vs->var_id;
 
-        if (id >= n) {
-            /* var_id out of range — pool corruption or misuse */
-            return -1;
-        }
+        /* Ids must be exactly 0..n-1, each declared once. A gap leaves a
+         * zero-initialised slot that expressions could name; a duplicate
+         * overwrites one declaration with another. */
+        if (id >= n || vs->width == 0) return DVS_COMPILE_BAD_VAR;
 
         Variable *v = &ctx->vars[id];
+        if (v->width != 0) return DVS_COMPILE_BAD_VAR;   /* declared twice */
         uint8_t  flags = 0;
         if (vs->is_signed) flags |= VAR_SIGNED;
         if (vs->is_aux)    flags |= VAR_AUX;
@@ -4352,6 +4366,7 @@ static int _ctx_var_type(void *ud, uint32_t vid, uint16_t *w, uint8_t *sgn) {
 int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
     int err = 0;
     dvs_problem_t *esp = dvs_sv_elaborate(aux_sp, _ctx_var_type, ctx, &err);
+    if (err) return _elab_error_code(err);
     int rc = _solver_add_constraint_body(ctx, esp);
     dvs_sv_release(aux_sp, esp);
     return rc;
