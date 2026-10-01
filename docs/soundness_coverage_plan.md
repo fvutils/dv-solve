@@ -432,6 +432,37 @@ Holes it shows:
 Named `DVS_COVER` counters (§4.2) are still to do. They are needed for the
 bins gcov cannot express, such as "learning seed kind × resolution kind".
 
+### P4 — gap assessment (first mutation score: 13/18)
+
+`python -m tests.formal.soundness.mutation --work DIR` plants 18 one-place
+bugs of the backlog's kinds and runs the detectors on each:
+- the propagator harness;
+- the pinned repros;
+- the pinned pytest files;
+- the campaign;
+- the `unknown` rate against the baseline;
+- the stress set and a campaign on the step-checker build.
+
+Caught (13): missing own-bound literal; no rewind (stress set only);
+`sum`, `disj` and all-different explainers; the reification edge and an
+off-by-one in it; `ite` entailment (pytest only); `mul` zero factor; ungated
+compile fallback; unguarded division by zero; the frontend compiled flag;
+`bvadd` wrap width.
+
+Missed (5), each a missing stimulus:
+
+| Mutant | Why nothing caught it | Work item |
+|---|---|---|
+| no guard literal in learnt clauses | after B53 only array selects create guarded propagators, and no door generates arrays | array stimulus (QF_ABV) in the generator |
+| no forced resolution of the domain-emptying step | the fallbacks (tautology / duplicate) now absorb it on every problem tried | a learning stress problem where the emptying step is the lone current-level literal |
+| stale culprit propagator (B51) | no problem exhausts a domain split with learning on | stress problems built to exhaust splits |
+| 64-bit unsigned compared as signed | narrow campaign has no 64-bit variables; the wide campaign was not part of the run | run `--wide` in the mutation campaign |
+| no alias resolve in the gated compile path | needs `x == y` merged plus a guarded `x op K`; SMT-LIB2 masks it (validation + bitblast) and the builder door rarely draws both | bias the generator: alias + `ite(x == K, ...)` on the merged variable in builder-safe problems |
+
+The run also exposed two harness gaps, fixed: `disj_clause` had no harness
+case, and an earlier runner bug (stale objects between mutants) produced a
+misleading 14/18. The runner now restores files with fresh timestamps.
+
 ### P5 — continuous (finding before starting)
 
 **No CI job runs the test suites today.**
