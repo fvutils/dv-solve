@@ -108,6 +108,11 @@ static int h_inset(const int64_t *v, const Case *c) {
 static int h_alldiff(const int64_t *v, const Case *c) {
     (void)c; return v[0] != v[1] && v[0] != v[2] && v[1] != v[2];
 }
+static int h_disj3(const int64_t *v, const Case *c) { (void)c; return v[0] == 2 || v[1] < v[2] || v[2] >= 5; }
+static int h_disj2(const int64_t *v, const Case *c) { (void)c; return v[0] != v[1] || v[0] <= 1; }
+static int h_disj4(const int64_t *v, const Case *c) {
+    (void)c; return v[0] > v[1] || v[1] == 3 || v[2] != v[3] || v[3] <= 0;
+}
 static int h_sum(const int64_t *v, const Case *c)  { (void)c; return v[0] == v[1] + v[2] + v[3]; }
 static int h_sum2x(const int64_t *v, const Case *c) { (void)c; return v[0] == v[1] + v[1] + v[2]; }
 static int h_countones(const int64_t *v, const Case *c) {
@@ -174,6 +179,27 @@ static uint32_t a_sum2x(dvs_ctx_t *x, const Case *c) {
     (void)c; uint32_t ids[3] = { 1, 1, 2 };
     return prop_add_sum_eq_32(x, 0, 3, ids, 0);
 }
+static uint32_t a_disj3(dvs_ctx_t *x, const Case *c) {
+    (void)c;
+    uint32_t vars[3] = { 0, 1, 2 }, ops[3] = { DVS_BIN_EQ, DVS_BIN_LT, DVS_BIN_GTE };
+    int64_t k[3] = { 2, 0, 5 };
+    uint32_t rhs[3] = { UINT32_MAX, 2, UINT32_MAX };
+    return prop_add_disj_clause(x, 3, vars, ops, k, 0, rhs);
+}
+static uint32_t a_disj2(dvs_ctx_t *x, const Case *c) {
+    (void)c;
+    uint32_t vars[2] = { 0, 0 }, ops[2] = { DVS_BIN_NEQ, DVS_BIN_LTE };
+    int64_t k[2] = { 0, 1 };
+    uint32_t rhs[2] = { 1, UINT32_MAX };
+    return prop_add_disj_clause(x, 2, vars, ops, k, 0, rhs);
+}
+static uint32_t a_disj4(dvs_ctx_t *x, const Case *c) {
+    (void)c;
+    uint32_t vars[4] = { 0, 1, 2, 3 }, ops[4] = { DVS_BIN_GT, DVS_BIN_EQ, DVS_BIN_NEQ, DVS_BIN_LTE };
+    int64_t k[4] = { 0, 3, 0, 0 };
+    uint32_t rhs[4] = { 1, UINT32_MAX, 3, UINT32_MAX };
+    return prop_add_disj_clause(x, 4, vars, ops, k, 0, rhs);
+}
 static uint32_t a_countones(dvs_ctx_t *x, const Case *c) { (void)c; return prop_add_countones_32(x, 0, 1, 0); }
 static uint32_t a_clog2(dvs_ctx_t *x, const Case *c)     { (void)c; return prop_add_clog2_32(x, 0, 1, 0); }
 
@@ -233,6 +259,9 @@ static const Case CASES[] = {
     { "in_set_32 {1,4,6}", 1, {3}, {0}, a_inset32, h_inset, {1, 4, 6} },
     { "in_set_64 {0,3,7}", 1, {3}, {0}, a_inset64, h_inset, {0, 3, 7} },
     { "all_different", 3, {U3}, {0}, a_alldiff, h_alldiff, {0} },
+    { "disj x==2|y<z|z>=5", 3, {U3}, {0}, a_disj3, h_disj3, {0} },
+    { "disj x!=y|x<=1 s", 2, {U3}, {S3}, a_disj2, h_disj2, {0} },
+    { "disj 4 vars", 4, {2, 2, 2, 2}, {0}, a_disj4, h_disj4, {0} },
     { "sum_eq 3", 4, {3, 2, 2, 2}, {0}, a_sum, h_sum, {0} },
     { "sum_eq x+x+y", 3, {3, 2, 2}, {0}, a_sum2x, h_sum2x, {0} },
     { "countones", 2, {3, 3}, {0}, a_countones, h_countones, {0} },

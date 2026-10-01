@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 6))
+(declare-const y (_ BitVec 6))
+(assert (=> (or (bvsgt x (_ bv15 6)) (bvugt y (_ bv28 6)) (bvsle x x) (bvsle (_ bv10 6) x) (= x y)) (bvult (ite (bvugt x y) x y) (ite (bvugt x y) x y))))
+(check-sat)

@@ -11,7 +11,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 
-from .ir import Problem, ev, satisfiable, smt, width
+from .ir import OracleUndecided, Problem, ev, satisfiable, smt, width
 
 
 @dataclass
@@ -49,7 +49,10 @@ def _check_model(p: Problem, cons: list, m: dict) -> bool:
 
 
 def smt2_batch(p: Problem, exe: str, timeout: float = 60.0) -> list:
-    exp = "sat" if satisfiable(p.widths, p.cons) else "unsat"
+    try:
+        exp = "sat" if satisfiable(p.widths, p.cons) else "unsat"
+    except OracleUndecided:
+        return []
     try:
         r = subprocess.run([exe], input=p.smt2(), capture_output=True, text=True,
                            timeout=timeout)
@@ -71,8 +74,11 @@ def smt2_incremental(p: Problem, exe: str, timeout: float = 60.0) -> list:
     script = (decl + "".join(f"(assert {smt(c)})\n" for c in first) + "(check-sat)\n"
               "(push 1)\n" + "".join(f"(assert {smt(c)})\n" for c in rest) + "(check-sat)\n"
               "(get-value (" + " ".join(p.widths) + "))\n(pop 1)\n(check-sat)\n")
-    exps = ["sat" if satisfiable(p.widths, first) else "unsat",
-            "sat" if satisfiable(p.widths, p.cons) else "unsat"]
+    try:
+        exps = ["sat" if satisfiable(p.widths, first) else "unsat",
+                "sat" if satisfiable(p.widths, p.cons) else "unsat"]
+    except OracleUndecided:
+        return []
     exps.append(exps[0])
     try:
         r = subprocess.run([exe, "--interactive"], input=script, capture_output=True,
@@ -145,7 +151,12 @@ def builder(p: Problem, time_limit_ms: int = 10000) -> list:
     from dv_solve.builder import SolveProblemBuilder
     from dv_solve.ctx import (SolveCtx, CompileUnsatError, CompileIncompleteError,
                               SOLVE_OK, SOLVE_UNSAT, _SolveOpts)
-    exp = "sat" if satisfiable(p.widths, p.cons) else "unsat"
+    if max(p.widths.values()) > 64:
+        return []                    # the builder's variables are at most 64 bits
+    try:
+        exp = "sat" if satisfiable(p.widths, p.cons) else "unsat"
+    except OracleUndecided:
+        return []
     ids = {n: i for i, n in enumerate(p.widths)}
     b = SolveProblemBuilder()
     for n, w in p.widths.items():

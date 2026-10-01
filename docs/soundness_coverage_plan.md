@@ -354,7 +354,8 @@ sub-intervals. Checks, against a truth function written in the test:
 - every explanation, given in the state the propagator saw, implies its bound
   over the full domains.
 
-It checks 630,000 explanations per run. It found the `bounds_mul_32` zero
+It checks 630,000 explanations per run. `disj_clause` (the `or` of comparisons)
+was added after the mutation campaign showed it was not covered (§P4). It found the `bounds_mul_32` zero
 factor, B55 and B57 directly, and would have found B54.
 
 Validated against history:
@@ -378,6 +379,13 @@ Validated against history:
 | `test_campaign_smoke.py` | Two fixed seeds × 150 problems in every suite run (~5 s). |
 
 Throughput: 1,500 problems through all three doors in about 21 s per process.
+
+Wide mode (`--wide FRACTION`): layouts of 16, 32, 33, 63, 64 and 65 bits,
+covering the 2^31 / 2^32 / 2^63 / 2^64 boundaries (backlog cluster 2) and the
+>64-bit bitblast path. They are too wide to enumerate, so the oracle falls
+back to z3. A problem z3 cannot decide is skipped, and every model is still
+checked by the evaluator. Wide problems cost about 1.3 s each, so they run
+in the nightly campaign, not the smoke test.
 
 What it found:
 - The first 400 problems found B52.
@@ -423,6 +431,25 @@ Holes it shows:
 
 Named `DVS_COVER` counters (§4.2) are still to do. They are needed for the
 bins gcov cannot express, such as "learning seed kind × resolution kind".
+
+### P5 — continuous (finding before starting)
+
+**No CI job runs the test suites today.**
+- `.github/workflows/wheels.yml` builds wheels and runs
+  `tests/wheel_smoke.py` (an import check).
+- `.forgejo/workflows/ci.yml` checks repository policy (no internal
+  identifiers, no publisher).
+
+ctest, the unit and formal suites, the propagator harness and the campaign
+smoke test run only when someone runs them by hand. P5 therefore starts with
+a test job, added as a pair (`.github/` and `.forgejo/`) per the CI rules:
+- build;
+- ctest;
+- `pytest tests/unit tests/formal`, including the campaign smoke test;
+- a `-DDVS_STEP_CHECK=ON` build running `test_lcg_stress.py`.
+
+Then a nightly job: fresh seeds, `--wide 0.2`, the step-checker campaign and
+the mutation score. This needs the §7 budget decision.
 
 ### Completeness gaps found (sound, but `unknown`)
 

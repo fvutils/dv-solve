@@ -137,5 +137,36 @@ def solutions(widths: dict, cons: list):
             yield env
 
 
+ENUM_LIMIT_BITS = 16
+
+
+class OracleUndecided(Exception):
+    """Too wide to enumerate, and z3 did not answer either."""
+
+
+def _z3() -> str | None:
+    import shutil
+    from pathlib import Path
+    local = Path(__file__).resolve().parents[3] / "packages" / "python" / "bin" / "z3"
+    return str(local) if local.is_file() else shutil.which("z3")
+
+
 def satisfiable(widths: dict, cons: list) -> bool:
-    return next(solutions(widths, cons), None) is not None
+    """Enumerate when the free bits allow it; otherwise ask z3."""
+    if sum(widths.values()) <= ENUM_LIMIT_BITS:
+        return next(solutions(widths, cons), None) is not None
+    import subprocess
+    z3 = _z3()
+    if z3 is None:
+        raise OracleUndecided("z3 not found")
+    script = Problem(widths, cons).smt2(get_model=False)
+    try:
+        out = subprocess.run([z3, "-in", "-T:30"], input=script, capture_output=True,
+                             text=True, timeout=60).stdout.split()
+    except subprocess.TimeoutExpired:
+        raise OracleUndecided("z3 timed out")
+    if out[:1] == ["sat"]:
+        return True
+    if out[:1] == ["unsat"]:
+        return False
+    raise OracleUndecided(f"z3 said {out[:1]}")

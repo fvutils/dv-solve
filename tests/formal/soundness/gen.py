@@ -18,6 +18,12 @@ _BUILDER_CMP = ["=", "distinct", "bvult", "bvule", "bvugt", "bvuge"]
 WIDTHS = [{"x": 4, "y": 4, "z": 4}, {"x": 3, "y": 3, "z": 6}, {"x": 6, "y": 6},
           {"a": 1, "x": 5, "y": 5}, {"x": 8, "y": 4}, {"x": 2, "y": 2, "z": 2, "u": 2}]
 
+# Wide layouts: the 2^31 / 2^32 / 2^63 / 2^64 boundaries and the >64-bit
+# (bitblast) path. Too wide to enumerate; z3 is the oracle.
+WIDE_WIDTHS = [{"x": 16, "y": 16}, {"x": 32, "y": 32}, {"x": 33, "y": 33, "z": 32},
+               {"x": 63, "y": 63}, {"x": 64, "y": 64}, {"x": 64, "y": 64, "z": 64},
+               {"x": 65, "y": 65}, {"a": 1, "x": 64, "y": 32}]
+
 
 class Gen:
     def __init__(self, rng: random.Random, widths: dict, builder_safe: bool = False):
