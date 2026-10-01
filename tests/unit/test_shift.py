@@ -17,10 +17,10 @@ _CTX_BUF_SIZE = 524288
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -42,10 +42,10 @@ def _setup(lib: ctypes.CDLL):
     lib.solver_compile.restype  = ctypes.c_int
     lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     lib.solver_propagate.restype  = ctypes.c_int
     lib.solver_propagate.argtypes = [ctypes.c_void_p]
@@ -95,7 +95,7 @@ def _make_ctx(lib, var_specs):
     for i, (width, is_signed, lo, hi) in enumerate(var_specs):
         ref = lib.problem_add_var(sp, i, width, is_signed, lo, hi)
         assert ref != EXPR_NULL
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -103,20 +103,20 @@ def _make_ctx(lib, var_specs):
 
 
 def _lo(lib, ctx, i):
-    return lib.zsp_var_lo64(ctx, i)
+    return lib.dvs_var_lo64(ctx, i)
 
 
 def _hi(lib, ctx, i):
-    return lib.zsp_var_hi64(ctx, i)
+    return lib.dvs_var_hi64(ctx, i)
 
 
 # ------------------------------------------------------------------ #
 # SHL tests                                                           #
 # ------------------------------------------------------------------ #
 
-def test_shl_const(libzsp):
+def test_shl_const(libdvs):
     """r = a << 3; a=[1,4] -> r in [8, 32]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -133,12 +133,12 @@ def test_shl_const(libzsp):
     assert _lo(lib, ctx, 0) >= 8    # 1 << 3
     assert _hi(lib, ctx, 0) <= 32   # 4 << 3
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_shl_both_singletons(libzsp):
+def test_shl_both_singletons(libdvs):
     """r = 5 << 2 -> r = 20."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -155,12 +155,12 @@ def test_shl_both_singletons(libzsp):
     assert _lo(lib, ctx, 0) == 20
     assert _hi(lib, ctx, 0) == 20
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_shl_backward(libzsp):
+def test_shl_backward(libdvs):
     """r = a << 3; fix r=[24,24] -> a=[3,3]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -179,16 +179,16 @@ def test_shl_backward(libzsp):
     assert _lo(lib, ctx, 1) == 3
     assert _hi(lib, ctx, 1) == 3
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 # ------------------------------------------------------------------ #
 # LSHR tests                                                          #
 # ------------------------------------------------------------------ #
 
-def test_lshr_const(libzsp):
+def test_lshr_const(libdvs):
     """r = a >> 2; a=[8,15] -> r in [2,3]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -205,12 +205,12 @@ def test_lshr_const(libzsp):
     assert _lo(lib, ctx, 0) >= 2    # 8 >> 2
     assert _hi(lib, ctx, 0) <= 3    # 15 >> 2
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_lshr_both_singletons(libzsp):
+def test_lshr_both_singletons(libdvs):
     """r = 100 >> 3 -> r = 12."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -227,16 +227,16 @@ def test_lshr_both_singletons(libzsp):
     assert _lo(lib, ctx, 0) == 12
     assert _hi(lib, ctx, 0) == 12
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 # ------------------------------------------------------------------ #
 # Compilation tests                                                    #
 # ------------------------------------------------------------------ #
 
-def test_shl_compile_e2e(libzsp):
+def test_shl_compile_e2e(libdvs):
     """r == (a << b) via problem builder, then solve."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -255,7 +255,7 @@ def test_shl_compile_e2e(libzsp):
     eq_e  = lib.expr_binary(sp, BIN_EQ, v_r, shl_e)
     lib.problem_add_constraint(sp, eq_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -269,4 +269,4 @@ def test_shl_compile_e2e(libzsp):
     b = lib.solver_get_value(ctx, 2)
     assert r == (a << b), f"r={r} != a<<b = {a}<<{b} = {a<<b}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

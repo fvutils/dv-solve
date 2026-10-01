@@ -45,7 +45,7 @@ def _distinct_after_reset(result_width, n=8):
 
 
 @pytest.mark.parametrize("width", [8, 16, 31, 32, 40, 48, 63])
-def test_reset_restores_all_tiers(libzsp, width):
+def test_reset_restores_all_tiers(libdvs, width):
     # A working reset must produce several distinct values across seeds; a
     # broken reset pins the variable and yields exactly one.
     seen = _distinct_after_reset(width)

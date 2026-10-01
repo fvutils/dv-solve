@@ -3,7 +3,7 @@
 ## Motivation
 
 The original `SolveProblem` API requires a fixed-size buffer allocated up
-front.  On overflow, `zsp_pool_alloc` returns `EXPR_NULL` silently.
+front.  On overflow, `dvs_pool_alloc` returns `EXPR_NULL` silently.
 `SolveProblemBuilder` replaces this with a growable linked-list allocator
 that never overflows and produces exact-sized buffers on `finalize()`.
 
@@ -21,7 +21,7 @@ Builder (write)  -->  finalize()  -->  SolveProblem bytes (read)  -->  solver_co
 ```c
 // Create a builder.  block_size=0 uses the default (4096 bytes).
 // alloc=NULL uses malloc.
-SolveProblemBuilder *builder_create(uint32_t block_size, zsp_alloc_t *alloc);
+SolveProblemBuilder *builder_create(uint32_t block_size, dvs_alloc_t *alloc);
 
 // Reset to empty state, reusing allocated blocks.
 void builder_reset(SolveProblemBuilder *b);

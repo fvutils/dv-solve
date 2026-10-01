@@ -46,10 +46,10 @@ class ContraResult(ctypes.Structure):
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -90,16 +90,16 @@ def _setup(lib: ctypes.CDLL):
 
 
 def _make_ctx(lib):
-    ba = lib.zsp_block_alloc_create(None, 4096)
+    ba = lib.dvs_block_alloc_create(None, 4096)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
     return ctx_buf, ctx, ba
 
 
-def test_relax_le_simple(libzsp_debug):
+def test_relax_le_simple(libdvs_debug):
     """MUS {x >= 8, x <= 5}. Relaxation of x <= 5 -> x <= 8, delta = +3."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -136,12 +136,12 @@ def test_relax_le_simple(libzsp_debug):
         pytest.fail("No relaxation found for C2")
 
     lib.contra_result_free(ctypes.byref(result))
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_relax_ge_simple(libzsp_debug):
+def test_relax_ge_simple(libdvs_debug):
     """MUS {x >= 8, x <= 5}. Relaxation of x >= 8 -> x >= 5, delta = -3."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -173,12 +173,12 @@ def test_relax_ge_simple(libzsp_debug):
         pytest.fail("No relaxation found for C1")
 
     lib.contra_result_free(ctypes.byref(result))
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_relax_all_mus_constraints(libzsp_debug):
+def test_relax_all_mus_constraints(libdvs_debug):
     """Every relaxable MUS constraint should have a relaxation suggestion."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -206,12 +206,12 @@ def test_relax_all_mus_constraints(libzsp_debug):
             f"Constraint {r.constraint_id} has zero delta"
 
     lib.contra_result_free(ctypes.byref(result))
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_relax_in_result(libzsp_debug):
+def test_relax_in_result(libdvs_debug):
     """contra_analyze_unsat with default opts includes relaxations."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -234,4 +234,4 @@ def test_relax_in_result(libzsp_debug):
     assert result.relaxations is not None
 
     lib.contra_result_free(ctypes.byref(result))
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

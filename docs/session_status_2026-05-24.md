@@ -170,18 +170,18 @@ first pass.
 
 ## Files touched this session
 
-- `src/c/zsp_prop_templates.c` — bvnot width mask
+- `src/c/dvs_prop_templates.c` — bvnot width mask
 - `src/c/smt2/smt2_frontend.c` — push/pop aux cleanup,
   `_next_var_id` sync, `_fresh_aux` post-sync, `_add_var` grow,
   capacity hint, `_bool_to_var` EXTRACT fallback
 - `src/c/smt2/smt2_frontend.h` — `push_n_aux_problems`, bumped
   `SMT2_MAX_FUNS`
 - `src/c/smt2/smt2_main.c` — stderr divert when stdout is a pipe
-- `src/c/zsp_compile.c` — LIFO var init two-pass, concat & extend
+- `src/c/dvs_compile.c` — LIFO var init two-pass, concat & extend
   `_value_to_var` materialisation, `incremental_capacity_hint`
-- `src/c/zsp_ctx.h`, `zsp_ctx.c` — `incremental_capacity_hint`,
+- `src/c/dvs_ctx.h`, `dvs_ctx.c` — `incremental_capacity_hint`,
   `CheckpointMark.n_clauses_at_cp`
-- `src/c/zsp_checkpoint.c` — full pop cleanup (NULL post-cp
+- `src/c/dvs_checkpoint.c` — full pop cleanup (NULL post-cp
   prop_refs, roll back `n_props`, clear queue, re-enqueue pre-cp
   props, drop post-cp learnt clauses)
 

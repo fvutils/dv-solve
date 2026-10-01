@@ -33,12 +33,12 @@ def _candidate_paths() -> list[Path]:
     that module's docstring for the contract and for why ``LD_LIBRARY_PATH``
     is now a fallback rather than an override.
 
-    Two behaviours changed with that move. ``/tmp/pytest-*/zsp_build*`` is no
+    Two behaviours changed with that move. ``/tmp/pytest-*/dvs_build*`` is no
     longer searched: it let an unrelated, possibly half-built test tree supply
     the solver to production code on any developer box that had ever run the
     suite. The C unit-test fixtures never relied on it -- they build into a
     tmp_path and hand the path to ``ctypes.CDLL`` directly -- and any test that
-    wants a specific build must now say so via ``ZSP_SOLVER_PATH``.
+    wants a specific build must now say so via ``DVS_SOLVER_PATH``.
     """
     return [Path(d) for d in _resolve.lib_search_dirs()]
 
@@ -52,7 +52,7 @@ def _find_library() -> Optional[Path]:
 def _library_not_found_error() -> RuntimeError:
     """Build an actionable error for when the native library is unavailable.
 
-    When an installation WAS selected (``ZSP_SOLVER_PATH`` set, typically) the
+    When an installation WAS selected (``DVS_SOLVER_PATH`` set, typically) the
     error names it, rather than reporting a generic search failure.
     """
     if _resolve.select_installation() is not None:
@@ -70,11 +70,11 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     _wire_builder_argtypes(lib)
     c = ctypes
 
-    # zsp_block_alloc
-    lib.zsp_block_alloc_create.restype  = c.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [c.c_void_p]
+    # dvs_block_alloc
+    lib.dvs_block_alloc_create.restype  = c.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [c.c_void_p]
 
     # SolveProblem
     lib.solve_problem_init.restype  = c.c_void_p
@@ -188,13 +188,13 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
                                    c.c_uint64, c.c_uint32]
 
     # Variable query helpers
-    lib.zsp_var_lo32.restype  = c.c_int32
-    lib.zsp_var_lo32.argtypes = [c.c_void_p, c.c_uint32]
-    lib.zsp_var_hi32.restype  = c.c_int32
-    lib.zsp_var_hi32.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_var_lo32.restype  = c.c_int32
+    lib.dvs_var_lo32.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_var_hi32.restype  = c.c_int32
+    lib.dvs_var_hi32.argtypes = [c.c_void_p, c.c_uint32]
 
-    lib.zsp_prop_constraint_id.restype  = c.c_uint32
-    lib.zsp_prop_constraint_id.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_prop_constraint_id.restype  = c.c_uint32
+    lib.dvs_prop_constraint_id.argtypes = [c.c_void_p, c.c_uint32]
 
     # Placement propagators
     lib.prop_add_min_of_n_32.restype  = c.c_uint32
@@ -212,34 +212,34 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.solver_set_value_selector.restype  = None
     lib.solver_set_value_selector.argtypes = [c.c_void_p, c.c_void_p, c.c_void_p]
 
-    # BV-SAT completeness engine (zsp_bbsolver). Takes a SolveProblem buffer
+    # BV-SAT completeness engine (dvs_bbsolver). Takes a SolveProblem buffer
     # (the same one solver_compile consumes) and answers SAT/UNSAT
     # authoritatively via bit-blasting + kissat. See bvsat.py.
-    lib.zsp_bbsolver_new.restype  = c.c_void_p
-    lib.zsp_bbsolver_new.argtypes = [c.c_void_p, c.c_void_p]   # alloc, problem
-    lib.zsp_bbsolver_free.restype  = None
-    lib.zsp_bbsolver_free.argtypes = [c.c_void_p]
-    lib.zsp_bbsolver_check.restype  = c.c_int                  # ZSP_BB_SAT/UNSAT/...
-    lib.zsp_bbsolver_check.argtypes = [c.c_void_p, c.c_uint64]  # bb, seed
+    lib.dvs_bbsolver_new.restype  = c.c_void_p
+    lib.dvs_bbsolver_new.argtypes = [c.c_void_p, c.c_void_p]   # alloc, problem
+    lib.dvs_bbsolver_free.restype  = None
+    lib.dvs_bbsolver_free.argtypes = [c.c_void_p]
+    lib.dvs_bbsolver_check.restype  = c.c_int                  # DVS_BB_SAT/UNSAT/...
+    lib.dvs_bbsolver_check.argtypes = [c.c_void_p, c.c_uint64]  # bb, seed
     # DSE-2 soft-aware serve.
-    lib.zsp_bbsolver_check_maxsat.restype  = c.c_int
-    lib.zsp_bbsolver_check_maxsat.argtypes = [
+    lib.dvs_bbsolver_check_maxsat.restype  = c.c_int
+    lib.dvs_bbsolver_check_maxsat.argtypes = [
         c.c_void_p, c.c_void_p, c.c_uint64,                    # alloc, problem, seed
         c.POINTER(c.c_void_p), c.c_void_p, c.c_uint32]         # out_bb, out_keep, keep_cap
-    lib.zsp_bbsolver_set_soft_keep.restype  = None
-    lib.zsp_bbsolver_set_soft_keep.argtypes = [c.c_void_p, c.c_void_p, c.c_uint32]
-    lib.zsp_bbsolver_value.restype  = c.c_int                  # 0 on success
-    lib.zsp_bbsolver_value.argtypes = [c.c_void_p, c.c_uint32,
+    lib.dvs_bbsolver_set_soft_keep.restype  = None
+    lib.dvs_bbsolver_set_soft_keep.argtypes = [c.c_void_p, c.c_void_p, c.c_uint32]
+    lib.dvs_bbsolver_value.restype  = c.c_int                  # 0 on success
+    lib.dvs_bbsolver_value.argtypes = [c.c_void_p, c.c_uint32,
                                        c.POINTER(c.c_int64)]
-    lib.zsp_bbsolver_value_wide.restype  = c.c_int             # 0 on success
-    lib.zsp_bbsolver_value_wide.argtypes = [c.c_void_p, c.c_uint32,
+    lib.dvs_bbsolver_value_wide.restype  = c.c_int             # 0 on success
+    lib.dvs_bbsolver_value_wide.argtypes = [c.c_void_p, c.c_uint32,
                                             c.POINTER(c.c_uint64), c.c_uint32]
-    lib.zsp_bbsolver_num_aig_ands.restype  = c.c_uint64
-    lib.zsp_bbsolver_num_aig_ands.argtypes = [c.c_void_p]
-    lib.zsp_bbsolver_num_sat_clauses.restype  = c.c_uint64
-    lib.zsp_bbsolver_num_sat_clauses.argtypes = [c.c_void_p]
-    lib.zsp_bbsolver_num_sat_vars.restype  = c.c_uint64
-    lib.zsp_bbsolver_num_sat_vars.argtypes = [c.c_void_p]
+    lib.dvs_bbsolver_num_aig_ands.restype  = c.c_uint64
+    lib.dvs_bbsolver_num_aig_ands.argtypes = [c.c_void_p]
+    lib.dvs_bbsolver_num_sat_clauses.restype  = c.c_uint64
+    lib.dvs_bbsolver_num_sat_clauses.argtypes = [c.c_void_p]
+    lib.dvs_bbsolver_num_sat_vars.restype  = c.c_uint64
+    lib.dvs_bbsolver_num_sat_vars.argtypes = [c.c_void_p]
 
 
 def _load_lib() -> Optional[ctypes.CDLL]:

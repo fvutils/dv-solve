@@ -161,10 +161,10 @@ def _setup(lib: ctypes.CDLL):
     lib.problem_add_constraint.restype  = ctypes.c_uint32
     lib.problem_add_constraint.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solver_create.restype  = ctypes.c_void_p
     lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
@@ -188,7 +188,7 @@ def _setup(lib: ctypes.CDLL):
 def _compile_and_solve(lib, sp_ptr, n_vars, seed=0x1234):
     """Compile a SolveProblem and solve it. Returns list of values."""
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     assert ba
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
@@ -206,7 +206,7 @@ def _compile_and_solve(lib, sp_ptr, n_vars, seed=0x1234):
         values.append(lib.solver_get_value(ctx, i))
 
     lib.solver_destroy(ctx)
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
     return values
 
 
@@ -216,8 +216,8 @@ def _compile_and_solve(lib, sp_ptr, n_vars, seed=0x1234):
 
 class TestBuilder:
     @pytest.fixture(autouse=True)
-    def setup(self, libzsp):
-        self.lib = libzsp
+    def setup(self, libdvs):
+        self.lib = libdvs
         _setup(self.lib)
 
     def _builder(self, block_size=0):

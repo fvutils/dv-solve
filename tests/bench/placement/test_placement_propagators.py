@@ -43,7 +43,7 @@ def _make_ctx(lib, n_vars, var_specs, buf_size=1 << 20):
     arr = (ctypes.c_uint32 * len(all_ids))(*all_ids)
     lib.problem_add_source(sp, ctypes.c_uint32(len(all_ids)), arr)
 
-    ba = lib.zsp_block_alloc_create(None, buf_size)
+    ba = lib.dvs_block_alloc_create(None, buf_size)
     ctx_buf = (ctypes.c_uint8 * buf_size)()
     ctx = lib.solver_create(ctx_buf, buf_size, ba)
     assert ctx is not None
@@ -55,7 +55,7 @@ def _make_ctx(lib, n_vars, var_specs, buf_size=1 << 20):
 
 
 def _cleanup(lib, ba):
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 class _SolveOpts(ctypes.Structure):

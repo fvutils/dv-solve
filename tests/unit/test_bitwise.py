@@ -18,10 +18,10 @@ _CTX_BUF_SIZE = 524288
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -47,10 +47,10 @@ def _setup(lib: ctypes.CDLL):
     lib.solver_compile.restype  = ctypes.c_int
     lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     lib.solver_propagate.restype  = ctypes.c_int
     lib.solver_propagate.argtypes = [ctypes.c_void_p]
@@ -108,7 +108,7 @@ def _make_ctx(lib, var_specs):
     for i, (width, is_signed, lo, hi) in enumerate(var_specs):
         ref = lib.problem_add_var(sp, i, width, is_signed, lo, hi)
         assert ref != EXPR_NULL
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -116,11 +116,11 @@ def _make_ctx(lib, var_specs):
 
 
 def _lo(lib, ctx, i):
-    return lib.zsp_var_lo64(ctx, i)
+    return lib.dvs_var_lo64(ctx, i)
 
 
 def _hi(lib, ctx, i):
-    return lib.zsp_var_hi64(ctx, i)
+    return lib.dvs_var_hi64(ctx, i)
 
 
 def _fix(lib, ctx, i, v):
@@ -132,9 +132,9 @@ def _fix(lib, ctx, i, v):
 # AND tests                                                            #
 # ------------------------------------------------------------------ #
 
-def test_band_singleton_mask(libzsp):
+def test_band_singleton_mask(libdvs):
     """r = x & 0xF0; x=[0,255] -> r in [0,0xF0], low nibble clear."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -151,12 +151,12 @@ def test_band_singleton_mask(libzsp):
     assert _hi(lib, ctx, 0) <= 0xF0
     assert _lo(lib, ctx, 0) >= 0
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_band_both_singletons(libzsp):
+def test_band_both_singletons(libdvs):
     """r = a & b; a=0xFF, b=0x0F -> r=0x0F."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -173,16 +173,16 @@ def test_band_both_singletons(libzsp):
     assert _lo(lib, ctx, 0) == 0x0F
     assert _hi(lib, ctx, 0) == 0x0F
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 # ------------------------------------------------------------------ #
 # OR tests                                                             #
 # ------------------------------------------------------------------ #
 
-def test_bor_singleton(libzsp):
+def test_bor_singleton(libdvs):
     """r = x | 0x80; x=[0,127] -> r in [0x80, ...]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -198,16 +198,16 @@ def test_bor_singleton(libzsp):
 
     assert _lo(lib, ctx, 0) >= 0x80
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 # ------------------------------------------------------------------ #
 # XOR tests                                                            #
 # ------------------------------------------------------------------ #
 
-def test_bxor_singleton(libzsp):
+def test_bxor_singleton(libdvs):
     """r = x ^ 0xFF; x=[0,0] -> r=[0xFF,0xFF]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -224,12 +224,12 @@ def test_bxor_singleton(libzsp):
     assert _lo(lib, ctx, 0) == 0xFF
     assert _hi(lib, ctx, 0) == 0xFF
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_bxor_backward(libzsp):
+def test_bxor_backward(libdvs):
     """r = x ^ 0xFF; fix r=0xAA -> x=0x55."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -247,16 +247,16 @@ def test_bxor_backward(libzsp):
     assert _lo(lib, ctx, 1) == 0x55
     assert _hi(lib, ctx, 1) == 0x55
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 # ------------------------------------------------------------------ #
 # NOT tests                                                            #
 # ------------------------------------------------------------------ #
 
-def test_bnot_zero(libzsp):
+def test_bnot_zero(libdvs):
     """r = ~x; x=[0,0] -> r=[-1,-1] (all bits set, signed)."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -272,12 +272,12 @@ def test_bnot_zero(libzsp):
     assert _lo(lib, ctx, 0) == -1
     assert _hi(lib, ctx, 0) == -1
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_bnot_backward(libzsp):
+def test_bnot_backward(libdvs):
     """r = ~x; fix r=-1 -> x=0."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -294,16 +294,16 @@ def test_bnot_backward(libzsp):
     assert _lo(lib, ctx, 1) == 0
     assert _hi(lib, ctx, 1) == 0
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 # ------------------------------------------------------------------ #
 # Compilation / end-to-end tests                                      #
 # ------------------------------------------------------------------ #
 
-def test_band_compile_e2e(libzsp):
+def test_band_compile_e2e(libdvs):
     """r == (x & mask) via problem builder, then solve."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -322,7 +322,7 @@ def test_band_compile_e2e(libzsp):
     eq_e  = lib.expr_binary(sp, BIN_EQ, v_r, and_e)
     lib.problem_add_constraint(sp, eq_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -335,12 +335,12 @@ def test_band_compile_e2e(libzsp):
     x = lib.solver_get_value(ctx, 1)
     assert r == (x & 0xF0), f"r={r:#x} != x&0xF0 = {x&0xF0:#x}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_bor_compile_e2e(libzsp):
+def test_bor_compile_e2e(libdvs):
     """r == (x | 0x80) via problem builder, then solve."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -359,7 +359,7 @@ def test_bor_compile_e2e(libzsp):
     eq_e = lib.expr_binary(sp, BIN_EQ, v_r, or_e)
     lib.problem_add_constraint(sp, eq_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -372,4 +372,4 @@ def test_bor_compile_e2e(libzsp):
     x = lib.solver_get_value(ctx, 1)
     assert r == (x | 0x80), f"r={r:#x} != x|0x80 = {x|0x80:#x}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

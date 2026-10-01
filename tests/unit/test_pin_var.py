@@ -18,10 +18,10 @@ _CTX_BUF_SIZE = 1048576
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -47,10 +47,10 @@ def _setup(lib: ctypes.CDLL):
     lib.solver_compile.restype  = ctypes.c_int
     lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     class SolveOpts(ctypes.Structure):
         _fields_ = [
@@ -84,9 +84,9 @@ BIN_GT  = 14
 BIN_EQ  = 10
 
 
-def test_pin_var_basic(libzsp):
+def test_pin_var_basic(libdvs):
     """Pin x=5, constraint y > x. Verify y > 5."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -103,7 +103,7 @@ def test_pin_var_basic(libzsp):
     gt_e = lib.expr_binary(sp, BIN_GT, v_y, v_x)
     lib.problem_add_constraint(sp, gt_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -121,12 +121,12 @@ def test_pin_var_basic(libzsp):
     assert x == 5
     assert y > 5, f"Expected y > 5, got {y}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_pin_var_conflict(libzsp):
+def test_pin_var_conflict(libdvs):
     """Pin x=5, then pin x=3 via constraint: conflict."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -142,7 +142,7 @@ def test_pin_var_conflict(libzsp):
     lt_e = lib.expr_binary(sp, BIN_LT, v_x, c_3)
     lib.problem_add_constraint(sp, lt_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -151,12 +151,12 @@ def test_pin_var_conflict(libzsp):
     rc = lib.solver_pin_var(ctx, 0, 5)
     assert rc == -1, "Expected conflict from pin_var"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_pin_var_with_checkpoint(libzsp):
+def test_pin_var_with_checkpoint(libdvs):
     """Checkpoint, pin, solve, restore, pin different, solve again."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -173,7 +173,7 @@ def test_pin_var_with_checkpoint(libzsp):
     eq_e = lib.expr_binary(sp, BIN_EQ, v_x, v_y)
     lib.problem_add_constraint(sp, eq_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -200,4 +200,4 @@ def test_pin_var_with_checkpoint(libzsp):
     assert result == SOLVE_OK
     assert lib.solver_get_value(ctx, 1) == 42  # y == x == 42
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

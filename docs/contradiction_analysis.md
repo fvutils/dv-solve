@@ -1,7 +1,7 @@
 # Contradiction Analysis -- User Guide
 
 **Module: zuspec-solver-lcg contradiction analysis**
-**Build flag: `ZSP_CONTRADICTION_ANALYSIS`**
+**Build flag: `DVS_CONTRADICTION_ANALYSIS`**
 
 ---
 
@@ -25,7 +25,7 @@ relaxed soft was dropped and which hard constraints forced the relaxation.
 ### Build flag
 
 ```cmake
-cmake -DZSP_CONTRADICTION_ANALYSIS=ON ..
+cmake -DDVS_CONTRADICTION_ANALYSIS=ON ..
 ```
 
 When OFF (default), no contradiction code is compiled. Zero code-size
@@ -211,7 +211,7 @@ if (res == SOLVE_OK) {
   where R is the constant range.
 - **Budget control**: Set `opts.max_solver_calls` to limit total solver
   invocations. Partial results are returned on budget exhaustion.
-- **Zero overhead**: When compiled out (`ZSP_CONTRADICTION_ANALYSIS=OFF`),
+- **Zero overhead**: When compiled out (`DVS_CONTRADICTION_ANALYSIS=OFF`),
   no code is added to the core solver.
 
 ## 9. Limitations

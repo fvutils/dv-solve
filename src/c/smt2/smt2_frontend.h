@@ -4,16 +4,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include "zsp_builder.h"
-#include "zsp_ctx.h"
-#include "zsp_search.h"
-#include "zsp_block_alloc.h"
+#include "dvs_builder.h"
+#include "dvs_ctx.h"
+#include "dvs_search.h"
+#include "dvs_block_alloc.h"
 #include "smt2/smt2_parser.h"
 
-/* Forward declaration: full definition in zsp_bbsolver.h. Used when
+/* Forward declaration: full definition in dvs_bbsolver.h. Used when
  * DV_ENGINE=bitblast to keep the bit-blast solver alive across check-sat
  * and get-value commands. */
-typedef struct zsp_bbsolver_s zsp_bbsolver_t;
+typedef struct dvs_bbsolver_s dvs_bbsolver_t;
 
 #ifdef __cplusplus
 extern "C" {
@@ -282,7 +282,7 @@ typedef struct {
     char               **named;
     uint32_t             n_named;
     uint32_t             named_cap;
-    zsp_block_alloc_t   *block_alloc;
+    dvs_block_alloc_t   *block_alloc;
     void                *ctx_buf;      /* raw buffer for SolveCtx */
     size_t               ctx_buf_size;
 
@@ -366,7 +366,7 @@ typedef struct {
     /* Bit-blast solver kept alive across check-sat and get-value when
      * DV_ENGINE=bitblast. NULL when the CDCL engine is in use. Freed in
      * smt2_frontend_destroy and replaced on each (check-sat). */
-    zsp_bbsolver_t      *bb_solver;
+    dvs_bbsolver_t      *bb_solver;
 
     /* Output */
     FILE                *out;

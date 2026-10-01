@@ -4,9 +4,9 @@ Large plain-QF_BV instances (asp graph-colouring / edge-matching / sudoku) build
 deeply-nested ``(and c1 (and c2 (and c3 ...)))`` expression trees. Three separate
 recursive walks used to descend one C-stack frame per conjunct and SIGSEGV:
 
-  * ``bb_binary``           (bitblast walk, zsp_bbsolver.c)
-  * ``_compile_constraint`` (CDCL compile, zsp_compile.c)
-  * ``collect_substs_from`` (bitblast equality-subst pre-pass, zsp_bbsolver.c)
+  * ``bb_binary``           (bitblast walk, dvs_bbsolver.c)
+  * ``_compile_constraint`` (CDCL compile, dvs_compile.c)
+  * ``collect_substs_from`` (bitblast equality-subst pre-pass, dvs_bbsolver.c)
 
 All three were flattened to iterative heap worklists (fix 2026-07-20). These
 fixtures crash the pre-fix binary within ~1.5 s on BOTH engines, so a short

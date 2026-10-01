@@ -13,7 +13,7 @@ pytest tests/bench/ -m bench
 pytest tests/bench/ -m bench --bench-target-secs=2
 
 # Specific backend only
-ZSP_SOLVERS=native pytest tests/bench/ -m bench
+DVS_SOLVERS=native pytest tests/bench/ -m bench
 ```
 
 ## Scenarios

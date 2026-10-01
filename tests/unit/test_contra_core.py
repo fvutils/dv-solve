@@ -23,10 +23,10 @@ BIN_GTE = 15
 
 def _setup(lib: ctypes.CDLL):
     """Declare ctypes argtypes/restype."""
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -71,16 +71,16 @@ def _setup(lib: ctypes.CDLL):
 
 
 def _make_ctx(lib):
-    ba = lib.zsp_block_alloc_create(None, 4096)
+    ba = lib.dvs_block_alloc_create(None, 4096)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
     return ctx_buf, ctx, ba
 
 
-def test_quick_core_trivial_2(libzsp_debug):
+def test_quick_core_trivial_2(libdvs_debug):
     """Trivial UNSAT: x >= 10 and x <= 5. Core should contain both."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -116,12 +116,12 @@ def test_quick_core_trivial_2(libzsp_debug):
     assert 1 in core, f"Constraint 1 not in core: {core}"
     assert 2 in core, f"Constraint 2 not in core: {core}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_quick_core_3_of_5(libzsp_debug):
+def test_quick_core_3_of_5(libdvs_debug):
     """5 constraints, 3 contradictory. Core should contain the 3."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -170,12 +170,12 @@ def test_quick_core_3_of_5(libzsp_debug):
     assert 1 in core, f"Constraint 1 (x >= 10) not in core: {core}"
     assert 4 in core, f"Constraint 4 (x <= 5) not in core: {core}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_quick_core_sat(libzsp_debug):
+def test_quick_core_sat(libdvs_debug):
     """All constraints satisfiable. Core should be empty or contain all."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -204,13 +204,13 @@ def test_quick_core_sat(libzsp_debug):
     # no relaxed constraints (all are active)
     assert rc == 0
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_quick_core_compile_time_unsat(libzsp_debug):
+def test_quick_core_compile_time_unsat(libdvs_debug):
     """Contradiction detected at compile time (domain intersection empty).
     Core should identify the constraint."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -239,4 +239,4 @@ def test_quick_core_compile_time_unsat(libzsp_debug):
     n = out_n.value
     assert n >= 2, f"Expected core >= 2 for compile-time UNSAT, got {n}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

@@ -36,10 +36,10 @@ class _SolveOpts(ctypes.Structure):
 
 def _setup_lib(lib):
     c = ctypes
-    lib.zsp_block_alloc_create.restype  = c.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [c.c_void_p]
+    lib.dvs_block_alloc_create.restype  = c.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [c.c_void_p]
 
     lib.solve_problem_init.restype  = c.c_void_p
     lib.solve_problem_init.argtypes = [c.c_void_p, c.c_size_t]
@@ -73,10 +73,10 @@ def _setup_lib(lib):
     lib.solver_solve.argtypes = [c.c_void_p, c.c_void_p]
     lib.solver_get_value.restype  = c.c_int64
     lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
-    lib.zsp_var_lo32.restype  = c.c_int32
-    lib.zsp_var_lo32.argtypes = [c.c_void_p, c.c_uint32]
-    lib.zsp_var_hi32.restype  = c.c_int32
-    lib.zsp_var_hi32.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_var_lo32.restype  = c.c_int32
+    lib.dvs_var_lo32.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_var_hi32.restype  = c.c_int32
+    lib.dvs_var_hi32.argtypes = [c.c_void_p, c.c_uint32]
 
 
 def _make_problem(lib, buf_size=65536):
@@ -88,7 +88,7 @@ def _make_problem(lib, buf_size=65536):
 
 def _compile(lib, sp):
     """Compile a SolveProblem; return (ctx, ctx_buf, ba)."""
-    ba = lib.zsp_block_alloc_create(None, _CTX_BUF_SIZE)
+    ba = lib.dvs_block_alloc_create(None, _CTX_BUF_SIZE)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx is not None
@@ -104,9 +104,9 @@ def _solve(lib, ctx, seed=42):
 
 class TestIncremental:
 
-    def test_add_constraint_tightens_domain(self, libzsp):
+    def test_add_constraint_tightens_domain(self, libdvs):
         """Compile x in [0,100]; add x <= 10; solve gives x in [0,10]."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -124,18 +124,18 @@ class TestIncremental:
         assert rc >= 0, f"solver_add_constraint failed: {rc}"
 
         # Verify domain tightened
-        hi = lib.zsp_var_hi32(ctx, 0)
+        hi = lib.dvs_var_hi32(ctx, 0)
         assert hi <= 10, f"Expected hi <= 10, got {hi}"
 
         result = _solve(lib, ctx)
         assert result == SOLVE_OK
         val = lib.solver_get_value(ctx, 0)
         assert 0 <= val <= 10, f"Expected value in [0,10], got {val}"
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
-    def test_add_constraint_unsat(self, libzsp):
+    def test_add_constraint_unsat(self, libdvs):
         """Compile x in [0,5]; add x >= 10; returns -2 (UNSAT)."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -150,11 +150,11 @@ class TestIncremental:
 
         rc = lib.solver_add_constraint(ctx, aux_sp)
         assert rc == -2, f"Expected -2 (UNSAT), got {rc}"
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
-    def test_add_var_after_compile(self, libzsp):
+    def test_add_var_after_compile(self, libdvs):
         """Compile with 2 vars; add 3rd var via aux_sp; solve uses all 3."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -177,11 +177,11 @@ class TestIncremental:
         assert result == SOLVE_OK
         val = lib.solver_get_value(ctx, 2)
         assert val == 7, f"Expected 7, got {val}"
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
-    def test_add_multiple_constraints(self, libzsp):
+    def test_add_multiple_constraints(self, libdvs):
         """Compile base; add 3 constraints incrementally; final solve correct."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -207,11 +207,11 @@ class TestIncremental:
         assert result == SOLVE_OK
         val = lib.solver_get_value(ctx, 0)
         assert 20 <= val <= 50, f"Expected [20,50], got {val}"
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
-    def test_add_alldiff_after_compile(self, libzsp):
+    def test_add_alldiff_after_compile(self, libdvs):
         """Compile 3 vars; add AllDifferent incrementally; solve distinct."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -232,11 +232,11 @@ class TestIncremental:
         assert result == SOLVE_OK
         vals = [lib.solver_get_value(ctx, i) for i in range(3)]
         assert len(set(vals)) == 3, f"Not all distinct: {vals}"
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
-    def test_var_capacity_overflow(self, libzsp):
+    def test_var_capacity_overflow(self, libdvs):
         """Try to add var_id >= capacity; returns -1."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -250,4 +250,4 @@ class TestIncremental:
 
         rc = lib.solver_add_constraint(ctx, aux_sp)
         assert rc == -1, f"Expected -1 (capacity overflow), got {rc}"
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)

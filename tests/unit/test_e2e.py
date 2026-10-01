@@ -54,7 +54,7 @@ def e2e_lib_path(tmp_path_factory):
     """Build libdv_solve.so once for all e2e tests (module scope)."""
     if not shutil.which("cmake"):
         return None
-    build_dir = tmp_path_factory.mktemp("zsp_e2e_build")
+    build_dir = tmp_path_factory.mktemp("dvs_e2e_build")
     try:
         return _build_lib(build_dir)
     except Exception:
@@ -66,18 +66,18 @@ def _make_native_available(lib_path: Path, monkeypatch) -> bool:
 
     The override is set through *monkeypatch* so it ends with the test. Set
     directly on ``os.environ`` it outlived this module, and because
-    ``ZSP_SOLVER_PATH`` is terminal, every later test in the session resolved
+    ``DVS_SOLVER_PATH`` is terminal, every later test in the session resolved
     headers, SV sources and the DPI library against this bare build tree.
     """
     import dv_solve.lib as _lib_mod
     _lib_mod._LOAD_ATTEMPTED = False
     _lib_mod._LIB_CACHE = None
-    monkeypatch.setenv("ZSP_SOLVER_PATH", str(lib_path.parent))
+    monkeypatch.setenv("DVS_SOLVER_PATH", str(lib_path.parent))
     return _lib_mod._load_lib() is not None
 
 
 # ------------------------------------------------------------------ #
-# Fixture: select back-end via ZSP_SOLVER_BACKEND env var             #
+# Fixture: select back-end via DVS_SOLVER_BACKEND env var             #
 # ------------------------------------------------------------------ #
 
 @pytest.fixture(params=["python", "native"])
@@ -88,7 +88,7 @@ def backend(request, monkeypatch, e2e_lib_path):
         if e2e_lib_path is None or not _make_native_available(e2e_lib_path,
                                                               monkeypatch):
             pytest.skip("native solver library not available")
-    monkeypatch.setenv("ZSP_SOLVER_BACKEND", name)
+    monkeypatch.setenv("DVS_SOLVER_BACKEND", name)
     yield name
 
 

@@ -5,9 +5,9 @@
 #include <time.h>
 #include <sys/resource.h>
 #include "smt2/smt2_frontend.h"
-#include "zsp_lcg.h"
-#include "zsp_bbsolver.h"
-#include "zsp_cube.h"
+#include "dvs_lcg.h"
+#include "dvs_bbsolver.h"
+#include "dvs_cube.h"
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -533,11 +533,11 @@ static ExprRef _bv_const(Smt2Frontend *fe, int64_t value, uint16_t width) {
     return builder_expr_const_sized(fe->builder, value, 0, (uint8_t)width);
 }
 
-/* Mark a problem this front end finalized as already explicit (zsp_sv.h):
+/* Mark a problem this front end finalized as already explicit (dvs_sv.h):
  * SMT-LIB semantics are exact bit-vector semantics, every constant is sized,
  * so SystemVerilog elaboration must leave it alone. */
 static SolveProblem *_explicit(SolveProblem *p) {
-    if (p) p->flags |= ZSP_PROBLEM_F_EXPLICIT;
+    if (p) p->flags |= DVS_PROBLEM_F_EXPLICIT;
     return p;
 }
 
@@ -2531,7 +2531,7 @@ static int _is_bit1_literal(Smt2Frontend *fe, const Sexpr *s) {
  * guard propagators carrying no bound information, and `t_constraint_dist`
  * left a 32-bit variable at its full domain for the search to enumerate.
  *
- * Emitting BIN_OR instead keeps the tree intact, so zsp_compile.c's OR-tree
+ * Emitting BIN_OR instead keeps the tree intact, so dvs_compile.c's OR-tree
  * flattener can reach it, classify the reified `ite(P,1,0)` leaves, and build
  * a DisjClause propagator (which then hulls the domain).
  *
@@ -2866,11 +2866,11 @@ static int _ensure_compiled(Smt2Frontend *fe) {
         fe->ctx_buf = malloc(sz);
         if (!fe->ctx_buf) return -1;
         fe->ctx_buf_size = sz;
-        fe->block_alloc = zsp_block_alloc_create(NULL, BA_BLOCK_SIZE);
+        fe->block_alloc = dvs_block_alloc_create(NULL, BA_BLOCK_SIZE);
         if (!fe->block_alloc) { free(fe->ctx_buf); fe->ctx_buf = NULL; return -1; }
         fe->ctx = solver_create(fe->ctx_buf, sz, fe->block_alloc);
         if (!fe->ctx) {
-            zsp_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
+            dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
             free(fe->ctx_buf); fe->ctx_buf = NULL;
             return -1;
         }
@@ -2888,7 +2888,7 @@ static int _ensure_compiled(Smt2Frontend *fe) {
          * UNSAT, rc == -2, or other error), and only until the cap. */
         if (fe->ctx->pool.overflow && sz < (size_t)CTX_BUF_SIZE) {
             solver_destroy(fe->ctx); fe->ctx = NULL;
-            zsp_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
+            dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
             free(fe->ctx_buf); fe->ctx_buf = NULL;
             sz = (sz * 4 < (size_t)CTX_BUF_SIZE) ? sz * 4 : (size_t)CTX_BUF_SIZE;
             continue;
@@ -2961,7 +2961,7 @@ static int _flush_aux(Smt2Frontend *fe) {
  * whole buffer then fills it deterministically from the builder's blocks, and
  * every ExprRef is a pool-relative offset, so identical problems produce
  * byte-identical content and thus the same fingerprint. We hash the leading
- * scalar/head fields plus the pool DATA region, skipping the embedded zsp_pool_t
+ * scalar/head fields plus the pool DATA region, skipping the embedded dvs_pool_t
  * header (which may hold non-deterministic bookkeeping). Used only as a cache
  * key in Verilator mode; a collision would at worst reuse a wrong-but-still-
  * sound model, and the space (64-bit) makes that astronomically unlikely. */
@@ -2970,7 +2970,7 @@ static uint64_t _problem_fingerprint(const SolveProblem *p) {
     const uint8_t *lead = (const uint8_t *)p;
     size_t lead_len = (size_t)((const uint8_t *)&p->pool - (const uint8_t *)p);
     for (size_t i = 0; i < lead_len; i++) { h ^= lead[i]; h *= 1099511628211ULL; }
-    const uint8_t *data = (const uint8_t *)&p->pool + sizeof(zsp_pool_t);
+    const uint8_t *data = (const uint8_t *)&p->pool + sizeof(dvs_pool_t);
     size_t used = p->pool.used;
     for (size_t i = 0; i < used; i++) { h ^= data[i]; h *= 1099511628211ULL; }
     return h ? h : 1;                                  /* never return 0 */
@@ -3132,7 +3132,7 @@ static int64_t _abs_mval_ref(Smt2Frontend *fe, ExprRef ref) {
     if (!k) return 0;
     if (*k == EXPR_VAR) {
         int64_t v = 0;
-        zsp_bbsolver_value(fe->bb_solver, ((ExprVar *)k)->var_id, &v);
+        dvs_bbsolver_value(fe->bb_solver, ((ExprVar *)k)->var_id, &v);
         return v;
     }
     if (*k == EXPR_CONST) return ((ExprConst *)k)->value;
@@ -3140,7 +3140,7 @@ static int64_t _abs_mval_ref(Smt2Frontend *fe, ExprRef ref) {
 }
 static int64_t _abs_mval_var(Smt2Frontend *fe, uint32_t varid) {
     int64_t v = 0;
-    zsp_bbsolver_value(fe->bb_solver, varid, &v);
+    dvs_bbsolver_value(fe->bb_solver, varid, &v);
     return v;
 }
 
@@ -3182,7 +3182,7 @@ static uint32_t _abs_read_inplace(Smt2Frontend *fe, Smt2ArrayValue *node,
 /* Assert an in-place-built predicate into the live incremental solver. */
 static int _abs_assert(Smt2Frontend *fe, ExprRef pred) {
     if (pred == EXPR_NULL) return -1;
-    return zsp_bbsolver_assert(fe->bb_solver, pred) == 0 ? 0 : -1;
+    return dvs_bbsolver_assert(fe->bb_solver, pred) == 0 ? 0 : -1;
 }
 
 /* Build read i's one-step defining constraint (STORE/ITE/CONST), minting parent
@@ -3508,38 +3508,38 @@ static int _check_sat_array(Smt2Frontend *fe) {
     fe->has_aux = 0;
 
     /* Incremental CaDiCaL backend is required for assert + resolve. */
-    fe->bb_solver = zsp_bbsolver_new_backend(NULL, fe->problem, /*cadical=*/1);
-    if (!fe->bb_solver || !zsp_bbsolver_is_incremental(fe->bb_solver)) {
+    fe->bb_solver = dvs_bbsolver_new_backend(NULL, fe->problem, /*cadical=*/1);
+    if (!fe->bb_solver || !dvs_bbsolver_is_incremental(fe->bb_solver)) {
         SMT2_EMIT_UNKNOWN(fe); fflush(fe->out);
         return -1;
     }
 
-    int rc = zsp_bbsolver_prepare(fe->bb_solver, fe->seed);
-    if (rc == ZSP_BB_ENCODE_READY) {
+    int rc = dvs_bbsolver_prepare(fe->bb_solver, fe->seed);
+    if (rc == DVS_BB_ENCODE_READY) {
         /* resolve_raw: refinement must read the TRUE model (diversify randomizes
          * don't-care bits, which include lazily-unconstrained read vars). */
-        if (_array_emit_extensionality(fe) < 0) rc = ZSP_BB_UNKNOWN;
-        else rc = zsp_bbsolver_resolve_raw(fe->bb_solver);
-        while (rc == ZSP_BB_SAT) {
+        if (_array_emit_extensionality(fe) < 0) rc = DVS_BB_UNKNOWN;
+        else rc = dvs_bbsolver_resolve_raw(fe->bb_solver);
+        while (rc == DVS_BB_SAT) {
             int added = _array_refine(fe);
-            if (added < 0) { rc = ZSP_BB_UNKNOWN; break; }
+            if (added < 0) { rc = DVS_BB_UNKNOWN; break; }
             if (added == 0) break;                 /* model satisfies the theory */
-            rc = zsp_bbsolver_resolve_raw(fe->bb_solver);
+            rc = dvs_bbsolver_resolve_raw(fe->bb_solver);
         }
     }
 
-    fe->bb_model_valid = (rc == ZSP_BB_SAT);
-    if (rc == ZSP_BB_SAT) {
+    fe->bb_model_valid = (rc == DVS_BB_SAT);
+    if (rc == DVS_BB_SAT) {
         fprintf(fe->out, "sat\n");
         fe->last_result = SOLVE_OK; fe->has_result = 1;
-    } else if (rc == ZSP_BB_UNSAT) {
+    } else if (rc == DVS_BB_UNSAT) {
         fprintf(fe->out, "unsat\n");
         fe->last_result = SOLVE_UNSAT; fe->has_result = 1;
     } else {
         SMT2_EMIT_UNKNOWN(fe);
     }
     fflush(fe->out);
-    return rc == ZSP_BB_ERROR ? -1 : 0;
+    return rc == DVS_BB_ERROR ? -1 : 0;
 }
 
 /* Phase B.0: bit-blast + kissat engine. Bypasses solver_solve() and runs
@@ -3548,7 +3548,7 @@ static int _check_sat_array(Smt2Frontend *fe) {
  * so that subsequent (get-value) calls can read back model values. */
 /* Free the bit-blast solver and the problem it was built from, if owned. */
 static void _free_bb(Smt2Frontend *fe) {
-    if (fe->bb_solver)  { zsp_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
+    if (fe->bb_solver)  { dvs_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
     if (fe->bb_problem) { free(fe->bb_problem); fe->bb_problem = NULL; }
 }
 
@@ -3601,7 +3601,7 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
                 return 0;
             }
             if (fe->bb_solver &&
-                zsp_bbsolver_rediversify(fe->bb_solver, fe->seed) == 0) {
+                dvs_bbsolver_rediversify(fe->bb_solver, fe->seed) == 0) {
                 fe->bb_model_valid = 1;
                 fprintf(fe->out, "sat\n");
                 fflush(fe->out);
@@ -3614,7 +3614,7 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
 
     /* Cache miss (or forced re-solve): drop any prior bbsolver and solve fresh. */
     _free_bb(fe);
-    fe->bb_solver  = zsp_bbsolver_new(NULL, p);
+    fe->bb_solver  = dvs_bbsolver_new(NULL, p);
     fe->bb_problem = owned;                 /* lives exactly as long as bb_solver */
     *owned_io = NULL;
     if (!fe->bb_solver) {
@@ -3623,20 +3623,20 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
         fe->cache_valid = 0;
         return -1;
     }
-    int rc = zsp_bbsolver_check(fe->bb_solver, fe->seed);
-    fe->bb_model_valid = (rc == ZSP_BB_SAT);
-    if (fe->verilator_mode && (rc == ZSP_BB_SAT || rc == ZSP_BB_UNSAT)) {
+    int rc = dvs_bbsolver_check(fe->bb_solver, fe->seed);
+    fe->bb_model_valid = (rc == DVS_BB_SAT);
+    if (fe->verilator_mode && (rc == DVS_BB_SAT || rc == DVS_BB_UNSAT)) {
         fe->cached_fp = fp;
         fe->cache_valid = 1;
-        fe->cached_result = (rc == ZSP_BB_SAT) ? 1 : 0;
+        fe->cached_result = (rc == DVS_BB_SAT) ? 1 : 0;
     } else {
         fe->cache_valid = 0;                           /* unknown/error: never reuse */
     }
-    if (rc == ZSP_BB_SAT) {
+    if (rc == DVS_BB_SAT) {
         fprintf(fe->out, "sat\n");
         fe->last_result = SOLVE_OK;
         fe->has_result = 1;
-    } else if (rc == ZSP_BB_UNSAT) {
+    } else if (rc == DVS_BB_UNSAT) {
         fprintf(fe->out, "unsat\n");
         fe->last_result = SOLVE_UNSAT;
         fe->has_result = 1;
@@ -3646,7 +3646,7 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
     fflush(fe->out);
     /* The CDCL path returns 0 for both SAT and UNSAT (only protocol errors
      * are negative). Mirror that — UNSAT is a valid result, not an error. */
-    return rc == ZSP_BB_ERROR ? -1 : 0;
+    return rc == DVS_BB_ERROR ? -1 : 0;
 }
 
 /* True when the cube-and-conquer engine is explicitly selected
@@ -3662,7 +3662,7 @@ static int _engine_is_cube(Smt2Frontend *fe) {
  * path it runs directly on fe->problem and keeps fe->bb_solver alive for
  * subsequent (get-value). Bit-blasts once, then partitions the search space
  * into cubes solved over the shared instance. Soundness contract is enforced
- * inside zsp_cube_check (SAT on any cube; UNSAT only on an exhaustive all-UNSAT
+ * inside dvs_cube_check (SAT on any cube; UNSAT only on an exhaustive all-UNSAT
  * partition; otherwise unknown). No Verilator identity cache — cube is for
  * one-shot hard instances, not the re-randomize loop. */
 static int _check_sat_cube(Smt2Frontend *fe) {
@@ -3674,19 +3674,19 @@ static int _check_sat_cube(Smt2Frontend *fe) {
     _free_bb(fe);
     /* Prefer CaDiCaL: cube-and-conquer needs retractable assumptions. Falls
      * back to kissat (→ single-shot solve) when CaDiCaL is not compiled in. */
-    fe->bb_solver = zsp_bbsolver_new_backend(NULL, fe->problem, /*prefer_cadical=*/1);
+    fe->bb_solver = dvs_bbsolver_new_backend(NULL, fe->problem, /*prefer_cadical=*/1);
     if (!fe->bb_solver) {
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
         return -1;
     }
-    int rc = zsp_cube_check(fe->bb_solver, fe->seed);
-    fe->bb_model_valid = (rc == ZSP_BB_SAT);
-    if (rc == ZSP_BB_SAT) {
+    int rc = dvs_cube_check(fe->bb_solver, fe->seed);
+    fe->bb_model_valid = (rc == DVS_BB_SAT);
+    if (rc == DVS_BB_SAT) {
         fprintf(fe->out, "sat\n");
         fe->last_result = SOLVE_OK;
         fe->has_result = 1;
-    } else if (rc == ZSP_BB_UNSAT) {
+    } else if (rc == DVS_BB_UNSAT) {
         fprintf(fe->out, "unsat\n");
         fe->last_result = SOLVE_UNSAT;
         fe->has_result = 1;
@@ -3694,7 +3694,7 @@ static int _check_sat_cube(Smt2Frontend *fe) {
         SMT2_EMIT_UNKNOWN(fe);
     }
     fflush(fe->out);
-    return rc == ZSP_BB_ERROR ? -1 : 0;
+    return rc == DVS_BB_ERROR ? -1 : 0;
 }
 
 /* Pick the solve engine for the current problem.
@@ -3738,7 +3738,7 @@ static int _engine_is_bitblast(Smt2Frontend *fe) {
 static int64_t _fe_get_var_value(Smt2Frontend *fe, uint32_t var_id) {
     if (fe->bb_solver && fe->bb_model_valid) {
         int64_t v = 0;
-        if (zsp_bbsolver_value(fe->bb_solver, var_id, &v) == 0) return v;
+        if (dvs_bbsolver_value(fe->bb_solver, var_id, &v) == 0) return v;
         /* fall through to CDCL on bbsolver miss */
     }
     return solver_get_value(fe->ctx, var_id);
@@ -3751,7 +3751,7 @@ static int _fe_get_var_value_wide(Smt2Frontend *fe, uint32_t var_id,
                                   uint64_t *limbs, uint32_t n_limbs) {
     for (uint32_t i = 0; i < n_limbs; i++) limbs[i] = 0;
     if (fe->bb_solver && fe->bb_model_valid &&
-        zsp_bbsolver_value_wide(fe->bb_solver, var_id, limbs, n_limbs) == 0)
+        dvs_bbsolver_value_wide(fe->bb_solver, var_id, limbs, n_limbs) == 0)
         return 0;
     /* Fallback: the low 64 bits from the scalar reader (wide vars never reach
      * the CDCL engine, so this is only hit if the bbsolver lookup missed). */
@@ -3923,7 +3923,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * against the FULL fe->problem (incl. the dropped constraints), downgrading
      * to unknown on any violation. So the only remaining CDCL soundness risk is
      * a wrong `unsat`, which validation cannot catch — those are fixed at the
-     * source (e.g. the sign_extend compile no longer conflicts; see zsp_compile). */
+     * source (e.g. the sign_extend compile no longer conflicts; see dvs_compile). */
 
     if (_engine_is_bitblast(fe) && !route_cdcl) {
         return _check_sat_bitblast(fe);
@@ -3992,7 +3992,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * tie-break; DV_FAIR_PICK=1 reservoir-samples uniformly among the
      * smallest-domain vars, which stops the same variable from always being
      * decided first and skewing every other variable's marginal (see
-     * _select_unassigned in zsp_search.c). Costs a little speed, so it is
+     * _select_unassigned in dvs_search.c). Costs a little speed, so it is
      * opt-in -- but it is a real sampling-quality lever, so it needs to be
      * reachable to be evaluated (tests/formal/sample_quality.py). */
     {
@@ -4896,7 +4896,7 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     free(fe->aux_problems);
     if (fe->builder)     builder_destroy(fe->builder);
     if (fe->ctx)         solver_destroy(fe->ctx);
-    if (fe->block_alloc) zsp_block_alloc_destroy(fe->block_alloc);
+    if (fe->block_alloc) dvs_block_alloc_destroy(fe->block_alloc);
     free(fe->ctx_buf);
     free(fe->vars);
     free(fe->funs);
@@ -4939,7 +4939,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     int      array_lazy = fe->array_lazy, array_eager = fe->array_eager;
     uint64_t div_counter = fe->div_counter;
     uint32_t reseed_period = fe->reseed_period;
-    zsp_bbsolver_t *bb = fe->bb_solver;
+    dvs_bbsolver_t *bb = fe->bb_solver;
     SolveProblem   *bb_problem = fe->bb_problem;   /* backs bb; carried with it */
     uint64_t cached_fp = fe->cached_fp;
     int      cache_valid = fe->cache_valid, cached_result = fe->cached_result;
@@ -4955,7 +4955,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     for (uint32_t i = 0; i < fe->n_aux_problems; i++) free(fe->aux_problems[i]);
     free(fe->aux_problems);
     if (fe->ctx)         solver_destroy(fe->ctx);
-    if (fe->block_alloc) zsp_block_alloc_destroy(fe->block_alloc);
+    if (fe->block_alloc) dvs_block_alloc_destroy(fe->block_alloc);
     free(fe->ctx_buf);
     free(fe->vars);
     free(fe->funs);          /* re-zeroed by the memset below; realloc'd on next define-fun */

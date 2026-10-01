@@ -15,7 +15,7 @@ reflects the pre-substitution numbers.
   noise floor).
 - Raw CSV: `tests/formal/results/perfcompare_2026-05-25_v2.csv`.
 - HEAD includes: kissat backend (B.0), AIG + Tseitin + BV bit-blaster,
-  zsp_bbsolver with variable bit-fix (Phase A.1 wired), top-level + AND-
+  dvs_bbsolver with variable bit-fix (Phase A.1 wired), top-level + AND-
   descent equality substitution, ExprRef memoization, **Tseitin
   top-level dedup-by-(id,sign) fix**.
 
@@ -124,7 +124,7 @@ In rough priority:
    shift?) dominates the AIG size, targeted rewrites or a better
    bit-blast circuit there would help more than generic rewrites.
 3. **Phase B.1 kissat fork** — long-term plan: fork kissat into
-   `src/c/sat/`, route through `zsp_alloc_t`, integrate with the trail
+   `src/c/sat/`, route through `dvs_alloc_t`, integrate with the trail
    and checkpoint primitives. Foundational for the dv-solve-native CDCL
    path the plan ultimately calls for.
 

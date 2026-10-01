@@ -21,17 +21,17 @@ class TestPythonBuilder:
     """Test the Python SolveProblemBuilder wrapper."""
 
     @pytest.fixture(autouse=True)
-    def setup(self, libzsp):
-        self.lib = libzsp
+    def setup(self, libdvs):
+        self.lib = libdvs
         # Wire builder argtypes so the Python builder can use this lib handle
         from dv_solve.lib import _wire_builder_argtypes
         _wire_builder_argtypes(self.lib)
         # Wire solver functions for round-trip testing
         c = ctypes
-        self.lib.zsp_block_alloc_create.restype  = c.c_void_p
-        self.lib.zsp_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
-        self.lib.zsp_block_alloc_destroy.restype  = None
-        self.lib.zsp_block_alloc_destroy.argtypes = [c.c_void_p]
+        self.lib.dvs_block_alloc_create.restype  = c.c_void_p
+        self.lib.dvs_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
+        self.lib.dvs_block_alloc_destroy.restype  = None
+        self.lib.dvs_block_alloc_destroy.argtypes = [c.c_void_p]
         self.lib.solver_create.restype  = c.c_void_p
         self.lib.solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
         self.lib.solver_destroy.restype  = None
@@ -57,7 +57,7 @@ class TestPythonBuilder:
     def _solve_buffer(self, buf, n_vars, seed=0x42):
         """Compile and solve a finalized ctypes buffer."""
         ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-        ba = self.lib.zsp_block_alloc_create(None, 0)
+        ba = self.lib.dvs_block_alloc_create(None, 0)
         assert ba
         # Cast the ctypes array to a void pointer for solver_compile
         sp_ptr = ctypes.cast(buf, ctypes.c_void_p).value
@@ -70,7 +70,7 @@ class TestPythonBuilder:
         assert result == SOLVE_OK
         values = [self.lib.solver_get_value(ctx, i) for i in range(n_vars)]
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
         return values
 
     def test_python_builder_basic(self):

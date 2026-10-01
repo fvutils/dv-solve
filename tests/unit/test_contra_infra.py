@@ -24,10 +24,10 @@ BIN_GTE = 15
 
 def _setup(lib: ctypes.CDLL):
     """Declare ctypes argtypes/restype for functions used by these tests."""
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -54,13 +54,13 @@ def _setup(lib: ctypes.CDLL):
     lib.solver_compile.restype  = ctypes.c_int
     lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_prop_constraint_id.restype  = ctypes.c_uint32
-    lib.zsp_prop_constraint_id.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_prop_constraint_id.restype  = ctypes.c_uint32
+    lib.dvs_prop_constraint_id.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 def _make_ctx(lib):
     """Create a block_alloc and solver context; return (ctx_buf, ctx, ba)."""
-    ba = lib.zsp_block_alloc_create(None, 4096)
+    ba = lib.dvs_block_alloc_create(None, 4096)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
@@ -71,9 +71,9 @@ def _make_ctx(lib):
 # Tests                                                                #
 # ------------------------------------------------------------------ #
 
-def test_constraint_id_auto(libzsp):
+def test_constraint_id_auto(libdvs):
     """Constraints get auto-assigned sequential IDs from 1."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -103,7 +103,7 @@ def test_constraint_id_auto(libzsp):
     # Each propagator should have a constraint_id in {1, 2}
     seen_ids = set()
     for pi in range(100):
-        cid = lib.zsp_prop_constraint_id(ctx, pi)
+        cid = lib.dvs_prop_constraint_id(ctx, pi)
         if cid == 0:
             break
         seen_ids.add(cid)
@@ -111,13 +111,13 @@ def test_constraint_id_auto(libzsp):
     assert len(seen_ids) >= 1, f"Expected at least 1 constraint ID, got {seen_ids}"
     assert all(1 <= cid <= 2 for cid in seen_ids), f"Unexpected IDs: {seen_ids}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_constraint_id_roundtrip(libzsp):
+def test_constraint_id_roundtrip(libdvs):
     """Compile a multi-constraint problem and verify prop_constraint_id
     maps propagators to the correct constraint IDs."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -144,20 +144,20 @@ def test_constraint_id_roundtrip(libzsp):
     # All propagators should map to constraint_id == 1
     found_any = False
     for pi in range(100):
-        cid = lib.zsp_prop_constraint_id(ctx, pi)
+        cid = lib.dvs_prop_constraint_id(ctx, pi)
         if cid == 0:
             break
         assert cid == 1, f"Propagator {pi} has constraint_id {cid}, expected 1"
         found_any = True
 
     assert found_any, "No propagators were created"
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_contra_hooks_null(libzsp):
+def test_contra_hooks_null(libdvs):
     """contra_ctx and contra_hooks are NULL after solver_create;
     UNSAT at compile time does not crash."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     ctx_buf, ctx, ba = _make_ctx(lib)
@@ -175,12 +175,12 @@ def test_contra_hooks_null(libzsp):
     rc = lib.solver_compile(ctx, sp)
     assert rc == -2, "Expected UNSAT at compile time"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_contra_api_available(libzsp_debug):
+def test_contra_api_available(libdvs_debug):
     """Contradiction analysis API is available in the debug library."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     lib.contra_analyze_unsat.restype = ctypes.c_int
@@ -230,4 +230,4 @@ def test_contra_api_available(libzsp_debug):
     rc = lib.contra_quick_core(ctx, sp, out_ids, ctypes.byref(out_n))
     assert rc == 0
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

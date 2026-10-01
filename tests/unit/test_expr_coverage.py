@@ -128,7 +128,7 @@ def test_aggregate_construct(case):
     support was never measured. It is measured now, and all four work.
 
     The bit-blaster must DEFER (UNKNOWN) rather than error. It used to route
-    these through err_bv, so check() returned ZSP_BB_ERROR -- which a caller
+    these through err_bv, so check() returned DVS_BB_ERROR -- which a caller
     reads as "something went wrong" rather than "ask the other engine", and
     the other engine is precisely the one that can answer.
     """

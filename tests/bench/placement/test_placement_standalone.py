@@ -2,7 +2,7 @@
 """Standalone tests for placement propagators (no pytest dependency).
 
 Run directly:
-    ZSP_SOLVER_PATH=build python3 tests/bench/placement/test_placement_standalone.py
+    DVS_SOLVER_PATH=build python3 tests/bench/placement/test_placement_standalone.py
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _make_ctx(lib, var_specs, buf_size=1 << 20):
     arr = (ctypes.c_uint32 * len(all_ids))(*all_ids)
     lib.problem_add_source(sp, ctypes.c_uint32(len(all_ids)), arr)
 
-    ba = lib.zsp_block_alloc_create(None, buf_size)
+    ba = lib.dvs_block_alloc_create(None, buf_size)
     ctx_buf = (ctypes.c_uint8 * buf_size)()
     ctx = lib.solver_create(ctx_buf, buf_size, ba)
     assert ctx is not None
@@ -120,7 +120,7 @@ def test_min_of_3():
     b = lib.solver_get_value(ctx, 2)
     c = lib.solver_get_value(ctx, 3)
     assert r == min(a, b, c), f"r={r}, min({a},{b},{c})={min(a,b,c)}"
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 def test_max_of_3():
@@ -146,7 +146,7 @@ def test_max_of_3():
     b = lib.solver_get_value(ctx, 2)
     c = lib.solver_get_value(ctx, 3)
     assert r == max(a, b, c), f"r={r}, max({a},{b},{c})={max(a,b,c)}"
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 def test_no_overlap_2_rects():
@@ -173,7 +173,7 @@ def test_no_overlap_2_rects():
     x0 = lib.solver_get_value(ctx, 0)
     x1 = lib.solver_get_value(ctx, 1)
     assert x0 + 5 <= x1 or x1 + 5 <= x0, f"Overlap: x0={x0}, x1={x1}"
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 def test_no_overlap_3_rects_with_halo():
@@ -219,7 +219,7 @@ def test_no_overlap_3_rects_with_halo():
             x_sep = (xi_eff + ew_i <= xj_eff) or (xj_eff + ew_j <= xi_eff)
             y_sep = (yi_eff + eh_i <= yj_eff) or (yj_eff + eh_j <= yi_eff)
             assert x_sep or y_sep, f"Overlap: rect {i} at {positions[i]}, rect {j} at {positions[j]}"
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 def test_optimize_sum():
@@ -243,7 +243,7 @@ def test_optimize_sum():
     assert rc == 0
     assert result.found == 1
     assert result.best_objective == 2, f"Expected 2, got {result.best_objective}"
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 def test_hpwl():
@@ -289,7 +289,7 @@ def test_hpwl():
     hpwl = lib.solver_get_value(ctx, 10)
     expected = abs(x0 - x1) + abs(y0 - y1)
     assert hpwl == expected, f"HPWL={hpwl}, expected={expected} ({x0},{y0}),({x1},{y1})"
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 def main():

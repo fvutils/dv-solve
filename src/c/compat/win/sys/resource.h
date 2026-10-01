@@ -2,8 +2,8 @@
  * timing/peak-memory statistics (resources.c, kitten.c). ru_maxrss is reported
  * in kilobytes, matching the Linux convention the callers assume.
  */
-#ifndef ZSP_WIN_SYS_RESOURCE_H
-#define ZSP_WIN_SYS_RESOURCE_H
+#ifndef DVS_WIN_SYS_RESOURCE_H
+#define DVS_WIN_SYS_RESOURCE_H
 #ifdef _MSC_VER
 
 #include <sys/time.h>   /* struct timeval */
@@ -20,4 +20,4 @@ struct rusage {
 int getrusage(int who, struct rusage *usage);
 
 #endif /* _MSC_VER */
-#endif /* ZSP_WIN_SYS_RESOURCE_H */
+#endif /* DVS_WIN_SYS_RESOURCE_H */

@@ -2,7 +2,7 @@
 
 ## Status update (after phases A + B1 + multi-UIP + bvor propagator fix)
 
-Three patches landed in `src/c/zsp_lcg.c` and `src/c/zsp_prop_templates.c`:
+Three patches landed in `src/c/dvs_lcg.c` and `src/c/dvs_prop_templates.c`:
 
 1. **seen[] per (var, is_lb)** — root soundness fix. The original
    per-variable dedup silently dropped the second literal in any
@@ -57,16 +57,16 @@ boolector sat. With `DV_USE_LCG=0` (CDCL off) every one returns the
 correct `sat`, so the bug is in the CDCL **conflict-analysis /
 explanation** path, not in any propagator's fire function. This plan
 finds the unsound learnt clause, fixes the responsible explain
-callback, audits the rest of `zsp_explain.c`, and lifts the int32
+callback, audits the rest of `dvs_explain.c`, and lifts the int32
 bound restriction in a forward-compatible way.
 
 ## Background
 
-Lazy clause generation in dv-solve (`src/c/zsp_lcg.c`) builds learnt
+Lazy clause generation in dv-solve (`src/c/dvs_lcg.c`) builds learnt
 clauses by asking each propagator "given that *you* tightened a bound
 on var V to value B, what literals over the other watched vars imply
 that change?" via the propagator's `explain(self, ctx, V, is_lb, B,
-out)` callback in `src/c/zsp_explain.c`.
+out)` callback in `src/c/dvs_explain.c`.
 
 Today every explain callback reads **current** `var_lo64/var_hi64`
 from `ctx` rather than the bounds that held when the propagator fired,
@@ -107,7 +107,7 @@ of the plan is to find out.
 ## A — Pinpoint the unsound learnt clause (diagnose first)
 
 A1. Add a compile-time-gated trace mode `DV_LCG_TRACE=1` in
-`zsp_lcg.c::lcg_analyze_conflict`. For each conflict, emit to stderr:
+`dvs_lcg.c::lcg_analyze_conflict`. For each conflict, emit to stderr:
   - decision_level, conflict_var (or conflict prop_ref)
   - every trail entry consulted: `var, kind, decision_level, prop_ref,
     fire_fn_name, old_value → new_value`
@@ -201,7 +201,7 @@ six-literal blanket cite with a rule-aware explanation:
   This requires knowing *which* rule fired, which is the snapshot we
   capture per-fire. Concretely: extend the band/bor/bxor propagator
   to record a tiny rule-tag byte in its watch struct (`BoundsBAND_64_t`
-  already exists at the bottom of `zsp_prop_templates.c:1571` —
+  already exists at the bottom of `dvs_prop_templates.c:1571` —
   add `uint8_t last_rule` and the new_bound that was set). Explain
   reads the tag and selects the right antecedent set.
 
@@ -228,7 +228,7 @@ green.
 
 ## C — Audit the remaining explain callbacks
 
-The 26 callbacks in `zsp_explain.c` were written incrementally; only
+The 26 callbacks in `dvs_explain.c` were written incrementally; only
 the few exercised by tier2/tier3 have been stress-tested. Audit each
 one against this checklist:
 
@@ -290,11 +290,11 @@ D2. **Pick a representation.** Two options to weigh:
   before and after the widen gives an apples-to-apples number.
 
 D3. **Implementation.** Change `Literal.bound` to `int64_t`. Drop
-every `(int32_t)` cast in `zsp_explain.c` and `zsp_lcg.c`. Re-run the
+every `(int32_t)` cast in `dvs_explain.c` and `dvs_lcg.c`. Re-run the
 build (`cmake --build build`); fix any callers that assumed 32-bit
 arithmetic. Rerun the full test suite + tier1 + tier2/3 cross-checks.
 
-D4. **Reserve the tagged path** in `zsp_lcg.h` with a comment
+D4. **Reserve the tagged path** in `dvs_lcg.h` with a comment
 referencing this plan, so a future change can switch representations
 without breaking ABI for embedded callers.
 

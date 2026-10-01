@@ -40,10 +40,10 @@ _CTX_BUF_SIZE = 524288   # 512 KiB — large enough for LevelMark[256]
 
 def _setup(lib: ctypes.CDLL):
     # block allocator
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     # problem
     lib.solve_problem_init.restype  = ctypes.c_void_p
@@ -62,19 +62,19 @@ def _setup(lib: ctypes.CDLL):
     lib.solver_compile.restype  = ctypes.c_int
     lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_var_lo32.restype  = ctypes.c_int32
-    lib.zsp_var_lo32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi32.restype  = ctypes.c_int32
-    lib.zsp_var_hi32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo32.restype  = ctypes.c_int32
+    lib.dvs_var_lo32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi32.restype  = ctypes.c_int32
+    lib.dvs_var_hi32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.zsp_ctx_decision_level.restype  = ctypes.c_uint32
-    lib.zsp_ctx_decision_level.argtypes = [ctypes.c_void_p]
-    lib.zsp_ctx_trail_count.restype  = ctypes.c_uint64
-    lib.zsp_ctx_trail_count.argtypes = [ctypes.c_void_p]
+    lib.dvs_ctx_decision_level.restype  = ctypes.c_uint32
+    lib.dvs_ctx_decision_level.argtypes = [ctypes.c_void_p]
+    lib.dvs_ctx_trail_count.restype  = ctypes.c_uint64
+    lib.dvs_ctx_trail_count.argtypes = [ctypes.c_void_p]
 
     # trail
     lib.trail_push_level.restype  = None
@@ -92,8 +92,8 @@ def _setup(lib: ctypes.CDLL):
     lib.trail_backtrack.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     # stack block count (for verifying dynamic memory management)
-    lib.zsp_stack_block_count.restype  = ctypes.c_size_t
-    lib.zsp_stack_block_count.argtypes = [ctypes.c_void_p]
+    lib.dvs_stack_block_count.restype  = ctypes.c_size_t
+    lib.dvs_stack_block_count.argtypes = [ctypes.c_void_p]
 
     lib.solver_get_var.restype  = ctypes.c_void_p
     lib.solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
@@ -104,7 +104,7 @@ def _setup(lib: ctypes.CDLL):
 # ------------------------------------------------------------------ #
 
 def _make_ba(lib, block_size=65536):
-    ba = lib.zsp_block_alloc_create(None, block_size)
+    ba = lib.dvs_block_alloc_create(None, block_size)
     assert ba is not None
     return ba
 
@@ -137,9 +137,9 @@ def _compile(lib, ctx, sp):
 
 class TestTrail:
     @pytest.fixture(autouse=True)
-    def setup_lib(self, libzsp):
-        _setup(libzsp)
-        self.lib = libzsp
+    def setup_lib(self, libdvs):
+        _setup(libdvs)
+        self.lib = libdvs
 
     # -- push_level ------------------------------------------------- #
 
@@ -149,14 +149,14 @@ class TestTrail:
         ctx, cb = _make_ctx(self.lib, ba)
         _compile(self.lib, ctx, sp)
 
-        assert self.lib.zsp_ctx_decision_level(ctx) == 0
+        assert self.lib.dvs_ctx_decision_level(ctx) == 0
         self.lib.trail_push_level(ctx)
-        assert self.lib.zsp_ctx_decision_level(ctx) == 1
+        assert self.lib.dvs_ctx_decision_level(ctx) == 1
         self.lib.trail_push_level(ctx)
-        assert self.lib.zsp_ctx_decision_level(ctx) == 2
+        assert self.lib.dvs_ctx_decision_level(ctx) == 2
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
 
     # -- tier-0 LB record ------------------------------------------- #
 
@@ -167,14 +167,14 @@ class TestTrail:
         _compile(self.lib, ctx, sp)
         self.lib.trail_push_level(ctx)
 
-        assert self.lib.zsp_var_lo32(ctx, 0) == 0
+        assert self.lib.dvs_var_lo32(ctx, 0) == 0
         rc = self.lib.trail_record_lb(ctx, 0, 10)
         assert rc == 0
-        assert self.lib.zsp_var_lo32(ctx, 0) == 10
-        assert self.lib.zsp_ctx_trail_count(ctx) == 1
+        assert self.lib.dvs_var_lo32(ctx, 0) == 10
+        assert self.lib.dvs_ctx_trail_count(ctx) == 1
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
 
     # -- tier-0 UB record ------------------------------------------- #
 
@@ -187,10 +187,10 @@ class TestTrail:
 
         rc = self.lib.trail_record_ub(ctx, 0, 200)
         assert rc == 0
-        assert self.lib.zsp_var_hi32(ctx, 0) == 200
+        assert self.lib.dvs_var_hi32(ctx, 0) == 200
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
 
     # -- backtrack to level 0: restores bounds ---------------------- #
 
@@ -203,17 +203,17 @@ class TestTrail:
         self.lib.trail_push_level(ctx)   # level 0 → 1
         self.lib.trail_record_lb(ctx, 0, 50)
         self.lib.trail_record_ub(ctx, 0, 200)
-        assert self.lib.zsp_var_lo32(ctx, 0) == 50
-        assert self.lib.zsp_var_hi32(ctx, 0) == 200
+        assert self.lib.dvs_var_lo32(ctx, 0) == 50
+        assert self.lib.dvs_var_hi32(ctx, 0) == 200
 
         self.lib.trail_backtrack(ctx, 0)
-        assert self.lib.zsp_ctx_decision_level(ctx) == 0
-        assert self.lib.zsp_var_lo32(ctx, 0) == 0
-        assert self.lib.zsp_var_hi32(ctx, 0) == 255
-        assert self.lib.zsp_ctx_trail_count(ctx) == 0
+        assert self.lib.dvs_ctx_decision_level(ctx) == 0
+        assert self.lib.dvs_var_lo32(ctx, 0) == 0
+        assert self.lib.dvs_var_hi32(ctx, 0) == 255
+        assert self.lib.dvs_ctx_trail_count(ctx) == 0
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
 
     # -- multiple changes at one level ------------------------------ #
 
@@ -230,17 +230,17 @@ class TestTrail:
         self.lib.trail_record_ub(ctx, 0,  50)
         self.lib.trail_record_lb(ctx, 1,  10)
         self.lib.trail_record_ub(ctx, 1, 200)
-        assert self.lib.zsp_ctx_trail_count(ctx) == 4
+        assert self.lib.dvs_ctx_trail_count(ctx) == 4
 
         self.lib.trail_backtrack(ctx, 0)
-        assert self.lib.zsp_var_lo32(ctx, 0) == -100
-        assert self.lib.zsp_var_hi32(ctx, 0) ==  100
-        assert self.lib.zsp_var_lo32(ctx, 1) ==    0
-        assert self.lib.zsp_var_hi32(ctx, 1) ==  255
-        assert self.lib.zsp_ctx_trail_count(ctx) == 0
+        assert self.lib.dvs_var_lo32(ctx, 0) == -100
+        assert self.lib.dvs_var_hi32(ctx, 0) ==  100
+        assert self.lib.dvs_var_lo32(ctx, 1) ==    0
+        assert self.lib.dvs_var_hi32(ctx, 1) ==  255
+        assert self.lib.dvs_ctx_trail_count(ctx) == 0
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
 
     # -- multi-level push/pop --------------------------------------- #
 
@@ -262,21 +262,21 @@ class TestTrail:
         self.lib.trail_push_level(ctx)
         self.lib.trail_record_lb(ctx, 0, 30)
 
-        assert self.lib.zsp_var_lo32(ctx, 0) == 30
-        assert self.lib.zsp_ctx_decision_level(ctx) == 3
+        assert self.lib.dvs_var_lo32(ctx, 0) == 30
+        assert self.lib.dvs_ctx_decision_level(ctx) == 3
 
         # Backtrack to level 1: should restore lo to 10
         self.lib.trail_backtrack(ctx, 1)
-        assert self.lib.zsp_ctx_decision_level(ctx) == 1
-        assert self.lib.zsp_var_lo32(ctx, 0) == 10
+        assert self.lib.dvs_ctx_decision_level(ctx) == 1
+        assert self.lib.dvs_var_lo32(ctx, 0) == 10
 
         # Backtrack to level 0: lo back to 0
         self.lib.trail_backtrack(ctx, 0)
-        assert self.lib.zsp_ctx_decision_level(ctx) == 0
-        assert self.lib.zsp_var_lo32(ctx, 0) == 0
+        assert self.lib.dvs_ctx_decision_level(ctx) == 0
+        assert self.lib.dvs_var_lo32(ctx, 0) == 0
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
 
     # -- tier-1 (64-bit) trail -------------------------------------- #
 
@@ -286,8 +286,8 @@ class TestTrail:
         ctx, cb = _make_ctx(self.lib, ba)
         _compile(self.lib, ctx, sp)
 
-        orig_lo = self.lib.zsp_var_lo64(ctx, 0)
-        orig_hi = self.lib.zsp_var_hi64(ctx, 0)
+        orig_lo = self.lib.dvs_var_lo64(ctx, 0)
+        orig_hi = self.lib.dvs_var_hi64(ctx, 0)
         assert orig_lo == 0
         assert orig_hi == 2**63 - 1
 
@@ -296,15 +296,15 @@ class TestTrail:
         rc_ub = self.lib.trail_record_ub(ctx, 0, 2**62)
         assert rc_lb == 0
         assert rc_ub == 0
-        assert self.lib.zsp_var_lo64(ctx, 0) == 1000
-        assert self.lib.zsp_var_hi64(ctx, 0) == 2**62
+        assert self.lib.dvs_var_lo64(ctx, 0) == 1000
+        assert self.lib.dvs_var_hi64(ctx, 0) == 2**62
 
         self.lib.trail_backtrack(ctx, 0)
-        assert self.lib.zsp_var_lo64(ctx, 0) == orig_lo
-        assert self.lib.zsp_var_hi64(ctx, 0) == orig_hi
+        assert self.lib.dvs_var_lo64(ctx, 0) == orig_lo
+        assert self.lib.dvs_var_hi64(ctx, 0) == orig_hi
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
 
     # -- hole record (no-op restore) -------------------------------- #
 
@@ -317,14 +317,14 @@ class TestTrail:
 
         rc = self.lib.trail_record_hole(ctx, 0, 42)
         assert rc == 0
-        assert self.lib.zsp_ctx_trail_count(ctx) == 1
+        assert self.lib.dvs_ctx_trail_count(ctx) == 1
 
         # Backtrack: hole restore is no-op, but trail_count goes back to 0
         self.lib.trail_backtrack(ctx, 0)
-        assert self.lib.zsp_ctx_trail_count(ctx) == 0
+        assert self.lib.dvs_ctx_trail_count(ctx) == 0
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
 
     # -- backtrack across block boundary ---------------------------- #
 
@@ -339,23 +339,23 @@ class TestTrail:
         _compile(self.lib, ctx, sp)
 
         self.lib.trail_push_level(ctx)
-        orig_lo = self.lib.zsp_var_lo32(ctx, 0)
+        orig_lo = self.lib.dvs_var_lo32(ctx, 0)
 
         # Record 50 LB changes (each raises lo by 1)
         for i in range(1, 51):
             rc = self.lib.trail_record_lb(ctx, 0, i)
             assert rc == 0, f"trail_record_lb failed at step {i}"
 
-        assert self.lib.zsp_ctx_trail_count(ctx) == 50
-        assert self.lib.zsp_var_lo32(ctx, 0) == 50
+        assert self.lib.dvs_ctx_trail_count(ctx) == 50
+        assert self.lib.dvs_var_lo32(ctx, 0) == 50
 
         # Backtrack: all 50 changes undone, dynamic memory recovered
         self.lib.trail_backtrack(ctx, 0)
-        assert self.lib.zsp_var_lo32(ctx, 0) == orig_lo
-        assert self.lib.zsp_ctx_trail_count(ctx) == 0
+        assert self.lib.dvs_var_lo32(ctx, 0) == orig_lo
+        assert self.lib.dvs_ctx_trail_count(ctx) == 0
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
 
     # -- trail_count accumulates across levels ---------------------- #
 
@@ -371,17 +371,17 @@ class TestTrail:
         self.lib.trail_record_lb(ctx, 1, 10)   # count=2
         self.lib.trail_record_ub(ctx, 1, 200)  # count=3
 
-        assert self.lib.zsp_ctx_trail_count(ctx) == 3
+        assert self.lib.dvs_ctx_trail_count(ctx) == 3
 
         # Backtrack to level 1: undo 2 entries for var 1, keep 1 for var 0
         self.lib.trail_backtrack(ctx, 1)
-        assert self.lib.zsp_ctx_trail_count(ctx) == 1
-        assert self.lib.zsp_var_lo32(ctx, 0) == 5   # still tightened
-        assert self.lib.zsp_var_lo32(ctx, 1) == 0   # restored
-        assert self.lib.zsp_var_hi32(ctx, 1) == 255  # restored
+        assert self.lib.dvs_ctx_trail_count(ctx) == 1
+        assert self.lib.dvs_var_lo32(ctx, 0) == 5   # still tightened
+        assert self.lib.dvs_var_lo32(ctx, 1) == 0   # restored
+        assert self.lib.dvs_var_hi32(ctx, 1) == 255  # restored
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)
 
     # -- dynamic stack block count shrinks on backtrack ------------- #
 
@@ -404,8 +404,8 @@ class TestTrail:
         self.lib.trail_backtrack(ctx, 0)
         # After backtrack, no trail entries exist → dynamic stack should be empty.
         # We verify indirectly: trail_count == 0 and bounds restored.
-        assert self.lib.zsp_ctx_trail_count(ctx) == 0
-        assert self.lib.zsp_var_lo32(ctx, 0) == 0
+        assert self.lib.dvs_ctx_trail_count(ctx) == 0
+        assert self.lib.dvs_var_lo32(ctx, 0) == 0
 
         self.lib.solver_destroy(ctx)
-        self.lib.zsp_block_alloc_destroy(ba)
+        self.lib.dvs_block_alloc_destroy(ba)

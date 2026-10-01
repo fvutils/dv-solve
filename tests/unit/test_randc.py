@@ -28,10 +28,10 @@ class SolveOpts(ctypes.Structure):
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -60,10 +60,10 @@ def _setup(lib: ctypes.CDLL):
     lib.solver_exclude_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                          ctypes.c_int64]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 def _compile_single_var(lib, width, lo, hi):
@@ -73,7 +73,7 @@ def _compile_single_var(lib, width, lo, hi):
     sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
     assert sp
     lib.problem_add_var(sp, 0, width, 0, lo, hi)
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -84,9 +84,9 @@ def _compile_single_var(lib, width, lo, hi):
 # Tests                                                                #
 # ------------------------------------------------------------------ #
 
-def test_exclude_boundary_lo(libzsp):
+def test_exclude_boundary_lo(libdvs):
     """Exclude lo value, verify new lo = old_lo+1 after tightening."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     ctx, ba, _, _ = _compile_single_var(lib, 8, 0, 10)
@@ -95,7 +95,7 @@ def test_exclude_boundary_lo(libzsp):
     assert rc == 0
 
     # After excluding 0, the lower bound should be tightened to 1
-    lo = lib.zsp_var_lo64(ctx, 0)
+    lo = lib.dvs_var_lo64(ctx, 0)
     assert lo >= 1, f"lo={lo}, expected >= 1 after excluding 0"
 
     # Solve should produce a value >= 1
@@ -105,12 +105,12 @@ def test_exclude_boundary_lo(libzsp):
     x = lib.solver_get_value(ctx, 0)
     assert x >= 1, f"x={x}, expected >= 1"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_exclude_boundary_hi(libzsp):
+def test_exclude_boundary_hi(libdvs):
     """Exclude hi value, verify new hi = old_hi-1."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     ctx, ba, _, _ = _compile_single_var(lib, 8, 0, 10)
@@ -118,7 +118,7 @@ def test_exclude_boundary_hi(libzsp):
     rc = lib.solver_exclude_value(ctx, 0, 10)
     assert rc == 0
 
-    hi = lib.zsp_var_hi64(ctx, 0)
+    hi = lib.dvs_var_hi64(ctx, 0)
     assert hi <= 9, f"hi={hi}, expected <= 9 after excluding 10"
 
     opts = SolveOpts(seed=0x2222)
@@ -127,12 +127,12 @@ def test_exclude_boundary_hi(libzsp):
     x = lib.solver_get_value(ctx, 0)
     assert x <= 9, f"x={x}, expected <= 9"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_exclude_middle(libzsp):
+def test_exclude_middle(libdvs):
     """Exclude middle value, verify it's never picked over 100 solves."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     ctx, ba, _, _ = _compile_single_var(lib, 8, 0, 10)
@@ -151,13 +151,13 @@ def test_exclude_middle(libzsp):
         x = lib.solver_get_value(ctx, 0)
         assert x != 5, f"iteration {i}: x=5, but 5 was excluded"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_full_cycle(libzsp):
+def test_full_cycle(libdvs):
     """Variable with domain [0,7]. Exclude all 8 values one-by-one.
     Verify each value appears exactly once."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     ctx, ba, _, _ = _compile_single_var(lib, 8, 0, 7)
@@ -183,12 +183,12 @@ def test_full_cycle(libzsp):
 
     assert seen == set(range(8)), f"Incomplete cycle: seen={seen}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_exclude_all_returns_error(libzsp):
+def test_exclude_all_returns_error(libdvs):
     """Excluding all values from a 2-element domain returns -1."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     ctx, ba, _, _ = _compile_single_var(lib, 8, 0, 1)
@@ -199,12 +199,12 @@ def test_exclude_all_returns_error(libzsp):
     rc = lib.solver_exclude_value(ctx, 0, 1)
     assert rc == -1, "Expected -1 when excluding would empty domain"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_exclude_outside_domain(libzsp):
+def test_exclude_outside_domain(libdvs):
     """Excluding a value outside the domain is a no-op (returns 0)."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     ctx, ba, _, _ = _compile_single_var(lib, 8, 5, 10)
@@ -215,12 +215,12 @@ def test_exclude_outside_domain(libzsp):
     rc = lib.solver_exclude_value(ctx, 0, 100)
     assert rc == 0, "Excluding value above domain should succeed (no-op)"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_exclude_duplicate(libzsp):
+def test_exclude_duplicate(libdvs):
     """Excluding the same value twice is a no-op."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     ctx, ba, _, _ = _compile_single_var(lib, 8, 0, 10)
@@ -230,4 +230,4 @@ def test_exclude_duplicate(libzsp):
     rc = lib.solver_exclude_value(ctx, 0, 5)
     assert rc == 0, "Duplicate exclude should be a no-op"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

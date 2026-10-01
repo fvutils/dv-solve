@@ -7,10 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "zsp_problem.h"
-#include "zsp_ctx.h"
-#include "zsp_search.h"
-#include "zsp_placement.h"
+#include "dvs_problem.h"
+#include "dvs_ctx.h"
+#include "dvs_search.h"
+#include "dvs_placement.h"
 
 static double now_sec(void) {
     struct timespec ts;
@@ -51,7 +51,7 @@ static BenchResult run_one(int n, int canvas, int halo, int max_restarts) {
 
     size_t ctx_sz = 1 << 22;
     void *ctx_buf = calloc(1, ctx_sz);
-    zsp_block_alloc_t *ba = zsp_block_alloc_create(NULL, ctx_sz);
+    dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
     SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
     if (solver_compile(ctx, sp) != 0) {
         br.result = -2;
@@ -86,7 +86,7 @@ static BenchResult run_one(int n, int canvas, int halo, int max_restarts) {
     br.time_sec = t1 - t0;
 
 cleanup:
-    zsp_block_alloc_destroy(ba);
+    dvs_block_alloc_destroy(ba);
     free(ctx_buf);
     free(sp_buf);
     return br;

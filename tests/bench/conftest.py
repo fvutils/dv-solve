@@ -37,9 +37,9 @@ def pytest_configure(config):
     target = config.getoption("--bench-target-secs", default=None)
     timeout = config.getoption("--bench-timeout-secs", default=None)
     if target is not None:
-        os.environ["ZSP_BENCH_TARGET"] = str(target)
+        os.environ["DVS_BENCH_TARGET"] = str(target)
     if timeout is not None:
-        os.environ["ZSP_BENCH_TIMEOUT"] = str(timeout)
+        os.environ["DVS_BENCH_TIMEOUT"] = str(timeout)
 
 
 def _build_native_lib(build_dir: Path) -> Path:
@@ -61,7 +61,7 @@ def _build_native_lib(build_dir: Path) -> Path:
 
 @pytest.fixture(scope="session", autouse=True)
 def _native_lib_path(tmp_path_factory):
-    """Build the native solver library once per session and set ZSP_SOLVER_PATH."""
+    """Build the native solver library once per session and set DVS_SOLVER_PATH."""
     if not shutil.which("cmake"):
         return None
     # Check if library is already available (e.g. from a prior build or env)
@@ -69,13 +69,13 @@ def _native_lib_path(tmp_path_factory):
     if _lib_mod._load_lib() is not None:
         return None  # already found; no need to rebuild
 
-    build_dir = tmp_path_factory.mktemp("zsp_bench_build")
+    build_dir = tmp_path_factory.mktemp("dvs_bench_build")
     try:
         lib_path = _build_native_lib(build_dir)
         # Reset cache so the new path is picked up
         _lib_mod._LOAD_ATTEMPTED = False
         _lib_mod._LIB_CACHE = None
-        os.environ["ZSP_SOLVER_PATH"] = str(lib_path.parent)
+        os.environ["DVS_SOLVER_PATH"] = str(lib_path.parent)
         _lib_mod._load_lib()  # warm the cache
         return lib_path
     except Exception:

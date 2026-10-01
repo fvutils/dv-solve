@@ -1,4 +1,4 @@
-"""Unit tests for zsp_problem (Phase 3).
+"""Unit tests for dvs_problem (Phase 3).
 
 Coverage:
 - solve_problem_init: basic init, too-small buffer
@@ -148,7 +148,7 @@ class SolveProblemHead(ctypes.Structure):
         ("sources_head",     ctypes.c_uint32),
         ("_pad0",            ctypes.c_uint32),
         ("_pad1",            ctypes.c_uint32),
-        # pool header (zsp_pool_t = 4 × uint32) follows
+        # pool header (dvs_pool_t = 4 × uint32) follows
     ]
 
 
@@ -252,9 +252,9 @@ def _read_struct(cls, addr: int):
 
 class TestProblem:
     @pytest.fixture(autouse=True)
-    def setup_lib(self, libzsp):
-        _setup(libzsp)
-        self.lib = libzsp
+    def setup_lib(self, libdvs):
+        _setup(libdvs)
+        self.lib = libdvs
 
     # -- lifecycle -------------------------------------------------- #
 

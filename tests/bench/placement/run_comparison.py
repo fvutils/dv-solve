@@ -48,7 +48,7 @@ def main():
 
     build_dir = _ROOT / "build"
     if build_dir.exists():
-        os.environ["ZSP_SOLVER_PATH"] = str(build_dir)
+        os.environ["DVS_SOLVER_PATH"] = str(build_dir)
 
     # Determine which suites to run
     suites = args.suite

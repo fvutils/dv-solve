@@ -35,10 +35,10 @@ class _SolveOpts(ctypes.Structure):
 
 def _setup_lib(lib):
     c = ctypes
-    lib.zsp_block_alloc_create.restype  = c.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [c.c_void_p]
+    lib.dvs_block_alloc_create.restype  = c.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [c.c_void_p]
 
     lib.solve_problem_init.restype  = c.c_void_p
     lib.solve_problem_init.argtypes = [c.c_void_p, c.c_size_t]
@@ -72,10 +72,10 @@ def _setup_lib(lib):
     lib.solver_solve.argtypes = [c.c_void_p, c.c_void_p]
     lib.solver_get_value.restype  = c.c_int64
     lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
-    lib.zsp_var_lo32.restype  = c.c_int32
-    lib.zsp_var_lo32.argtypes = [c.c_void_p, c.c_uint32]
-    lib.zsp_var_hi32.restype  = c.c_int32
-    lib.zsp_var_hi32.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_var_lo32.restype  = c.c_int32
+    lib.dvs_var_lo32.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_var_hi32.restype  = c.c_int32
+    lib.dvs_var_hi32.argtypes = [c.c_void_p, c.c_uint32]
 
 
 def _make_problem(lib, buf_size=65536):
@@ -86,7 +86,7 @@ def _make_problem(lib, buf_size=65536):
 
 
 def _compile(lib, sp):
-    ba = lib.zsp_block_alloc_create(None, _CTX_BUF_SIZE)
+    ba = lib.dvs_block_alloc_create(None, _CTX_BUF_SIZE)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx is not None
@@ -102,9 +102,9 @@ def _solve(lib, ctx, seed=42):
 
 class TestCheckpoint:
 
-    def test_checkpoint_restore_domains(self, libzsp):
+    def test_checkpoint_restore_domains(self, libdvs):
         """Set x=[0,100]; checkpoint; tighten to [50,60]; restore; verify [0,100]."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -112,8 +112,8 @@ class TestCheckpoint:
         ctx, _, ba = _compile(lib, sp)
 
         # Verify initial bounds
-        lo = lib.zsp_var_lo32(ctx, 0)
-        hi = lib.zsp_var_hi32(ctx, 0)
+        lo = lib.dvs_var_lo32(ctx, 0)
+        hi = lib.dvs_var_hi32(ctx, 0)
         assert lo == 0 and hi == 100
 
         # Checkpoint
@@ -128,21 +128,21 @@ class TestCheckpoint:
             lib.expr_var(aux_sp, 0), lib.expr_const(aux_sp, 60, 0)))
         lib.solver_add_constraint(ctx, aux_sp)
 
-        lo2 = lib.zsp_var_lo32(ctx, 0)
-        hi2 = lib.zsp_var_hi32(ctx, 0)
+        lo2 = lib.dvs_var_lo32(ctx, 0)
+        hi2 = lib.dvs_var_hi32(ctx, 0)
         assert lo2 >= 50 and hi2 <= 60
 
         # Restore
         lib.solver_restore(ctx, cp)
 
-        lo3 = lib.zsp_var_lo32(ctx, 0)
-        hi3 = lib.zsp_var_hi32(ctx, 0)
+        lo3 = lib.dvs_var_lo32(ctx, 0)
+        hi3 = lib.dvs_var_hi32(ctx, 0)
         assert lo3 == 0 and hi3 == 100, f"Expected [0,100], got [{lo3},{hi3}]"
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
-    def test_checkpoint_restore_added_constraint(self, libzsp):
+    def test_checkpoint_restore_added_constraint(self, libdvs):
         """Checkpoint; add x<=3; restore; verify constraint no longer enforced."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -156,23 +156,23 @@ class TestCheckpoint:
             lib.expr_var(aux_sp, 0), lib.expr_const(aux_sp, 3, 0)))
         lib.solver_add_constraint(ctx, aux_sp)
 
-        hi = lib.zsp_var_hi32(ctx, 0)
+        hi = lib.dvs_var_hi32(ctx, 0)
         assert hi <= 3
 
         # Restore
         lib.solver_restore(ctx, cp)
 
-        hi2 = lib.zsp_var_hi32(ctx, 0)
+        hi2 = lib.dvs_var_hi32(ctx, 0)
         assert hi2 == 10, f"Expected hi=10 after restore, got {hi2}"
 
         # Solve should allow values > 3 now
         result = _solve(lib, ctx, seed=100)
         assert result == SOLVE_OK
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
-    def test_nested_checkpoints(self, libzsp):
+    def test_nested_checkpoints(self, libdvs):
         """Checkpoint A; tighten; checkpoint B; tighten more; restore B; restore A."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -190,8 +190,8 @@ class TestCheckpoint:
             lib.expr_var(aux1, 0), lib.expr_const(aux1, 80, 0)))
         lib.solver_add_constraint(ctx, aux1)
 
-        lo1 = lib.zsp_var_lo32(ctx, 0)
-        hi1 = lib.zsp_var_hi32(ctx, 0)
+        lo1 = lib.dvs_var_lo32(ctx, 0)
+        hi1 = lib.dvs_var_hi32(ctx, 0)
         assert lo1 >= 20 and hi1 <= 80
 
         # Checkpoint B
@@ -205,26 +205,26 @@ class TestCheckpoint:
             lib.expr_var(aux2, 0), lib.expr_const(aux2, 60, 0)))
         lib.solver_add_constraint(ctx, aux2)
 
-        lo2 = lib.zsp_var_lo32(ctx, 0)
-        hi2 = lib.zsp_var_hi32(ctx, 0)
+        lo2 = lib.dvs_var_lo32(ctx, 0)
+        hi2 = lib.dvs_var_hi32(ctx, 0)
         assert lo2 >= 40 and hi2 <= 60
 
         # Restore B → back to [20, 80]
         lib.solver_restore(ctx, cpB)
-        lo3 = lib.zsp_var_lo32(ctx, 0)
-        hi3 = lib.zsp_var_hi32(ctx, 0)
+        lo3 = lib.dvs_var_lo32(ctx, 0)
+        hi3 = lib.dvs_var_hi32(ctx, 0)
         assert lo3 == 20 and hi3 == 80, f"After restore B: [{lo3},{hi3}]"
 
         # Restore A → back to [0, 100]
         lib.solver_restore(ctx, cpA)
-        lo4 = lib.zsp_var_lo32(ctx, 0)
-        hi4 = lib.zsp_var_hi32(ctx, 0)
+        lo4 = lib.dvs_var_lo32(ctx, 0)
+        hi4 = lib.dvs_var_hi32(ctx, 0)
         assert lo4 == 0 and hi4 == 100, f"After restore A: [{lo4},{hi4}]"
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
-    def test_solve_after_restore(self, libzsp):
+    def test_solve_after_restore(self, libdvs):
         """Checkpoint; add constraints; solve; restore; add different; solve."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -258,11 +258,11 @@ class TestCheckpoint:
         assert result2 == SOLVE_OK
         val2 = lib.solver_get_value(ctx, 0)
         assert val2 == 77, f"Expected 77, got {val2}"
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
-    def test_checkpoint_with_alldiff(self, libzsp):
+    def test_checkpoint_with_alldiff(self, libdvs):
         """Checkpoint; add AllDifferent; solve; restore; solve without constraint."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -289,4 +289,4 @@ class TestCheckpoint:
         # Solve again — without AllDifferent, duplicates are allowed
         result2 = _solve(lib, ctx, seed=1)
         assert result2 == SOLVE_OK
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)

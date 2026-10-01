@@ -126,7 +126,7 @@ class _Gen:
 
         The generic `or` production below builds disjunctions over arbitrary
         *terms*, which almost never reduce to the shape `_flatten_or` in
-        zsp_compile.c recognises -- so they route to a Boolean guard and never
+        dvs_compile.c recognises -- so they route to a Boolean guard and never
         reach the DisjClause propagator. This production targets that
         propagator (and its interval-hull pass) head on: it is the `x inside
         {a, b, c}` family that Verilator emits constantly.

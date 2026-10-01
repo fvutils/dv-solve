@@ -43,7 +43,7 @@ target_include_directories(kissat PUBLIC ${KISSAT_SRC})
 # build.h is included as "build.h"; expose its directory privately to the
 # kissat sources so other code can't accidentally pick it up.
 target_include_directories(kissat PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/kissat_gen)
-# dv-solve fork: kissat sources can #include "zsp_alloc.h" for the optional
+# dv-solve fork: kissat sources can #include "dvs_alloc.h" for the optional
 # allocator routing. The include must be PRIVATE — upstream Kissat must not
 # acquire dv-solve as a transitive dependency.
 target_include_directories(kissat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -56,17 +56,17 @@ target_include_directories(kissat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 target_compile_definitions(kissat PRIVATE NDEBUG QUIET NPROOFS)
 
 # Public C headers the dv-solve / kissat sources expect on Windows live here.
-set(ZSP_WIN_COMPAT ${CMAKE_CURRENT_SOURCE_DIR}/src/c/compat/win)
+set(DVS_WIN_COMPAT ${CMAKE_CURRENT_SOURCE_DIR}/src/c/compat/win)
 
 if(MSVC)
     # MSVC rejects the GCC/Clang flags above. Force-include the builtins/stat
     # shim into every kissat TU, put the POSIX shim headers on the include
     # path, and compile the Win32 backings for getrusage/gettimeofday/sysconf.
-    target_sources(kissat PRIVATE ${ZSP_WIN_COMPAT}/win_compat.c)
-    target_include_directories(kissat PRIVATE ${ZSP_WIN_COMPAT})
+    target_sources(kissat PRIVATE ${DVS_WIN_COMPAT}/win_compat.c)
+    target_include_directories(kissat PRIVATE ${DVS_WIN_COMPAT})
     target_compile_options(kissat PRIVATE
         /O2
-        /FI${ZSP_WIN_COMPAT}/msvc_compat.h
+        /FI${DVS_WIN_COMPAT}/msvc_compat.h
         /wd4244 /wd4267 /wd4146   # narrowing/sign-conversion noise from kissat
     )
     target_compile_definitions(kissat PRIVATE

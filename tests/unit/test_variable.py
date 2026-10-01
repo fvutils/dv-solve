@@ -28,8 +28,8 @@ VAR_STATE  = 0x04
 VAR_TIER1  = 0x08
 VAR_TIER2  = 0x10
 
-# Mirrors ZSP_COMPILE_UNSUPPORTED_WIDTH in zsp_ctx.h.
-ZSP_COMPILE_UNSUPPORTED_WIDTH = -3
+# Mirrors DVS_COMPILE_UNSUPPORTED_WIDTH in dvs_ctx.h.
+DVS_COMPILE_UNSUPPORTED_WIDTH = -3
 
 EXPR_NULL = 0xFFFFFFFF
 
@@ -79,20 +79,20 @@ def _setup(lib: ctypes.CDLL):
     lib.solver_get_var.restype  = ctypes.c_void_p
     lib.solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.zsp_var_lo32.restype  = ctypes.c_int32
-    lib.zsp_var_lo32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo32.restype  = ctypes.c_int32
+    lib.dvs_var_lo32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.zsp_var_hi32.restype  = ctypes.c_int32
-    lib.zsp_var_hi32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi32.restype  = ctypes.c_int32
+    lib.dvs_var_hi32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.zsp_ctx_pool_used.restype  = ctypes.c_uint32
-    lib.zsp_ctx_pool_used.argtypes = [ctypes.c_void_p]
+    lib.dvs_ctx_pool_used.restype  = ctypes.c_uint32
+    lib.dvs_ctx_pool_used.argtypes = [ctypes.c_void_p]
 
 
 # ------------------------------------------------------------------ #
@@ -125,9 +125,9 @@ def _var(lib, ctx, var_id):
 
 class TestVariable:
     @pytest.fixture(autouse=True)
-    def setup_lib(self, libzsp):
-        _setup(libzsp)
-        self.lib = libzsp
+    def setup_lib(self, libdvs):
+        _setup(libdvs)
+        self.lib = libdvs
 
     # -- lifecycle -------------------------------------------------- #
 
@@ -163,8 +163,8 @@ class TestVariable:
         assert not (v.flags & VAR_TIER2)
         assert not (v.flags & VAR_SIGNED)
 
-        assert self.lib.zsp_var_lo32(ctx, 0) == 0
-        assert self.lib.zsp_var_hi32(ctx, 0) == 255
+        assert self.lib.dvs_var_lo32(ctx, 0) == 0
+        assert self.lib.dvs_var_hi32(ctx, 0) == 255
         self.lib.solver_destroy(ctx)
 
     # -- tier-0: signed 32-bit ------------------------------------- #
@@ -180,8 +180,8 @@ class TestVariable:
         assert v.flags & VAR_SIGNED
         assert not (v.flags & VAR_TIER1)
 
-        assert self.lib.zsp_var_lo32(ctx, 0) == -(2**31)
-        assert self.lib.zsp_var_hi32(ctx, 0) == 2**31 - 1
+        assert self.lib.dvs_var_lo32(ctx, 0) == -(2**31)
+        assert self.lib.dvs_var_hi32(ctx, 0) == 2**31 - 1
         self.lib.solver_destroy(ctx)
 
     # -- tier-0: negative bounds ----------------------------------- #
@@ -192,8 +192,8 @@ class TestVariable:
         ctx, ctx_buf = _make_ctx(self.lib)
         assert self.lib.solver_compile(ctx, sp) == 0
 
-        assert self.lib.zsp_var_lo32(ctx, 0) == -100
-        assert self.lib.zsp_var_hi32(ctx, 0) ==  100
+        assert self.lib.dvs_var_lo32(ctx, 0) == -100
+        assert self.lib.dvs_var_hi32(ctx, 0) ==  100
         self.lib.solver_destroy(ctx)
 
     # -- tier-0: var_lo64 widens correctly  ------------------------ #
@@ -206,7 +206,7 @@ class TestVariable:
         assert self.lib.solver_compile(ctx, sp) == 0
 
         # lo is 0 → zero-extended should still be 0
-        assert self.lib.zsp_var_lo64(ctx, 0) == 0
+        assert self.lib.dvs_var_lo64(ctx, 0) == 0
         self.lib.solver_destroy(ctx)
 
     def test_tier0_lo64_signed_widening(self):
@@ -216,8 +216,8 @@ class TestVariable:
         ctx, ctx_buf = _make_ctx(self.lib)
         assert self.lib.solver_compile(ctx, sp) == 0
 
-        assert self.lib.zsp_var_lo64(ctx, 0) == -128
-        assert self.lib.zsp_var_hi64(ctx, 0) ==  127
+        assert self.lib.dvs_var_lo64(ctx, 0) == -128
+        assert self.lib.dvs_var_hi64(ctx, 0) ==  127
         self.lib.solver_destroy(ctx)
 
     # -- tier-1: 64-bit -------------------------------------------- #
@@ -237,8 +237,8 @@ class TestVariable:
         assert not (v.flags & VAR_TIER2)
         assert v.holes_offset != 0
 
-        assert self.lib.zsp_var_lo64(ctx, 0) == lo
-        assert self.lib.zsp_var_hi64(ctx, 0) == hi
+        assert self.lib.dvs_var_lo64(ctx, 0) == lo
+        assert self.lib.dvs_var_hi64(ctx, 0) == hi
         self.lib.solver_destroy(ctx)
 
     def test_tier1_signed_64bit(self):
@@ -253,8 +253,8 @@ class TestVariable:
         assert v.flags & VAR_TIER1
         assert v.flags & VAR_SIGNED
 
-        assert self.lib.zsp_var_lo64(ctx, 0) == lo
-        assert self.lib.zsp_var_hi64(ctx, 0) == hi
+        assert self.lib.dvs_var_lo64(ctx, 0) == lo
+        assert self.lib.dvs_var_hi64(ctx, 0) == hi
         self.lib.solver_destroy(ctx)
 
     def test_tier1_33bit_boundary(self):
@@ -284,14 +284,14 @@ class TestVariable:
 
         Checking the flags said nothing about any of that, because the flags
         were the one part that was right. Compile now returns
-        ZSP_COMPILE_UNSUPPORTED_WIDTH, so a caller escalates to the bit-blaster
+        DVS_COMPILE_UNSUPPORTED_WIDTH, so a caller escalates to the bit-blaster
         (which handles these widths) instead of receiving a false UNSAT or, if
         the accessors alone had been fixed, an unenforced constraint.
         """
         sp, sp_buf = _make_sp(self.lib)
         self.lib.problem_add_var(sp, 0, 128, 0, 0, 1000)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == ZSP_COMPILE_UNSUPPORTED_WIDTH
+        assert self.lib.solver_compile(ctx, sp) == DVS_COMPILE_UNSUPPORTED_WIDTH
         self.lib.solver_destroy(ctx)
 
     def test_tier1_64bit_still_accepted(self):
@@ -315,7 +315,7 @@ class TestVariable:
         self.lib.problem_add_var(sp, 0,   8, 0, 0, 255)
         self.lib.problem_add_var(sp, 1, 128, 0, 0, 1000)
         ctx, ctx_buf = _make_ctx(self.lib)
-        assert self.lib.solver_compile(ctx, sp) == ZSP_COMPILE_UNSUPPORTED_WIDTH
+        assert self.lib.solver_compile(ctx, sp) == DVS_COMPILE_UNSUPPORTED_WIDTH
         self.lib.solver_destroy(ctx)
 
     # -- multiple variables of mixed tiers ------------------------- #
@@ -337,11 +337,11 @@ class TestVariable:
         assert not (v1.flags & (VAR_TIER1 | VAR_TIER2))
         assert v2.flags & VAR_TIER1
 
-        assert self.lib.zsp_var_lo32(ctx, 0) == 0
-        assert self.lib.zsp_var_hi32(ctx, 0) == 255
-        assert self.lib.zsp_var_lo32(ctx, 1) == -(2**31)
-        assert self.lib.zsp_var_lo64(ctx, 2) == 0
-        assert self.lib.zsp_var_hi64(ctx, 2) == 2**63 - 1
+        assert self.lib.dvs_var_lo32(ctx, 0) == 0
+        assert self.lib.dvs_var_hi32(ctx, 0) == 255
+        assert self.lib.dvs_var_lo32(ctx, 1) == -(2**31)
+        assert self.lib.dvs_var_lo64(ctx, 2) == 0
+        assert self.lib.dvs_var_hi64(ctx, 2) == 2**63 - 1
         self.lib.solver_destroy(ctx)
 
     # -- static pool usage ----------------------------------------- #
@@ -352,9 +352,9 @@ class TestVariable:
         self.lib.problem_add_var(sp, 0, 8, 0, 0, 255)
         ctx, ctx_buf = _make_ctx(self.lib)
 
-        used_before = self.lib.zsp_ctx_pool_used(ctx)
+        used_before = self.lib.dvs_ctx_pool_used(ctx)
         assert self.lib.solver_compile(ctx, sp) == 0
-        used_after = self.lib.zsp_ctx_pool_used(ctx)
+        used_after = self.lib.dvs_ctx_pool_used(ctx)
 
         assert used_after > used_before, (
             f"Pool should have grown: {used_before} → {used_after}"
@@ -373,8 +373,8 @@ class TestVariable:
         assert self.lib.solver_compile(ctx0, sp0) == 0
         assert self.lib.solver_compile(ctx1, sp1) == 0
 
-        used0 = self.lib.zsp_ctx_pool_used(ctx0)
-        used1 = self.lib.zsp_ctx_pool_used(ctx1)
+        used0 = self.lib.dvs_ctx_pool_used(ctx0)
+        used1 = self.lib.dvs_ctx_pool_used(ctx1)
 
         assert used1 > used0, (
             f"Tier-1 should use more pool than tier-0: {used0} vs {used1}"

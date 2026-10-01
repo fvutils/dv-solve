@@ -200,7 +200,7 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
 
     # Create solver context
     ctx_buf_size = 1 << 24 if n > 64 else 1 << 22  # 16 MiB for large N
-    ba = lib.zsp_block_alloc_create(None, ctx_buf_size)
+    ba = lib.dvs_block_alloc_create(None, ctx_buf_size)
     ctx_buf = (ctypes.c_uint8 * ctx_buf_size)()
     ctx = lib.solver_create(ctx_buf, ctx_buf_size, ba)
 
@@ -208,7 +208,7 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
     if rc < 0:  # negative = error, positive = uncompiled constraints (OK)
         lib.builder_free_problem(builder, sp, sp_size.value)
         lib.builder_destroy(builder)
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
         result.solver_result = rc
         return result
 
@@ -475,7 +475,7 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
         lib.hpwl_cost_ctx_destroy(ctypes.byref(hpwl_cleanup[0]))
     lib.builder_free_problem(builder, sp, sp_size.value)
     lib.builder_destroy(builder)
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
     return result
 

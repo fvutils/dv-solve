@@ -75,7 +75,7 @@ test_soft_resolve_reuse_keeps_set`.
 ## Serve-path (BV-SAT) equivalence
 
 The bit-blast / SAT serve path honors softs with the **same** priority-respecting
-greedy relaxation via `zsp_bbsolver_check_maxsat` (`zsp_bbsolver.c`): start with all
+greedy relaxation via `dvs_bbsolver_check_maxsat` (`dvs_bbsolver.c`): start with all
 softs kept; on UNSAT drop the lowest-preference (highest priority value, last on ties)
 and re-solve, until SAT. The kept set is exported as a `soft_keep[]` mask (in
 `softs_head` walk order) and enforced as hard on every sampler draw, so the served

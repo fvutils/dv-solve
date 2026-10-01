@@ -4,7 +4,7 @@ These resolve differently in an installed wheel (native libraries staged at the
 package root) than in a source tree (CMake writes them to ``build/<libdir>``),
 and returning the wheel answer unconditionally is a defect a consumer only sees
 as a *build* failure in someone else's project -- ``cannot find -ldv_solve``, or
-``fatal error: zsp_block_alloc.h`` before that. Hence a test per layout, with the
+``fatal error: dvs_block_alloc.h`` before that. Hence a test per layout, with the
 layout faked so neither depends on how this checkout happens to be built.
 """
 import os
@@ -26,7 +26,7 @@ def layout(tmp_path, monkeypatch):
     They now live in ``dv_solve._resolve``, the single search implementation
     shared with the ctypes loader -- patching them on ``dv_solve`` itself would
     no longer redirect anything. The environment is cleared for the same
-    reason: that shared resolver honours ``ZSP_SOLVER_PATH`` and (as a last
+    reason: that shared resolver honours ``DVS_SOLVER_PATH`` and (as a last
     resort) ``LD_LIBRARY_PATH``, so a developer's ambient settings would
     otherwise decide the result of a test about layout precedence.
     """
@@ -34,7 +34,7 @@ def layout(tmp_path, monkeypatch):
     src_root = tmp_path / "checkout"
     pkg_dir.mkdir(parents=True)
     src_root.mkdir()
-    monkeypatch.delenv("ZSP_SOLVER_PATH", raising=False)
+    monkeypatch.delenv("DVS_SOLVER_PATH", raising=False)
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     monkeypatch.setattr(_resolve, "_pkg_dir", lambda: str(pkg_dir))
     monkeypatch.setattr(_resolve, "_src_root", lambda: str(src_root))
@@ -125,8 +125,8 @@ def test_the_reported_libdir_actually_holds_the_library():
 
 def test_the_reported_incdirs_actually_hold_the_headers():
     """The companion check for headers, which had this same defect first:
-    an unqualified `#include "zsp_ctx.h"` has to resolve against one of them."""
+    an unqualified `#include "dvs_ctx.h"` has to resolve against one of them."""
     incdirs = dv_solve.get_incdirs()
     assert incdirs
-    assert any(os.path.isfile(os.path.join(d, "zsp_ctx.h")) for d in incdirs), \
-        "no reported include dir holds zsp_ctx.h: %s" % incdirs
+    assert any(os.path.isfile(os.path.join(d, "dvs_ctx.h")) for d in incdirs), \
+        "no reported include dir holds dvs_ctx.h: %s" % incdirs

@@ -28,10 +28,10 @@ def _setup_lib(lib):
     """Wire argtypes/restypes needed by these tests."""
     c = ctypes
 
-    lib.zsp_block_alloc_create.restype  = c.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [c.c_void_p]
+    lib.dvs_block_alloc_create.restype  = c.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [c.c_void_p]
 
     lib.solve_problem_init.restype  = c.c_void_p
     lib.solve_problem_init.argtypes = [c.c_void_p, c.c_size_t]
@@ -114,7 +114,7 @@ def _make_problem(lib, buf_size=65536):
 
 def _solve(lib, sp, seed=42):
     """Compile + solve a SolveProblem; return (result, ctx, ctx_buf, ba)."""
-    ba = lib.zsp_block_alloc_create(None, _CTX_BUF_SIZE)
+    ba = lib.dvs_block_alloc_create(None, _CTX_BUF_SIZE)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx is not None
@@ -128,7 +128,7 @@ def _solve(lib, sp, seed=42):
 
 
 def _cleanup(lib, ba):
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 # ------------------------------------------------------------------ #
@@ -138,9 +138,9 @@ def _cleanup(lib, ba):
 class TestAllDifferent:
     """Tests for the AllDifferent propagator."""
 
-    def test_alldiff_3_vars_disjoint(self, libzsp):
+    def test_alldiff_3_vars_disjoint(self, libdvs):
         """3 vars [0,2]; solve produces 3 distinct values."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -159,9 +159,9 @@ class TestAllDifferent:
         assert all(0 <= v <= 2 for v in vals)
         _cleanup(lib, ba)
 
-    def test_alldiff_3_vars_domain_4(self, libzsp):
+    def test_alldiff_3_vars_domain_4(self, libdvs):
         """3 vars [0,3]; 20 seeds all produce distinct values."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         for seed in range(1, 21):
@@ -179,9 +179,9 @@ class TestAllDifferent:
             assert len(set(vals)) == 3, f"seed={seed}: not all distinct: {vals}"
             _cleanup(lib, ba)
 
-    def test_alldiff_conflict_pigeonhole(self, libzsp):
+    def test_alldiff_conflict_pigeonhole(self, libdvs):
         """3 vars [0,1] (only 2 values for 3 vars); SOLVE_UNSAT."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -195,9 +195,9 @@ class TestAllDifferent:
         assert result == SOLVE_UNSAT
         _cleanup(lib, ba)
 
-    def test_alldiff_with_bounds(self, libzsp):
+    def test_alldiff_with_bounds(self, libdvs):
         """2 vars with tight domains [1,3]; AllDifferent; distinct values."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -218,9 +218,9 @@ class TestAllDifferent:
         assert 1 <= v1 <= 3
         _cleanup(lib, ba)
 
-    def test_alldiff_singleton_exclusion(self, libzsp):
+    def test_alldiff_singleton_exclusion(self, libdvs):
         """3 vars; first fixed to 5; other two must avoid 5."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -242,9 +242,9 @@ class TestAllDifferent:
         assert v1 != v2, f"v1 == v2 == {v1}"
         _cleanup(lib, ba)
 
-    def test_alldiff_8_vars(self, libzsp):
+    def test_alldiff_8_vars(self, libdvs):
         """8 vars [0,7]; all distinct; verify permutation."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         buf, sp = _make_problem(lib)
@@ -261,9 +261,9 @@ class TestAllDifferent:
         assert sorted(vals) == list(range(8)), f"Not a permutation: {vals}"
         _cleanup(lib, ba)
 
-    def test_alldiff_via_builder(self, libzsp):
+    def test_alldiff_via_builder(self, libdvs):
         """Build via SolveProblemBuilder, finalize, compile, solve."""
-        lib = libzsp
+        lib = libdvs
         _setup_lib(lib)
 
         b = lib.builder_create(4096, None)

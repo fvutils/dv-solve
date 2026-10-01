@@ -2,10 +2,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "zsp_problem.h"
-#include "zsp_ctx.h"
-#include "zsp_search.h"
-#include "zsp_placement.h"
+#include "dvs_problem.h"
+#include "dvs_ctx.h"
+#include "dvs_search.h"
+#include "dvs_placement.h"
 
 int main(void) {
     /* Build problem: 4 variables */
@@ -25,7 +25,7 @@ int main(void) {
     /* Create solver context */
     size_t ctx_sz = 1 << 20;
     void *ctx_buf = calloc(1, ctx_sz);
-    zsp_block_alloc_t *ba = zsp_block_alloc_create(NULL, ctx_sz);
+    dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
     SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
     if (!ctx) { fprintf(stderr, "ctx create fail\n"); return 1; }
 
@@ -66,7 +66,7 @@ int main(void) {
                a < b ? (a < c ? a : c) : (b < c ? b : c));
     }
 
-    zsp_block_alloc_destroy(ba);
+    dvs_block_alloc_destroy(ba);
     free(ctx_buf);
     free(sp_buf);
     return 0;

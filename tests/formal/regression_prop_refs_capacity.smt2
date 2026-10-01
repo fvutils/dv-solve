@@ -4,8 +4,8 @@
 ; SMT2 commands into dv-solve-smt2). Before the fix, this trace SEGV'd
 ; under ASAN at step 25 in solver_propagate at the p->fire dispatch:
 ;
-;   #0 solver_propagate /src/c/zsp_propagate.c:265
-;   #1 solver_add_constraint /src/c/zsp_compile.c:2843
+;   #0 solver_propagate /src/c/dvs_propagate.c:265
+;   #1 solver_add_constraint /src/c/dvs_compile.c:2843
 ;   #2 _flush_aux /src/c/smt2/smt2_frontend.c:1670
 ;   #3 _cmd_check_sat /src/c/smt2/smt2_frontend.c:1716
 ;

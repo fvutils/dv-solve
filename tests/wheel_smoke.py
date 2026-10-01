@@ -46,8 +46,8 @@ def main():
 
     incdirs = dv_solve.get_incdirs()
     print("incdirs:", incdirs)
-    if not any(os.path.isfile(os.path.join(d, "zsp_ctx.h")) for d in incdirs):
-        print("FAIL: no reported include dir holds zsp_ctx.h:", incdirs)
+    if not any(os.path.isfile(os.path.join(d, "dvs_ctx.h")) for d in incdirs):
+        print("FAIL: no reported include dir holds dvs_ctx.h:", incdirs)
         return 1
 
     return 0

@@ -17,7 +17,7 @@ from typing import Optional
 from .lib import _load_lib, _library_not_found_error
 
 # ------------------------------------------------------------------ #
-# SolveResult constants (must match zsp_search.h)                     #
+# SolveResult constants (must match dvs_search.h)                     #
 # ------------------------------------------------------------------ #
 SOLVE_OK      = 0
 SOLVE_UNSAT   = 1
@@ -29,7 +29,7 @@ _CTX_BUF_SIZE = 1 << 20  # 1 MiB — headroom for propagators + decisions
 
 # ------------------------------------------------------------------ #
 # SolveOpts ctypes struct                                              #
-# Layout (must match zsp_search.h exactly):                            #
+# Layout (must match dvs_search.h exactly):                            #
 #   seed(uint64=8) + max_conflicts(uint32=4) + max_restarts(uint32=4)  #
 #   + use_phase_save(uint8=1) + _pad[3] + max_shave_iters(uint32=4)   #
 #   → total 24 bytes                                                   #
@@ -47,7 +47,7 @@ class _SolveOpts(ctypes.Structure):
     ]
 
 
-# Mirrors ZSP_COMPILE_UNSUPPORTED_WIDTH in zsp_ctx.h.
+# Mirrors DVS_COMPILE_UNSUPPORTED_WIDTH in dvs_ctx.h.
 _COMPILE_UNSUPPORTED_WIDTH = -3
 
 
@@ -111,15 +111,15 @@ class SolveCtx:
         self._problem = problem
 
         # Block allocator owns all dynamic memory used by the context.
-        self._ba = lib.zsp_block_alloc_create(None, ctx_buf_size)
+        self._ba = lib.dvs_block_alloc_create(None, ctx_buf_size)
         if self._ba is None:
-            raise RuntimeError("zsp_block_alloc_create failed")
+            raise RuntimeError("dvs_block_alloc_create failed")
 
         # Context lives inside a caller-managed buffer.
         self._ctx_buf = (ctypes.c_uint8 * ctx_buf_size)()
         ctx = lib.solver_create(self._ctx_buf, ctx_buf_size, self._ba)
         if ctx is None:
-            lib.zsp_block_alloc_destroy(self._ba)
+            lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             raise RuntimeError("solver_create failed")
         self._ctx = ctx  # c_void_p value
@@ -136,11 +136,11 @@ class SolveCtx:
         # __init__) and will be garbage-collected, at which point __del__ ->
         # destroy() must NOT free the already-freed block allocator again.
         if rc == -2:
-            lib.zsp_block_alloc_destroy(self._ba)
+            lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             raise CompileUnsatError("Domain became empty during compile-time bound tightening")
         if rc == _COMPILE_UNSUPPORTED_WIDTH:
-            lib.zsp_block_alloc_destroy(self._ba)
+            lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             raise CompileUnsupportedError(
                 "problem declares a variable wider than 64 bits, which the "
@@ -148,11 +148,11 @@ class SolveCtx:
                 "(dv_solve.bvsat.BVSatCtx) for this problem"
             )
         if rc < 0:
-            lib.zsp_block_alloc_destroy(self._ba)
+            lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             raise RuntimeError(f"solver_compile failed (rc={rc})")
         if rc > 0:
-            lib.zsp_block_alloc_destroy(self._ba)
+            lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             raise CompileIncompleteError(
                 f"{rc} constraint(s) could not be compiled natively"
@@ -180,7 +180,7 @@ class SolveCtx:
     def destroy(self) -> None:
         """Release the native memory. Also called when the context is garbage-collected."""
         if self._ba is not None:
-            self._lib.zsp_block_alloc_destroy(self._ba)
+            self._lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
 
     # ------------------------------------------------------------------ #

@@ -4,7 +4,7 @@
  * no pipe/IPC, no per-randomize parse/build/reset). It parses ONE solve problem
  * once (the same constraints the end-to-end sweep drives over the pipe), solves
  * it once, then loops the only work an embedded integration pays per randomize():
- *   zsp_bbsolver_rediversify(seed)  +  read back every variable's value.
+ *   dvs_bbsolver_rediversify(seed)  +  read back every variable's value.
  *
  * Compare the reported ms/randomize against the SMT-LIB-over-pipe numbers to see
  * the ceiling an in-process (DPI) integration would reach on the same problem.
@@ -19,8 +19,8 @@
 #include "smt2/smt2_frontend.h"
 #include "smt2/smt2_lexer.h"
 #include "smt2/smt2_parser.h"
-#include "zsp_bbsolver.h"
-#include "zsp_problem.h"
+#include "dvs_bbsolver.h"
+#include "dvs_problem.h"
 
 static double now_ms(void) {
     struct timespec t;
@@ -63,14 +63,14 @@ int main(int argc, char **argv) {
 
     /* Warm the model once, then time the pure in-process randomize() loop:
      * re-diversify (new seed) + read back every variable. */
-    zsp_bbsolver_rediversify(fe.bb_solver, 1);
+    dvs_bbsolver_rediversify(fe.bb_solver, 1);
     volatile int64_t sink = 0;
     double t0 = now_ms();
     for (long i = 1; i <= iters; i++) {
-        zsp_bbsolver_rediversify(fe.bb_solver, (uint64_t)i + 1);
+        dvs_bbsolver_rediversify(fe.bb_solver, (uint64_t)i + 1);
         for (uint32_t v = 0; v < nvars; v++) {
             int64_t val = 0;
-            zsp_bbsolver_value(fe.bb_solver, v, &val);
+            dvs_bbsolver_value(fe.bb_solver, v, &val);
             sink += val;
         }
     }

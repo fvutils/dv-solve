@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the native-solver C unit tests.
 
-The ``libzsp`` fixture builds ``libdv_solve.so`` via CMake (into a
+The ``libdvs`` fixture builds ``libdv_solve.so`` via CMake (into a
 temporary directory) and loads it with ``ctypes.CDLL``.  Tests that need
 the library receive it as a parameter; the fixture emits a pytest.skip()
 if the build fails so the suite degrades gracefully on hosts without a C
@@ -61,7 +61,7 @@ def _build_debug_library(build_dir: Path) -> Path:
 
     subprocess.run(
         ["cmake", str(_PKG_DIR), "-DCMAKE_BUILD_TYPE=Release",
-         "-DZSP_CONTRADICTION_ANALYSIS=ON"],
+         "-DDVS_CONTRADICTION_ANALYSIS=ON"],
         cwd=build_dir,
         check=True,
         capture_output=True,
@@ -84,7 +84,7 @@ def _build_debug_library(build_dir: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
-def libzsp(tmp_path_factory):
+def libdvs(tmp_path_factory):
     """Session-scoped fixture that builds and loads libdv_solve.so.
 
     Yields the ctypes.CDLL handle.  Skips if cmake/gcc is not available
@@ -95,7 +95,7 @@ def libzsp(tmp_path_factory):
     if not shutil.which("gcc") and not shutil.which("cc"):
         pytest.skip("C compiler not found — skipping native solver tests")
 
-    build_dir = tmp_path_factory.mktemp("zsp_build")
+    build_dir = tmp_path_factory.mktemp("dvs_build")
     try:
         lib_path = _build_library(build_dir)
     except Exception as exc:
@@ -106,11 +106,11 @@ def libzsp(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def libzsp_dpi(tmp_path_factory):
+def libdvs_dpi(tmp_path_factory):
     """Session-scoped fixture that builds and loads libdv_solve_dpi.so.
 
     The DPI library includes all core solver functions plus the DPI-C
-    interface functions (zsp_dpi_compile_b64, zsp_dpi_solve_h, etc.).
+    interface functions (dvs_dpi_compile_b64, dvs_dpi_solve_h, etc.).
     Skips if cmake/gcc is not available or the build fails.
     """
     if not shutil.which("cmake"):
@@ -118,7 +118,7 @@ def libzsp_dpi(tmp_path_factory):
     if not shutil.which("gcc") and not shutil.which("cc"):
         pytest.skip("C compiler not found -- skipping DPI unit tests")
 
-    build_dir = tmp_path_factory.mktemp("zsp_dpi_unit_build")
+    build_dir = tmp_path_factory.mktemp("dvs_dpi_unit_build")
     try:
         _build_library(build_dir)  # builds all targets including dv_solve_dpi
     except Exception as exc:
@@ -134,17 +134,17 @@ def libzsp_dpi(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def libzsp_debug(tmp_path_factory):
+def libdvs_debug(tmp_path_factory):
     """Session-scoped fixture that builds and loads libdv_solve_debug.so.
 
-    This library always has ZSP_CONTRADICTION_ANALYSIS=ON.
+    This library always has DVS_CONTRADICTION_ANALYSIS=ON.
     """
     if not shutil.which("cmake"):
         pytest.skip("cmake not found")
     if not shutil.which("gcc") and not shutil.which("cc"):
         pytest.skip("C compiler not found")
 
-    build_dir = tmp_path_factory.mktemp("zsp_build_debug")
+    build_dir = tmp_path_factory.mktemp("dvs_build_debug")
     try:
         lib_path = _build_debug_library(build_dir)
     except Exception as exc:

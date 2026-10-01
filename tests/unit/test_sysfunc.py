@@ -2,12 +2,12 @@
 $countones/$countbits, $clog2, and the composed $onehot/$onehot0.
 
 These map to the EXPR_COUNTONES / EXPR_CLOG2 high-level IR nodes, lowered by
-zsp_compile.c to the _fire_countones_32 / _fire_clog2_32 bounds propagators.
-The bitblast engine does NOT lower these (zsp_bbsolver.c: "SUM/COUNTONES/CLOG2/
+dvs_compile.c to the _fire_countones_32 / _fire_clog2_32 bounds propagators.
+The bitblast engine does NOT lower these (dvs_bbsolver.c: "SUM/COUNTONES/CLOG2/
 ARRAY_SELECT not yet supported"), so every case here runs on the primary CDCL
 engine (SolveCtx).
 
-clog2 convention (see _clog2_32 in zsp_prop_templates.c): clog2(v)=0 for v<=1,
+clog2 convention (see _clog2_32 in dvs_prop_templates.c): clog2(v)=0 for v<=1,
 otherwise ceil(log2(v)) -- i.e. the SystemVerilog $clog2 definition.
 
 KNOWN BUG (BUG-1, see docs/verilator_coverage_test_plan.md): the countones/clog2

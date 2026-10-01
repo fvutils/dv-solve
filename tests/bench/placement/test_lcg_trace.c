@@ -3,11 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "zsp_problem.h"
-#include "zsp_ctx.h"
-#include "zsp_search.h"
-#include "zsp_placement.h"
-#include "zsp_lcg.h"
+#include "dvs_problem.h"
+#include "dvs_ctx.h"
+#include "dvs_search.h"
+#include "dvs_placement.h"
+#include "dvs_lcg.h"
 
 static void print_literal(const char *prefix, Literal lit) {
     printf("%s var%u %s %d", prefix, lit.var_id,
@@ -36,7 +36,7 @@ int main(void) {
 
     size_t ctx_sz = 1 << 22;
     void *ctx_buf = calloc(1, ctx_sz);
-    zsp_block_alloc_t *ba = zsp_block_alloc_create(NULL, ctx_sz);
+    dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
     SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
     solver_compile(ctx, sp);
 
@@ -134,7 +134,7 @@ int main(void) {
         }
     }
 
-    zsp_block_alloc_destroy(ba);
+    dvs_block_alloc_destroy(ba);
     free(ctx_buf);
     free(sp_buf);
     return 0;

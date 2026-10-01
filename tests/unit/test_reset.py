@@ -21,10 +21,10 @@ _CTX_BUF_SIZE = 1048576
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -50,10 +50,10 @@ def _setup(lib: ctypes.CDLL):
     lib.solver_compile.restype  = ctypes.c_int
     lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     class SolveOpts(ctypes.Structure):
         _fields_ = [
@@ -111,7 +111,7 @@ def _build_constrained(lib):
     le_e  = lib.expr_binary(sp, BIN_LTE, v_sum, c_50)
     lib.problem_add_constraint(sp, le_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -123,15 +123,15 @@ def _solve(lib, ctx, seed=0x1234):
     return lib.solver_solve(ctx, ctypes.byref(opts))
 
 
-def test_reset_restores_domains(libzsp):
+def test_reset_restores_domains(libdvs):
     """After solve + reset, variable domains match post-compile state."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf, ctx_buf, ba, ctx, sp = _build_constrained(lib)
 
     # Record post-compile bounds
-    pre_lo = [lib.zsp_var_lo64(ctx, i) for i in range(3)]
-    pre_hi = [lib.zsp_var_hi64(ctx, i) for i in range(3)]
+    pre_lo = [lib.dvs_var_lo64(ctx, i) for i in range(3)]
+    pre_hi = [lib.dvs_var_hi64(ctx, i) for i in range(3)]
 
     # Solve (mutates bounds)
     rc = _solve(lib, ctx)
@@ -142,17 +142,17 @@ def test_reset_restores_domains(libzsp):
 
     # Verify bounds restored
     for i in range(3):
-        lo = lib.zsp_var_lo64(ctx, i)
-        hi = lib.zsp_var_hi64(ctx, i)
+        lo = lib.dvs_var_lo64(ctx, i)
+        hi = lib.dvs_var_hi64(ctx, i)
         assert lo == pre_lo[i], f"var {i} lo: {lo} != {pre_lo[i]}"
         assert hi == pre_hi[i], f"var {i} hi: {hi} != {pre_hi[i]}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_reset_then_solve_again(libzsp):
+def test_reset_then_solve_again(libdvs):
     """Solve, reset, solve again with different seed: both valid."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf, ctx_buf, ba, ctx, sp = _build_constrained(lib)
 
@@ -170,12 +170,12 @@ def test_reset_then_solve_again(libzsp):
     y2 = lib.solver_get_value(ctx, 1)
     assert x2 + y2 <= 50
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_reset_repeated(libzsp):
+def test_reset_repeated(libdvs):
     """100 iterations of reset + solve: all valid and diverse."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf, ctx_buf, ba, ctx, sp = _build_constrained(lib)
 
@@ -194,12 +194,12 @@ def test_reset_repeated(libzsp):
     # With 100 solves over a domain with ~1300 valid pairs, expect diversity
     assert len(seen) >= 10, f"Only {len(seen)} distinct solutions in 100 runs"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_deterministic_seed(libzsp):
+def test_deterministic_seed(libdvs):
     """Same seed after reset produces same solution."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf, ctx_buf, ba, ctx, sp = _build_constrained(lib)
 
@@ -221,12 +221,12 @@ def test_deterministic_seed(libzsp):
         f"Same seed different results: ({x1},{y1}) vs ({x2},{y2})"
     )
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_solver_set_seed(libzsp):
+def test_solver_set_seed(libdvs):
     """solver_set_seed changes the RNG state."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf, ctx_buf, ba, ctx, sp = _build_constrained(lib)
 
@@ -247,12 +247,12 @@ def test_solver_set_seed(libzsp):
 
     assert x1 == x2, f"solver_set_seed not deterministic: {x1} vs {x2}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_batch_get_values(libzsp):
+def test_batch_get_values(libdvs):
     """solver_get_values reads multiple variables."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf, ctx_buf, ba, ctx, sp = _build_constrained(lib)
 
@@ -268,4 +268,4 @@ def test_batch_get_values(libzsp):
         expected = lib.solver_get_value(ctx, i)
         assert out[i] == expected, f"var {i}: batch={out[i]} != single={expected}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

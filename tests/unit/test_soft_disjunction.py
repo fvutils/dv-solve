@@ -7,7 +7,7 @@ historically did NOT steer the value picker toward a *kept* disjunction soft
 honor rate across seeds to pin the mechanism, and become the DSE-1 acceptance
 gate once the soft value-bias lands.
 
-Op codes (zsp_problem.h BinOp/UnaryOp):
+Op codes (dvs_problem.h BinOp/UnaryOp):
   BIN_EQ=10  BIN_LTE=13  BIN_GT=14  BIN_GTE=15  BIN_OR=17 ; UN_NOT=1
 """
 from __future__ import annotations
@@ -29,10 +29,10 @@ UN_NOT = 1
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -117,7 +117,7 @@ def _run_once(lib, seed, *, hard_guard_true, not_wrapped=False):
     disj = lib.expr_binary(sp, BIN_OR, notguard, d_eq_40)
     lib.problem_add_soft_constraint(sp, disj, 0)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0, f"compile rc={rc}"
@@ -127,7 +127,7 @@ def _run_once(lib, seed, *, hard_guard_true, not_wrapped=False):
     assert res == SOLVE_OK
     a = lib.solver_get_value(ctx, 0)
     d = lib.solver_get_value(ctx, 1)
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
     return a, d
 
 
@@ -140,31 +140,31 @@ def _run_simple(lib, seed):
     d_eq_40 = lib.expr_binary(sp, BIN_EQ, lib.expr_var(sp, 0),
                               lib.expr_const(sp, 40, 0))
     lib.problem_add_soft_constraint(sp, d_eq_40, 0)
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert lib.solver_compile(ctx, sp) >= 0
     opts = lib._SolveOpts(seed=seed, use_phase_save=1)
     assert lib.solver_solve(ctx, ctypes.byref(opts)) == SOLVE_OK
     d = lib.solver_get_value(ctx, 0)
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
     return d
 
 
 _SEEDS = [0x1000 + i * 0x9E37 for i in range(32)]
 
 
-def test_control_simple_soft_honored(libzsp):
+def test_control_simple_soft_honored(libdvs):
     """Baseline: a simple non-disjunction soft is honored (sanity)."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     hits = sum(1 for s in _SEEDS if _run_simple(lib, s) == 40)
     assert hits == len(_SEEDS), f"simple soft honored {hits}/{len(_SEEDS)}"
 
 
-def test_disjunction_soft_guard_forced_true(libzsp):
+def test_disjunction_soft_guard_forced_true(libdvs):
     """DSE-1 ACCEPTANCE: hard a>10 forces (a<=10) false, so a kept soft must
     satisfy d==40. Pre-DSE-1 this was honored ~0/N (the gap)."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     results = [_run_once(lib, s, hard_guard_true=True) for s in _SEEDS]
     # Every model must satisfy the disjunction (a>10 is hard, so d==40).
@@ -178,13 +178,13 @@ def test_disjunction_soft_guard_forced_true(libzsp):
         f"(sample: {results[:5]})")
 
 
-def test_disjunction_soft_NOTwrapped_guard_forced_true(libzsp):
+def test_disjunction_soft_NOTwrapped_guard_forced_true(libdvs):
     """DSE-0 DISCRIMINATOR: same as above but the guard negation is
     ``UN_NOT(a>10)`` (the pyvsc-emitted shape) rather than the pre-negated
     ``a<=10``. If this fails while the pre-negated form passes, the gap is the
     DisjClause not seeing through UN_NOT(comparison) — a translation/compile
     issue, not a value-picker one."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     results = [_run_once(lib, s, hard_guard_true=True, not_wrapped=True)
                for s in _SEEDS]
@@ -196,10 +196,10 @@ def test_disjunction_soft_NOTwrapped_guard_forced_true(libzsp):
         f"(sample: {results[:5]})")
 
 
-def test_disjunction_soft_guard_free_holds(libzsp):
+def test_disjunction_soft_guard_free_holds(libdvs):
     """Soundness: with the guard free, the disjunction must still HOLD in
     every model (either a<=10 or d==40) — never violated."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     results = [_run_once(lib, s, hard_guard_true=False) for s in _SEEDS]
     for (a, d) in results:

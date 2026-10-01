@@ -56,15 +56,15 @@ These are MIT-licensed and reusable without dragging the SolverEngine in.
 
 | Bitwuzla piece                    | dv-solve analog                       | Gap |
 |-----------------------------------|---------------------------------------|-----|
-| `BitVectorDomain` (3-valued bits) | `zsp_wiremask`                        | dv-solve tracks known bits but not the per-op invertibility/consistency rules that drive value selection; wiremask is consumed, not exploited for value choice |
+| `BitVectorDomain` (3-valued bits) | `dvs_wiremask`                        | dv-solve tracks known bits but not the per-op invertibility/consistency rules that drive value selection; wiremask is consumed, not exploited for value choice |
 | `BitVectorBounds` (sign+unsigned) | trail/range on integer vars in CDCL   | no first-class BV interval domain; bounds are encoded into clauses rather than propagated as a domain |
-| `Rewriter` (5 files of patterns)  | partial in `zsp_compile.c`            | no systematic rewrite layer; we re-derive simplifications per propagator |
+| `Rewriter` (5 files of patterns)  | partial in `dvs_compile.c`            | no systematic rewrite layer; we re-derive simplifications per propagator |
 | Preprocessing passes              | none coherent                         | no normalize / variable_substitution / contradicting_ands / embedded_constraints; these are the *cheapest* wins on hard fixtures |
 | AIG bit-blaster                   | none                                  | we have CDCL over high-level domain only; no bit-blast path |
 | External SAT (CaDiCaL/Kissat)     | not wired                             | sources are now in `resources/`; no build hookup |
 | `LocalSearchBV` (propagation LS)  | none                                  | randomization currently relies on CDCL-with-bounds-adjustment; no LS engine |
-| Interpolation                     | `zsp_explain` / `zsp_nogood`          | we produce learned clauses but no Craig interpolants |
-| CDCL(T) loop                      | `zsp_search` + LCG                    | core present, but theory layer is monolithic |
+| Interpolation                     | `dvs_explain` / `dvs_nogood`          | we produce learned clauses but no Craig interpolants |
+| CDCL(T) loop                      | `dvs_search` + LCG                    | core present, but theory layer is monolithic |
 
 ## Recommended adoption order
 
@@ -80,42 +80,42 @@ five tier1 false-unsat bugs (see [[false_unsat_tier1]]) are all
 `bvand + range + masked-bound` patterns that fall out under a `normalize` /
 `contradicting_ands` style pass.
 
-1. **Port `BitVectorDomain`** as a C library backing `zsp_wiremask`. The
+1. **Port `BitVectorDomain`** as a C library backing `dvs_wiremask`. The
    crucial extension over the current wiremask is the per-op
    **invertibility / consistency** predicates: given target value `t` and
    fixed sibling bits, can operand `x` be inverted? This is what lets the
    domain *prune values*, not just record them.
    - **[DONE 2026-05-25 — basic predicates and transformations]**
-     `src/c/zsp_bvdom.{c,h}`. 3-valued domain represented as
+     `src/c/dvs_bvdom.{c,h}`. 3-valued domain represented as
      `{ uint64_t lo, uint64_t hi, uint8_t width }`, specialized for
      dv-solve's width <= 64 ceiling (no multi-precision needed). API:
      init / value / lo-hi, validity / fixed / has-fixed-bits / per-bit
      predicates, fix-bit / fix / match / copy_with_fixed_bits,
      equality / meet, and full domain transformations for not / and / or /
      xor / shl-const / shr-const / ashr-const / concat / extract /
-     zero-ext / sign-ext / to-string. Tested via `test_zsp_bvdom`
+     zero-ext / sign-ext / to-string. Tested via `test_dvs_bvdom`
      (49 assertions, every transformation verified at the bit level).
    - **[TODO]** Per-op invertibility / consistency predicates for
      bvadd / bvmul / bvult / bvslt / bvshl / bvshr / bvashr / etc.
      ~800 lines in bitwuzla's `bitvector_domain.cpp`; deferred until
      Phase C local search needs them.
-2. **Port `BitVectorBounds`** as `zsp_bvbounds.{c,h}` — signed and unsigned
+2. **Port `BitVectorBounds`** as `dvs_bvbounds.{c,h}` — signed and unsigned
    intervals per BV term, with the standard meet/widening operators. Hook
    into the trail so each decision/propagation tightens or restores bounds.
-   - **[DONE 2026-05-25]** Two layers: `zsp_bvrange_t` (a single contiguous
-     `[min, max]` on a uint64_t) and `zsp_bvbounds_t` (pair of ranges —
+   - **[DONE 2026-05-25]** Two layers: `dvs_bvrange_t` (a single contiguous
+     `[min, max]` on a uint64_t) and `dvs_bvbounds_t` (pair of ranges —
      `lo` in `[0, max_signed]` plus `hi` in `[min_signed, ones]`). The
      signed-split form lets ranges that straddle the midpoint be
      represented exactly (`[100, 200]` on 8 bits becomes
      `lo=[100, 127]` + `hi=[128, 200]`). API: range init / init-from-domain /
      init-empty, validity / containment / intersect, plus the bounds-level
      init-from-range / init-from-domain / contains / intersect / is-valid /
-     to-str. Tested via `test_zsp_bvbounds` (31 assertions).
+     to-str. Tested via `test_dvs_bvbounds` (31 assertions).
    - **[TODO]** Trail integration so each decision/propagation tightens
      and restores bounds — deferred until the CDCL path actually consumes
      bounds (currently bounds are used only at IR walk time in the
      bbsolver's variable-bound assertion emission).
-3. **Stand up a rewriter** (`zsp_rewrite.c`) with the bitwuzla pattern set
+3. **Stand up a rewriter** (`dvs_rewrite.c`) with the bitwuzla pattern set
    ported by category:
    - bool: `not(not x) → x`, ITE pushdowns, `and/or` absorption
    - bv: `bvand x 0 → 0`, `bvor x ~0 → ~0`, shift/mul-by-power-of-2,
@@ -149,27 +149,27 @@ shim — see D1.
    Use it non-incrementally — one fresh solver instance per `check-sat`. BMC
    frames are still produced incrementally at the dv-solve level (we re-blast
    only the new frame), so this is acceptable as a bring-up step.
-2. **Port `lib/bitblast/`** as `zsp_aig.{c,h}` + `zsp_aig_cnf.{c,h}` +
-   `zsp_bitblast.{c,h}` — templated AIG node type becomes a concrete `int32_t`
+2. **Port `lib/bitblast/`** as `dvs_aig.{c,h}` + `dvs_aig_cnf.{c,h}` +
+   `dvs_bitblast.{c,h}` — templated AIG node type becomes a concrete `int32_t`
    id (positive id / negative id = literal sign; arena-stored data). ~1k lines
    of mostly mechanical code, ported to C.
-   - **[DONE 2026-05-25] `zsp_aig.{c,h}`** — AIG manager with arena storage,
+   - **[DONE 2026-05-25] `dvs_aig.{c,h}`** — AIG manager with arena storage,
      hash-consing of AND gates, full Brummayer/Biere level-1..4 rewriting
      rules. No ref-counting / GC (AIG built monotonically per check-sat).
-     `tests/c/test_zsp_aig.c` exercises all rule families + hash-consing.
-   - **[DONE 2026-05-25] `zsp_aig_cnf.{c,h}`** — Tseitin encoder. Iterative
+     `tests/c/test_dvs_aig.c` exercises all rule families + hash-consing.
+   - **[DONE 2026-05-25] `dvs_aig_cnf.{c,h}`** — Tseitin encoder. Iterative
      DFS over the AIG, emits 3 clauses per AND or 4 clauses per detected
      ITE (with the `parents() == 1` sharing check from upstream). Top-level
      flattening through positive ANDs. Identity mapping from AIG id to SAT
-     var id. `tests/c/test_zsp_aig_cnf.c` covers AND, XOR, ITE, asserted-FALSE.
-   - **[DONE 2026-05-25] `zsp_bitblast.{c,h}`** — Full BV bit-blaster.
+     var id. `tests/c/test_dvs_aig_cnf.c` covers AND, XOR, ITE, asserted-FALSE.
+   - **[DONE 2026-05-25] `dvs_bitblast.{c,h}`** — Full BV bit-blaster.
      Operations: not, and, or, xor, eq, ult, slt, shl, shr, ashr, add, neg,
      sub, mul, udiv, urem, extract, concat, zero_ext, sign_ext, ite. Bit
-     ordering matches upstream (MSB = index 0). Result `zsp_bv_t` arrays
+     ordering matches upstream (MSB = index 0). Result `dvs_bv_t` arrays
      allocated from a bump arena owned by the bb context (freed wholesale).
-     `tests/c/test_zsp_bitblast.c` exercises every op end-to-end through
+     `tests/c/test_dvs_bitblast.c` exercises every op end-to-end through
      AIG → CNF → kissat, including model readback for a factoring problem.
-3. **`zsp_bbsolver.c`** — a theory-level solver that bit-blasts a goal,
+3. **`dvs_bbsolver.c`** — a theory-level solver that bit-blasts a goal,
    feeds it to the SAT layer, and surfaces the model. Used in formal mode.
 4. **Incremental bit-blasting at the dv-solve layer**: bitwuzla's
    `BvBitblastSolver` only blasts newly-asserted terms between checks;
@@ -178,8 +178,8 @@ shim — see D1.
 5. **Driver flag**: `--engine=cdcl|bitblast|auto`. Auto picks bitblast for
    BV-only, quantifier-free, no-propagator problems.
 6. **Adapt (B.1): fork Kissat into `src/c/sat/`**. Add incremental
-   assumptions and push/pop. Route allocations through `zsp_alloc_t`,
-   migrate the clause arena to `zsp_pool`-style 32-bit references, integrate
+   assumptions and push/pop. Route allocations through `dvs_alloc_t`,
+   migrate the clause arena to `dvs_pool`-style 32-bit references, integrate
    with the dv-solve trail and `LevelMark` checkpoints. See
    [[sat_memory_management_plan]] for the detailed adoption sequence — the
    pluggable allocator, checkpoint-keyed arena marks, and unified trail are
@@ -215,8 +215,8 @@ diverse solutions, and the "essential input" path selection naturally maps
 to the random-variable bias dv-solve already tracks.
 
 1. **Port `lib/ls/`** to C — `LocalSearchBV` + `BitVectorNode` + the per-op
-   inverse/consistent value functions. Re-uses the C `zsp_bvdomain` /
-   `zsp_bvbounds` libraries from Phase A. Per D2, the port is C-only;
+   inverse/consistent value functions. Re-uses the C `dvs_bvdomain` /
+   `dvs_bvbounds` libraries from Phase A. Per D2, the port is C-only;
    bitwuzla's C++ template polymorphism collapses to explicit dispatch tables
    over `NodeKind`.
 2. **Hybrid scheduler**: run LS as a *first attempt* with a short propagation
@@ -266,7 +266,7 @@ combining them. Candidates:
 ## What NOT to adopt
 
 - **SolverEngine / Env / Options machinery**. dv-solve already has its own
-  context (`zsp_ctx`); duplicating bitwuzla's option system is gratuitous.
+  context (`dvs_ctx`); duplicating bitwuzla's option system is gratuitous.
 - **The full FP and quantifier theories** (`solver/fp`, `solver/quant`). Out
   of scope for DV.
 - **Bitwuzla's term/node manager**. We already have a DAG; map bitwuzla
@@ -299,7 +299,7 @@ backends behind a shim" to a two-step plan:
   even if the SAT layer below is non-incremental.
 - **B.1 (adapt)**: fork Kissat into `src/c/sat/` and graft on the pieces it
   is missing: incremental assumptions, push/pop, and — critically — routing
-  through `zsp_alloc_t` and the dv-solve checkpoint/trail patterns (see
+  through `dvs_alloc_t` and the dv-solve checkpoint/trail patterns (see
   [[sat_memory_management_plan]]). This is the path that lets us *replace*
   the external SAT solver over time with a dv-solve-native CDCL core that
   inherits our memory-management strengths.
@@ -307,7 +307,7 @@ backends behind a shim" to a two-step plan:
 CaDiCaL is *not* a parallel backend. We keep its sources around as a
 reference for incremental-SAT correctness (assumption interface, restart
 heuristics, GC policy) but we do not link it. Drop the
-`zsp_sat.h`-with-two-backends shim — there is only one backend, and it is
+`dvs_sat.h`-with-two-backends shim — there is only one backend, and it is
 ours-built-on-Kissat.
 
 ### D2 — Phase C local search is C-only

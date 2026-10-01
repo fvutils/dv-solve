@@ -17,7 +17,7 @@ from typing import Sequence
 from .lib import _load_lib, _library_not_found_error
 
 # ------------------------------------------------------------------ #
-# BinOp / UnaryOp constants (must match zsp_problem.h)               #
+# BinOp / UnaryOp constants (must match dvs_problem.h)               #
 # ------------------------------------------------------------------ #
 BIN_ADD    = 0
 BIN_SUB    = 1

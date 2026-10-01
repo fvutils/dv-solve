@@ -70,10 +70,10 @@ class ContraResult(ctypes.Structure):
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -107,7 +107,7 @@ def _setup(lib: ctypes.CDLL):
 
 
 def _make_ctx(lib):
-    ba = lib.zsp_block_alloc_create(None, 4096)
+    ba = lib.dvs_block_alloc_create(None, 4096)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
@@ -127,9 +127,9 @@ def _build_trivial_unsat(lib):
     return sp_buf, sp
 
 
-def test_proof_text_format(libzsp_debug):
+def test_proof_text_format(libdvs_debug):
     """Text output contains UNSATISFIABLE header and constraint labels."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf, sp = _build_trivial_unsat(lib)
@@ -148,12 +148,12 @@ def test_proof_text_format(libzsp_debug):
     assert "Relaxation" in text_str
 
     lib.contra_result_free(ctypes.byref(result))
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_proof_json_valid(libzsp_debug):
+def test_proof_json_valid(libdvs_debug):
     """JSON output parses successfully and contains expected keys."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf, sp = _build_trivial_unsat(lib)
@@ -183,12 +183,12 @@ def test_proof_json_valid(libzsp_debug):
         assert "is_relaxable" in entry
 
     lib.contra_result_free(ctypes.byref(result))
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_proof_with_constraint_info(libzsp_debug):
+def test_proof_with_constraint_info(libdvs_debug):
     """When constraint names are provided, they appear in the output."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf, sp = _build_trivial_unsat(lib)
@@ -229,4 +229,4 @@ def test_proof_with_constraint_info(libzsp_debug):
     assert "x >= 10" in names or "x <= 5" in names
 
     lib.contra_result_free(ctypes.byref(result))
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

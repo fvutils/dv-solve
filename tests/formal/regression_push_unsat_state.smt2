@@ -9,7 +9,7 @@
 ;
 ; Root cause (two interacting bugs):
 ;
-; 1. solver_solve at zsp_search.c:341 overwrites level_marks[0] to seal
+; 1. solver_solve at dvs_search.c:341 overwrites level_marks[0] to seal
 ;    "level-0 baseline" for its restarts/bounds_shave probing. Inside a
 ;    push scope, this leaves level_marks[m->decision_level] pointing
 ;    at a post-push state — and solver_restore's trail_backtrack stops

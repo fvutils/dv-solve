@@ -10,11 +10,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "zsp_problem.h"
-#include "zsp_ctx.h"
-#include "zsp_search.h"
-#include "zsp_placement.h"
-#include "zsp_costguided.h"
+#include "dvs_problem.h"
+#include "dvs_ctx.h"
+#include "dvs_search.h"
+#include "dvs_placement.h"
+#include "dvs_costguided.h"
 
 static double now_sec(void) {
     struct timespec ts;
@@ -77,7 +77,7 @@ static RunResult run_placement(int n_macros, int canvas, int n_nets,
     /* Create context */
     size_t ctx_sz = 1 << 22;
     void *ctx_buf = calloc(1, ctx_sz);
-    zsp_block_alloc_t *ba = zsp_block_alloc_create(NULL, ctx_sz);
+    dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
     SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
     if (solver_compile(ctx, sp) != 0) { rr.result = -2; goto done; }
 
@@ -179,7 +179,7 @@ static RunResult run_placement(int n_macros, int canvas, int n_nets,
     free(macros);
 
 done:
-    zsp_block_alloc_destroy(ba);
+    dvs_block_alloc_destroy(ba);
     free(ctx_buf);
     free(sp_buf);
     return rr;

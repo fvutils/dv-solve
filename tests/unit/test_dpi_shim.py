@@ -1,7 +1,7 @@
 """Unit tests for the DPI shim chandle API.
 
-Uses ctypes to call zsp_dpi_compile_b64 / zsp_dpi_solve_h /
-zsp_dpi_get_value_h / zsp_dpi_release_h.
+Uses ctypes to call dvs_dpi_compile_b64 / dvs_dpi_solve_h /
+dvs_dpi_get_value_h / dvs_dpi_release_h.
 """
 from __future__ import annotations
 
@@ -17,20 +17,20 @@ BIN_EQ = 10
 
 def _setup_dpi(lib: ctypes.CDLL):
     """Wire argtypes for chandle DPI functions."""
-    lib.zsp_dpi_compile_b64.restype = ctypes.c_void_p
-    lib.zsp_dpi_compile_b64.argtypes = [ctypes.c_char_p]
+    lib.dvs_dpi_compile_b64.restype = ctypes.c_void_p
+    lib.dvs_dpi_compile_b64.argtypes = [ctypes.c_char_p]
 
-    lib.zsp_dpi_solve_h.restype = ctypes.c_int
-    lib.zsp_dpi_solve_h.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
+    lib.dvs_dpi_solve_h.restype = ctypes.c_int
+    lib.dvs_dpi_solve_h.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
 
-    lib.zsp_dpi_get_value_h.restype = ctypes.c_longlong
-    lib.zsp_dpi_get_value_h.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.dvs_dpi_get_value_h.restype = ctypes.c_longlong
+    lib.dvs_dpi_get_value_h.argtypes = [ctypes.c_void_p, ctypes.c_int]
 
-    lib.zsp_dpi_release_h.restype = None
-    lib.zsp_dpi_release_h.argtypes = [ctypes.c_void_p]
+    lib.dvs_dpi_release_h.restype = None
+    lib.dvs_dpi_release_h.argtypes = [ctypes.c_void_p]
 
-    lib.zsp_dpi_n_uncompiled_h.restype = ctypes.c_int
-    lib.zsp_dpi_n_uncompiled_h.argtypes = [ctypes.c_void_p]
+    lib.dvs_dpi_n_uncompiled_h.restype = ctypes.c_int
+    lib.dvs_dpi_n_uncompiled_h.argtypes = [ctypes.c_void_p]
 
     # Builder functions for constructing test problems
     lib.builder_create.restype = ctypes.c_void_p
@@ -103,7 +103,7 @@ def libdpi(tmp_path_factory):
     if not shutil.which("cmake"):
         pytest.skip("cmake not found")
 
-    build_dir = tmp_path_factory.mktemp("zsp_dpi_build")
+    build_dir = tmp_path_factory.mktemp("dvs_dpi_build")
     subprocess.run(
         ["cmake", str(pkg_dir), "-DCMAKE_BUILD_TYPE=Release"],
         cwd=build_dir, check=True, capture_output=True,
@@ -130,47 +130,47 @@ class TestDpiShim:
         """Compile 2 vars with a<=b, solve, verify."""
         b64 = _build_2var_b64(self.lib)
 
-        ctx = self.lib.zsp_dpi_compile_b64(b64.encode("ascii"))
-        assert ctx, "zsp_dpi_compile_b64 returned NULL"
+        ctx = self.lib.dvs_dpi_compile_b64(b64.encode("ascii"))
+        assert ctx, "dvs_dpi_compile_b64 returned NULL"
 
-        rc = self.lib.zsp_dpi_solve_h(ctx, 0x42)
-        assert rc == 0, f"zsp_dpi_solve_h failed: {rc}"
+        rc = self.lib.dvs_dpi_solve_h(ctx, 0x42)
+        assert rc == 0, f"dvs_dpi_solve_h failed: {rc}"
 
-        a = self.lib.zsp_dpi_get_value_h(ctx, 0)
-        b = self.lib.zsp_dpi_get_value_h(ctx, 1)
+        a = self.lib.dvs_dpi_get_value_h(ctx, 0)
+        b = self.lib.dvs_dpi_get_value_h(ctx, 1)
         assert a <= b, f"a={a}, b={b}"
         assert 0 <= a <= 100
         assert 0 <= b <= 100
 
-        self.lib.zsp_dpi_release_h(ctx)
+        self.lib.dvs_dpi_release_h(ctx)
 
     def test_compile_solve_reuse(self):
         """Compile once, solve 10 times with different seeds."""
         b64 = _build_2var_b64(self.lib)
-        ctx = self.lib.zsp_dpi_compile_b64(b64.encode("ascii"))
+        ctx = self.lib.dvs_dpi_compile_b64(b64.encode("ascii"))
         assert ctx
 
         for seed in range(10):
-            rc = self.lib.zsp_dpi_solve_h(ctx, seed + 1)
+            rc = self.lib.dvs_dpi_solve_h(ctx, seed + 1)
             assert rc == 0
-            a = self.lib.zsp_dpi_get_value_h(ctx, 0)
-            b = self.lib.zsp_dpi_get_value_h(ctx, 1)
+            a = self.lib.dvs_dpi_get_value_h(ctx, 0)
+            b = self.lib.dvs_dpi_get_value_h(ctx, 1)
             assert a <= b
 
-        self.lib.zsp_dpi_release_h(ctx)
+        self.lib.dvs_dpi_release_h(ctx)
 
 
     def test_null_handle(self):
         """Operations on NULL handle return error / 0."""
-        rc = self.lib.zsp_dpi_solve_h(None, 0x42)
+        rc = self.lib.dvs_dpi_solve_h(None, 0x42)
         assert rc == -1
 
-        val = self.lib.zsp_dpi_get_value_h(None, 0)
+        val = self.lib.dvs_dpi_get_value_h(None, 0)
         assert val == 0
 
     def test_bad_b64(self):
         """Invalid base64 returns NULL."""
-        ctx = self.lib.zsp_dpi_compile_b64(b"!!!invalid!!!")
+        ctx = self.lib.dvs_dpi_compile_b64(b"!!!invalid!!!")
         assert ctx is None or ctx == 0
 
     def test_seed_determinism(self):
@@ -179,15 +179,15 @@ class TestDpiShim:
 
         results = []
         for _ in range(2):
-            ctx = self.lib.zsp_dpi_compile_b64(b64.encode("ascii"))
+            ctx = self.lib.dvs_dpi_compile_b64(b64.encode("ascii"))
             assert ctx
-            rc = self.lib.zsp_dpi_solve_h(ctx, 0xABCD)
+            rc = self.lib.dvs_dpi_solve_h(ctx, 0xABCD)
             assert rc == 0
             results.append((
-                self.lib.zsp_dpi_get_value_h(ctx, 0),
-                self.lib.zsp_dpi_get_value_h(ctx, 1),
+                self.lib.dvs_dpi_get_value_h(ctx, 0),
+                self.lib.dvs_dpi_get_value_h(ctx, 1),
             ))
-            self.lib.zsp_dpi_release_h(ctx)
+            self.lib.dvs_dpi_release_h(ctx)
 
         assert results[0] == results[1], (
             f"Same seed produced different results: {results[0]} vs {results[1]}"
@@ -196,18 +196,18 @@ class TestDpiShim:
     def test_get_value_out_of_range(self):
         """get_value_h with out-of-range var_id returns 0."""
         b64 = _build_2var_b64(self.lib)
-        ctx = self.lib.zsp_dpi_compile_b64(b64.encode("ascii"))
+        ctx = self.lib.dvs_dpi_compile_b64(b64.encode("ascii"))
         assert ctx
-        rc = self.lib.zsp_dpi_solve_h(ctx, 1)
+        rc = self.lib.dvs_dpi_solve_h(ctx, 1)
         assert rc == 0
 
-        val = self.lib.zsp_dpi_get_value_h(ctx, 999)
+        val = self.lib.dvs_dpi_get_value_h(ctx, 999)
         assert val == 0
 
-        val = self.lib.zsp_dpi_get_value_h(ctx, -1)
+        val = self.lib.dvs_dpi_get_value_h(ctx, -1)
         assert val == 0
 
-        self.lib.zsp_dpi_release_h(ctx)
+        self.lib.dvs_dpi_release_h(ctx)
 
     def test_n_uncompiled_reported(self):
         """The shim must expose whether compile took the whole problem.
@@ -217,12 +217,12 @@ class TestDpiShim:
         SV consumer solved with those constraints dropped. Nothing reported it,
         which made the result indistinguishable from a correct solve."""
         b64 = _build_2var_b64(self.lib)
-        ctx = self.lib.zsp_dpi_compile_b64(b64.encode("ascii"))
+        ctx = self.lib.dvs_dpi_compile_b64(b64.encode("ascii"))
         assert ctx
-        assert self.lib.zsp_dpi_n_uncompiled_h(ctx) == 0
-        self.lib.zsp_dpi_release_h(ctx)
+        assert self.lib.dvs_dpi_n_uncompiled_h(ctx) == 0
+        self.lib.dvs_dpi_release_h(ctx)
 
-        assert self.lib.zsp_dpi_n_uncompiled_h(None) == -1
+        assert self.lib.dvs_dpi_n_uncompiled_h(None) == -1
 
     def test_model_validated_when_constraints_dropped(self):
         """A solve is re-checked against the ORIGINAL problem whenever compile
@@ -232,14 +232,14 @@ class TestDpiShim:
         Driven through the ordinary path: whatever compile happens to accept,
         the answer handed back must satisfy the problem that was submitted."""
         b64 = _build_2var_b64(self.lib)
-        ctx = self.lib.zsp_dpi_compile_b64(b64.encode("ascii"))
+        ctx = self.lib.dvs_dpi_compile_b64(b64.encode("ascii"))
         assert ctx
         try:
-            rc = self.lib.zsp_dpi_solve_h(ctx, 7)
+            rc = self.lib.dvs_dpi_solve_h(ctx, 7)
             assert rc in (0, 1), f"unexpected rc={rc}"
             if rc == 0:
-                a = self.lib.zsp_dpi_get_value_h(ctx, 0)
-                b = self.lib.zsp_dpi_get_value_h(ctx, 1)
+                a = self.lib.dvs_dpi_get_value_h(ctx, 0)
+                b = self.lib.dvs_dpi_get_value_h(ctx, 1)
                 assert a <= b, f"reported OK but a={a} > b={b}"
         finally:
-            self.lib.zsp_dpi_release_h(ctx)
+            self.lib.dvs_dpi_release_h(ctx)

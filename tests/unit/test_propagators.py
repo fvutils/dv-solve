@@ -42,10 +42,10 @@ _CTX_BUF_SIZE = 524288   # 512 KiB
 # ------------------------------------------------------------------ #
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -65,16 +65,16 @@ def _setup(lib: ctypes.CDLL):
     lib.solver_get_var.restype  = ctypes.c_void_p
     lib.solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.zsp_ctx_decision_level.restype  = ctypes.c_uint32
-    lib.zsp_ctx_decision_level.argtypes = [ctypes.c_void_p]
-    lib.zsp_var_lo32.restype  = ctypes.c_int32
-    lib.zsp_var_lo32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi32.restype  = ctypes.c_int32
-    lib.zsp_var_hi32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_ctx_decision_level.restype  = ctypes.c_uint32
+    lib.dvs_ctx_decision_level.argtypes = [ctypes.c_void_p]
+    lib.dvs_var_lo32.restype  = ctypes.c_int32
+    lib.dvs_var_lo32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi32.restype  = ctypes.c_int32
+    lib.dvs_var_hi32.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     # trail helpers used to fix variable bounds
     lib.trail_record_lb.restype  = ctypes.c_int
@@ -149,7 +149,7 @@ def _make_problem_and_ctx(lib, var_specs):
         ref = lib.problem_add_var(sp, i, width, is_signed, lo, hi)
         assert ref != EXPR_NULL, f"problem_add_var failed for var {i}"
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     assert ba
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
@@ -161,11 +161,11 @@ def _make_problem_and_ctx(lib, var_specs):
 
 
 def _lo(lib, ctx, var_id):
-    return lib.zsp_var_lo64(ctx, var_id)
+    return lib.dvs_var_lo64(ctx, var_id)
 
 
 def _hi(lib, ctx, var_id):
-    return lib.zsp_var_hi64(ctx, var_id)
+    return lib.dvs_var_hi64(ctx, var_id)
 
 
 def _fix(lib, ctx, var_id, val):
@@ -178,9 +178,9 @@ def _fix(lib, ctx, var_id, val):
 # Tests                                                                #
 # ------------------------------------------------------------------ #
 
-def test_bounds_add_32_propagates(libzsp):
+def test_bounds_add_32_propagates(libdvs):
     """r=a+b; fix a=[3,3] b=[4,4]; propagate → r=[7,7]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     # vars: r=[0,100], a=[0,100], b=[0,100]
@@ -214,12 +214,12 @@ def test_bounds_add_32_propagates(libzsp):
     assert _lo(lib, ctx, 0) == 7
     assert _hi(lib, ctx, 0) == 7
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_bounds_le_32_propagates(libzsp):
+def test_bounds_le_32_propagates(libdvs):
     """x≤y; fix y=[5,5]; propagate → x.hi=5."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -241,12 +241,12 @@ def test_bounds_le_32_propagates(libzsp):
     # BoundsLE: y.lo is tightened to max(y.lo, x.lo) = max(5,0) = 5 (unchanged)
     assert _lo(lib, ctx, 1) >= _lo(lib, ctx, 0)  # y.lo ≥ x.lo always holds
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_bounds_lt_32_propagates(libzsp):
+def test_bounds_lt_32_propagates(libdvs):
     """x<y; fix y=[10,10]; propagate → x.hi=9."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -265,12 +265,12 @@ def test_bounds_lt_32_propagates(libzsp):
 
     assert _hi(lib, ctx, 0) <= 9
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_bounds_eq_32_propagates(libzsp):
+def test_bounds_eq_32_propagates(libdvs):
     """x=y; fix x=[7,7]; propagate → y=[7,7]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -290,15 +290,15 @@ def test_bounds_eq_32_propagates(libzsp):
     assert _lo(lib, ctx, 1) == 7
     assert _hi(lib, ctx, 1) == 7
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_bounds_ne_32_singleton_conflict(libzsp):
+def test_bounds_ne_32_singleton_conflict(libdvs):
     """x≠y; both fixed to 5 → bounds-NE alone is a soft propagator,
     so it won't CONFLICT from NE alone; but if the domain becomes empty
     from the singleton removal path, it would. Here: x=[5,5], y=[5,5]
     — NE tries to remove 5 from y → y.lo becomes 6 > y.hi=5 → CONFLICT."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -312,12 +312,12 @@ def test_bounds_ne_32_singleton_conflict(libzsp):
     rc = lib.solver_propagate(ctx)
     assert rc == PROP_CONFLICT
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_unary_neg_32(libzsp):
+def test_unary_neg_32(libdvs):
     """r=-a; fix a=[3,3]; propagate → r=[-3,-3]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -337,12 +337,12 @@ def test_unary_neg_32(libzsp):
     assert _lo(lib, ctx, 0) == -3
     assert _hi(lib, ctx, 0) == -3
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_in_set_32(libzsp):
+def test_in_set_32(libdvs):
     """x∈{2,5,9}; initial x=[0,20]; propagate → x in [2,9]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -360,12 +360,12 @@ def test_in_set_32(libzsp):
     assert _lo(lib, ctx, 0) >= 2
     assert _hi(lib, ctx, 0) <= 9
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_in_set_32_conflict(libzsp):
+def test_in_set_32_conflict(libdvs):
     """x∈{2,5,9}; but x=[15,20]; no valid element → CONFLICT."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -379,12 +379,12 @@ def test_in_set_32_conflict(libzsp):
     rc = lib.solver_propagate(ctx)
     assert rc == PROP_CONFLICT
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_implication_32_ub_fires_when_guard_true(libzsp):
+def test_implication_32_ub_fires_when_guard_true(libdvs):
     """guard=1 → a≤3; fix guard=[1,1]; propagate → a.hi=3."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -403,12 +403,12 @@ def test_implication_32_ub_fires_when_guard_true(libzsp):
 
     assert _hi(lib, ctx, 1) <= 3
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_implication_32_entailed_when_guard_false(libzsp):
+def test_implication_32_entailed_when_guard_false(libdvs):
     """guard=0 → implication entailed; a unchanged."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -429,12 +429,12 @@ def test_implication_32_entailed_when_guard_false(libzsp):
     # a should be unchanged (no tightening)
     assert _hi(lib, ctx, 1) == 10
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_conflict_empty_domain(libzsp):
+def test_conflict_empty_domain(libdvs):
     """ctx_tighten_lb32 with lb > hi → PROP_CONFLICT."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -445,10 +445,10 @@ def test_conflict_empty_domain(libzsp):
     rc = lib.ctx_tighten_lb32(ctx, 0, 10)
     assert rc == PROP_CONFLICT
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_priority_queue_ordering(libzsp):
+def test_priority_queue_ordering(libdvs):
     """Two BoundsLE propagators at different priorities both converge.
 
     High-priority (0): x ≤ y → x.hi ≤ y.hi = 5
@@ -456,7 +456,7 @@ def test_priority_queue_ordering(libzsp):
     Result: x.hi ≤ 5 (tightest bound wins at fixpoint regardless of order).
     Tests that both propagators fired and the queue processed both.
     """
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -478,14 +478,14 @@ def test_priority_queue_ordering(libzsp):
     # x.hi must be ≤ 5 (tightest, from y)
     assert _hi(lib, ctx, 0) <= 5
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_chained_propagators(libzsp):
+def test_chained_propagators(libdvs):
     """BoundsAdd + BoundsLE chain: r=a+b; r≤z.
     Fix a=b=3; propagate; expect r=[6,6] and z.lo≥6.
     """
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -508,12 +508,12 @@ def test_chained_propagators(libzsp):
     # BoundsLE: z.lo ≥ r.lo = 6
     assert _lo(lib, ctx, 3) >= 6
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_watcher_re_enqueues_on_tighten(libzsp):
+def test_watcher_re_enqueues_on_tighten(libdvs):
     """Tightening a variable re-enqueues its watching propagator."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_problem_and_ctx(lib, [
@@ -537,4 +537,4 @@ def test_watcher_re_enqueues_on_tighten(libzsp):
 
     assert _hi(lib, ctx, 0) <= 20
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

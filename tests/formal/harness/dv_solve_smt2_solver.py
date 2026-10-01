@@ -67,7 +67,7 @@ class DvSolveSMT2Solver:
 class DvSolveSMT2BBSolver:
     """Bitblast-engine dv-solve-smt2 solver (DV_ENGINE=bitblast).
 
-    The bitblast engine routes the SMT problem through zsp_bbsolver
+    The bitblast engine routes the SMT problem through dvs_bbsolver
     (AIG + Tseitin + kissat) rather than the CDCL theory propagators.
     Substantially faster than CDCL on QF_UFBV / array-heavy BMC
     fixtures (measured: every CDCL-timing-out tier2/tier3 BMC fixture

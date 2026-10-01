@@ -37,10 +37,10 @@ class SolveOpts(ctypes.Structure):
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -93,7 +93,7 @@ def _make_dist_entries(*specs):
 def _create_solver(lib, sp):
     """Create a solver context, compile the problem, return (ctx, ba)."""
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0, f"solver_compile failed: {rc}"
@@ -104,9 +104,9 @@ def _create_solver(lib, sp):
 # Tests                                                                #
 # ------------------------------------------------------------------ #
 
-def test_dist_domain_restriction(libzsp):
+def test_dist_domain_restriction(libdvs):
     """dist {[1:3], [5:6]}. Verify solutions only in those ranges."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -136,12 +136,12 @@ def test_dist_domain_restriction(libzsp):
         x = lib.solver_get_value(ctx, 0)
         assert x in allowed, f"iteration {i}: x={x}, not in {allowed}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_dist_zero_weight_excluded(libzsp):
+def test_dist_zero_weight_excluded(libdvs):
     """dist {0 := 0, 1 := 1}. Verify 0 never appears."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -169,12 +169,12 @@ def test_dist_zero_weight_excluded(libzsp):
         x = lib.solver_get_value(ctx, 0)
         assert x == 1, f"iteration {i}: x={x}, expected 1 (0 should be excluded)"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_dist_weighted_bias(libzsp):
+def test_dist_weighted_bias(libdvs):
     """dist {0 := 1, 255 := 3}. Over 1000 solves, verify ~75% hit 255."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -214,12 +214,12 @@ def test_dist_weighted_bias(libzsp):
         f"({count_255}/{n_trials})"
     )
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_dist_range_divided(libzsp):
+def test_dist_range_divided(libdvs):
     """dist {[0:9] :/ 1, [10:19] :/ 3}. Over 1000 solves, verify ~75% in [10:19]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -261,4 +261,4 @@ def test_dist_range_divided(libzsp):
         f"({count_high}/{n_trials})"
     )
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

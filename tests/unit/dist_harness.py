@@ -18,7 +18,7 @@ Typical use::
 
     from .dist_harness import DistProblem, assert_uniform, assert_gof
 
-    dp = DistProblem(libzsp)
+    dp = DistProblem(libdvs)
     dp.add_var(0, width=4, lo=0, hi=15)
     hist = dp.sample(var_id=0, n=8000)
     assert_uniform(hist, range(16))          # free var ~ uniform
@@ -41,7 +41,7 @@ SOLVE_OK = 0
 _SP_BUF_SIZE = 65536
 _CTX_BUF_SIZE = 524288
 
-# BinOp codes — mirror the C enum in src/c/zsp_problem.h.
+# BinOp codes — mirror the C enum in src/c/dvs_problem.h.
 BIN_ADD, BIN_SUB, BIN_MUL, BIN_DIV, BIN_MOD = range(5)
 BIN_BAND, BIN_BOR, BIN_BXOR, BIN_LSHIFT, BIN_RSHIFT = range(5, 10)
 BIN_EQ, BIN_NEQ, BIN_LT, BIN_LTE, BIN_GT, BIN_GTE = range(10, 16)
@@ -80,10 +80,10 @@ def bind(lib: ctypes.CDLL) -> None:
     """Attach restype / argtypes to the C entry points this harness uses."""
     if id(lib) in _bound:
         return
-    lib.zsp_block_alloc_create.restype = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -204,7 +204,7 @@ class DistProblem:
         if self._ctx is not None:
             return
         self._ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-        self._ba = self.lib.zsp_block_alloc_create(None, 0)
+        self._ba = self.lib.dvs_block_alloc_create(None, 0)
         self._ctx = self.lib.solver_create(self._ctx_buf, _CTX_BUF_SIZE, self._ba)
         rc = self.lib.solver_compile(self._ctx, self.sp)
         assert rc >= 0, f"solver_compile failed: {rc}"
@@ -252,7 +252,7 @@ class DistProblem:
 
     def close(self):
         if self._ba is not None:
-            self.lib.zsp_block_alloc_destroy(self._ba)
+            self.lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             self._ctx = None
 

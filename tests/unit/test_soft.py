@@ -18,10 +18,10 @@ _CTX_BUF_SIZE = 524288
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -48,10 +48,10 @@ def _setup(lib: ctypes.CDLL):
     lib.solver_compile.restype  = ctypes.c_int
     lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     lib.solver_propagate.restype  = ctypes.c_int
     lib.solver_propagate.argtypes = [ctypes.c_void_p]
@@ -87,9 +87,9 @@ BIN_GTE = 15
 # Tests                                                                #
 # ------------------------------------------------------------------ #
 
-def test_soft_all_satisfiable(libzsp):
+def test_soft_all_satisfiable(libdvs):
     """Hard: x in [0,10]. Soft: x == 5. Solution should be x=5."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -106,7 +106,7 @@ def test_soft_all_satisfiable(libzsp):
     eq_e = lib.expr_binary(sp, BIN_EQ, v_x, c5)
     lib.problem_add_soft_constraint(sp, eq_e, 0)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -121,12 +121,12 @@ def test_soft_all_satisfiable(libzsp):
     # Soft should be active (not relaxed)
     assert lib.solver_soft_active(ctx, 0) == 1
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_soft_one_relaxed(libzsp):
+def test_soft_one_relaxed(libdvs):
     """Hard: x > 7. Soft: x == 5. Soft must be relaxed. Solution: x > 7."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -149,7 +149,7 @@ def test_soft_one_relaxed(libzsp):
     eq_e = lib.expr_binary(sp, BIN_EQ, v_x2, c5)
     lib.problem_add_soft_constraint(sp, eq_e, 0)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -164,13 +164,13 @@ def test_soft_one_relaxed(libzsp):
     # Soft should be relaxed
     assert lib.solver_soft_active(ctx, 0) == 0
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_soft_priority_ordering(libzsp):
+def test_soft_priority_ordering(libdvs):
     """Two conflicting soft constraints with different priorities.
     Lower priority (higher number) is relaxed first."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -199,7 +199,7 @@ def test_soft_priority_ordering(libzsp):
     eq5_e = lib.expr_binary(sp, BIN_EQ, v_x3, c5)
     lib.problem_add_soft_constraint(sp, eq5_e, 10)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -218,13 +218,13 @@ def test_soft_priority_ordering(libzsp):
     assert lib.solver_soft_active(ctx, 0) == 0  # both relaxed
     assert lib.solver_soft_active(ctx, 1) == 0
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_soft_multiple_relaxed(libzsp):
+def test_soft_multiple_relaxed(libdvs):
     """Three soft constraints, two conflict with hard. Both relaxed,
     third remains active."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -260,7 +260,7 @@ def test_soft_multiple_relaxed(libzsp):
     eq7_e = lib.expr_binary(sp, BIN_EQ, v_y, c7)
     lib.problem_add_soft_constraint(sp, eq7_e, 1)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -282,10 +282,10 @@ def test_soft_multiple_relaxed(libzsp):
     assert lib.solver_soft_active(ctx, 1) == 0   # x==5, relaxed
     assert lib.solver_soft_active(ctx, 2) == 0   # x==3, relaxed
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-# NOTE (DSE-3 follow-up): the *serve* path (zsp_bbsolver_check_maxsat) uses additive
+# NOTE (DSE-3 follow-up): the *serve* path (dvs_bbsolver_check_maxsat) uses additive
 # greedy and is collateral-free — locked by
 # test_soft_maxsat_serve.test_serve_soft_no_collateral_drop. The *primary* path
 # (solver_solve) keeps the subtractive relaxation and can shed a satisfiable
@@ -297,14 +297,14 @@ def test_soft_multiple_relaxed(libzsp):
 # here until that quirk is fixed.
 
 
-def test_soft_priority_ladder_three_primary(libzsp):
+def test_soft_priority_ladder_three_primary(libdvs):
     """DSE-3 ladder (primary path). Three mutually-exclusive softs at distinct
     priorities; all conflict pairwise so only one survives. C priority is
     `lower value = keep-harder` (0 = highest preference), so x==10 @ pri0 is kept
     and the pri5/pri10 softs relax. The matched serve-path test
     (`test_soft_maxsat_serve.test_serve_soft_priority_ladder_three`) asserts the
     SAME kept value — locking primary order == serve order."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -324,7 +324,7 @@ def test_soft_priority_ladder_three_primary(libzsp):
     s2 = lib.expr_binary(sp, BIN_EQ, lib.expr_var(sp, 0), lib.expr_const(sp, 30, 0))
     lib.problem_add_soft_constraint(sp, s2, 10)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -336,10 +336,10 @@ def test_soft_priority_ladder_three_primary(libzsp):
     x = lib.solver_get_value(ctx, 0)
     assert x == 10, f"x={x}, expected 10 (highest-preference soft kept)"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_soft_no_collateral_drop_primary(libzsp):
+def test_soft_no_collateral_drop_primary(libdvs):
     """Primary-path collateral-shedding regression — the root cause of the
     intermittent `ve/unit/test_constraint_soft.py::test_soft_nested` failure.
 
@@ -356,8 +356,8 @@ def test_soft_no_collateral_drop_primary(libzsp):
     EQ-only softs deliberately: they compile to guard-gated implication
     propagators that relax cleanly. (A `!=` soft falls to the generic
     compile-with-guard path whose compile-time tightening does not fully undo on
-    relaxation — a separate, escalation-covered limitation, see zsp_compile.c."""
-    lib = libzsp
+    relaxation — a separate, escalation-covered limitation, see dvs_compile.c."""
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -373,7 +373,7 @@ def test_soft_no_collateral_drop_primary(libzsp):
         e = lib.expr_binary(sp, BIN_EQ, lib.expr_var(sp, vid), lib.expr_const(sp, k, 0))
         lib.problem_add_soft_constraint(sp, e, pri)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -389,10 +389,10 @@ def test_soft_no_collateral_drop_primary(libzsp):
     assert a == 11, f"a={a}: a==11 dropped as collateral"
     assert d == 40, f"d={d}: d==40 dropped as collateral (the test_soft_nested bug)"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_soft_resolve_reuse_keeps_set(libzsp):
+def test_soft_resolve_reuse_keeps_set(libdvs):
     """Regression: solving the SAME ctx twice (the backend's plan-reuse path:
     solver_reset + solver_solve) must keep the same maximal soft set both times.
     Previously solver_solve did not re-activate assumption_active_mask at entry,
@@ -400,7 +400,7 @@ def test_soft_resolve_reuse_keeps_set(libzsp):
     remaining kept soft on the conflict and dropped the WHOLE set (the var came
     back unconstrained). Here a 3-soft conflicting ladder must keep x==10 on every
     solve of the reused ctx."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -414,7 +414,7 @@ def test_soft_resolve_reuse_keeps_set(libzsp):
                             lib.expr_const(sp, val, 0))
         lib.problem_add_soft_constraint(sp, e, pri)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -428,12 +428,12 @@ def test_soft_resolve_reuse_keeps_set(libzsp):
         x = lib.solver_get_value(ctx, 0)
         assert x == 10, f"attempt {attempt}: x={x}, expected 10 (kept soft)"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_soft_active_query(libzsp):
+def test_soft_active_query(libdvs):
     """After solve, verify solver_soft_active() returns correct status."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -449,7 +449,7 @@ def test_soft_active_query(libzsp):
     eq_e = lib.expr_binary(sp, BIN_EQ, v_x, c15)
     lib.problem_add_soft_constraint(sp, eq_e, 0)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
     assert rc >= 0
@@ -462,13 +462,13 @@ def test_soft_active_query(libzsp):
     # Out of range returns -1
     assert lib.solver_soft_active(ctx, 99) == -1
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_soft_with_hard_unsat(libzsp):
+def test_soft_with_hard_unsat(libdvs):
     """Hard constraints alone are UNSAT. Returns SOLVE_UNSAT
     (soft relaxation can't help)."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -491,14 +491,14 @@ def test_soft_with_hard_unsat(libzsp):
     eq_e = lib.expr_binary(sp, BIN_EQ, v_x2, c3)
     lib.problem_add_soft_constraint(sp, eq_e, 0)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     rc = lib.solver_compile(ctx, sp)
 
     # Compile might detect UNSAT directly (returns -2)
     if rc == -2:
         # UNSAT detected at compile time - that's fine
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
         return
 
     opts = lib._SolveOpts(seed=0x7777)
@@ -506,4 +506,4 @@ def test_soft_with_hard_unsat(libzsp):
     # Should be UNSAT since hard constraint alone is impossible
     assert result != SOLVE_OK
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

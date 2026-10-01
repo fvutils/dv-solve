@@ -31,7 +31,7 @@ literals per analysis on the regressed fixtures and is what brought
 back fsm_onehot_d32.
 **Estimated size:** ~half-session.
 **Risk:** low. Local refactor of one function (`_explain_binary_bitwise`),
-plus per-op variants in `zsp_explain.c`.
+plus per-op variants in `dvs_explain.c`.
 
 ### Problem
 
@@ -65,7 +65,7 @@ plan body of the prior doc (`docs/cdcl_explain_soundness_plan.md`).
 ### Exit criteria
 
 - [x] `bvand`, `bvor`, `bvxor` explain are split into per-op functions
-      in `zsp_explain.c`, each citing 2 or 4 literals (not 6).
+      in `dvs_explain.c`, each citing 2 or 4 literals (not 6).
 - [x] `tests/formal/test_cross_check_tier1.py` and
       `tests/formal/test_cross_check.py` both pass with 0 failures
       (118 total: 104 passed, 14 skipped — was 103/15).
@@ -152,7 +152,7 @@ the unit literal).
 
 **Status:** landed 2026-05-24. Audit doc:
 `docs/cdcl_explain_audit.md`. 33 callbacks documented (28 in
-`zsp_explain.c` + 5 `_64` variants in `zsp_prop_templates.c`). No
+`dvs_explain.c` + 5 `_64` variants in `dvs_prop_templates.c`). No
 soundness fix-needed verdicts; the latent bug from `/tmp/bor.smt2`
 was about the **analyzer** (Phase 2), not the explain callbacks.
 **Estimated size:** ~half-session.
@@ -160,7 +160,7 @@ was about the **analyzer** (Phase 2), not the explain callbacks.
 
 ### Problem
 
-The 26 explain callbacks in `zsp_explain.c` were written
+The 26 explain callbacks in `dvs_explain.c` were written
 incrementally; only those exercised by tier2/3 have been
 stress-tested. Now that phase 1 has touched the most-used ones, walk
 the rest against:
@@ -173,7 +173,7 @@ the rest against:
 
 ### Approach
 
-Walk `zsp_explain.c` top to bottom. For each callback, write a one-
+Walk `dvs_explain.c` top to bottom. For each callback, write a one-
 line entry in `docs/cdcl_explain_audit.md` with verdict and notes.
 Patch the ones flagged.
 
@@ -198,7 +198,7 @@ Cross-check unchanged at 98/20/0; wall time within noise (223s vs
 Truncation across all 33 explain callbacks removed — the bounds
 flagged in the Phase 3 audit no longer collapse to 32-bit.
 **Estimated size:** ~one session.
-**Risk:** medium. Touches `zsp_lcg.h`, every explain.c callback,
+**Risk:** medium. Touches `dvs_lcg.h`, every explain.c callback,
 clause storage. Possible ABI implication for the DPI shim.
 
 User asked to design for both 32- and 64-bit bounds flexibly. Two
@@ -215,8 +215,8 @@ variant (B) isn't needed.
 ### Exit criteria
 
 - [x] `Literal.bound` is `int64_t` (struct size 12 → 16 bytes).
-- [x] All `(int32_t)bound` casts in `zsp_lcg.c`,
-      `zsp_explain.c`, and `zsp_prop_templates.c`'s explain
+- [x] All `(int32_t)bound` casts in `dvs_lcg.c`,
+      `dvs_explain.c`, and `dvs_prop_templates.c`'s explain
       callbacks are removed. Trace `printf` widened to `%lld`.
 - [x] Cross-check unchanged at 98 passed / 20 skipped / 0
       disagreements. Wall time within noise of the Phase 2
@@ -297,9 +297,9 @@ cheap coalescing step in ADD_EXPL_LIT.
 ### What was actually built (slightly different shape from the original)
 
 - `TrailEntry._te_pad` repurposed as `flags`; `TRAIL_FLAG_SINGLETON`
-  defined in `zsp_trail.h`.
+  defined in `dvs_trail.h`.
 - **Auto-detection** at tighten time: `_mark_singleton_pair` in
-  `zsp_propagate.c` watches every `ctx_tighten_lb/ub` and, when the
+  `dvs_propagate.c` watches every `ctx_tighten_lb/ub` and, when the
   variable becomes singleton (`lo == hi`), scans back to find the
   companion bound entry at the same level from the same propagator
   (or same decision) and flags both. Covers decisions, eq, ITE,
@@ -563,10 +563,10 @@ section "Remaining edges".
    slipped past the `!= EXPR_NULL` check; the bogus `prop_ref=0`
    then made `p = pool_base+0` (the pool header), so the fire
    dispatch read a garbage function pointer and SEGV'd. Fix in
-   `zsp_compile.c`: apply `incremental_capacity_hint` to `pr_cap`
+   `dvs_compile.c`: apply `incremental_capacity_hint` to `pr_cap`
    (covers `prop_refs`, `prop_guard_vars`, `prop_constraint_id` since
    they all share the same capacity). Defense-in-depth in
-   `zsp_checkpoint.c`: `solver_restore` clamps its loop bound to
+   `dvs_checkpoint.c`: `solver_restore` clamps its loop bound to
    `n_prop_refs_capacity`. Regression fixture:
    `tests/formal/regression_prop_refs_capacity.smt2` (captured d30
    trace). Verified: `sby -f counter_assert_d100.sby bmc` PASS.
@@ -574,7 +574,7 @@ section "Remaining edges".
 2. ~~**Cover-mode false-UNSAT**~~ **fixed 2026-05-24.** Two
    interacting bugs in the push/pop state-restore path:
 
-   (a) `solver_solve` at `zsp_search.c:341` overwrites
+   (a) `solver_solve` at `dvs_search.c:341` overwrites
    `level_marks[0]` to seal "level-0 baseline" for its restarts
    and `bounds_shave` probing. Inside a push scope, this leaves
    `level_marks[m->decision_level]` pointing at a *post-push* trail

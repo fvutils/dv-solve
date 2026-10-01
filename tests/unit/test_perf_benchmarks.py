@@ -50,8 +50,8 @@ class _SolveOpts(ctypes.Structure):
 def _setup_lib(lib):
     c = ctypes
     for fn, rt, at in [
-        ("zsp_block_alloc_create", c.c_void_p, [c.c_void_p, c.c_size_t]),
-        ("zsp_block_alloc_destroy", None, [c.c_void_p]),
+        ("dvs_block_alloc_create", c.c_void_p, [c.c_void_p, c.c_size_t]),
+        ("dvs_block_alloc_destroy", None, [c.c_void_p]),
         ("solve_problem_init", c.c_void_p, [c.c_void_p, c.c_size_t]),
         ("problem_add_var", c.c_uint32, [c.c_void_p, c.c_uint32, c.c_uint8, c.c_uint8, c.c_int64, c.c_int64]),
         ("problem_add_constraint", c.c_uint32, [c.c_void_p, c.c_uint32]),
@@ -122,7 +122,7 @@ class TestT1PadConfig:
         lib.problem_add_all_different(sp, 6, vids)
 
         # Compile
-        ba = lib.zsp_block_alloc_create(None, _CTX_BUF_SIZE)
+        ba = lib.dvs_block_alloc_create(None, _CTX_BUF_SIZE)
         ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
         ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
         rc = lib.solver_compile(ctx, sp)
@@ -130,7 +130,7 @@ class TestT1PadConfig:
         elab_us = (t1 - t0) * 1e6
 
         if rc < 0:
-            lib.zsp_block_alloc_destroy(ba)
+            lib.dvs_block_alloc_destroy(ba)
             return elab_us, 0, None, rc
 
         # Solve
@@ -144,13 +144,13 @@ class TestT1PadConfig:
         if result == SOLVE_OK:
             values = [lib.solver_get_value(ctx, i) for i in range(6)]
 
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
         return elab_us, solve_us, values, result
 
-    def test_t1_correctness(self, libzsp):
+    def test_t1_correctness(self, libdvs):
         """Verify: two disjoint consecutive triples from [0..7]."""
-        _setup_lib(libzsp)
-        elab_us, solve_us, vals, result = self._build_and_solve(libzsp, seed=42)
+        _setup_lib(libdvs)
+        elab_us, solve_us, vals, result = self._build_and_solve(libdvs, seed=42)
         assert result == SOLVE_OK, f"T1 should be SAT (rc={result})"
         assert len(set(vals)) == 6, f"Not all distinct: {vals}"
         assert vals[1] == vals[0] + 1 and vals[2] == vals[1] + 1, \
@@ -158,14 +158,14 @@ class TestT1PadConfig:
         assert vals[4] == vals[3] + 1 and vals[5] == vals[4] + 1, \
             f"Triple 2 not consecutive: {vals[3:6]}"
 
-    def test_t1_performance(self, libzsp):
+    def test_t1_performance(self, libdvs):
         """Measure elab and per-solve times over 50 seeds."""
-        _setup_lib(libzsp)
+        _setup_lib(libdvs)
         elab_times = []
         solve_times = []
 
         for seed in range(1, 51):
-            e, s, vals, result = self._build_and_solve(libzsp, seed)
+            e, s, vals, result = self._build_and_solve(libdvs, seed)
             assert result == SOLVE_OK, f"seed {seed} failed"
             elab_times.append(e)
             solve_times.append(s)
@@ -290,10 +290,10 @@ class TestT2ClockDomainGraph:
 class TestT3ThermalChain:
     """T3: Build thermal graph, infer 0->3->0, solve each step."""
 
-    def test_t3_end_to_end(self, libzsp):
+    def test_t3_end_to_end(self, libdvs):
         """Full pipeline: graph + BFS + 6 action solves. Timing report."""
-        _setup_lib(libzsp)
-        lib = libzsp
+        _setup_lib(libdvs)
+        lib = libdvs
 
         fields = [FieldDescriptor("level", 0, 3)]
         def step(values):
@@ -330,7 +330,7 @@ class TestT3ThermalChain:
             lib.problem_add_var(sp, 1, 8, 0, nxt, nxt)
             lib.problem_add_var(sp, 2, 8, 1, -1, 1)
 
-            ba = lib.zsp_block_alloc_create(None, _CTX_BUF_SIZE)
+            ba = lib.dvs_block_alloc_create(None, _CTX_BUF_SIZE)
             ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
             ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
             lib.solver_compile(ctx, sp)
@@ -341,7 +341,7 @@ class TestT3ThermalChain:
             te = time.perf_counter()
             assert result == SOLVE_OK
             solve_times.append((te - ts) * 1e6)
-            lib.zsp_block_alloc_destroy(ba)
+            lib.dvs_block_alloc_destroy(ba)
 
         t_end = time.perf_counter()
         graph_ms = (t_graph - t0) * 1000

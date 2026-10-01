@@ -1,7 +1,7 @@
 # Propagator Catalog
 
 All propagator types implemented in the solver, their semantics, and
-propagation rules.  Source: `zsp_propagator.h`, `zsp_prop_templates.c`.
+propagation rules.  Source: `dvs_propagator.h`, `dvs_prop_templates.c`.
 
 ## Comparison Propagators
 

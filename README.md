@@ -59,4 +59,4 @@ cmake --build build
 ```
 
 The shared library (`libdv_solve.so`) is installed alongside the Python package.
-The C source prefix (`zsp_`) will be renamed to `dvs_` in a future release.
+Internal C symbols are prefixed `dvs_`.

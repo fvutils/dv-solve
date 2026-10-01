@@ -1,4 +1,4 @@
-"""Conformance tests for the BV-SAT completeness engine (zsp_bbsolver / BVSatCtx).
+"""Conformance tests for the BV-SAT completeness engine (dvs_bbsolver / BVSatCtx).
 
 Phase A, test layer T-C (see doc/notes/dv_solve_phaseA_bvsat_plan.md). The engine
 was previously *untested*; this is the trust foundation before the back-end is

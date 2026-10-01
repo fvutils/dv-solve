@@ -19,10 +19,10 @@ _CTX_BUF_SIZE = 1048576
 
 
 def _setup(lib):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
     lib.problem_add_var.restype  = ctypes.c_uint32
@@ -109,7 +109,7 @@ def test_reset_reuse(tmp_path):
 
     # --- Method 1: compile once + reset + re-solve ---
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ba = lib.zsp_block_alloc_create(None, 0)
+    ba = lib.dvs_block_alloc_create(None, 0)
     ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     lib.solver_compile(ctx, sp)
 
@@ -124,7 +124,7 @@ def test_reset_reuse(tmp_path):
         lib.solver_reset(ctx)
     reset_ns = time.perf_counter_ns() - t0
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
     reset_per = reset_ns / N_ITERS
     print(f"\n  reset+solve: {N_ITERS} iters, "

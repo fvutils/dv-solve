@@ -7,7 +7,7 @@ w-bit wrapped result. Also samples range-valued operands and asserts
 the solver returns a value consistent with `r == (a op b) mod 2^w`.
 
 This is the soundness oracle for the wrap-aware bit-vector
-propagators in zsp_prop_templates.c (prop_add_bv{add,sub,mul,shl}_64).
+propagators in dvs_prop_templates.c (prop_add_bv{add,sub,mul,shl}_64).
 """
 from __future__ import annotations
 

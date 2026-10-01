@@ -1,14 +1,14 @@
 # Solver Runtime C API Reference
 
 Complete reference for the zuspec-solver C runtime API.
-Header: `zsp_search.h`, `zsp_ctx.h`.
+Header: `dvs_search.h`, `dvs_ctx.h`.
 
 ## Lifecycle
 
 ```c
 // Create a solver context in a caller-supplied buffer.
 SolveCtx *solver_create(void *static_buf, size_t static_size,
-                         zsp_block_alloc_t *block_alloc);
+                         dvs_block_alloc_t *block_alloc);
 
 // Compile a SolveProblem into the context.
 // Returns 0 on success, -1 on pool overflow, -2 on compile-time UNSAT.
