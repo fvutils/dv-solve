@@ -233,6 +233,8 @@ PropResult ctx_tighten_ub64(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub) {
 /* ------------------------------------------------------------------ */
 
 PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
+    /* Only a propagator that fails in THIS call is the conflict's culprit. */
+    ctx->conflict_prop_ref = EXPR_NULL;
     /* A clause conflict recorded by an earlier, unanalysed conflict (e.g. a
      * shaving probe) must not be mistaken for the source of the next one. */
     ctx->conflict_clause_idx = EXPR_NULL;

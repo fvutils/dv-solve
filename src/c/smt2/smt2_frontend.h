@@ -81,6 +81,13 @@ typedef struct {
     uint8_t  _pad[2];
 } Smt2Var;
 
+/* One recorded command for get-unsat-core replay: a deep copy of the command
+ * and, for a :named assertion, its index in named[] (-1 otherwise). */
+typedef struct {
+    const Sexpr *cmd;
+    int32_t      named;
+} Smt2CoreCmd;
+
 /* ------------------------------------------------------------------ */
 /* Array sort and value types                                          */
 /* ------------------------------------------------------------------ */
@@ -282,6 +289,18 @@ typedef struct {
     char               **named;
     uint32_t             n_named;
     uint32_t             named_cap;
+    /* get-unsat-core minimisation. While :produce-unsat-cores is true, every
+     * command that shapes the assertion set (set-logic, declarations,
+     * definitions, assertions) is deep-copied here in order, scoped by push/pop
+     * like named[]. get-unsat-core replays it in a scratch frontend to drop
+     * named assertions the contradiction does not need. Off by default, so the
+     * Verilator randomize() loop never pays for the copies. */
+    int                  produce_unsat_cores;
+    Smt2CoreCmd         *core_hist;
+    uint32_t             n_core_hist;
+    uint32_t             core_hist_cap;
+    uint32_t             core_hist_at_check; /* n_core_hist at the last check-sat */
+    uint8_t              core_replayable;    /* last unsat came from a plain check-sat */
     dvs_block_alloc_t   *block_alloc;
     void                *ctx_buf;      /* raw buffer for dvs_ctx_t */
     size_t               ctx_buf_size;
@@ -423,6 +442,7 @@ typedef struct {
     uint32_t             push_n_array_vars[32];
     uint32_t             push_n_aux_problems[32];
     uint32_t             push_n_named[32];
+    uint32_t             push_n_core_hist[32];
     uint8_t              push_incomplete[32];  /* `incomplete` at each push */
     uint32_t             push_depth;
 

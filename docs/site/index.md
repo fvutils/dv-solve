@@ -39,6 +39,7 @@ concepts/problem-model
 concepts/soft-constraints
 concepts/randomization-seeds
 concepts/soundness
+concepts/diagnosing-unsat
 concepts/engines
 ```
 

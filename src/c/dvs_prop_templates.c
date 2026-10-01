@@ -447,6 +447,12 @@ static PropResult _fire_bounds_mul_32(Propagator *self, dvs_ctx_t *ctx) {
     Variable      *b   = &ctx->vars[bid];
 
     PropResult res;
+    /* A zero factor makes the product zero. Without this, a == b == 0 left r
+     * untouched and r=1 was accepted (found by test_prop_exhaustive). */
+    if ((a->lo == 0 && a->hi == 0) || (b->lo == 0 && b->hi == 0)) {
+        if ((res = ctx_tighten_lb32(ctx, rid, 0)) != PROP_OK) return res;
+        return ctx_tighten_ub32(ctx, rid, 0);
+    }
     if (a->lo == a->hi) {
         int32_t k = a->lo;
         if (k > 0) {
@@ -866,13 +872,13 @@ static PropResult _fire_reification_32(Propagator *self, dvs_ctx_t *ctx) {
      * which is entailment, not propagation -- a wrong `unsat` whenever both
      * operands are ranges (B31). */
     if (g->hi == 0) {
+        /* At the edge the +1/-1 would overflow, but the edge is not "no
+         * information": y.lo at x's maximum (or x.hi at y's minimum) means no
+         * x exceeds y. Skipping instead accepted x=0, y=max with g=0 (B55). */
         PropResult r;
-        if (y->lo < var_repr_max(x)) {
-            if ((r = ctx_tighten_lb32(ctx, xid, y->lo + 1)) != PROP_OK) return r;
-        }
-        if (x->hi > var_repr_min(y)) {
-            if ((r = ctx_tighten_ub32(ctx, yid, x->hi - 1)) != PROP_OK) return r;
-        }
+        if (y->lo >= var_repr_max(x) || x->hi <= var_repr_min(y)) return PROP_CONFLICT;
+        if ((r = ctx_tighten_lb32(ctx, xid, y->lo + 1)) != PROP_OK) return r;
+        if ((r = ctx_tighten_ub32(ctx, yid, x->hi - 1)) != PROP_OK) return r;
     }
     /* Backward: if domain proves x ≤ y unconditionally, force guard=1.
      * If domain proves x > y unconditionally, force guard=0. */
@@ -2672,14 +2678,14 @@ static PropResult _fire_reification_64(Propagator *self, dvs_ctx_t *ctx) {
      * which over-pruned and returned a wrong `unsat` whenever both operands
      * were ranges, e.g. the reified `x < (y | 1)` (B31). */
     if (g->hi == 0) {
+        /* At the edge there is no x > y at all: conflict, not "nothing to
+         * add" (B55, see _fire_reification_32). */
         PropResult r;
-        if (var_b_lt(x, ylo, var_repr_max(x))) {
-            if ((r = ctx_tighten_lb64(ctx, xid, ylo + 1)) != PROP_OK) return r;
-        }
+        if (!var_b_lt(x, ylo, var_repr_max(x))) return PROP_CONFLICT;
+        if ((r = ctx_tighten_lb64(ctx, xid, ylo + 1)) != PROP_OK) return r;
         int64_t xhi_now = var_hi64(ctx, x);
-        if (var_b_gt(y, xhi_now, var_repr_min(y))) {
-            if ((r = ctx_tighten_ub64(ctx, yid, xhi_now - 1)) != PROP_OK) return r;
-        }
+        if (!var_b_gt(y, xhi_now, var_repr_min(y))) return PROP_CONFLICT;
+        if ((r = ctx_tighten_ub64(ctx, yid, xhi_now - 1)) != PROP_OK) return r;
     }
     /* Backward: if the domains prove x <= y (or x > y) unconditionally, pin g. */
     if (g->lo != g->hi) {

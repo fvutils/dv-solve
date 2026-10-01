@@ -12,6 +12,204 @@
 #include "dvs_lcg.h"
 #include "dvs_explain.h"
 
+#ifdef DVS_STEP_CHECK
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+/* Soundness step checker (DVS_STEP_CHECK builds only).
+ *
+ * A learnt clause must hold in every solution; one that does not can make a
+ * satisfiable problem `unsat`, but only when it happens to cut the last
+ * solution, so the answer alone rarely shows it. Check every clause as it is
+ * learnt: in a forked child (an exact copy, nothing to restore), backtrack to
+ * the root, switch learning off, assert the clause's negation and search with
+ * the plain chronological solver. Finding a solution proves the clause wrong:
+ * print it and abort. The check shares no code with clause learning or the
+ * explainers -- only the propagators and the search. */
+static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts);
+
+extern dvs_problem_t *dvs_sc_problem;
+extern int dvs_sc_uncompiled;
+static int      _sc_in_child;
+static uint64_t _sc_checked, _sc_unknown, _sc_invalid;
+
+static void _sc_report(void) {
+    if (getenv("DV_STEP_CHECK_STATS"))
+        fprintf(stderr, "[step-check] learnt clauses checked=%llu unknown=%llu invalid=%llu\n",
+                (unsigned long long)_sc_checked, (unsigned long long)_sc_unknown,
+                (unsigned long long)_sc_invalid);
+}
+
+static void _sc_print_lits(const Literal *lits, uint32_t n, const char *sep) {
+    for (uint32_t i = 0; i < n; i++)
+        fprintf(stderr, "%s v%u %s %lld", i ? sep : " ", lits[i].var_id,
+                lits[i].is_lb ? ">=" : "<=", (long long)lits[i].bound);
+    fprintf(stderr, "\n");
+}
+
+static void _sc_print_clause(const Literal *lits, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++)
+        fprintf(stderr, "%s v%u %s %lld", i ? " \\/" : " ", lits[i].var_id,
+                lits[i].is_lb ? ">=" : "<=", (long long)lits[i].bound);
+    fprintf(stderr, "\n");
+}
+
+/* Suite runs set DV_STEP_CHECK_LOG (append the violation, tagged with the
+ * pytest test that hit it) and DV_STEP_CHECK_CONTINUE (an abort inside the
+ * library would end the whole pytest process). */
+static void _sc_fail(const Literal *lits, uint32_t n) {
+    const char *lp = getenv("DV_STEP_CHECK_LOG");
+    FILE *lf = lp ? fopen(lp, "a") : NULL;
+    if (lf) {
+        const char *tn = getenv("PYTEST_CURRENT_TEST");
+        fprintf(lf, "INVALID test=%s pid=%d clause:", tn ? tn : "-", (int)getpid());
+        for (uint32_t i = 0; i < n; i++)
+            fprintf(lf, "%s v%u %s %lld", i ? " \\/" : " ", lits[i].var_id,
+                    lits[i].is_lb ? ">=" : "<=", (long long)lits[i].bound);
+        fprintf(lf, "\n");
+        fclose(lf);
+    }
+    if (!getenv("DV_STEP_CHECK_CONTINUE")) abort();
+    _sc_invalid++;
+}
+
+/* Fork; in the child backtrack to the root, switch learning off, assert
+ * every literal of `assume` and search with the plain solver. Returns 10 if
+ * that finds a solution (printing it), 20 if not, 30 if undecided. */
+static int _sc_fork_solve(dvs_ctx_t *ctx, const Literal *assume, uint32_t n,
+                          const dvs_solve_opts_t *opts) {
+    fflush(stdout); fflush(stderr);
+    pid_t pid = fork();
+    if (pid < 0) return 30;
+    if (pid == 0) {
+        _sc_in_child = 1;
+        LCGCtx *lcg = (LCGCtx *)ctx->lcg;
+        if (lcg) lcg->enabled = 0;
+        trail_backtrack(ctx, 0);
+        PropResult pr = PROP_OK;
+        for (uint32_t i = 0; i < n && pr == PROP_OK; i++)
+            pr = assume[i].is_lb ? ctx_tighten_lb64(ctx, assume[i].var_id, assume[i].bound)
+                                 : ctx_tighten_ub64(ctx, assume[i].var_id, assume[i].bound);
+        if (pr != PROP_OK) _exit(20);
+        dvs_solve_opts_t o;
+        if (opts) o = *opts; else memset(&o, 0, sizeof o);
+        o.use_lcg = 0;
+        o.time_limit_ms = 5000;
+        dvs_result_t r = _solver_solve_core(ctx, &o);
+        if (r == DVS_SOLVE_OK && dvs_sc_problem &&
+            dvs_solver_validate_model(ctx, dvs_sc_problem, NULL) > 0) {
+            /* Compile left constraints out (the real solve validates and
+             * escalates): this is no solution, and no evidence either way. */
+            if (dvs_sc_uncompiled) _exit(30);
+            /* The propagators accepted an assignment the constraints reject:
+             * a wrong-model bug in its own right, and no evidence about the
+             * step being checked. */
+            fprintf(stderr, "[step-check] INVALID model accepted by the propagators"
+                    " (an incomplete propagator):\n");
+            dvs_solver_validate_model(ctx, dvs_sc_problem, stderr);
+            _exit(40);
+        }
+        if (r == DVS_SOLVE_OK) {
+            fprintf(stderr, "[step-check] solution:");
+            for (uint32_t i = 0; i < ctx->n_vars; i++) {
+                uint32_t v = i;   /* a var merged by `x == y` reads its root */
+                while (ctx->var_alias && ctx->var_alias[v] != v) v = ctx->var_alias[v];
+                int64_t lo = var_lo64(ctx, &ctx->vars[v]), hi = var_hi64(ctx, &ctx->vars[v]);
+                if (lo == hi) fprintf(stderr, " v%u=%lld", i, (long long)lo);
+                else fprintf(stderr, " v%u=%lld..%lld", i, (long long)lo, (long long)hi);
+            }
+            fprintf(stderr, "\n");
+            _exit(10);
+        }
+        _exit(r == DVS_SOLVE_UNSAT ? 20 : 30);
+    }
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0) { }
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 30;
+}
+
+/* With DV_STEP_CHECK_DUMP, list every live propagator after a violation:
+ * name, watched variables, guard. */
+static void _sc_dump_props(dvs_ctx_t *ctx) {
+    if (!getenv("DV_STEP_CHECK_DUMP")) return;
+    uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
+                   ? ctx->n_props : ctx->n_prop_refs_capacity;
+    for (uint32_t i = 0; i < lim; i++) {
+        if (ctx->prop_refs[i] == EXPR_NULL) continue;
+        Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ctx->prop_refs[i]);
+        uint32_t nw;
+        const uint32_t *wv = prop_watched_vars(p, &nw);
+        fprintf(stderr, "[step-check]   prop %u %s", i, prop_fire_name(p->fire));
+        for (uint32_t j = 0; j < nw; j++) fprintf(stderr, " v%u", wv[j]);
+        if (ctx->prop_guard_vars && ctx->prop_guard_vars[i] != EXPR_NULL)
+            fprintf(stderr, " guard=v%u", ctx->prop_guard_vars[i]);
+        fprintf(stderr, "\n");
+    }
+}
+
+static void _step_check_learnt(dvs_ctx_t *ctx, const Literal *lits, uint32_t n,
+                               const dvs_solve_opts_t *opts) {
+    static int registered;
+    if (_sc_in_child) return;
+    if (!registered) { registered = 1; atexit(_sc_report); }
+    /* A conflict clause is the negation of bounds that all hold at the
+     * conflict, so every literal must be false now. One that already holds
+     * excludes nothing: the search re-derives the same conflict for ever. */
+    for (uint32_t i = 0; i < n; i++) {
+        const Variable *v = &ctx->vars[lits[i].var_id];
+        int is_false = lits[i].is_lb
+            ? var_b_lt(v, var_hi64(ctx, v), lits[i].bound)
+            : var_b_gt(v, var_lo64(ctx, v), lits[i].bound);
+        if (!is_false) {
+            fprintf(stderr, "[step-check] INVALID learnt clause (literal %u not false"
+                    " at the conflict):", i);
+            _sc_print_clause(lits, n);
+            _sc_fail(lits, n);
+            return;
+        }
+    }
+    /* Valid iff no solution satisfies the clause's negation. */
+    Literal neg[MAX_CLAUSE_LITS];
+    for (uint32_t i = 0; i < n; i++) neg[i] = literal_negate(lits[i]);
+    int code = _sc_fork_solve(ctx, neg, n, opts);
+    if (code == 40) { _sc_fail(lits, n); return; }
+    if (code == 10) {
+        fprintf(stderr, "[step-check] INVALID learnt clause:");
+        _sc_print_clause(lits, n);
+        _sc_fail(lits, n);
+        return;
+    }
+    if (code == 20) _sc_checked++; else _sc_unknown++;
+}
+
+/* Called by conflict analysis (dvs_lcg.c) for every explanation it uses:
+ * `ante` (the explainer's literals plus any own-bound and guard literals the
+ * analysis added) must imply `lit` in every solution. */
+void dvs_step_check_explanation(dvs_ctx_t *ctx, const char *who,
+                                const Literal *ante, uint32_t n, Literal lit) {
+    static uint64_t checked, unknown;
+    if (_sc_in_child || getenv("DV_STEP_CHECK_NO_EXPLAIN")) return;
+    Literal as[MAX_CLAUSE_LITS + 1];
+    if (n > MAX_CLAUSE_LITS) { unknown++; return; }
+    memcpy(as, ante, n * sizeof(Literal));
+    as[n] = literal_negate(lit);
+    int code = _sc_fork_solve(ctx, as, n + 1, NULL);
+    if (code == 40) { Literal l1[1] = { lit }; _sc_fail(l1, 1); return; }
+    if (code == 10) {
+        fprintf(stderr, "[step-check] INVALID explanation from %s: v%u %s %lld because",
+                who, lit.var_id, lit.is_lb ? ">=" : "<=", (long long)lit.bound);
+        _sc_print_lits(ante, n, " /\\");
+        _sc_dump_props(ctx);
+        Literal l1[1] = { lit };
+        _sc_fail(l1, 1);
+        return;
+    }
+    if (code == 20) checked++; else unknown++;
+    (void)checked; (void)unknown;
+}
+#endif
+
 /* Forward declarations for hole management */
 static int _is_hole(const dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
 static uint32_t _count_holes_in_range(const dvs_ctx_t *ctx, uint32_t var_id,
@@ -577,6 +775,13 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
          * after the change) and stamp TRAIL_FLAG_SINGLETON on the new
          * entry plus the companion-bound entry at the same level. */
         trail_push_level(ctx);
+        /* A conflict from the search's own tightenings (here, and the
+         * chronological path below) has no culprit propagator or clause.
+         * Clear the last ones so conflict analysis cannot blame them: it
+         * would seed from bounds that do not conflict and learn a clause
+         * that removes solutions (wrong `unsat`). */
+        ctx->conflict_prop_ref   = EXPR_NULL;
+        ctx->conflict_clause_idx = EXPR_NULL;
         PropResult pr = ctx_tighten_lb64(ctx, x_id, v);
         if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x_id, v);
         if (pr == PROP_OK) {
@@ -660,6 +865,9 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                                                    learnt_buf, &n_lits,
                                                    &bt_level, &lbd);
                     if (rc == 0 && n_lits > 0) {
+#ifdef DVS_STEP_CHECK
+                        _step_check_learnt(ctx, learnt_buf, n_lits, opts);
+#endif
                         /* Backjump first so trail state matches the
                          * level the asserting literal will fire at. */
                         if (bt_level >= cur) bt_level = cur - 1;
@@ -690,6 +898,8 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
 
             /* Backtrack to the previous level */
             trail_backtrack(ctx, cur - 1);
+            ctx->conflict_prop_ref   = EXPR_NULL;   /* see the decision push */
+            ctx->conflict_clause_idx = EXPR_NULL;
 
             /* Resolve the conflict. Sign-aware ordering so an unsigned domain
              * in/across the upper half is handled correctly (a signed

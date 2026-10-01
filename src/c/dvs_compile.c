@@ -602,6 +602,8 @@ static int _flatten_or(dvs_problem_t *sp, dvs_expr_t ref,
 /* Forward declaration */
 static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t root);
 static int _compile_neg_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t root);
+static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref);
+static uint32_t _invert_guard(dvs_ctx_t *ctx, uint32_t g);
 
 /* ------------------------------------------------------------------ */
 /* Union-Find for variable aliasing                                    */
@@ -648,13 +650,21 @@ static int _compile_gated_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp,
         int is_cv = !is_vc && _is_const(sp, e->lhs, &cv) && _is_var(sp, e->rhs, &vid);
 
         if (is_vc || is_cv) {
-            /* The Implication propagator stores an int32 bound; for a tier-1 var
-             * a constant near/beyond the int32 range (the switch also uses cv±1)
-             * would truncate. Defer such a guarded comparison to the complete
-             * BV-SAT engine rather than compile it unsoundly. */
+            vid = _resolve(ctx, vid);   /* x == y merges: act on the kept var */
+            dvs_binop_t wop = e->op;
+            if (is_cv) wop = (dvs_binop_t)_swap_cmp(wop);
+            /* A tier-1 var takes the 64-bit Implication. Only the forms that
+             * need no cv±1 (which could wrap at the ends of the range); the
+             * strict ones go to the reifying fallback below. */
             if (_var_needs_wide(ctx, vid) &&
-                (cv <= (int64_t)INT32_MIN || cv >= (int64_t)INT32_MAX))
-                return 0;
+                (wop == DVS_BIN_EQ || wop == DVS_BIN_LTE || wop == DVS_BIN_GTE)) {
+                if (wop != DVS_BIN_GTE)
+                    prop_add_implication_64(ctx, guard_id, vid, cv, 1, 0);
+                if (wop != DVS_BIN_LTE)
+                    prop_add_implication_64(ctx, guard_id, vid, cv, 0, 0);
+                return 1;
+            }
+            if (_var_needs_wide(ctx, vid)) goto reify;
             if (cv <= (int64_t)INT32_MIN || cv >= (int64_t)INT32_MAX) {
                 /* A tier-0 var's whole range lies strictly inside int32, so
                  * the comparison is decided: true needs nothing, false means
@@ -705,16 +715,19 @@ static int _compile_gated_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp,
         }
     }
 
-    /* Fallback: compile normally and gate resulting propagators */
-    uint32_t props_before = ctx->n_props;
-    int rc = _compile_constraint(ctx, sp, root);
-    if (rc > 0) {
-        for (uint32_t pi = props_before; pi < ctx->n_props; pi++) {
-            if (ctx->prop_guard_vars && pi < ctx->n_prop_refs_capacity)
-                ctx->prop_guard_vars[pi] = guard_id;
-        }
-    }
-    return rc;
+reify:
+    /* Anything else: reify the constraint as a 0/1 var g (g <-> root) and add
+     * guard -> g. Compiling it normally and gating the propagators that
+     * appeared was unsound (B53): _compile_constraint also tightens root
+     * domains, merges `x == y` variables and answers -1 for a false
+     * constant, and none of that can be gated -- so a branch that was never
+     * taken still applied, and `ite(c, false, true)` came back unsat. A shape
+     * _bool_to_var cannot reify stays uncompiled (0), which model validation
+     * and escalation handle. */
+    uint32_t g = _bool_to_var(ctx, sp, root);
+    if (g == EXPR_NULL) return 0;
+    prop_add_implication_32(ctx, guard_id, g, 1, /*is_ub=*/0, 0);
+    return 1;
 }
 
 static int _init_aux_tiered(dvs_ctx_t *ctx, Variable *v, uint16_t width,
@@ -2823,236 +2836,38 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                 else
                     return _compile_constraint(ctx, sp, ite->else_e);
             }
-            /* Cond is a comparison expression: ITE(var op const, then, else).
-             * Handle pattern: if (var == const) { then_constraint }.
-             * Create a boolean guard linked to the comparison via
-             * Reification, and gate the then-branch with this guard. */
-            ExprKind ck = *(ExprKind *)dvs_pool_ptr(&sp->pool, ite->cond);
-            if (ck == EXPR_BINARY) {
-                ExprBinary *cmp = (ExprBinary *)dvs_pool_ptr(&sp->pool, ite->cond);
-                uint32_t cmp_vid; int64_t cmp_cv;
-                int is_vc = _is_var(sp, cmp->lhs, &cmp_vid) && _is_const(sp, cmp->rhs, &cmp_cv);
-                int is_cv = !is_vc && _is_const(sp, cmp->lhs, &cmp_cv) && _is_var(sp, cmp->rhs, &cmp_vid);
-
-                if ((is_vc || is_cv) && cmp->op == DVS_BIN_EQ &&
-                    ctx->n_vars < ctx->n_vars_capacity) {
-                    /* Create guard boolean [0,1] and const-var for cmp_cv */
-                    uint32_t gid = ctx->n_vars;
-                    Variable *gv = &ctx->vars[gid];
-                    gv->lo = 0; gv->hi = 1;
-                    gv->width = 1; gv->flags = 0;
-                    gv->holes_offset = 0; gv->_pad = 0;
-                    ctx->n_vars = gid + 1;
-                    if (ctx->watcher_heads) ctx->watcher_heads[gid] = EXPR_NULL;
-                    if (gid < 64) ctx->unassigned_mask |= (1ULL << gid);
-
-                    /* Bidirectional: guard ↔ (cmp_vid == cmp_cv)
-                     * Uses ReificationEq with a const-var pinned to cmp_cv. */
-                    if (ctx->n_vars < ctx->n_vars_capacity) {
-                        uint32_t cv_id = ctx->n_vars;
-                        Variable *cvv = &ctx->vars[cv_id];
-                        if (_init_const_singleton(ctx, cvv, cmp_cv,
-                                ctx->vars[_resolve(ctx, cmp_vid)].flags & VAR_SIGNED,
-                                ctx->vars[_resolve(ctx, cmp_vid)].width) != 0)
-                            return 0;
-                        ctx->n_vars = cv_id + 1;
-                        if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
-                        prop_add_reification_eq_32(ctx, gid, cmp_vid, cv_id, 0);
-                    }
-
-                    /* Compile then-branch with guard (uses gated helper
-                     * to avoid irreversible compile-time tightening) */
-                    int then_rc = _compile_gated_constraint(ctx, sp,
-                                                            ite->then_e, gid);
-                    if (then_rc < 0) return then_rc;
-
-                    /* Else-branch: compile with not_guard */
-                    int64_t else_cv2;
-                    if (ite->else_e == EXPR_NULL ||
-                        (_is_const(sp, ite->else_e, &else_cv2) && else_cv2 != 0)) {
-                        /* No else or trivially true else -- done */
-                    } else if (ctx->n_vars + 2 <= ctx->n_vars_capacity) {
-                        /* Create not_guard: not_guard + guard == 1 */
-                        uint32_t ng_id = ctx->n_vars;
-                        Variable *ngv = &ctx->vars[ng_id];
-                        ngv->lo = 0; ngv->hi = 1;
-                        ngv->width = 1; ngv->flags = 0;
-                        ngv->holes_offset = 0; ngv->_pad = 0;
-                        ctx->n_vars = ng_id + 1;
-                        if (ctx->watcher_heads) ctx->watcher_heads[ng_id] = EXPR_NULL;
-                        if (ng_id < 64) ctx->unassigned_mask |= (1ULL << ng_id);
-
-                        uint32_t one_id2 = ctx->n_vars;
-                        Variable *ov2 = &ctx->vars[one_id2];
-                        _init_tier0(ov2, 32, 0, 1, 1);
-                        ctx->n_vars = one_id2 + 1;
-                        if (ctx->watcher_heads) ctx->watcher_heads[one_id2] = EXPR_NULL;
-                        prop_add_bounds_add_32(ctx, one_id2, gid, ng_id, 0);
-
-                        _compile_gated_constraint(ctx, sp, ite->else_e, ng_id);
-                    }
-
-                    return (then_rc > 0) ? 1 : 0;
-                }
-
-                /* var == var condition: guard <-> (lhs_var == rhs_var) */
-                uint32_t lhs_vid, rhs_vid;
-                int is_vv = _is_var(sp, cmp->lhs, &lhs_vid) &&
-                            _is_var(sp, cmp->rhs, &rhs_vid);
-                if (is_vv && cmp->op == DVS_BIN_EQ &&
-                    ctx->n_vars < ctx->n_vars_capacity) {
-                    uint32_t gid = ctx->n_vars;
-                    Variable *gv = &ctx->vars[gid];
-                    gv->lo = 0; gv->hi = 1;
-                    gv->width = 1; gv->flags = 0;
-                    gv->holes_offset = 0; gv->_pad = 0;
-                    ctx->n_vars = gid + 1;
-                    if (ctx->watcher_heads) ctx->watcher_heads[gid] = EXPR_NULL;
-                    if (gid < 64) ctx->unassigned_mask |= (1ULL << gid);
-
-                    /* guard <-> (lhs == rhs) */
-                    prop_add_reification_eq_32(ctx, gid, lhs_vid, rhs_vid, 0);
-
-                    /* Compile then-branch with guard (gated helper) */
-                    int then_rc = _compile_gated_constraint(ctx, sp,
-                                                            ite->then_e, gid);
-                    if (then_rc < 0) return then_rc;
-
-                    /* Handle else-branch */
-                    int64_t else_cv3;
-                    if (ite->else_e != EXPR_NULL &&
-                        !(_is_const(sp, ite->else_e, &else_cv3) && else_cv3 != 0)) {
-                        /* Non-trivial else: compile with not_guard */
-                        if (ctx->n_vars < ctx->n_vars_capacity) {
-                            uint32_t ng_id = ctx->n_vars;
-                            Variable *ngv = &ctx->vars[ng_id];
-                            ngv->lo = 0; ngv->hi = 1;
-                            ngv->width = 1; ngv->flags = 0;
-                            ngv->holes_offset = 0; ngv->_pad = 0;
-                            ctx->n_vars = ng_id + 1;
-                            if (ctx->watcher_heads) ctx->watcher_heads[ng_id] = EXPR_NULL;
-                            if (ng_id < 64) ctx->unassigned_mask |= (1ULL << ng_id);
-
-                            /* not_guard == 1 - guard: use a const-1 var and
-                             * the ADD propagator: guard + not_guard == 1 */
-                            if (ctx->n_vars < ctx->n_vars_capacity) {
-                                uint32_t one_id = ctx->n_vars;
-                                Variable *ov = &ctx->vars[one_id];
-                                _init_tier0(ov, 32, 0, 1, 1);
-                                ctx->n_vars = one_id + 1;
-                                if (ctx->watcher_heads) ctx->watcher_heads[one_id] = EXPR_NULL;
-                                prop_add_bounds_add_32(ctx, one_id, gid, ng_id, 0);
-                            }
-
-                            int else_rc = _compile_gated_constraint(ctx, sp,
-                                                                ite->else_e, ng_id);
-                            (void)else_rc;
-                        }
-                    }
-
-                    return (then_rc > 0) ? 1 : 0;
-                }
-            }
-            return 0;
+            /* Cond is an expression: reify it below. */
         }
 
-        /* Cond is a variable: compile both branches with guard gating.
-         * Then-branch fires when cond_var == 1.
-         * Else-branch fires when cond_var == 0, which we track with a
-         * helper not_cond variable: not_cond = 1 - cond. */
-
-        /* Compile then-branch constraints */
-        int then_rc = _compile_constraint(ctx, sp, ite->then_e);
+        /* Reify the condition as a 0/1 guard and compile each branch gated
+         * by it (else: by its negation). Every branch goes through
+         * _compile_gated_constraint, which has no unconditional effects. The
+         * old per-shape paths compiled branches with _compile_constraint and
+         * gated only the propagators they could find -- the last one, or one
+         * off by one -- so compile-time tightenings, merges and the rest of
+         * the propagators applied whichever way the condition went (B53). */
+        uint32_t g;
+        if (cond_is_var) {
+            g = _resolve(ctx, cond_var_id);
+            /* A var condition is a Bool; anything wider would need g != 0. */
+            if (var_lo64(ctx, &ctx->vars[g]) < 0 || var_hi64(ctx, &ctx->vars[g]) > 1)
+                return 0;
+        } else {
+            g = _bool_to_var(ctx, sp, ite->cond);
+            if (g == EXPR_NULL) return 0;
+        }
+        int then_rc = _compile_gated_constraint(ctx, sp, ite->then_e, g);
         if (then_rc < 0) return then_rc;
-
-        if (then_rc > 0) {
-            /* Then-branch was compiled successfully.
-             * The most recently added propagator is for the then-branch.
-             * Set its guard to cond_var. */
-            if (ctx->n_props > 0) {
-                uint32_t last_prop_id = ctx->n_props - 1;
-                if (ctx->prop_guard_vars && last_prop_id < ctx->n_prop_refs_capacity)
-                    ctx->prop_guard_vars[last_prop_id] = cond_var_id;
-            }
-        }
-
-        /* Compile else-branch if present */
-        if (ite->else_e != EXPR_NULL) {
-            int else_rc = _compile_constraint(ctx, sp, ite->else_e);
+        int else_rc = 1;
+        int64_t else_cv;
+        if (ite->else_e != EXPR_NULL &&
+            !(_is_const(sp, ite->else_e, &else_cv) && else_cv != 0)) {
+            uint32_t ng = _invert_guard(ctx, g);
+            if (ng == EXPR_NULL) return 0;
+            else_rc = _compile_gated_constraint(ctx, sp, ite->else_e, ng);
             if (else_rc < 0) return else_rc;
-
-            if (else_rc > 0 && ctx->n_props > 0) {
-                /* Else-branch: create a NOT-cond variable and use as guard.
-                 * We need not_cond_var where not_cond = 1 - cond.
-                 * For a boolean cond in [0,1], use a NE propagator approach:
-                 * Add a temp variable for not_cond, constrain not_cond + cond == 1. */
-
-                /* For simplicity, use a DisjClause-based approach instead:
-                 * The else propagator should fire when cond == 0.
-                 * We can achieve this by negating: create a variable that is
-                 * 1 when cond is 0 and 0 when cond is 1.
-                 * Use the Implication approach: set guard to cond_var but
-                 * invert the semantics in the guard check.
-                 * 
-                 * Actually, simpler approach for boolean guard:
-                 * Mark the else-propagator's guard with a special encoding.
-                 * Use (cond_var_id | 0x80000000) to indicate negated guard.
-                 * But that's hacky. Instead, just allocate a not_cond var
-                 * and add an equality: not_cond + cond == 1 */
-
-                /* Allocate not_cond as a new variable if we have capacity */
-                uint32_t not_cond_id = ctx->n_vars;
-                if (not_cond_id < ctx->n_vars_capacity) {
-                    Variable *nv = &ctx->vars[not_cond_id];
-                    /* Boolean: signed, [0,1] so it stays tier-0 */
-                    nv->lo = 0; nv->hi = 1;
-                    nv->width = 1; nv->flags = VAR_SIGNED;
-                    nv->holes_offset = 0; nv->_pad = 0;
-                    ctx->n_vars = not_cond_id + 1;
-
-                    /* Ensure watcher head is initialized */
-                    if (ctx->watcher_heads)
-                        ctx->watcher_heads[not_cond_id] = EXPR_NULL;
-
-                    /* Set unassigned bit */
-                    if (not_cond_id < 64)
-                        ctx->unassigned_mask |= (1ULL << not_cond_id);
-
-                    /* Add constraint: not_cond + cond == 1 via add propagator.
-                     * We need a temp "one" variable. Simpler: use NE propagator
-                     * between cond and not_cond, plus bounds.
-                     * Actually simplest: just use the add propagator.
-                     * Create a const-1 variable. */
-                    uint32_t one_id = ctx->n_vars;
-                    if (one_id < ctx->n_vars_capacity) {
-                        Variable *ov = &ctx->vars[one_id];
-                        ov->lo = 1; ov->hi = 1;
-                        ov->width = 1; ov->flags = VAR_SIGNED;
-                        ov->holes_offset = 0; ov->_pad = 0;
-                        ctx->n_vars = one_id + 1;
-                        if (ctx->watcher_heads)
-                            ctx->watcher_heads[one_id] = EXPR_NULL;
-                        /* one_id is singleton, don't set unassigned bit */
-
-                        /* one == cond + not_cond */
-                        prop_add_bounds_add_32(ctx, one_id, cond_var_id,
-                                               not_cond_id, 0);
-                    }
-
-                    /* Set guard on else-propagator */
-                    uint32_t last_prop_id = ctx->n_props - 2;
-                    /* Actually we just added the add propagator, so the else
-                     * propagator is further back. Track it properly. */
-                    /* The else branch compiled a propagator, then we added
-                     * the add propagator. The else propagator is at
-                     * n_props - 2 (before the add prop we just created). */
-                    if (ctx->prop_guard_vars && last_prop_id < ctx->n_prop_refs_capacity)
-                        ctx->prop_guard_vars[last_prop_id] = not_cond_id;
-                }
-            }
         }
-
-        return (then_rc > 0) ? 1 : 0;
+        return (then_rc > 0 && else_rc > 0) ? 1 : 0;
     }
 
     /* ---- r == extend(a): zero/sign extend compilation ---- */
@@ -3767,12 +3582,23 @@ static int _elab_error_code(int err) {
     }
 }
 
+#ifdef DVS_STEP_CHECK
+dvs_problem_t *dvs_sc_problem;   /* the step checker validates models against it */
+int dvs_sc_uncompiled;           /* and needs to know if compile left some out */
+#endif
+
 int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+#ifdef DVS_STEP_CHECK
+    dvs_sc_problem = sp;
+#endif
     int err = 0;
     dvs_problem_t *esp = dvs_sv_elaborate(sp, NULL, NULL, &err);
     if (err) return _elab_error_code(err);
     int rc = _solver_compile_body(ctx, esp);
     dvs_sv_release(sp, esp);
+#ifdef DVS_STEP_CHECK
+    dvs_sc_uncompiled = rc > 0;
+#endif
     return rc;
 }
 
@@ -4085,88 +3911,13 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                      * (which have built-in guard semantics via avar_id)
                      * instead of _compile_constraint which does compile-time
                      * tightening that can't be undone by guard relaxation. */
-                    int soft_compiled = 0;
-                    if (ss->root != EXPR_NULL) {
-                        ExprKind sk = *(ExprKind *)dvs_pool_ptr(&sp->pool, ss->root);
-                        if (sk == EXPR_BINARY) {
-                            ExprBinary *se = (ExprBinary *)dvs_pool_ptr(&sp->pool, ss->root);
-                            uint32_t svid; int64_t scv;
-                            int is_vc = _is_var(sp, se->lhs, &svid) && _is_const(sp, se->rhs, &scv);
-                            int is_cv = !is_vc && _is_const(sp, se->lhs, &scv) && _is_var(sp, se->rhs, &svid);
-                            if (is_vc || is_cv) {
-                                /* Flip operator for const-var ordering */
-                                dvs_binop_t sop = se->op;
-                                if (is_cv) {
-                                    switch (sop) {
-                                    case DVS_BIN_LT:  sop = DVS_BIN_GT;  break;
-                                    case DVS_BIN_LTE: sop = DVS_BIN_GTE; break;
-                                    case DVS_BIN_GT:  sop = DVS_BIN_LT;  break;
-                                    case DVS_BIN_GTE: sop = DVS_BIN_LTE; break;
-                                    default: break;
-                                    }
-                                }
-                                /* Create implication propagators gated by avar_id */
-                                if (scv <= (int64_t)INT32_MIN || scv >= (int64_t)INT32_MAX) {
-                                    int64_t b = scv;
-                                    int ub = -1, both = 0;
-                                    switch (sop) {
-                                    case DVS_BIN_EQ:  both = 1; break;
-                                    case DVS_BIN_LTE: ub = 1; break;
-                                    case DVS_BIN_LT:  ub = 1; b = scv - 1; break;
-                                    case DVS_BIN_GTE: ub = 0; break;
-                                    case DVS_BIN_GT:  ub = 0; b = scv + 1; break;
-                                    default: break;
-                                    }
-                                    if (both) {
-                                        prop_add_implication_64(ctx, avar_id, svid, b, 1, 0);
-                                        prop_add_implication_64(ctx, avar_id, svid, b, 0, 0);
-                                        soft_compiled = 1;
-                                    } else if (ub >= 0) {
-                                        prop_add_implication_64(ctx, avar_id, svid, b, (uint8_t)ub, 0);
-                                        soft_compiled = 1;
-                                    }
-                                    sop = DVS_BIN_AND;   /* handled: skip the int32 switch */
-                                }
-                                switch (sop) {
-                                case DVS_BIN_EQ:
-                                    prop_add_implication_32(ctx, avar_id, svid, (int32_t)scv, 1, 0);
-                                    prop_add_implication_32(ctx, avar_id, svid, (int32_t)scv, 0, 0);
-                                    soft_compiled = 1;
-                                    break;
-                                case DVS_BIN_LTE:
-                                    prop_add_implication_32(ctx, avar_id, svid, (int32_t)scv, 1, 0);
-                                    soft_compiled = 1;
-                                    break;
-                                case DVS_BIN_LT:
-                                    prop_add_implication_32(ctx, avar_id, svid, (int32_t)(scv - 1), 1, 0);
-                                    soft_compiled = 1;
-                                    break;
-                                case DVS_BIN_GTE:
-                                    prop_add_implication_32(ctx, avar_id, svid, (int32_t)scv, 0, 0);
-                                    soft_compiled = 1;
-                                    break;
-                                case DVS_BIN_GT:
-                                    prop_add_implication_32(ctx, avar_id, svid, (int32_t)(scv + 1), 0, 0);
-                                    soft_compiled = 1;
-                                    break;
-                                default: break;
-                                }
-                            }
-                        }
-                    }
-                    /* Fallback: use _compile_constraint + guard-gating
-                     * for patterns that create propagators */
-                    if (!soft_compiled) {
-                        uint32_t props_before = ctx->n_props;
-                        int r = _compile_constraint(ctx, sp, ss->root);
-                        if (r > 0) {
-                            for (uint32_t pi = props_before; pi < ctx->n_props; pi++) {
-                                if (ctx->prop_guard_vars &&
-                                    pi < ctx->n_prop_refs_capacity)
-                                    ctx->prop_guard_vars[pi] = avar_id;
-                            }
-                        }
-                    }
+                    /* Gated by avar_id, so relaxing the soft (avar := 0)
+                     * removes all of it. The old fallback compiled the body
+                     * with _compile_constraint and gated only its new
+                     * propagators: compile-time tightenings and merges made
+                     * the soft constraint hard (B53). A body that cannot be
+                     * compiled gated is left out, as before. */
+                    (void)_compile_gated_constraint(ctx, sp, ss->root, avar_id);
 
                     aidx++;
                 }

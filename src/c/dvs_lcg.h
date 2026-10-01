@@ -190,6 +190,20 @@ typedef struct {
     /* Conflict analysis working storage */
     uint8_t  *seen;          /* per-variable: seen during analysis */
     Literal  *seen_lit;      /* the explanation literal for each seen variable */
+    uint32_t *body_pos;      /* per (var, kind): 1 + index of its clause-body literal, or 0 */
+    /* Index of the above-root bound tightenings, rebuilt per analysis:
+     * bucket (var, kind) holds its trail entries oldest first, in
+     * mk_ent[mk_start[slot] .. mk_start[slot + 1]). See _lit_maker. */
+    struct TrailEntry **mk_ent;
+    uint32_t  mk_cap;
+    uint32_t *mk_start;      /* 2 * n_vars + 1 bucket offsets */
+    uint32_t *mk_cur;        /* 2 * n_vars fill cursors */
+    /* Bounds temporarily rewound during analysis (see _rewind_before), to
+     * be restored before it returns. */
+    uint32_t *undo_var;
+    uint8_t  *undo_kind;
+    int64_t  *undo_val;
+    uint32_t  n_undo, undo_cap;
     Literal  *learnt_buf;    /* buffer for building learnt clause  */
     uint32_t  learnt_cap;
 

@@ -23,7 +23,7 @@ Any other logic is an error. The logic also selects the solving engine; see
 | Command | Support |
 |---|---|
 | `set-logic` | the logics above |
-| `set-option` | `:produce-models`, `:seed`; other options are accepted and ignored |
+| `set-option` | `:produce-models`, `:produce-unsat-cores`, `:seed`; other options are accepted and ignored |
 | `set-info` | accepted and ignored |
 | `declare-const`, `declare-fun` | Bool, `(_ BitVec n)` for n up to 128, arrays of bit-vectors, and functions over them |
 | `declare-sort` | arity 0 (opaque sorts) |
@@ -34,6 +34,7 @@ Any other logic is an error. The logic also selects the solving engine; see
 | `check-sat-assuming` | yes |
 | `get-value`, `get-model` | after `sat` |
 | `get-unsat-assumptions` | after `check-sat-assuming` returns `unsat` |
+| `get-unsat-core` | after `unsat`; see below |
 | `get-info` | `:name`, `:version`, `:authors` |
 | `push`, `pop` | yes, including nested scopes |
 | `reset` | yes |
@@ -41,10 +42,17 @@ Any other logic is an error. The logic also selects the solving engine; see
 | `echo` | yes |
 | `exit` | yes |
 
-Not supported: `get-unsat-core`, `get-proof`, `get-assignment`,
+Not supported: `get-proof`, `get-assignment`,
 `declare-datatype` (singular), and datatypes with more than one constructor.
 An unsupported command writes an error to the diagnostic stream and produces
 no response on standard output; the session carries on.
+
+`get-unsat-core` lists the `:named` assertions in an unsatisfiable set. With
+`:produce-unsat-cores` set to `true` the list is minimal: removing any one of
+the names leaves a satisfiable set. dv-solve finds it by re-solving without
+each name in turn, which takes up to 10 seconds; if it runs out of time, the
+list is still unsatisfiable but may not be minimal. Without the option, and
+after `check-sat-assuming`, the list is every named assertion in scope.
 
 `reset-assertions` is accepted but has no effect. Use `push`/`pop` to retract
 assertions, or `reset` to start again.

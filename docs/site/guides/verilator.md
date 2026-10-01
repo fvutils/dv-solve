@@ -43,19 +43,20 @@ Verilator warns about the constraints involved. For this class:
 
 ```{literalinclude} ../../examples/verilator/bad.sv
 :language: systemverilog
-:lines: 1-5
+:lines: 1-6
 ```
 
 the simulation prints:
 
 ```text
 %Warning-UNSATCONSTR: bad.sv:3: Unsatisfied constraint: 'constraint c1 { x > 10; }'
-%Warning-UNSATCONSTR: bad.sv:4: Unsatisfied constraint: 'constraint c2 { x < 5; }'
+%Warning-UNSATCONSTR: bad.sv:5: Unsatisfied constraint: 'constraint c3 { x < 5; }'
 randomize() failed
 ```
 
-dv-solve currently lists every named constraint of the class, not only the
-ones that conflict.
+The warnings name a minimal conflicting set: `c1` and `c3` can't both hold,
+and removing either one would make the rest satisfiable. `c2` is not listed
+because it plays no part in the conflict.
 
 ## When dv-solve can't decide
 

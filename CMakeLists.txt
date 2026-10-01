@@ -120,6 +120,15 @@ endif()
 
 option(DVS_CONTRADICTION_ANALYSIS "Build contradiction analysis module" OFF)
 
+# Soundness step checker (tests only; never in a release). Every learnt clause
+# is checked, in a forked child, against the problem with learning off: a
+# solution that violates the clause aborts the run. See
+# docs/soundness_coverage_plan.md, P1.
+option(DVS_STEP_CHECK "Check every learnt clause against the problem (slow; tests only)" OFF)
+if(DVS_STEP_CHECK)
+    add_compile_definitions(DVS_STEP_CHECK=1)
+endif()
+
 set(DVS_CONTRA_SOURCES
     src/c/dvs_contradiction.c
 )
@@ -345,6 +354,11 @@ add_executable(test_dvs_bvdom tests/c/test_dvs_bvdom.c)
 target_link_libraries(test_dvs_bvdom PRIVATE dv_solve)
 target_include_directories(test_dvs_bvdom PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_dvs_bvdom COMMAND test_dvs_bvdom)
+
+add_executable(test_prop_exhaustive tests/c/test_prop_exhaustive.c)
+target_link_libraries(test_prop_exhaustive PRIVATE dv_solve)
+target_include_directories(test_prop_exhaustive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_prop_exhaustive COMMAND test_prop_exhaustive)
 
 add_executable(test_dvs_bvbounds tests/c/test_dvs_bvbounds.c)
 target_link_libraries(test_dvs_bvbounds PRIVATE dv_solve)

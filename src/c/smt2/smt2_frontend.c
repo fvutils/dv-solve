@@ -1035,6 +1035,23 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
 /* List expression translation                                         */
 /* ------------------------------------------------------------------ */
 
+/* SMT-LIB unsigned division (is_rem=0) or remainder (is_rem=1) of two
+ * width-`w` operands, with the zero-divisor case made explicit: a/0 is all
+ * ones and a%0 is a. A nonzero constant divisor needs no guard. */
+static dvs_expr_t _udivrem_expr(Smt2Frontend *fe, dvs_expr_t A, dvs_expr_t B,
+                                uint16_t w, int is_rem) {
+    dvs_builder_t *b = fe->builder;
+    dvs_expr_t q = dvs_builder_expr_binary(b, is_rem ? DVS_BIN_MOD : DVS_BIN_DIV, A, B);
+    const void *bp = dvs_builder_ref_ptr(b, B);
+    if (bp && *(const ExprKind *)bp == EXPR_CONST &&
+        ((const ExprConst *)bp)->value != 0)
+        return q;
+    dvs_expr_t zero = _bv_const(fe, 0, w);
+    dvs_expr_t b_is_zero = dvs_builder_expr_binary(b, DVS_BIN_EQ, B, zero);
+    dvs_expr_t at_zero = is_rem ? A : dvs_builder_expr_unary(b, DVS_UN_INVERT, zero);
+    return dvs_builder_expr_ite(b, b_is_zero, at_zero, q);
+}
+
 /* Build the SMT-LIB signed division (is_rem=0) or remainder (is_rem=1) of two
  * width-`w` operands, lowered to unsigned bvudiv/bvurem + sign muxing (round
  * toward zero). Reused by bvsdiv/bvsrem and by bvsmod. Returns an dvs_expr_t of
@@ -1565,11 +1582,31 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         return (TaggedExpr){ { r, 1 }, 0, NULL }; \
     }
 
+    /* Unsigned division and remainder. SMT-LIB defines a zero divisor:
+     * (bvudiv a 0) = all ones, (bvurem a 0) = a. The engines' own DIV/MOD
+     * leave the result unconstrained at a zero divisor (SystemVerilog's x),
+     * so unless the divisor is a nonzero constant, guard it here; without the
+     * guard a model could pick any value and `unsat` problems came back `sat`
+     * (B52). */
+    {
+        int is_udiv = (oplen == 6 && memcmp(op, "bvudiv", 6) == 0);
+        int is_urem = (oplen == 6 && memcmp(op, "bvurem", 6) == 0);
+        if (is_udiv || is_urem) {
+            if (s->list.count != 3) return TAGGED_NULL;
+            TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+            if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
+            TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+            if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
+            uint16_t w = a.te.width ? a.te.width : b.te.width;
+            _flag_wide_arith(fe, w);
+            dvs_expr_t q = _udivrem_expr(fe, a.te.ref, b.te.ref, w, is_urem);
+            return (TaggedExpr){ { q, w }, 0, NULL };
+        }
+    }
+
     BINOP_CASE("bvadd", DVS_BIN_ADD)
     BINOP_CASE("bvsub", DVS_BIN_SUB)
     BINOP_CASE("bvmul", DVS_BIN_MUL)
-    BINOP_CASE("bvudiv", DVS_BIN_DIV)
-    BINOP_CASE("bvurem", DVS_BIN_MOD)
     BINOP_CASE("bvand", DVS_BIN_BAND)
     BINOP_CASE("bvor", DVS_BIN_BOR)
     BINOP_CASE("bvxor", DVS_BIN_BXOR)
@@ -2089,6 +2126,10 @@ static int _cmd_set_option(Smt2Frontend *fe, const Sexpr *cmd) {
     if (sexpr_is_keyword(key, ":seed")) {
         if (val->kind == SEXPR_NUMERAL)
             fe->seed = val->numval;
+        return 0;
+    }
+    if (sexpr_is_keyword(key, ":produce-unsat-cores")) {
+        fe->produce_unsat_cores = sexpr_is_symbol(val, "true");
         return 0;
     }
     return 0;
@@ -3775,6 +3816,8 @@ static void _emit_bv_bin_literal_wide(FILE *out, const uint64_t *limbs,
 
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     (void)cmd;
+    fe->core_hist_at_check = fe->n_core_hist;
+    fe->core_replayable    = 1;
     /* A previous answer's bit-blast model is not this answer's (B36). */
     fe->bb_model_valid = 0;
 
@@ -4576,6 +4619,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->push_n_array_vars[fe->push_depth] = fe->n_array_vars;
             fe->push_n_aux_problems[fe->push_depth] = fe->n_aux_problems;
             fe->push_n_named[fe->push_depth] = fe->n_named;
+            fe->push_n_core_hist[fe->push_depth] = fe->n_core_hist;
             fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
             fe->push_depth++;
         }
@@ -4604,6 +4648,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->push_n_array_vars[fe->push_depth - 1] = fe->n_array_vars;
         fe->push_n_aux_problems[fe->push_depth - 1] = fe->n_aux_problems;
         fe->push_n_named[fe->push_depth - 1] = fe->n_named;
+        fe->push_n_core_hist[fe->push_depth - 1] = fe->n_core_hist;
         fe->push_incomplete[fe->push_depth - 1] = (uint8_t)fe->incomplete;
     }
     return 0;
@@ -4676,15 +4721,87 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
         }
         fe->n_aux_problems = target_n_aux;
         _truncate_named(fe, fe->push_n_named[fe->push_depth]);
+        if (fe->n_core_hist > fe->push_n_core_hist[fe->push_depth])
+            fe->n_core_hist = fe->push_n_core_hist[fe->push_depth];
     }
     return 0;
 }
 
-/* (get-unsat-core): after `unsat`, report the :named assertions in scope.
- * The whole set of assertions is unsatisfiable, so all of its names form a
- * valid -- if not minimal -- unsat core. There is ALWAYS a reply on stdout:
- * drivers (Verilator's randomize() on an unsat constraint set) block reading
- * one, and a missing reply hangs them. */
+/* Wall-clock budget for minimising one unsat core. A core cut short is still
+ * a valid core, only a larger one. */
+#define SMT2_CORE_BUDGET_MS 10000
+
+/* Replay the recorded commands up to the last check-sat in a scratch frontend,
+ * leaving out the named assertions marked in `drop`, and solve. Returns 1 only
+ * for a definite `unsat`; sat, unknown and any error return 0, which keeps the
+ * assertion in the core. */
+static int _core_replay_unsat(const Smt2Frontend *fe, const uint8_t *drop,
+                              FILE *sink) {
+    Smt2Frontend *sub = (Smt2Frontend *)malloc(sizeof(*sub));
+    if (!sub) return 0;
+    smt2_frontend_init(sub, sink, sink);
+    int ok = 1;
+    for (uint32_t i = 0; i < fe->core_hist_at_check && ok; i++) {
+        const Smt2CoreCmd *c = &fe->core_hist[i];
+        if (c->named >= 0 && drop[c->named]) continue;
+        ok = (smt2_frontend_dispatch(sub, c->cmd) == 0);
+    }
+    if (ok) _cmd_check_sat(sub, NULL);
+    int unsat = ok && !sub->incomplete && sub->has_result
+             && sub->last_result == DVS_SOLVE_UNSAT;
+    smt2_frontend_destroy(sub);
+    free(sub);
+    return unsat;
+}
+
+static uint64_t _core_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* Mark in `drop` the named assertions the contradiction does not need
+ * (deletion-based: try each one out, keep it out while the rest stay unsat).
+ * Every step keeps the invariant that the replayed set without the dropped
+ * names is unsat, so whatever is left -- even when the budget runs out -- is
+ * a valid core. */
+static void _core_minimise(const Smt2Frontend *fe, uint8_t *drop) {
+    if (!fe->produce_unsat_cores || !fe->core_replayable) return;
+    uint8_t *recorded = (uint8_t *)calloc(fe->n_named ? fe->n_named : 1, 1);
+    FILE *sink = fopen("/dev/null", "w");
+    if (!recorded || !sink) goto done;
+    uint32_t n_recorded = 0;
+    for (uint32_t i = 0; i < fe->core_hist_at_check; i++) {
+        int32_t k = fe->core_hist[i].named;
+        if (k >= 0 && (uint32_t)k < fe->n_named && !recorded[k]) {
+            recorded[k] = 1;
+            n_recorded++;
+        }
+    }
+    if (n_recorded == 0) goto done;
+    uint64_t t0 = _core_now_ms();
+    /* The replay must reproduce the unsat before it can be trusted to shrink
+     * it (a command recorded before :produce-unsat-cores was set is missing). */
+    if (!_core_replay_unsat(fe, drop, sink)) goto done;
+    for (uint32_t k = 0; k < fe->n_named; k++) {
+        if (!recorded[k]) continue;
+        if (_core_now_ms() - t0 > SMT2_CORE_BUDGET_MS) break;
+        drop[k] = 1;
+        if (!_core_replay_unsat(fe, drop, sink)) drop[k] = 0;
+    }
+done:
+    if (sink) fclose(sink);
+    free(recorded);
+}
+
+/* (get-unsat-core): after `unsat`, report :named assertions that are
+ * unsatisfiable together with the unnamed ones. With :produce-unsat-cores set
+ * the set is minimised: dropping any one reported name leaves a satisfiable
+ * set (unless the time budget ran out). Otherwise every name in scope is
+ * reported -- the whole assertion set is unsatisfiable, so that is a valid, if
+ * not minimal, core. There is ALWAYS a reply on stdout: drivers (Verilator's
+ * randomize() on an unsat constraint set) block reading one, and a missing
+ * reply hangs them. */
 static int _cmd_get_unsat_core(Smt2Frontend *fe, const Sexpr *cmd) {
     (void)cmd;
     if (!fe->has_result || fe->last_result != DVS_SOLVE_UNSAT) {
@@ -4692,11 +4809,18 @@ static int _cmd_get_unsat_core(Smt2Frontend *fe, const Sexpr *cmd) {
         fflush(fe->out);
         return 0;
     }
+    uint8_t *drop = (uint8_t *)calloc(fe->n_named ? fe->n_named : 1, 1);
+    if (drop) _core_minimise(fe, drop);
     fputc('(', fe->out);
-    for (uint32_t i = 0; i < fe->n_named; i++)
-        fprintf(fe->out, i ? " %s" : "%s", fe->named[i]);
+    int first = 1;
+    for (uint32_t i = 0; i < fe->n_named; i++) {
+        if (drop && drop[i]) continue;
+        fprintf(fe->out, first ? "%s" : " %s", fe->named[i]);
+        first = 0;
+    }
     fputs(")\n", fe->out);
     fflush(fe->out);
+    free(drop);
     return 0;
 }
 
@@ -4705,6 +4829,8 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
         fprintf(fe->err, "error: check-sat-assuming requires a literal list\n");
         return -1;
     }
+
+    fe->core_replayable = 0;   /* the core would have to cover the assumptions */
 
     /* Tainted context -> honest `unknown` (see _cmd_check_sat). */
     if (fe->incomplete) {
@@ -4888,6 +5014,7 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
 void smt2_frontend_destroy(Smt2Frontend *fe) {
     _truncate_named(fe, 0);
     free(fe->named);
+    free(fe->core_hist);   /* the copies themselves live in persistent_arena */
     _free_bb(fe);
     if (fe->problem)     free(fe->problem);
     for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
@@ -4977,6 +5104,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
 
     _truncate_named(fe, 0);
     free(fe->named);
+    free(fe->core_hist);   /* the copies live in persistent_arena, reset below */
 
     /* Reset the reused allocations to empty (equivalent to a fresh create). */
     dvs_builder_reset(builder);
@@ -5004,7 +5132,49 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->persistent_arena = parena;
 }
 
+static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd);
+
+/* Commands that shape the assertion set, and so are replayed to minimise an
+ * unsat core. Options, info and queries are not: none can change a verdict. */
+static int _core_shapes_assertions(const Sexpr *head) {
+    static const char *const kinds[] = {
+        "set-logic", "declare-sort", "declare-const", "declare-fun",
+        "define-fun", "declare-datatypes", "assert",
+    };
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
+        if (sexpr_is_symbol(head, kinds[i])) return 1;
+    return 0;
+}
+
+/* Record a command for get-unsat-core replay. Best effort: a command that
+ * cannot be recorded stops recording for this assertion set, so the replay
+ * fails to reproduce the unsat and the core is reported unminimised. */
+static void _core_record(Smt2Frontend *fe, const Sexpr *cmd, int32_t named) {
+    if (fe->n_core_hist == fe->core_hist_cap) {
+        uint32_t cap = fe->core_hist_cap ? fe->core_hist_cap * 2 : 64;
+        Smt2CoreCmd *g = (Smt2CoreCmd *)realloc(fe->core_hist, cap * sizeof(*g));
+        if (!g) { fe->produce_unsat_cores = 0; return; }
+        fe->core_hist = g;
+        fe->core_hist_cap = cap;
+    }
+    const Sexpr *copy = _sexpr_deep_copy(&fe->persistent_arena, cmd);
+    if (!copy) { fe->produce_unsat_cores = 0; return; }
+    fe->core_hist[fe->n_core_hist].cmd   = copy;
+    fe->core_hist[fe->n_core_hist].named = named;
+    fe->n_core_hist++;
+}
+
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
+    int record = fe->produce_unsat_cores && cmd && cmd->kind == SEXPR_LIST
+              && cmd->list.count > 0 && _core_shapes_assertions(cmd->list.items[0]);
+    uint32_t n_named = fe->n_named;
+    int rc = _dispatch(fe, cmd);
+    if (record && rc == 0)
+        _core_record(fe, cmd, fe->n_named > n_named ? (int32_t)fe->n_named - 1 : -1);
+    return rc;
+}
+
+static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     /* Reset per-command transient allocations from prior command */
     _cmd_alloc_reset(fe);
 

@@ -239,9 +239,13 @@ int lcg_init(LCGCtx *lcg, uint32_t n_vars) {
      * etc.) whose antecedents include both bounds on a singleton var. */
     lcg->seen = (uint8_t *)calloc(2u * n_vars, sizeof(uint8_t));
     lcg->seen_lit = (Literal *)calloc(2u * n_vars, sizeof(Literal));
+    lcg->body_pos = (uint32_t *)calloc(2u * n_vars, sizeof(uint32_t));
+    lcg->mk_start = (uint32_t *)calloc(2u * n_vars + 1u, sizeof(uint32_t));
+    lcg->mk_cur = (uint32_t *)calloc(2u * n_vars, sizeof(uint32_t));
     lcg->learnt_cap = MAX_CLAUSE_LITS;
     lcg->learnt_buf = (Literal *)calloc(lcg->learnt_cap, sizeof(Literal));
-    if (!lcg->seen || !lcg->learnt_buf) {
+    if (!lcg->seen || !lcg->seen_lit || !lcg->body_pos || !lcg->learnt_buf ||
+        !lcg->mk_start || !lcg->mk_cur) {
         lcg_destroy(lcg);
         return -1;
     }
@@ -259,6 +263,13 @@ void lcg_destroy(LCGCtx *lcg) {
     vsids_destroy(&lcg->vsids);
     free(lcg->seen);
     free(lcg->seen_lit);
+    free(lcg->body_pos);
+    free(lcg->mk_ent);
+    free(lcg->mk_start);
+    free(lcg->mk_cur);
+    free(lcg->undo_var);
+    free(lcg->undo_kind);
+    free(lcg->undo_val);
     free(lcg->learnt_buf);
     memset(lcg, 0, sizeof(*lcg));
 }
@@ -270,10 +281,180 @@ void lcg_destroy(LCGCtx *lcg) {
  * H=resolution_no_explain, I=resolution_explain_fail. */
 uint64_t lcg_dbg_bail[16];
 
+static Literal _mk_lit(uint32_t var_id, uint8_t is_lb, int64_t bound) {
+    Literal l;
+    l.var_id = var_id;
+    l.is_lb = is_lb;
+    l._pad[0] = l._pad[1] = l._pad[2] = 0;
+    l.bound = bound;
+    return l;
+}
+
+/* Does literal `l` hold when its variable's bound (in l's direction) is v? */
+static int _lit_holds(const dvs_ctx_t *ctx, Literal l, int64_t v) {
+    const Variable *var = &ctx->vars[l.var_id];
+    return l.is_lb ? !var_b_lt(var, v, l.bound) : !var_b_gt(var, v, l.bound);
+}
+
+static int _lit_holds_now(const dvs_ctx_t *ctx, Literal l) {
+    const Variable *var = &ctx->vars[l.var_id];
+    return _lit_holds(ctx, l, l.is_lb ? var_lo64(ctx, var) : var_hi64(ctx, var));
+}
+
+/* Is `a` a strictly stronger bound than `b` (same variable and direction)? */
+static int _lit_stronger(const dvs_ctx_t *ctx, Literal a, Literal b) {
+    const Variable *var = &ctx->vars[a.var_id];
+    return a.is_lb ? var_b_gt(var, a.bound, b.bound) : var_b_lt(var, a.bound, b.bound);
+}
+
+/* Bucket the above-root bound tightenings by (variable, kind), oldest first,
+ * so _lit_maker can binary-search instead of scanning the trail. The trail is
+ * ordered by level, so the walk stops at the first level-0 entry. Returns -1
+ * when out of memory (the caller bails to chronological backtracking). */
+static int _mk_index(LCGCtx *lcg, dvs_ctx_t *ctx) {
+    uint32_t ns = 2u * ctx->n_vars, n = 0;
+    memset(lcg->mk_start, 0, (ns + 1u) * sizeof(uint32_t));
+    for (TrailEntry *t = ctx->trail_top; t && t->decision_level > 0; t = t->prev) {
+        if ((t->kind != TRAIL_LB && t->kind != TRAIL_UB) || t->var_id >= ctx->n_vars)
+            continue;
+        lcg->mk_start[SEEN_IX(t->var_id, t->kind == TRAIL_LB) + 1u]++;
+        n++;
+    }
+    for (uint32_t i = 1; i <= ns; i++) lcg->mk_start[i] += lcg->mk_start[i - 1];
+    if (n > lcg->mk_cap) {
+        uint32_t cap = n + n / 2u + 64u;
+        TrailEntry **ne = (TrailEntry **)realloc(lcg->mk_ent, cap * sizeof(TrailEntry *));
+        if (!ne) return -1;
+        lcg->mk_ent = ne;
+        lcg->mk_cap = cap;
+    }
+    memcpy(lcg->mk_cur, lcg->mk_start + 1, ns * sizeof(uint32_t));
+    for (TrailEntry *t = ctx->trail_top; t && t->decision_level > 0; t = t->prev) {
+        if ((t->kind != TRAIL_LB && t->kind != TRAIL_UB) || t->var_id >= ctx->n_vars)
+            continue;
+        lcg->mk_ent[--lcg->mk_cur[SEEN_IX(t->var_id, t->kind == TRAIL_LB)]] = t;
+    }
+    return 0;
+}
+
+/* The trail entry that made `l` true: the latest tightening of its bound
+ * whose old value did not satisfy it. NULL if `l` already held at the root
+ * (in the initial domain or by a level-0 tightening); the caller drops root
+ * literals. A bound only tightens, so along its bucket "the old value
+ * satisfies l" is false then true: binary-search the boundary. (A linear
+ * trail scan per literal made one analysis quadratic in the trail, and a
+ * bound climbing one value per round makes that tens of thousands long.) */
+static TrailEntry *_lit_maker(const LCGCtx *lcg, dvs_ctx_t *ctx, Literal l) {
+    uint32_t slot = SEEN_IX(l.var_id, l.is_lb);
+    uint32_t lo = lcg->mk_start[slot], hi = lcg->mk_start[slot + 1u];
+    /* Invariant: entries before lo do not satisfy l; entries from hi do. */
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        if (_lit_holds(ctx, l, lcg->mk_ent[mid]->old_value)) hi = mid;
+        else lo = mid + 1u;
+    }
+    return lo > lcg->mk_start[slot] ? lcg->mk_ent[lo - 1u] : NULL;
+}
+
+/* The guard of a guard-gated propagator (compile gates the branches of a
+ * constraint-level if/else, soft constraints and array-select cases this
+ * way), or EXPR_NULL. Its narrowings hold only while the guard is 1, which
+ * the explainers do not cite: the analysis adds `guard >= 1` itself, or the
+ * learnt clause would hold the gated constraint unconditionally. */
+static uint32_t _prop_guard(const dvs_ctx_t *ctx, const Propagator *p) {
+    if (!ctx->prop_guard_vars || p->prop_id >= ctx->n_prop_refs_capacity)
+        return EXPR_NULL;
+    return ctx->prop_guard_vars[p->prop_id];
+}
+
+/* Propagators whose every narrowing is a function of the OTHER variables'
+ * bounds alone (the new bound is the other side's bound, an interval sum, or
+ * the guard), so their explanations are complete without the narrowed
+ * variable's own previous bound. Every other explainer gets that bound added.
+ * Leaving one off this list only costs learning strength; putting one on it
+ * wrongly costs soundness. */
+static int _explains_without_own_bound(const Propagator *p) {
+    return p->explain == explain_bounds_le || p->explain == explain_bounds_lt
+        || p->explain == explain_bounds_eq || p->explain == explain_bounds_add
+        || p->explain == explain_sum_eq    || p->explain == explain_implication
+        || p->explain == explain_ite_value || p->explain == explain_reification;
+}
+
+#ifdef DVS_STEP_CHECK
+void dvs_step_check_explanation(dvs_ctx_t *ctx, const char *who,
+                                const Literal *ante, uint32_t n, Literal lit);
+#endif
+
+/* Set a bound directly, as trail_backtrack does. */
+static void _set_bound(dvs_ctx_t *ctx, uint32_t var_id, uint8_t kind, int64_t val) {
+    Variable *v = &ctx->vars[var_id];
+    if (VAR_IS_TIER0(v->flags)) {
+        if (kind == TRAIL_LB) v->lo = (int32_t)val; else v->hi = (int32_t)val;
+    } else if (VAR_IS_TIER1(v->flags)) {
+        WideBounds64 *wb = (WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+        if (kind == TRAIL_LB) wb->lo = val; else wb->hi = val;
+    }
+}
+
+/* Rewind the domains to the state just before trail entry `e` was made, so
+ * its propagator's explainer reads the bounds the propagator read. `*applied`
+ * is the newest entry still in force; everything newer than it was undone by
+ * an earlier call. Explainers read CURRENT bounds, and at a conflict those
+ * include bounds derived from the very step being explained: `v2 <= 45`
+ * explained by `v8 <= 12` and `v8 <= 12` by `v2 == 45`, each locally valid,
+ * the learnt clause not (B56). Every rewound bound is logged and restored by
+ * _restore_rewound before analysis returns. Returns -1 when out of memory. */
+static int _rewind_before(LCGCtx *lcg, dvs_ctx_t *ctx, TrailEntry **applied,
+                          TrailEntry *e) {
+    while (*applied && *applied != e->prev) {
+        TrailEntry *t = *applied;
+        if (t->kind == TRAIL_LB || t->kind == TRAIL_UB) {
+            if (lcg->n_undo == lcg->undo_cap) {
+                uint32_t cap = lcg->undo_cap ? 2u * lcg->undo_cap : 256u;
+                uint32_t *nv = (uint32_t *)realloc(lcg->undo_var, cap * sizeof *nv);
+                if (nv) lcg->undo_var = nv;
+                uint8_t *nk = (uint8_t *)realloc(lcg->undo_kind, cap * sizeof *nk);
+                if (nk) lcg->undo_kind = nk;
+                int64_t *nb = (int64_t *)realloc(lcg->undo_val, cap * sizeof *nb);
+                if (nb) lcg->undo_val = nb;
+                if (!nv || !nk || !nb) return -1;
+                lcg->undo_cap = cap;
+            }
+            const Variable *v = &ctx->vars[t->var_id];
+            lcg->undo_var[lcg->n_undo]  = t->var_id;
+            lcg->undo_kind[lcg->n_undo] = t->kind;
+            lcg->undo_val[lcg->n_undo]  = t->kind == TRAIL_LB ? var_lo64(ctx, v) : var_hi64(ctx, v);
+            lcg->n_undo++;
+            _set_bound(ctx, t->var_id, t->kind, t->old_value);
+        }
+        *applied = t->prev;
+    }
+    return 0;
+}
+
+static void _restore_rewound(LCGCtx *lcg, dvs_ctx_t *ctx) {
+    while (lcg->n_undo > 0) {
+        lcg->n_undo--;
+        _set_bound(ctx, lcg->undo_var[lcg->n_undo], lcg->undo_kind[lcg->n_undo],
+                   lcg->undo_val[lcg->n_undo]);
+    }
+}
+
+static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *out_n,
+                    uint32_t *out_bt, uint32_t *out_lbd);
+
 int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
                           Literal *out_lits, uint32_t *out_n,
                           uint32_t *out_bt, uint32_t *out_lbd) {
     if (!lcg || !lcg->enabled || !ctx) return -1;
+    lcg->n_undo = 0;
+    int rc = _analyze(lcg, ctx, out_lits, out_n, out_bt, out_lbd);
+    _restore_rewound(lcg, ctx);
+    return rc;
+}
+
+static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *out_n,
+                    uint32_t *out_bt, uint32_t *out_lbd) {
 
     uint32_t cur_level = ctx->decision_level;
     if (cur_level == 0) {
@@ -290,10 +471,13 @@ int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
 
     memset(lcg->seen, 0, 2u * ctx->n_vars * sizeof(uint8_t));
     memset(lcg->seen_lit, 0, 2u * ctx->n_vars * sizeof(Literal));
+    memset(lcg->body_pos, 0, 2u * ctx->n_vars * sizeof(uint32_t));
+    if (_mk_index(lcg, ctx) != 0) return -1;
 
     uint32_t n_at_cur_level = 0;
     uint32_t learnt_idx = 0;
     uint32_t bt_level = 0;
+    int64_t  force_slot = -1;
 
     /* Step 1: Seed the conflict.
      *
@@ -321,43 +505,56 @@ int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
         }
     }
 
-    /* Helper: add explanation literals to the working set */
-    /* Helper: add a literal from an explanation to the working set.
-     * Stores the literal so it can be used for UIP / clause body. */
-    #define ADD_EXPL_LIT(lit) do {                                   \
-        uint32_t _vid = (lit).var_id;                                \
-        uint32_t _slot = SEEN_IX(_vid, (lit).is_lb);                 \
-        /* Antecedent literals should be currently TRUE.  Process    \
-         * them to find their decision level and resolve or add to   \
-         * the learnt clause body. Skip if already seen or invalid.  \
-         * seen[] is indexed per (var, kind) so an antecedent of     \
-         * "x == c" (both x >= c AND x <= c) records both literals. */\
-        if (_vid < ctx->n_vars && !lcg->seen[_slot]) {              \
-            lcg->seen[_slot] = 1;                                   \
-            lcg->seen_lit[_slot] = (lit);                            \
-            vsids_bump(&lcg->vsids, _vid);                          \
-            /* Find the decision level for this literal's trail entry. */\
-            uint16_t _vlevel = 0;                                   \
-            uint8_t _match_kind = (lit).is_lb ? TRAIL_LB : TRAIL_UB;\
-            TrailEntry *_ts = ctx->trail_top;                       \
-            while (_ts) {                                            \
-                if (_ts->var_id == _vid &&                           \
-                    _ts->kind == _match_kind) {                     \
-                    _vlevel = _ts->decision_level; break;            \
-                }                                                    \
-                _ts = _ts->prev;                                    \
-            }                                                        \
-            if (_vlevel == cur_level) {                              \
-                n_at_cur_level++;                                    \
-            } else if (_vlevel > 0) {                                \
-                Literal _neg = literal_negate(lit);                  \
-                if (learnt_idx < lcg->learnt_cap) {                 \
-                    lcg->learnt_buf[learnt_idx++] = _neg;           \
-                }                                                    \
-                if (_vlevel > bt_level) bt_level = _vlevel;         \
-            }                                                        \
-        }                                                            \
-    } while(0)
+    /* The working set is a conjunction of literals that together imply the
+     * conflict. Every step must keep that true: the learnt clause is its
+     * negation, and a clause stronger than what the constraints imply
+     * removes solutions (wrong `unsat`).
+     *
+     * A literal is attributed to the trail entry that MADE it true -- the
+     * latest tightening of its bound whose old value did not yet satisfy it
+     * -- not simply the latest tightening, which may have pushed the bound
+     * further for an unrelated reason. Literals made at the current level go
+     * into seen[] (one per variable and direction, keeping the strongest
+     * bound) to be resolved; earlier-level literals go into the clause body
+     * (body_pos[] keeps the strongest per slot); root literals are dropped.
+     * A literal that does not hold at all means an explainer cited a bound it
+     * has no right to: bail to chronological backtracking rather than learn
+     * from it. So does running out of clause space -- dropping a literal
+     * would make the clause stronger than the truth. */
+    #define ADD_EXPL_LIT(lit) do {                                         \
+        Literal _l = (lit);                                                \
+        _l._pad[0] = _l._pad[1] = _l._pad[2] = 0;                          \
+        if (_l.var_id >= ctx->n_vars) { lcg_dbg_bail[11]++; return -1; }   \
+        if (!_lit_holds_now(ctx, _l)) { lcg_dbg_bail[11]++; return -1; }   \
+        TrailEntry *_m = _lit_maker(lcg, ctx, _l);                         \
+        if (!_m || _m->decision_level == 0) break;                         \
+        uint32_t _slot = SEEN_IX(_l.var_id, _l.is_lb);                     \
+        vsids_bump(&lcg->vsids, _l.var_id);                                \
+        if (_m->decision_level == cur_level) {                             \
+            if (!lcg->seen[_slot]) {                                       \
+                lcg->seen[_slot] = 1;                                      \
+                lcg->seen_lit[_slot] = _l;                                 \
+                n_at_cur_level++;                                          \
+            } else if (_lit_stronger(ctx, _l, lcg->seen_lit[_slot])) {     \
+                lcg->seen_lit[_slot] = _l;                                 \
+            }                                                              \
+        } else {                                                           \
+            uint32_t _p = lcg->body_pos[_slot];                            \
+            if (_p) {                                                      \
+                Literal _old = literal_negate(lcg->learnt_buf[_p - 1]);    \
+                if (_lit_stronger(ctx, _l, _old))                          \
+                    lcg->learnt_buf[_p - 1] = literal_negate(_l);          \
+            } else {                                                       \
+                if (learnt_idx >= lcg->learnt_cap) {                       \
+                    lcg_dbg_bail[12]++; return -1;                         \
+                }                                                          \
+                lcg->learnt_buf[learnt_idx++] = literal_negate(_l);        \
+                lcg->body_pos[_slot] = learnt_idx;                         \
+            }                                                              \
+            if (_m->decision_level > bt_level)                             \
+                bt_level = _m->decision_level;                             \
+        }                                                                  \
+    } while (0)
 
     if (conflict_var != EXPR_NULL) {
         if (_tron()) {
@@ -367,182 +564,34 @@ int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
                 (long)var_lo64(ctx, &ctx->vars[conflict_var]),
                 (long)var_hi64(ctx, &ctx->vars[conflict_var]));
         }
-        /* Empty-domain conflict: lo > hi for conflict_var.
-         * Both the LB and UB bound tightenings contributed to the
-         * conflict. Find the most recent trail entries for both. */
-        TrailEntry *lb_entry = NULL, *ub_entry = NULL;
-        TrailEntry *e = ctx->trail_top;
-        while (e) {
-            if (e->var_id == conflict_var) {
-                if (e->kind == TRAIL_LB && !lb_entry) lb_entry = e;
-                if (e->kind == TRAIL_UB && !ub_entry) ub_entry = e;
-                if (lb_entry && ub_entry) break;
-            }
-            e = e->prev;
+        /* lo > hi. The bound tightened last is the one that crossed: the
+         * conflict is "the other bound, and the crossing bound pushed just
+         * past it". Seed with that weakest crossing literal and force it to
+         * be resolved: it is the propagation that failed, not a candidate
+         * UIP. Left unresolved it can become the UIP, and when the other
+         * bound holds at root the learnt clause (the other bound itself) is
+         * already true -- it excludes nothing and the search re-derives the
+         * same conflict for ever. */
+        const Variable *cv = &ctx->vars[conflict_var];
+        int64_t clo = var_lo64(ctx, cv), chi = var_hi64(ctx, cv);
+        int ub_crossed = 1;
+        for (TrailEntry *t = ctx->trail_top; t; t = t->prev) {
+            if (t->var_id != conflict_var) continue;
+            if (t->kind == TRAIL_LB) { ub_crossed = 0; break; }
+            if (t->kind == TRAIL_UB) break;
         }
-
-        /* Determine which entry is at the current level.
-         * Process current-level entries as UIP candidates and
-         * earlier-level entries as clause body literals. */
-        TrailEntry *cur_entry = NULL;   /* entry at current level */
-        TrailEntry *other_entry = NULL; /* entry at earlier level */
-
-        /* Prefer the entry at the current level. If both are,
-         * pick the one that is a DECISION as the UIP (or the most
-         * recent one if both are propagated). */
-        if (lb_entry && lb_entry->decision_level == cur_level &&
-            ub_entry && ub_entry->decision_level == cur_level) {
-            /* Both at current level. The decision is the UIP;
-             * the propagation should be explained. */
-            if (ub_entry->prop_ref == EXPR_NULL) {
-                cur_entry = ub_entry; other_entry = lb_entry;
-            } else if (lb_entry->prop_ref == EXPR_NULL) {
-                cur_entry = lb_entry; other_entry = ub_entry;
-            } else {
-                /* Both propagated: pick the most recent as UIP */
-                cur_entry = lb_entry; other_entry = ub_entry;
-            }
-            /* "Other" is also at cur_level: add it as n_at_cur_level too */
-            Literal other_lit;
-            other_lit.var_id = conflict_var;
-            other_lit.is_lb = (other_entry->kind == TRAIL_LB) ? 1 : 0;
-            other_lit.bound = (other_lit.is_lb
-                ? var_lo64(ctx, &ctx->vars[conflict_var])
-                : var_hi64(ctx, &ctx->vars[conflict_var]));
-            other_lit._pad[0] = other_lit._pad[1] = other_lit._pad[2] = 0;
-            /* We can't use ADD_EXPL_LIT for the same variable since
-             * seen[] is per-variable. Instead, directly process
-             * the other entry's antecedents. */
-            if (other_entry->flags & TRAIL_FLAG_FROM_CLAUSE) {
-                uint32_t cidx = other_entry->prop_ref;
-                ClauseDB *db = &lcg->clause_db;
-                if (cidx < db->n_clauses && db->clauses[cidx]) {
-                    Clause *cl = db->clauses[cidx];
-                    Literal *clits = (Literal *)(cl + 1);
-                    for (uint32_t i = 0; i < cl->n_lits; i++) {
-                        if (clits[i].var_id == conflict_var &&
-                            clits[i].is_lb == other_lit.is_lb) continue;
-                        ADD_EXPL_LIT(literal_negate(clits[i]));
-                    }
-                }
-            } else if (other_entry->prop_ref != EXPR_NULL) {
-                Propagator *p = (Propagator *)dvs_pool_ptr(
-                    &ctx->pool, other_entry->prop_ref);
-                if (!p->explain) { lcg_dbg_bail[0]++; return -1; }
-                Explanation expl;
-                int64_t bv = other_lit.is_lb
-                    ? var_lo64(ctx, &ctx->vars[conflict_var])
-                    : var_hi64(ctx, &ctx->vars[conflict_var]);
-                if (p->explain(p, ctx, conflict_var,
-                               other_lit.is_lb, bv, &expl) != 0) {
-                    lcg_dbg_bail[1]++; return -1;
-                }
-                if (_tron()) {
-                    fprintf(stderr,
-                        "[lcg-trace] explain(other) prop=%s v%u %s=%ld -> %u lits\n",
-                        prop_fire_name(p->fire), conflict_var,
-                        other_lit.is_lb ? "lb" : "ub", (long)bv, expl.n_lits);
-                    for (uint32_t i = 0; i < expl.n_lits; i++)
-                        _trace_lit("  ante", expl.lits[i]);
-                }
-                for (uint32_t i = 0; i < expl.n_lits; i++)
-                    ADD_EXPL_LIT(expl.lits[i]);
-            }
-            /* Count the other_entry as being at the current level.
-             * Since it was resolved (explained or clause-walked),
-             * don't increment n_at_cur_level — only the UIP remains.
-             * Decisions (prop_ref == EXPR_NULL with no FROM_CLAUSE
-             * flag) can't be resolved, so count them. */
-            if (other_entry->prop_ref == EXPR_NULL &&
-                !(other_entry->flags & TRAIL_FLAG_FROM_CLAUSE))
-                n_at_cur_level++;
-        } else if (lb_entry && lb_entry->decision_level == cur_level) {
-            cur_entry = lb_entry;
-            other_entry = ub_entry;
-        } else if (ub_entry && ub_entry->decision_level == cur_level) {
-            cur_entry = ub_entry;
-            other_entry = lb_entry;
+        Literal llb, lub;
+        if (ub_crossed) {
+            llb = _mk_lit(conflict_var, 1, clo);
+            lub = _mk_lit(conflict_var, 0, (int64_t)((uint64_t)clo - 1u));
         } else {
-            /* Neither at current level: shouldn't happen. */
-            lcg_dbg_bail[2]++; return -1;
+            llb = _mk_lit(conflict_var, 1, (int64_t)((uint64_t)chi + 1u));
+            lub = _mk_lit(conflict_var, 0, chi);
         }
-
-        /* Process the current-level entry as the UIP candidate */
-        if (cur_entry) {
-            Literal cl;
-            cl.var_id = conflict_var;
-            cl.is_lb = (cur_entry->kind == TRAIL_LB) ? 1 : 0;
-            cl.bound = (cl.is_lb
-                ? var_lo64(ctx, &ctx->vars[conflict_var])
-                : var_hi64(ctx, &ctx->vars[conflict_var]));
-            cl._pad[0] = cl._pad[1] = cl._pad[2] = 0;
-
-            lcg->seen[SEEN_IX(conflict_var, cl.is_lb)] = 1;
-            lcg->seen_lit[SEEN_IX(conflict_var, cl.is_lb)] = cl;
-            vsids_bump(&lcg->vsids, conflict_var);
-            n_at_cur_level++;
-
-            /* If the current-level entry came from a clause, walk it */
-            if (cur_entry->flags & TRAIL_FLAG_FROM_CLAUSE) {
-                uint32_t cidx = cur_entry->prop_ref;
-                ClauseDB *db = &lcg->clause_db;
-                if (cidx < db->n_clauses && db->clauses[cidx]) {
-                    Clause *clc = db->clauses[cidx];
-                    Literal *clits = (Literal *)(clc + 1);
-                    for (uint32_t i = 0; i < clc->n_lits; i++) {
-                        if (clits[i].var_id == conflict_var &&
-                            clits[i].is_lb == cl.is_lb) continue;
-                        ADD_EXPL_LIT(literal_negate(clits[i]));
-                    }
-                }
-                /* Skip the propagator-explain branch below */
-                goto _emit_uip_done;
-            }
-            /* If the current-level entry was propagated, explain it */
-            if (cur_entry->prop_ref != EXPR_NULL) {
-                Propagator *p = (Propagator *)dvs_pool_ptr(
-                    &ctx->pool, cur_entry->prop_ref);
-                if (!p->explain) { lcg_dbg_bail[5]++; return -1; }
-                Explanation expl;
-                int64_t bv = cl.is_lb
-                    ? var_lo64(ctx, &ctx->vars[conflict_var])
-                    : var_hi64(ctx, &ctx->vars[conflict_var]);
-                if (p->explain(p, ctx, conflict_var,
-                               cl.is_lb, bv, &expl) != 0) {
-                    lcg_dbg_bail[6]++; return -1;
-                }
-                if (_tron()) {
-                    fprintf(stderr,
-                        "[lcg-trace] explain(cur) prop=%s v%u %s=%ld -> %u lits\n",
-                        prop_fire_name(p->fire), conflict_var,
-                        cl.is_lb ? "lb" : "ub", (long)bv, expl.n_lits);
-                    for (uint32_t i = 0; i < expl.n_lits; i++)
-                        _trace_lit("  ante", expl.lits[i]);
-                }
-                for (uint32_t i = 0; i < expl.n_lits; i++)
-                    ADD_EXPL_LIT(expl.lits[i]);
-            }
-            _emit_uip_done: ;
-        }
-
-        /* Process the earlier-level entry as a clause body literal */
-        if (other_entry && other_entry->decision_level > 0 &&
-            other_entry->decision_level < cur_level) {
-            Literal ol;
-            ol.var_id = conflict_var;
-            ol.is_lb = (other_entry->kind == TRAIL_LB) ? 1 : 0;
-            ol.bound = (ol.is_lb
-                ? var_lo64(ctx, &ctx->vars[conflict_var])
-                : var_hi64(ctx, &ctx->vars[conflict_var]));
-            ol._pad[0] = ol._pad[1] = ol._pad[2] = 0;
-
-            /* Negate and add directly to clause body */
-            Literal neg = literal_negate(ol);
-            if (learnt_idx < lcg->learnt_cap)
-                lcg->learnt_buf[learnt_idx++] = neg;
-            if (other_entry->decision_level > bt_level)
-                bt_level = other_entry->decision_level;
-        }
+        ADD_EXPL_LIT(llb);
+        ADD_EXPL_LIT(lub);
+        if (n_at_cur_level == 0) { lcg_dbg_bail[2]++; return -1; }
+        force_slot = (int64_t)SEEN_IX(conflict_var, ub_crossed ? 0 : 1);
     } else if (ctx->conflict_clause_idx != EXPR_NULL &&
                ctx->conflict_clause_idx < lcg->clause_db.n_clauses &&
                lcg->clause_db.clauses[ctx->conflict_clause_idx]) {
@@ -562,13 +611,7 @@ int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
         for (uint32_t i = 0; i < ccl->n_lits; i++) {
             uint32_t vid = clits[i].var_id;
             if (vid >= ctx->n_vars) { lcg_dbg_bail[3]++; return -1; }
-            Literal a;
-            a.var_id = vid;
-            a.is_lb  = clits[i].is_lb ? 0 : 1;
-            a.bound  = a.is_lb ? var_lo64(ctx, &ctx->vars[vid])
-                               : var_hi64(ctx, &ctx->vars[vid]);
-            a._pad[0] = a._pad[1] = a._pad[2] = 0;
-            ADD_EXPL_LIT(a);
+            ADD_EXPL_LIT(literal_negate(clits[i]));
         }
         ctx->conflict_clause_idx = EXPR_NULL;
         if (n_at_cur_level == 0) {
@@ -599,16 +642,16 @@ int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
         for (uint32_t i = 0; i < nw; i++) {
             uint32_t vid = wv[i];
             if (vid >= ctx->n_vars) continue;
-            int64_t vlo = var_lo64(ctx, &ctx->vars[vid]);
-            int64_t vhi = var_hi64(ctx, &ctx->vars[vid]);
-            Literal llb; llb.var_id = vid; llb.is_lb = 1;
-            llb.bound = vlo;
-            llb._pad[0] = llb._pad[1] = llb._pad[2] = 0;
-            ADD_EXPL_LIT(llb);
-            Literal lub; lub.var_id = vid; lub.is_lb = 0;
-            lub.bound = vhi;
-            lub._pad[0] = lub._pad[1] = lub._pad[2] = 0;
-            ADD_EXPL_LIT(lub);
+            if (_tron()) {
+                _trace_lit("  seed", _mk_lit(vid, 1, var_lo64(ctx, &ctx->vars[vid])));
+                _trace_lit("  seed", _mk_lit(vid, 0, var_hi64(ctx, &ctx->vars[vid])));
+            }
+            ADD_EXPL_LIT(_mk_lit(vid, 1, var_lo64(ctx, &ctx->vars[vid])));
+            ADD_EXPL_LIT(_mk_lit(vid, 0, var_hi64(ctx, &ctx->vars[vid])));
+        }
+        {   /* A guard-gated propagator can only fail while its guard is 1. */
+            uint32_t gid = _prop_guard(ctx, cp);
+            if (gid != EXPR_NULL) ADD_EXPL_LIT(_mk_lit(gid, 1, 1));
         }
         /* If nothing got added at current level, we can't form a UIP.
          * Fall back to chronological backtracking. */
@@ -620,14 +663,33 @@ int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
         return -1;
     }
 
-    /* Step 2: Resolution loop (1UIP). Resolve until only one literal
-     * at cur_level remains in the working set. */
+    /* Step 2: Resolution loop (1UIP). Walk the trail from the top and
+     * replace each current-level literal by the reasons of the entry that
+     * made it true, until only one current-level literal remains. */
     TrailEntry *e = ctx->trail_top;
-    while (n_at_cur_level > 1 && e) {
+    TrailEntry *applied = ctx->trail_top;   /* see _rewind_before */
+    while ((n_at_cur_level > 1 ||
+            (force_slot >= 0 && lcg->seen[force_slot])) && e) {
         uint8_t e_is_lb = (e->kind == TRAIL_LB) ? 1 : 0;
         uint32_t e_slot = SEEN_IX(e->var_id, e_is_lb);
-        if (e->decision_level != cur_level || !lcg->seen[e_slot]) {
+        if (e->decision_level != cur_level ||
+            (e->kind != TRAIL_LB && e->kind != TRAIL_UB) ||
+            !lcg->seen[e_slot] ||
+            _lit_holds(ctx, lcg->seen_lit[e_slot], e->old_value)) {
+            /* Not at this level, not a bound, not needed, or the needed
+             * literal already held before this entry (a later, stronger
+             * tightening of the same bound). */
             e = e->prev;
+            continue;
+        }
+        Literal need = lcg->seen_lit[e_slot];
+
+        if (e->prop_ref == EXPR_NULL && !(e->flags & TRAIL_FLAG_FROM_CLAUSE)) {
+            /* Decision at current level: this becomes the 1UIP.
+             * Stop resolution -- the remaining decisions at this level
+             * that can't be resolved ARE the UIP. */
+            n_at_cur_level = 1;  /* force loop exit, this literal is UIP */
+            force_slot = -1;
             continue;
         }
 
@@ -637,112 +699,93 @@ int lcg_analyze_conflict(LCGCtx *lcg, dvs_ctx_t *ctx,
         /* Clause-reason resolution: when a learnt clause unit-propagated
          * this entry, prop_ref holds the clause index and the antecedents
          * are the negations of the clause's other literals (which were
-         * false at unit-prop time). Without this branch the entry's
-         * prop_ref == clause_idx would mis-dispatch to a propagator
-         * pool offset; even if we tested EXPR_NULL first, decision-style
-         * handling would emit an over-strong 1-literal learnt clause. */
+         * false at unit-prop time). */
         if (e->flags & TRAIL_FLAG_FROM_CLAUSE) {
             uint32_t clause_idx = e->prop_ref;
             ClauseDB *db = &lcg->clause_db;
-            if (clause_idx < db->n_clauses && db->clauses[clause_idx]) {
-                Clause *cl = db->clauses[clause_idx];
-                Literal *lits = (Literal *)(cl + 1);
-                uint32_t n = cl->n_lits;
-                if (_tron()) {
-                    fprintf(stderr,
-                        "[lcg-trace] resolve  clause=%u v%u %s=%ld lvl=%u (old=%ld) -> %u lits\n",
-                        clause_idx, e->var_id,
-                        (e->kind == TRAIL_LB) ? "lb" : "ub",
-                        (long)((e->kind == TRAIL_LB)
-                               ? var_lo64(ctx, &ctx->vars[e->var_id])
-                               : var_hi64(ctx, &ctx->vars[e->var_id])),
-                        e->decision_level, (long)e->old_value, n - 1);
-                }
-                for (uint32_t i = 0; i < n; i++) {
-                    /* Skip the unit literal: that's the entry we're
-                     * resolving. Compare by (var_id, is_lb) — the unit
-                     * is the one this trail entry tightened. */
-                    if (lits[i].var_id == e->var_id &&
-                        lits[i].is_lb == e_is_lb) {
-                        continue;
-                    }
-                    Literal neg = literal_negate(lits[i]);
-                    if (_tron()) _trace_lit("  ante", neg);
-                    ADD_EXPL_LIT(neg);
-                }
+            if (clause_idx >= db->n_clauses || !db->clauses[clause_idx]) {
+                lcg_dbg_bail[7]++; return -1;
+            }
+            Clause *cl = db->clauses[clause_idx];
+            Literal *lits = (Literal *)(cl + 1);
+            uint32_t n = cl->n_lits;
+            if (_tron()) {
+                fprintf(stderr,
+                    "[lcg-trace] resolve  clause=%u v%u %s=%ld lvl=%u (old=%ld) -> %u lits\n",
+                    clause_idx, e->var_id, e_is_lb ? "lb" : "ub",
+                    (long)need.bound, e->decision_level, (long)e->old_value, n - 1);
+            }
+            for (uint32_t i = 0; i < n; i++) {
+                /* Skip the unit literal: that's the entry we're
+                 * resolving. Compare by (var_id, is_lb) — the unit
+                 * is the one this trail entry tightened. */
+                if (lits[i].var_id == e->var_id && lits[i].is_lb == e_is_lb)
+                    continue;
+                Literal neg = literal_negate(lits[i]);
+                if (_tron()) _trace_lit("  ante", neg);
+                ADD_EXPL_LIT(neg);
             }
             e = e->prev;
             continue;
         }
 
-        if (e->prop_ref == EXPR_NULL) {
-            /* Decision at current level: this becomes the 1UIP.
-             * Stop resolution -- the remaining decisions at this level
-             * that can't be resolved ARE the UIP. */
-            n_at_cur_level = 1;  /* force loop exit, this literal is UIP */
-            lcg->seen[e_slot] = 1;  /* re-mark as seen for UIP search */
-            continue;
-        }
-
-        /* Resolve through propagator explanation */
+        /* Resolve through propagator explanation, asking for exactly the
+         * literal the working set needs. */
         Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, e->prop_ref);
         if (!p->explain) { lcg_dbg_bail[7]++; return -1; }
+        if (_rewind_before(lcg, ctx, &applied, e) != 0) { lcg_dbg_bail[14]++; return -1; }
         Explanation expl;
-        int64_t bv = (e->kind == TRAIL_LB)
-            ? var_lo64(ctx, &ctx->vars[e->var_id])
-            : var_hi64(ctx, &ctx->vars[e->var_id]);
-        int rc = p->explain(p, ctx, e->var_id,
-                             (e->kind == TRAIL_LB) ? 1 : 0,
-                             bv, &expl);
+        int rc = p->explain(p, ctx, e->var_id, e_is_lb, need.bound, &expl);
         if (rc != 0) { lcg_dbg_bail[8]++; return -1; }
         if (_tron()) {
             fprintf(stderr,
                 "[lcg-trace] resolve  prop=%s v%u %s=%ld lvl=%u (old=%ld) -> %u lits\n",
-                prop_fire_name(p->fire), e->var_id,
-                (e->kind == TRAIL_LB) ? "lb" : "ub",
-                (long)bv, e->decision_level, (long)e->old_value,
+                prop_fire_name(p->fire), e->var_id, e_is_lb ? "lb" : "ub",
+                (long)need.bound, e->decision_level, (long)e->old_value,
                 expl.n_lits);
             for (uint32_t i = 0; i < expl.n_lits; i++)
                 _trace_lit("  ante", expl.lits[i]);
         }
+#ifdef DVS_STEP_CHECK
+        {   /* Check the full antecedent set this step relies on. */
+            Literal chk[MAX_EXPLAIN_LITS + 2];
+            uint32_t nc = 0;
+            for (uint32_t i = 0; i < expl.n_lits && nc < MAX_EXPLAIN_LITS; i++)
+                chk[nc++] = expl.lits[i];
+            if (!_explains_without_own_bound(p))
+                chk[nc++] = _mk_lit(e->var_id, e_is_lb, e->old_value);
+            if (_prop_guard(ctx, p) != EXPR_NULL)
+                chk[nc++] = _mk_lit(_prop_guard(ctx, p), 1, 1);
+            dvs_step_check_explanation(ctx, prop_fire_name(p->fire), chk, nc, need);
+        }
+#endif
         for (uint32_t i = 0; i < expl.n_lits; i++)
             ADD_EXPL_LIT(expl.lits[i]);
-
-        /* If this trail entry is part of a singleton pin (both LB and
-         * UB tightened by the same propagator at the same level to the
-         * same value), process the companion bound in the same step.
-         * Saves a trail-walk iteration and any redundant restart in the
-         * resolution loop. */
-        if (e->flags & TRAIL_FLAG_SINGLETON) {
-            uint32_t comp_slot = SEEN_IX(e->var_id, !e_is_lb);
-            if (lcg->seen[comp_slot]) {
-                Explanation expl2;
-                int64_t bv2 = (e->kind == TRAIL_LB)
-                    ? var_hi64(ctx, &ctx->vars[e->var_id])
-                    : var_lo64(ctx, &ctx->vars[e->var_id]);
-                int rc2 = p->explain(p, ctx, e->var_id,
-                                     (e->kind == TRAIL_LB) ? 0 : 1,
-                                     bv2, &expl2);
-                if (rc2 == 0) {
-                    if (_tron()) {
-                        fprintf(stderr,
-                            "[lcg-trace] resolve+ prop=%s v%u %s=%ld (singleton pair) -> %u lits\n",
-                            prop_fire_name(p->fire), e->var_id,
-                            (e->kind == TRAIL_LB) ? "ub" : "lb",
-                            (long)bv2, expl2.n_lits);
-                    }
-                    for (uint32_t i = 0; i < expl2.n_lits; i++)
-                        ADD_EXPL_LIT(expl2.lits[i]);
-                }
-                lcg->seen[comp_slot] = 0;
-                n_at_cur_level--;
-            }
+        {   /* A guard-gated propagator narrows only while its guard is 1. */
+            uint32_t gid = _prop_guard(ctx, p);
+            if (gid != EXPR_NULL) ADD_EXPL_LIT(_mk_lit(gid, 1, 1));
+        }
+        /* Most narrowings also rest on the variable's own previous bound:
+         * `x != 5` raises x.lo from 5 to 6 only because x.lo was 5. An
+         * explanation that leaves it out claims the bound follows from the
+         * other variables alone, and the learnt clause then removes real
+         * solutions. Add it for every propagator not known to narrow from
+         * the other variables only. */
+        if (!_explains_without_own_bound(p)) {
+            Literal own = _mk_lit(e->var_id, e_is_lb, e->old_value);
+            if (_tron()) _trace_lit("  own ", own);
+            ADD_EXPL_LIT(own);
         }
         e = e->prev;
         continue;
     }
 
     #undef ADD_EXPL_LIT
+
+    /* Resolving the crossing literal can leave nothing at this level (the
+     * failed propagation read only earlier-level bounds). There is no UIP,
+     * so the clause would not be asserting: backtrack chronologically. */
+    if (n_at_cur_level == 0) { lcg_dbg_bail[13]++; return -1; }
 
     /* Step 3: Emit the remaining seen literals at cur_level. The first
      * one walked back from trail_top is the 1UIP (the asserting literal,

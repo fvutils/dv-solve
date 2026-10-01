@@ -314,36 +314,49 @@ int explain_implication(Propagator *self, dvs_ctx_t *ctx,
 int explain_ite_value(Propagator *self, dvs_ctx_t *ctx,
                        uint32_t var_id, uint8_t is_lb,
                        int64_t new_bound, Explanation *out) {
+    /* r = c ? a : b. Each operand is narrowed from different bounds:
+     *   r: from c and the selected branch (or the hull of both while c is
+     *      undecided);
+     *   a / b: from r, once c selects that branch;
+     *   c: from r being disjoint from one branch.
+     * This once explained every narrowing as if it were r's, citing a and b
+     * for a narrowed c, a or b -- invisible while explainers read the bounds
+     * after the step (an explanation could cite the bound it explained),
+     * wrong once analysis rewound to the state the propagator saw (B56). A
+     * variable in two roles (`r = c ? a : r`) is refused. */
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], cid = ws->var_ids[1];
     uint32_t aid = ws->var_ids[2], bid = ws->var_ids[3];
     out->n_lits = 0;
+    int roles = (var_id == rid) + (var_id == cid) + (var_id == aid) + (var_id == bid);
+    if (roles != 1 || rid == cid || aid == cid || bid == cid) return -1;
 
     int64_t clo = var_lo64(ctx, &ctx->vars[cid]);
     int64_t chi = var_hi64(ctx, &ctx->vars[cid]);
+#define BOTH(id) do { \
+        out->lits[out->n_lits++] = _mk_lb(id, var_lo64(ctx, &ctx->vars[id])); \
+        out->lits[out->n_lits++] = _mk_ub(id, var_hi64(ctx, &ctx->vars[id])); } while (0)
+#define SAME(id) (out->lits[out->n_lits++] = is_lb \
+        ? _mk_lb(id, var_lo64(ctx, &ctx->vars[id])) : _mk_ub(id, var_hi64(ctx, &ctx->vars[id])))
 
-    if (clo >= 1) {
-        /* cond is true -> r tracks a */
+    if (var_id == rid) {
+        if (clo >= 1)      { out->lits[out->n_lits++] = _mk_lb(cid, 1); SAME(aid); }
+        else if (chi <= 0) { out->lits[out->n_lits++] = _mk_ub(cid, 0); SAME(bid); }
+        else               { BOTH(aid); BOTH(bid); SAME(rid); }   /* hull ∩ r's own range */
+    } else if (var_id == aid) {
+        if (clo < 1) return -1;
         out->lits[out->n_lits++] = _mk_lb(cid, 1);
-        if (is_lb)
-            out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
-        else
-            out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
-    } else if (chi <= 0) {
-        /* cond is false -> r tracks b */
+        SAME(rid);
+    } else if (var_id == bid) {
+        if (chi > 0) return -1;
         out->lits[out->n_lits++] = _mk_ub(cid, 0);
-        if (is_lb)
-            out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
-        else
-            out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
+        SAME(rid);
     } else {
-        /* cond undecided -> both branches contribute */
-        out->lits[out->n_lits++] = _mk_lb(aid, var_lo64(ctx, &ctx->vars[aid]));
-        out->lits[out->n_lits++] = _mk_ub(aid, var_hi64(ctx, &ctx->vars[aid]));
-        out->lits[out->n_lits++] = _mk_lb(bid, var_lo64(ctx, &ctx->vars[bid]));
-        out->lits[out->n_lits++] = _mk_ub(bid, var_hi64(ctx, &ctx->vars[bid]));
+        BOTH(rid); BOTH(aid); BOTH(bid);
     }
-    (void)var_id; (void)new_bound; (void)rid;
+#undef BOTH
+#undef SAME
+    (void)new_bound;
     return 0;
 }
 
@@ -391,19 +404,46 @@ int explain_disj_clause(Propagator *self, dvs_ctx_t *ctx,
 int explain_sum_eq(Propagator *self, dvs_ctx_t *ctx,
                     uint32_t var_id, uint8_t is_lb,
                     int64_t new_bound, Explanation *out) {
-    /* Generalized Add: all summand bounds are antecedents. Refused, not
-     * truncated, when they don't fit (see explain_disj_clause). */
+    /* r = s1 + ... + sk, watched as [r, s1, ..., sk]. The forward rule
+     * bounds r from the summands in the same direction; the backward rule
+     * bounds a summand from r and the OTHER summands in the opposite
+     * direction: sj <= r.hi - sum(others.lo), sj >= r.lo - sum(others.hi).
+     * Citing the summands' same-direction bounds for a summand (as this once
+     * did) explained `v3 <= 1` by `v0 <= 1` and `v0 <= 1` by `v3 <= 1`, and
+     * the learnt clause removed real solutions (B54). A variable watched
+     * twice (`x + x`) keeps its other occurrence, which is its own bound.
+     * Refused, not truncated, when the literals don't fit (see
+     * explain_disj_clause), and when var_id is both the result and a
+     * summand, since which rule fired is then unknown. */
     uint32_t nw;
     const uint32_t *vids = prop_watched_vars(self, &nw);
     out->n_lits = 0;
-    for (uint32_t i = 0; i < nw; i++) {
-        uint32_t vid = vids[i];
-        if (vid == var_id) continue;
-        if (out->n_lits + 1 > MAX_EXPLAIN_LITS) return -1;
-        if (is_lb)
-            out->lits[out->n_lits++] = _mk_lb(vid, var_lo64(ctx, &ctx->vars[vid]));
-        else
-            out->lits[out->n_lits++] = _mk_ub(vid, var_hi64(ctx, &ctx->vars[vid]));
+    if (nw < 2) return -1;
+    uint32_t rid = vids[0];
+    int as_summand = 0;
+    for (uint32_t i = 1; i < nw; i++)
+        if (vids[i] == var_id) { as_summand = 1; break; }
+    if (var_id == rid && as_summand) return -1;
+    if (nw > MAX_EXPLAIN_LITS) return -1;
+    if (var_id == rid) {
+        for (uint32_t i = 1; i < nw; i++) {
+            uint32_t vid = vids[i];
+            out->lits[out->n_lits++] = is_lb
+                ? _mk_lb(vid, var_lo64(ctx, &ctx->vars[vid]))
+                : _mk_ub(vid, var_hi64(ctx, &ctx->vars[vid]));
+        }
+    } else {
+        out->lits[out->n_lits++] = is_lb
+            ? _mk_lb(rid, var_lo64(ctx, &ctx->vars[rid]))
+            : _mk_ub(rid, var_hi64(ctx, &ctx->vars[rid]));
+        int skipped = 0;
+        for (uint32_t i = 1; i < nw; i++) {
+            uint32_t vid = vids[i];
+            if (vid == var_id && !skipped) { skipped = 1; continue; }
+            out->lits[out->n_lits++] = is_lb
+                ? _mk_ub(vid, var_hi64(ctx, &ctx->vars[vid]))
+                : _mk_lb(vid, var_lo64(ctx, &ctx->vars[vid]));
+        }
     }
     (void)new_bound;
     return 0;
