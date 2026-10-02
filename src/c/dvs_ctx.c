@@ -57,6 +57,12 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     ctx->conflict_clause_idx = EXPR_NULL;
     ctx->current_trail_flags = 0;
     ctx->lcg               = NULL;
+    ctx->scope_log_var     = NULL;
+    ctx->scope_log_bound   = NULL;
+    ctx->scope_log_depth   = NULL;
+    ctx->scope_log_is_lb   = NULL;
+    ctx->n_scope_log       = 0;
+    ctx->scope_log_cap     = 0;
 
     /* Init PropQueue — all levels empty */
     ctx->queue.non_empty_mask = 0;
@@ -96,6 +102,28 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     return ctx;
 }
 
+int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t bound) {
+    if (ctx->n_scope_log == ctx->scope_log_cap) {
+        uint32_t cap = ctx->scope_log_cap ? 2u * ctx->scope_log_cap : 64u;
+        uint32_t *nv = (uint32_t *)realloc(ctx->scope_log_var, cap * sizeof *nv);
+        if (nv) ctx->scope_log_var = nv;
+        int64_t *nb = (int64_t *)realloc(ctx->scope_log_bound, cap * sizeof *nb);
+        if (nb) ctx->scope_log_bound = nb;
+        uint8_t *nd = (uint8_t *)realloc(ctx->scope_log_depth, cap * sizeof *nd);
+        if (nd) ctx->scope_log_depth = nd;
+        uint8_t *nl = (uint8_t *)realloc(ctx->scope_log_is_lb, cap * sizeof *nl);
+        if (nl) ctx->scope_log_is_lb = nl;
+        if (!nv || !nb || !nd || !nl) return -1;
+        ctx->scope_log_cap = cap;
+    }
+    uint32_t i = ctx->n_scope_log++;
+    ctx->scope_log_var[i]   = var_id;
+    ctx->scope_log_bound[i] = bound;
+    ctx->scope_log_depth[i] = (uint8_t)ctx->n_checkpoints;
+    ctx->scope_log_is_lb[i] = is_lb ? 1 : 0;
+    return 0;
+}
+
 void dvs_solver_destroy(dvs_ctx_t *ctx) {
     if (!ctx) return;
     if (ctx->lcg) {
@@ -107,6 +135,13 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
         dvs_stack_destroy(ctx->dynamic);
         ctx->dynamic = NULL;
     }
+    free(ctx->scope_log_var);
+    free(ctx->scope_log_bound);
+    free(ctx->scope_log_depth);
+    free(ctx->scope_log_is_lb);
+    ctx->scope_log_var = NULL; ctx->scope_log_bound = NULL;
+    ctx->scope_log_depth = NULL; ctx->scope_log_is_lb = NULL;
+    ctx->n_scope_log = ctx->scope_log_cap = 0;
 }
 
 /* ------------------------------------------------------------------ */

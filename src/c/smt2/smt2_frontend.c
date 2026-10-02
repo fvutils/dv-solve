@@ -1982,16 +1982,25 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         return (TaggedExpr){ { r, t.te.width }, 0, NULL };
     }
 
-    /* concat */
+    /* concat. SMT-LIB's is binary; Verilator's solver interface (and z3)
+     * also write it n-ary, (concat a b c) == (concat (concat a b) c). Refusing
+     * that left the whole assertion uncompiled, and the check-sat `unknown`. */
     if (oplen == 6 && memcmp(op, "concat", 6) == 0) {
-        if (s->list.count != 3) return TAGGED_NULL;
-        TaggedExpr hi = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
-        if (hi.te.ref == EXPR_NULL) return TAGGED_NULL;
-        TaggedExpr lo = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
-        if (lo.te.ref == EXPR_NULL) return TAGGED_NULL;
-        dvs_expr_t r = dvs_builder_expr_concat(fe->builder, hi.te.ref, lo.te.ref,
-                                        (uint8_t)lo.te.width);
-        return (TaggedExpr){ { r, (uint16_t)(hi.te.width + lo.te.width) }, 0, NULL };
+        if (s->list.count < 3) return TAGGED_NULL;
+        TaggedExpr acc = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+        if (acc.te.ref == EXPR_NULL) return TAGGED_NULL;
+        for (uint32_t i = 2; i < s->list.count; i++) {
+            TaggedExpr lo = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[i]));
+            if (lo.te.ref == EXPR_NULL) return TAGGED_NULL;
+            dvs_expr_t r = dvs_builder_expr_concat(fe->builder, acc.te.ref, lo.te.ref,
+                                            (uint8_t)lo.te.width);
+            acc = (TaggedExpr){ { r, (uint16_t)(acc.te.width + lo.te.width) }, 0, NULL };
+            if (i + 1 < s->list.count) {
+                acc = _flatten_to_var(fe, acc);
+                if (acc.te.ref == EXPR_NULL) return TAGGED_NULL;
+            }
+        }
+        return acc;
     }
 
     /* ---- bvashr: arithmetic shift right ----
@@ -4376,6 +4385,16 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
         if (!*ok) return r;
         r.width = a.width;
         r.value = _trunc(~a.value, r.width);
+        return r;
+    }
+    if (sexpr_is_symbol(head, "concat") && s->list.count > 3) {
+        /* n-ary concat, left-associative (see the translator's). */
+        EvalRet r = _eval_sexpr(fe, s->list.items[1], ok);
+        for (uint32_t i = 2; i < s->list.count && *ok; i++) {
+            EvalRet b = _eval_sexpr(fe, s->list.items[i], ok);
+            r.width = r.width + b.width;
+            r.value = _trunc((r.value << b.width) | b.value, r.width);
+        }
         return r;
     }
     if (s->list.count == 3) {

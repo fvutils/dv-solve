@@ -83,14 +83,9 @@ def _setup(lib: ctypes.CDLL):
 
     # SolveOpts layout: seed(8) + max_conflicts(4) + max_restarts(4) +
     #                   use_phase_save(1) + _pad(3)
-    class SolveOpts(ctypes.Structure):
-        _fields_ = [
-            ("seed",           ctypes.c_uint64),
-            ("max_conflicts",  ctypes.c_uint32),
-            ("max_restarts",   ctypes.c_uint32),
-            ("use_phase_save", ctypes.c_uint8),
-            ("_pad",           ctypes.c_uint8 * 3),
-        ]
+    # The canonical mirror of the C struct (test_solve_opts_layout.py holds it
+    # to the header); a private copy here went stale once already.
+    from dv_solve.ctx import _SolveOpts as SolveOpts
 
     lib._SolveOpts = SolveOpts
 

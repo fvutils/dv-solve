@@ -46,6 +46,21 @@ void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
 
     CheckpointMark *m = &ctx->checkpoints[cp];
 
+    /* Bounds the scope established after this checkpoint go with it. */
+    {
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < ctx->n_scope_log; i++) {
+            if (ctx->scope_log_depth[i] <= cp) {
+                ctx->scope_log_var[k]   = ctx->scope_log_var[i];
+                ctx->scope_log_bound[k] = ctx->scope_log_bound[i];
+                ctx->scope_log_depth[k] = ctx->scope_log_depth[i];
+                ctx->scope_log_is_lb[k] = ctx->scope_log_is_lb[i];
+                k++;
+            }
+        }
+        ctx->n_scope_log = k;
+    }
+
     /* trail_backtrack walks ctx->trail_top backward, stopping when it
      * reaches ctx->level_marks[target_level].trail_top. Inside a push
      * scope, dvs_solver_solve seals "level-0 baseline" at line 341 of

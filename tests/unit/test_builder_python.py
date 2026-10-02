@@ -39,15 +39,9 @@ class TestPythonBuilder:
         self.lib.dvs_solver_compile.restype  = c.c_int
         self.lib.dvs_solver_compile.argtypes = [c.c_void_p, c.c_void_p]
 
-        class SolveOpts(ctypes.Structure):
-            _fields_ = [
-                ("seed",           c.c_uint64),
-                ("max_conflicts",  c.c_uint32),
-                ("max_restarts",   c.c_uint32),
-                ("use_phase_save", c.c_uint8),
-                ("_pad",           c.c_uint8 * 3),
-                ("max_shave_iters", c.c_uint32),
-            ]
+        # The canonical mirror of the C struct (test_solve_opts_layout.py holds it
+        # to the header); a private copy here went stale once already.
+        from dv_solve.ctx import _SolveOpts as SolveOpts
         self._SolveOpts = SolveOpts
         self.lib.dvs_solver_solve.restype  = c.c_int
         self.lib.dvs_solver_solve.argtypes = [c.c_void_p, c.c_void_p]

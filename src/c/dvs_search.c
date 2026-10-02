@@ -611,6 +611,32 @@ static int _split_upper_first(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
     return (_rand64(ctx) % tot) >= n_lo;
 }
 
+/* Should the decision on `x` (value `v` picked) be a bound decision?
+ *
+ * With clause learning, deciding a wide variable to a value teaches, on
+ * failure, only `x != v` -- and when the reason cannot be put as bounds (a
+ * product that must divide exactly, say), the search learns the domain one
+ * value at a time. A bound decision, `x <= v` or `x >= v`, fails with a clause
+ * about a range instead. So a variable that has taken part in conflicts (its
+ * activity is non-zero) and still has more than DVS_BOUND_DECISION_MIN values
+ * is narrowed by bounds; every other decision stays a value decision, which
+ * keeps the decision depth small. The side is chosen as a split's is (random,
+ * size-weighted, in diversity mode), and always narrows the domain.
+ * Returns 0 (value decision), 1 (x <= v) or 2 (x >= v). */
+#define DVS_BOUND_DECISION_MIN 64u
+static uint8_t _bound_decision(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
+                               uint32_t x, int64_t v) {
+    const LCGCtx *L = (const LCGCtx *)ctx->lcg;
+    if (!L || !L->enabled || x >= L->vsids.n_vars || !(L->vsids.activity[x] > 0.0))
+        return 0;
+    const Variable *xv = &ctx->vars[x];
+    int64_t lo = var_lo64(ctx, xv), hi = var_hi64(ctx, xv);
+    if ((uint64_t)hi - (uint64_t)lo <= DVS_BOUND_DECISION_MIN) return 0;
+    if (v == lo) return 1;              /* x <= lo: the side that narrows */
+    if (v == hi) return 2;
+    return _split_upper_first(ctx, opts, lo, v, hi) ? 2 : 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* dvs_solver_solve                                                        */
 /* ------------------------------------------------------------------ */
@@ -842,12 +868,14 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         }
 
         /* ── Record decision ── */
+        uint8_t bound = _bound_decision(ctx, opts, x_id, v);
         uint32_t dec_idx = ctx->decision_level;   /* index before push */
         ctx->decisions[dec_idx].var_id      = x_id;
         ctx->decisions[dec_idx].tried_value  = v;
         ctx->decisions[dec_idx].is_split     = 0;  /* plain value decision */
         ctx->decisions[dec_idx].upper_first  = 0;
         ctx->decisions[dec_idx].second_phase = 0;
+        ctx->decisions[dec_idx].bound        = bound;
 
         /* ── Push level and assign ──
          * The tighten helpers auto-detect singleton pinning (lo == hi
@@ -861,8 +889,13 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
          * that removes solutions (wrong `unsat`). */
         ctx->conflict_prop_ref   = EXPR_NULL;
         ctx->conflict_clause_idx = EXPR_NULL;
-        PropResult pr = ctx_tighten_lb64(ctx, x_id, v);
-        if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x_id, v);
+        PropResult pr;
+        if (bound == 1)      pr = ctx_tighten_ub64(ctx, x_id, v);
+        else if (bound == 2) pr = ctx_tighten_lb64(ctx, x_id, v);
+        else {
+            pr = ctx_tighten_lb64(ctx, x_id, v);
+            if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x_id, v);
+        }
         if (pr == PROP_OK) {
             pr = dvs_solver_propagate(ctx);
         }
@@ -1003,7 +1036,14 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
             const Variable *dvv = &ctx->vars[dv];
             int64_t dlo = var_lo64(ctx, dvv);
             int64_t dhi = var_hi64(ctx, dvv);
-            if (d->is_split && !d->second_phase) {
+            if (d->bound) {
+                /* A bound decision that failed: its negation holds. (Reached
+                 * only when clause learning could not analyse the conflict.) */
+                uint8_t b = d->bound;
+                d->bound = 0;
+                pr = (b == 1) ? ctx_tighten_lb64(ctx, dv, val + 1)
+                              : ctx_tighten_ub64(ctx, dv, val - 1);
+            } else if (d->is_split && !d->second_phase) {
                 /* First half exhausted -> explore the other one. `val` itself
                  * was excluded by the first half's tightening already. */
                 d->second_phase = 1;
@@ -1060,7 +1100,15 @@ static void _pin_inactive_assumptions(dvs_ctx_t *ctx) {
         if (!(ctx->assumption_active_mask & (1ULL << i))) {
             uint32_t av = ctx->assumption_var_ids[i];
             Variable *v = &ctx->vars[av];
-            v->lo = 0; v->hi = 0;
+            if (ctx->n_checkpoints > 0) {
+                /* Inside a checkpoint scope the write must be undone by the
+                 * caller's restore: record it on the trail (it lowers the
+                 * lower bound, which the trail restores like any other). */
+                if (var_lo64(ctx, v) != 0) trail_record_lb(ctx, av, 0);
+                if (var_hi64(ctx, v) != 0) trail_record_ub(ctx, av, 0);
+            } else {
+                v->lo = 0; v->hi = 0;
+            }
             if (av < 64)
                 ctx->unassigned_mask &= ~(1ULL << av);
         }
@@ -1258,8 +1306,51 @@ int64_t dvs_solver_get_value(const dvs_ctx_t *ctx, uint32_t var_id) {
 /* dvs_solver_reset                                                        */
 /* ------------------------------------------------------------------ */
 
+/* dvs_solver_reset inside a checkpoint scope: undo everything since the
+ * innermost checkpoint -- the last solve's search, its soft relaxations, and
+ * the propagation of what the scope added -- keeping the propagators (and
+ * so every constraint asserted in the scope) and the open checkpoints; then
+ * re-establish the bounds the scope set (scope_log: pins, compile-time
+ * tightenings). Their first propagation may have rested on a soft constraint
+ * the solve has since relaxed; re-establishing them is what lets the
+ * relaxation take effect without losing them. */
+static void _reset_in_scope(dvs_ctx_t *ctx) {
+    CheckpointMark *m = &ctx->checkpoints[ctx->n_checkpoints - 1];
+    uint32_t lvl = m->decision_level;
+    ctx->level_marks[lvl].trail_top   = m->trail_top;
+    ctx->level_marks[lvl].trail_count = m->trail_count;
+    ctx->level_marks[lvl].stack_mark  = m->stack_mark;
+    trail_backtrack(ctx, lvl);
+    trail_push_level(ctx);            /* the level the checkpoint opened */
+    ctx->conflict_count = 0;
+
+    uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
+                   ? ctx->n_props : ctx->n_prop_refs_capacity;
+    for (uint32_t i = 0; i < lim; i++) {
+        if (ctx->prop_refs[i] != EXPR_NULL) {
+            Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ctx->prop_refs[i]);
+            p->flags &= (uint8_t)~(PROP_FLAG_ENTAILED | PROP_FLAG_IN_QUEUE);
+            prop_enqueue(ctx, ctx->prop_refs[i]);
+        }
+    }
+    /* Re-establish the scope's bounds (a conflict here leaves an empty
+     * domain, which the caller's next propagation reports). */
+    for (uint32_t i = 0; i < ctx->n_scope_log; i++) {
+        if (ctx->scope_log_depth[i] != ctx->n_checkpoints) continue;
+        uint32_t v = ctx->scope_log_var[i];
+        PropResult r = ctx->scope_log_is_lb[i]
+            ? ctx_tighten_lb64(ctx, v, ctx->scope_log_bound[i])
+            : ctx_tighten_ub64(ctx, v, ctx->scope_log_bound[i]);
+        if (r == PROP_CONFLICT) break;
+    }
+}
+
 void dvs_solver_reset(dvs_ctx_t *ctx) {
     if (!ctx || !ctx->initial_vars || ctx->initial_n_vars == 0) return;
+    if (ctx->n_checkpoints > 0 && ctx->prop_refs) {
+        _reset_in_scope(ctx);
+        return;
+    }
 
     uint32_t n = ctx->initial_n_vars;
 
@@ -1339,6 +1430,10 @@ void dvs_solver_reset(dvs_ctx_t *ctx) {
 int dvs_solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx || var_id >= ctx->n_vars) return -1;
     var_id = _alias_root(ctx, var_id);
+    if (ctx->n_checkpoints > 0 &&
+        (dvs_scope_log_bound(ctx, var_id, 1, value) != 0 ||
+         dvs_scope_log_bound(ctx, var_id, 0, value) != 0))
+        return -1;
 
     PropResult r = ctx_tighten_lb64(ctx, var_id, value);
     if (r == PROP_CONFLICT) return -1;

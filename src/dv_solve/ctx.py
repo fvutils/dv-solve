@@ -191,6 +191,10 @@ class SolveCtx:
     def destroy(self) -> None:
         """Release the native memory. Also called when the context is garbage-collected."""
         if self._ba is not None:
+            # dvs_solver_destroy frees what the context malloc'd beside its
+            # buffer (the clause-learning state, the scope log); without it
+            # each context that learnt leaked several MiB.
+            self._lib.dvs_solver_destroy(self._ctx)
             self._lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
 

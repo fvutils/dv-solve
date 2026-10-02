@@ -4167,6 +4167,7 @@ int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
 }
 
 static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
+    TrailEntry *add_trail_top = ctx->trail_top;
     int n_uncompiled = 0;
 
     /* ---- Add new variables ----
@@ -4246,6 +4247,21 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
         uint32_t pref = prop_add_all_different(ctx, ad->n_vars, vids, 1);
         if (pref == EXPR_NULL) return -1;
         adref = ad->next;
+    }
+
+    /* ---- Inside a checkpoint scope, log the bounds compile set ----
+     * A constraint compiled to a bound tightening has no propagator: if a
+     * reset rewound the scope's trail, nothing would re-derive it. Taken
+     * before propagation, so no consequence of a soft constraint is fixed. */
+    if (ctx->n_checkpoints > 0) {
+        for (TrailEntry *t = ctx->trail_top; t && t != add_trail_top; t = t->prev) {
+            if (t->kind != TRAIL_LB && t->kind != TRAIL_UB) continue;
+            const Variable *tv = &ctx->vars[t->var_id];
+            int is_lb = t->kind == TRAIL_LB;
+            if (dvs_scope_log_bound(ctx, t->var_id, is_lb,
+                                    is_lb ? var_lo64(ctx, tv) : var_hi64(ctx, tv)) != 0)
+                return -1;
+        }
     }
 
     /* ---- Run propagation to fixpoint ---- */

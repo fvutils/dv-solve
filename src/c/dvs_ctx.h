@@ -144,6 +144,21 @@ typedef struct dvs_ctx_s {
     /* CDCL: heap-allocated LCG context, NULL when use_lcg=0. Lazily
      * created on first solve with use_lcg=1; freed in dvs_solver_destroy. */
     void              *lcg;               /* LCGCtx* (opaque to avoid header dep) */
+    /* Bounds a checkpoint scope established that propagation cannot
+     * re-derive, in order: pins (both bounds) and the compile-time bound
+     * tightenings of constraints added in the scope. Each records the
+     * variable, the bound (lower if is_lb), and the number of checkpoints open
+     * when it was made. Inside a scope dvs_solver_reset rewinds the trail to
+     * just after the innermost checkpoint and re-establishes the bounds made
+     * since: their first propagation may have rested on a soft constraint the
+     * solve has since relaxed. dvs_solver_restore(cp) drops those made after
+     * checkpoint cp. malloc'd; freed by dvs_solver_destroy. */
+    uint32_t          *scope_log_var;
+    int64_t           *scope_log_bound;
+    uint8_t           *scope_log_depth;
+    uint8_t           *scope_log_is_lb;
+    uint32_t           n_scope_log;
+    uint32_t           scope_log_cap;
     /* Custom value selector hook (for cost-guided search) */
     int64_t          (*value_selector_fn)(struct dvs_ctx_s *, uint32_t, void *);
     void              *value_selector_data;
@@ -360,5 +375,9 @@ uint32_t analyze_conflict(dvs_ctx_t *ctx);
 #ifdef __cplusplus
 }
 #endif
+
+/* Record a bound established in the current checkpoint scope (see
+ * dvs_ctx_t.scope_log_*). Returns -1 when out of memory. */
+int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t bound);
 
 #endif /* DVS_CTX_H */

@@ -1962,6 +1962,43 @@ static int _shift_amount_range(dvs_ctx_t *ctx, uint32_t bid, ModIv B, uint8_t w,
     return 1;
 }
 
+/* Bounds of an unsigned, non-wrapping product r = a * b by interval division:
+ * a in [ceil(lo(r) / hi(b)), floor(hi(r) / lo(b))], and likewise b; a
+ * positive r makes both operands positive. Applies only when every variable
+ * is unsigned and no wider than w and hi(a) * hi(b) < 2^w, which is when the
+ * modular product is the integer one. SOUND: removes only values no product
+ * in r can use. */
+static PropResult _bv_mul_divide(dvs_ctx_t *ctx, uint32_t rid, uint32_t aid,
+                                 uint32_t bid, uint8_t w) {
+    const uint32_t ids[3] = { rid, aid, bid };
+    for (int i = 0; i < 3; i++) {
+        const Variable *v = &ctx->vars[ids[i]];
+        if ((v->flags & VAR_SIGNED) || v->width == 0 || v->width > w) return PROP_OK;
+    }
+    const uint64_t mask = _bv_mask(w);
+    uint64_t rlo = (uint64_t)var_lo64(ctx, &ctx->vars[rid]);
+    uint64_t rhi = (uint64_t)var_hi64(ctx, &ctx->vars[rid]);
+    uint64_t ahi = (uint64_t)var_hi64(ctx, &ctx->vars[aid]);
+    uint64_t bhi = (uint64_t)var_hi64(ctx, &ctx->vars[bid]);
+    if (ahi != 0 && bhi > mask / ahi) return PROP_OK;        /* may wrap */
+    PropResult res;
+    for (int k = 0; k < 2; k++) {
+        uint32_t x = k ? bid : aid, y = k ? aid : bid;       /* x = r / y */
+        uint64_t ylo = (uint64_t)var_lo64(ctx, &ctx->vars[y]);
+        uint64_t yhi = (uint64_t)var_hi64(ctx, &ctx->vars[y]);
+        if (rlo > 0) {
+            if (yhi == 0) return PROP_CONFLICT;              /* r >= 1, y == 0 */
+            uint64_t need = rlo / yhi + (rlo % yhi != 0);    /* ceil(rlo / yhi) */
+            if ((res = ctx_tighten_lb64(ctx, x, (int64_t)need)) != PROP_OK) return res;
+        }
+        if (ylo > 0) {
+            if ((res = ctx_tighten_ub64(ctx, x, (int64_t)(rhi / ylo))) != PROP_OK)
+                return res;
+        }
+    }
+    return PROP_OK;
+}
+
 static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
@@ -2014,6 +2051,11 @@ static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
         if (_modiv_single(Rc) && _modiv_single(Ac) && _modiv_single(Bc) &&
             ((Ac.start * Bc.start) & mask) != Rc.start)
             return PROP_CONFLICT;
+        /* Unsigned and unable to wrap: r == a * b over the integers, and
+         * the operands follow from r by interval division. (Without this an
+         * interval of r taught the operands nothing; only a fixed r did, so
+         * `n == k * 512 or k * 4096` was searched one value of n at a time.) */
+        if ((res = _bv_mul_divide(ctx, rid, aid, bid, w)) != PROP_OK) return res;
     } else if (op == DVS_BIN_LSHIFT) {
         uint64_t s0, s1;
         if (_shift_amount_range(ctx, bid, B, w, &s0, &s1)) {
@@ -2078,14 +2120,93 @@ static PropResult _fire_bvsub_64(Propagator *self, dvs_ctx_t *ctx) { return _fir
 static PropResult _fire_bvmul_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64(self, ctx, DVS_BIN_MUL); }
 static PropResult _fire_bvshl_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64(self, ctx, DVS_BIN_LSHIFT); }
 
+/* Lifted explanation of an unsigned add/subtract that does not wrap.
+ *
+ * Both are read as X = Y + Z (mod 2^w): an add r = a + b is X=r, Y=a, Z=b; a
+ * subtract r = a - b is a = r + b, X=a, Y=r, Z=b. Asked for literal `need` on
+ * one of the three, it names the WEAKEST bounds that imply it, plus the
+ * bounds that rule out wrap-around (borrow, for Y and Z) -- not the operands'
+ * current bounds. That is what lets a conflict generalize: with `a` decided
+ * to some 64-bit value X0, `r = a + b <= 2^20` fails, and the conservative
+ * explanation (`a == X0`) teaches only `a != X0`; this one teaches
+ * `a <= 2^20 - lo(b) or a >= 2^64 - hi(b)`.
+ *
+ * Every literal returned holds in the (rewound) state it is asked in, and
+ * together they imply `need`; when the current bounds cannot support such a
+ * set (a wrap is possible, a signed or mixed-width operand), returns -1 and
+ * the caller uses the conservative explanation. */
+static int _explain_bvsum_lifted(dvs_ctx_t *ctx, uint32_t X, uint32_t Y, uint32_t Z,
+                                 uint8_t w, uint32_t var_id, uint8_t is_lb,
+                                 int64_t new_bound, Explanation *out) {
+    const uint32_t ids[3] = { X, Y, Z };
+    for (int i = 0; i < 3; i++) {
+        const Variable *v = &ctx->vars[ids[i]];
+        if ((v->flags & VAR_SIGNED) || v->width == 0 || v->width > w) return -1;
+    }
+    if (w == 0 || w > 64 || ctx->vars[X].width != w) return -1;
+    const uint64_t mask = _bv_mask(w);
+#define LO(v) ((uint64_t)var_lo64(ctx, &ctx->vars[v]))
+#define HI(v) ((uint64_t)var_hi64(ctx, &ctx->vars[v]))
+#define LIT(v, lb, b) do { out->lits[out->n_lits].var_id = (v); \
+        out->lits[out->n_lits].is_lb = (lb); out->lits[out->n_lits].bound = (int64_t)(b); \
+        out->lits[out->n_lits]._pad[0] = out->lits[out->n_lits]._pad[1] = \
+        out->lits[out->n_lits]._pad[2] = 0; out->n_lits++; } while (0)
+    const uint64_t B = (uint64_t)new_bound;
+    uint64_t t;
+    out->n_lits = 0;
+    if (var_id == X) {
+        if (is_lb) {                      /* Y + Z >= B, and Y + Z <= mask */
+            if (dvs_add_u64_ovf(HI(Y), HI(Z), &t) || t > mask) return -1;
+            if (dvs_add_u64_ovf(LO(Y), LO(Z), &t) || t < B) return -1;
+            LIT(Y, 1, B > LO(Z) ? B - LO(Z) : 0);
+            LIT(Z, 1, LO(Z));
+            LIT(Y, 0, mask - HI(Z));
+            LIT(Z, 0, HI(Z));
+        } else {                          /* Y + Z <= B (cannot wrap: B <= mask) */
+            if (dvs_add_u64_ovf(HI(Y), HI(Z), &t) || t > B) return -1;
+            LIT(Y, 0, B - HI(Z));
+            LIT(Z, 0, HI(Z));
+        }
+        return 0;
+    }
+    if (var_id != Y && var_id != Z) return -1;
+    const uint32_t O = (var_id == Y) ? Z : Y;   /* var = X - O, exact when X >= O */
+    if (is_lb) {                          /* X >= B + hi(O) */
+        if (dvs_add_u64_ovf(B, HI(O), &t) || t > mask || LO(X) < t) return -1;
+        LIT(X, 1, t);
+        LIT(O, 0, HI(O));
+    } else {                              /* X >= hi(O) (no borrow), X <= B + lo(O) */
+        if (LO(X) < HI(O)) return -1;
+        if (dvs_add_u64_ovf(B, LO(O), &t) || HI(X) > t) return -1;
+        LIT(X, 0, t);
+        LIT(O, 1, LO(O));
+        LIT(X, 1, HI(O));
+        LIT(O, 0, HI(O));
+    }
+    return 0;
+#undef LO
+#undef HI
+#undef LIT
+}
+
 /* Conservative sound explanation: the modular tightening of any one var
  * depends on the full current domains of the other two vars; cite both
- * bounds of each other variable. */
+ * bounds of each other variable. An unsigned add or subtract that cannot
+ * wrap gets a lifted explanation instead (_explain_bvsum_lifted). */
 static int _explain_bvbin_64(Propagator *self, dvs_ctx_t *ctx,
                              uint32_t var_id, uint8_t is_lb,
                              int64_t new_bound, Explanation *out) {
-    (void)is_lb; (void)new_bound;
     PropWatchSect *ws = PROP_WS(self);
+    {
+        const BvBin_64_t *bp = (const BvBin_64_t *)self;
+        uint32_t r = ws->var_ids[0], a = ws->var_ids[1], b = ws->var_ids[2];
+        if (self->fire == _fire_bvadd_64 &&
+            _explain_bvsum_lifted(ctx, r, a, b, bp->width, var_id, is_lb, new_bound, out) == 0)
+            return 0;
+        if (self->fire == _fire_bvsub_64 &&
+            _explain_bvsum_lifted(ctx, a, r, b, bp->width, var_id, is_lb, new_bound, out) == 0)
+            return 0;
+    }
     uint32_t ids[3] = { ws->var_ids[0], ws->var_ids[1], ws->var_ids[2] };
     int n = 0;
     for (int i = 0; i < 3; i++) {

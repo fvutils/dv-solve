@@ -29,7 +29,12 @@ typedef struct {
                              *     domain minimum (see _split_upper_first).  */
     uint8_t  second_phase;  /* for a split: 1 = the first half is exhausted
                              *     and the second half is being explored     */
-    uint8_t  _dec_pad[5];
+    uint8_t  bound;         /* 0: a value decision (x == tried_value);
+                             * 1: a bound decision x <= tried_value;
+                             * 2: a bound decision x >= tried_value
+                             *    (clause learning on a wide domain; see
+                             *    _bound_decision)                        */
+    uint8_t  _dec_pad[4];
 } DecisionRecord;
 
 /* Why a solve returned DVS_SOLVE_TIMEOUT. Diagnostic only; never affects the
