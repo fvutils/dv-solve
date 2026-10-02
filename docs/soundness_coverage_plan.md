@@ -316,6 +316,7 @@ The original questions, for the record:
 | B63: push/pop with variables wider than 64 bits kept popped assertions | Fixed: push records a builder mark, pop rewinds to it; a failed compile no longer leaves a half-built context (§9.12) |
 | B64: a Boolean `ite` branch comparing 64-bit constants folded as signed | Fixed (§9.12) |
 | B65: `ite_value_64` used signed min/max on unsigned 64-bit domains | Fixed (§9.12) |
+| B66: a builder array select ignored `x == y` merges of its elements | Fixed (§9.13) |
 | Guard-gated propagators: the learnt clause did not cite the guard | Fixed: analysis adds `guard >= 1` for a gated propagator's step |
 | Minimised `get-unsat-core` | Done; tests pass, including 400 brute-force random cores and a 6000-case stress run |
 | Pinned regressions | `tests/formal/test_lcg_soundness.py` (B50 ×2, B51, the livelock); `test_signed_ops.py::test_divrem_of_variables_matches_z3` (B52); `test_bool_ite_constraint.py` and `tests/unit/test_gated_constraints.py` (B53); `tests/c/test_prop_exhaustive.c` (B54, B55, B57, mul) |
@@ -459,7 +460,7 @@ exports LCOV but does not import it.
 Named `DVS_COVER` counters (§4.2) are still to do. They are needed for the
 bins gcov cannot express, such as "learning seed kind × resolution kind".
 
-### P4 — gap assessment (first mutation score: 13/18)
+### P4 — gap assessment (first mutation score: 13/18; 16/18 caught since)
 
 `python -m tests.formal.soundness.mutation --work DIR` plants 18 one-place
 bugs of the backlog's kinds and runs the detectors on each:
@@ -480,7 +481,7 @@ Missed (5), each a missing stimulus:
 
 | Mutant | Why nothing caught it | Work item |
 |---|---|---|
-| no guard literal in learnt clauses | after B53 only array selects create guarded propagators, and no door generates arrays | array stimulus (QF_ABV) in the generator |
+| no guard literal in learnt clauses (**caught since**, by `tests/unit/test_lcg_array_select.py`: 5 of 8 blocks fail) | after B53 only array selects create guarded propagators, and no door generates arrays | array stimulus (QF_ABV) in the generator |
 | no forced resolution of the domain-emptying step | the fallbacks (tautology / duplicate) now absorb it on every problem tried | a learning stress problem where the emptying step is the lone current-level literal |
 | stale culprit propagator (B51) | no problem exhausts a domain split with learning on | stress problems built to exhaust splits |
 | 64-bit unsigned compared as signed (**caught since**, by the 64-bit boundary harness cases: 104 failures) | narrow campaign has no 64-bit variables; the wide campaign was not part of the run | run `--wide` in the mutation campaign |
@@ -818,3 +819,26 @@ Coverage lessons:
 - **The nightly earns its budget on day one.** The first trial run found more
   than the previous 12,000 narrow problems did.
 
+### 9.13 B66: the array select, a door the campaign has no key to
+
+The guard-literal mutant survived because nothing generated array selects:
+only the builder emits them, and the campaign's builder door is fed from
+SMT-LIB2-shaped problems that have no arrays. A brute-forced builder test
+(`tests/unit/test_lcg_array_select.py`, 1,600 small problems, learning on and
+off) was written to catch the mutant. On its first run it failed on the
+unmutated code: 14 of the first 400 problems returned a model with
+`r != a[idx]`, or `sat` for an unsat problem. Every one had an `x == y`
+between two elements. The select compiled element `i` as the variable
+`base + i` and never resolved merges, so the element merged away was left
+unconstrained. Fix: resolve each element. Once fixed, the test passes and
+the mutant fails 5 of its 8 blocks.
+
+Coverage lessons:
+- **Builder-only constructs are a blind spot of the campaign.** Array
+  selects, and any other expression only the builder can produce, need
+  their own generator or brute-forced tests. The alias audit of B46 checked
+  the expressions that name their variables; the select names its elements
+  implicitly, as offsets from a base, and was missed.
+- **A stimulus written for one mutant found a real bug before the mutant
+  was applied.** Coverage holes found by mutation are worth closing even
+  when the mutant itself looks unlikely.

@@ -134,7 +134,7 @@ def _apply(src_root: Path, name: str) -> bool:
 PYTESTS = ["tests/formal/test_lcg_soundness.py", "tests/formal/test_bool_ite_constraint.py",
            "tests/formal/test_incremental_protocol.py", "tests/formal/soundness/test_regressions.py",
            "tests/unit/test_gated_constraints.py", "tests/unit/test_lcg_builder.py",
-           "tests/unit/test_wide_watch.py"]
+           "tests/unit/test_wide_watch.py", "tests/unit/test_lcg_array_select.py"]
 
 
 def _pinned(exe: Path) -> bool:

@@ -3144,8 +3144,9 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
          * Uses ReificationEq for the guard link and bounds_eq for the
          * conditional equality. */
         for (uint32_t i = 0; i < n; i++) {
-            uint32_t elem_id = base + i;
-            if (elem_id >= ctx->n_vars_capacity) return 0;
+            if (base + i >= ctx->n_vars_capacity) return 0;
+            /* An element merged by `x == y` lives on as the kept var. */
+            uint32_t elem_id = _resolve(ctx, base + i);
 
             /* Create guard variable [0,1] */
             if (ctx->n_vars >= ctx->n_vars_capacity) return 0;
