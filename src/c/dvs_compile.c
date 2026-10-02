@@ -1551,6 +1551,31 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         }
     }
 
+    /* A Boolean if-then-else: g ↔ (c ? a : b), with the same ite propagator
+     * the AND/OR guards use. Verilator lifts every constraint to a bit with
+     * __Vbv, so `ite(ite(thold == 0, cnt == 0, ...), 1, 0)` arrived here as
+     * the condition of the outer reification; without this arm the whole
+     * constraint went uncompiled, every seeded solve was downgraded to
+     * `unknown` by validation, and --mode=verilator fell back to bit-blast
+     * re-diversification, which nearly never moved off one model. Only 1-bit
+     * branches: a wider ite has no truth value to reify. */
+    if (k == EXPR_ITE) {
+        ExprITE *ei = (ExprITE *)dvs_pool_ptr(&sp->pool, ref);
+        if (_expr_width(ctx, sp, ei->then_e, 0) > 1 ||
+            _expr_width(ctx, sp, ei->else_e, 0) > 1)
+            return EXPR_NULL;
+        uint32_t gc = _bool_to_var(ctx, sp, ei->cond);
+        if (gc == EXPR_NULL) return EXPR_NULL;
+        uint32_t ga = _bool_to_var(ctx, sp, ei->then_e);
+        if (ga == EXPR_NULL) return EXPR_NULL;
+        uint32_t gb = _bool_to_var(ctx, sp, ei->else_e);
+        if (gb == EXPR_NULL) return EXPR_NULL;
+        uint32_t g = _new_guard(ctx);
+        if (g == EXPR_NULL) return EXPR_NULL;
+        prop_add_ite_value_64(ctx, g, gc, ga, gb, 0);
+        return g;
+    }
+
     if (k != EXPR_BINARY) return EXPR_NULL;
 
     ExprBinary *eb = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
