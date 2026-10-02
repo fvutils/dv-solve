@@ -4,7 +4,11 @@ Status: ACCEPTED 2026-10-02 (persistence revised the same day: no separate
 repo; §11 decisions agreed). R0 BUILT 2026-10-02: `tests/perf/{calib,schema,
 collect,history,consolidate}.py`, a dispatch-only `.forgejo/workflows/perf.yml`,
 and `tests/unit/test_perf_history.py`. Confirmed: artifacts expire 90 days
-after upload, and the artifact API refuses anonymous reads.
+after upload; the artifact API refuses anonymous reads; the automatic job
+token can list this repo's artifacts (download is confirmed in R2). R0 DONE
+2026-10-02: two dispatched runs consolidated into
+`tests/perf/history/2026.jsonl`, one of them measured during the soundness
+nightly and correctly marked noisy (§10).
 
 This document builds on `docs/ci_benchmark_publishing_plan.md` (2026-09-30)
 and replaces its §4 (harness), §5 (history), §6 (workflow) and §7
@@ -699,7 +703,11 @@ current job reads artifacts back through the API.
 ## 10. Risks
 
 - **Timing noise on a shared developer host.** This host is also an
-  interactive workstation. The mitigations are, in order of strength:
+  interactive workstation. CPU time does not escape contention: R0's second
+  run, taken while the soundness nightly held the host at load 12.7,
+  measured the calibration kernels 28% (`z3-ops`) and 15% (`z3-php10`)
+  slower than the quiet run, through shared caches, SMT siblings and a lower
+  boost clock. A single global correction factor would therefore be wrong. The mitigations are, in order of strength:
   ratios within one job; interleaving; CPU time instead of wall time; the
   dedicated runner label; the 05:00 schedule; `noisy` marking. Instruction
   counts (`perf stat`) would be immune to frequency and load, but
