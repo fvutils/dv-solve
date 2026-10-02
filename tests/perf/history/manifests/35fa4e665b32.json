@@ -1,0 +1,1209 @@
+{
+ "about": {
+  "gaps": "constructs dv-solve once lacked, kept as regressions",
+  "tier1": "small QF_BV constraint problems in the style of randomization",
+  "tier2": "bounded model checking from yosys-smtbmc (QF_UFBV)",
+  "tier3": "bounded model checking with arrays (QF_AUFBV)",
+  "tier4": "large memories: arrays with a wide address read at symbolic addresses, which dv-solve does not support yet",
+  "verilator": "what Verilator sends when it randomizes SystemVerilog classes",
+  "wide": "bit-vectors wider than 64 bits"
+ },
+ "fixtures": [
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/alignedaddr.smt2",
+   "sha": "a365ad58be734ee4"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/arrayordering.smt2",
+   "sha": "a261521bb22032dc"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/arraysum8.smt2",
+   "sha": "d3f23d18951ac953"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/axi4burst.smt2",
+   "sha": "2a6558ae19f8b68d"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/bustransaction.smt2",
+   "sha": "fc2eafdcca7f9d14"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/condinside.smt2",
+   "sha": "92e4bc9e85f1c96e"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/ddr5cmdbasic.smt2",
+   "sha": "f957ba67455148cf"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/ddr5moderegister.smt2",
+   "sha": "d56baaad2c5ba9da"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/ddr5timing.smt2",
+   "sha": "a1f6a25cb2450b33"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/distweighted.smt2",
+   "sha": "7e8cf2806533666c"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/enumcond.smt2",
+   "sha": "32774052c7e3ffb9"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/fifoctrl.smt2",
+   "sha": "96c031ba384bdadc"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/implicationchain8.smt2",
+   "sha": "b2931ea4450928bd"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/inequalityweb.smt2",
+   "sha": "7ed1baed2552d76f"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/memmaptight32.smt2",
+   "sha": "819b6effd568d32a"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/mempartitionknapsack.smt2",
+   "sha": "bd089a7071cda3ff"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/memtransaction.smt2",
+   "sha": "130b484e87d8105f"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/muldivscenario.smt2",
+   "sha": "49316038b56d40ed"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/nqueens8.smt2",
+   "sha": "b40c7ef3cca03fd0"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/onehot8.smt2",
+   "sha": "fed525ed3946afa1"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/packethdr.smt2",
+   "sha": "ec8da275fef90b46"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/pcietlp.smt2",
+   "sha": "2640a908fb901d35"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/shiftaligned.smt2",
+   "sha": "4038f537371340da"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/socaddrmap32.smt2",
+   "sha": "aaf69c1a7ad14c0c"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/socaddrmap40.smt2",
+   "sha": "76a20e0cb42141d9"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/socmemmap.smt2",
+   "sha": "9e7c1b67616a70c4"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/softrelaxbaseline.smt2",
+   "sha": "cfd8b95237ddbb42"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/softrelaxwithconflict.smt2",
+   "sha": "e0259045c6077053"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/sumpartition.smt2",
+   "sha": "e412837824755ce9"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/threeunique.smt2",
+   "sha": "aa19189819b3368e"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/unique16.smt2",
+   "sha": "be783a0f46904449"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/unique32.smt2",
+   "sha": "6ee2f5da35c99a73"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/unsignedops.smt2",
+   "sha": "fedccaa6ed9a2316"
+  },
+  {
+   "cat": "tier1",
+   "path": "tests/formal/smt2/tier1/verilatorops.smt2",
+   "sha": "7c008ceb0070041f"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/alu_pipeline_bmc_d1.smt2",
+   "sha": "85a55e1bbca945fa"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/alu_pipeline_bmc_d2.smt2",
+   "sha": "939b6951837b818a"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/alu_pipeline_bmc_d4.smt2",
+   "sha": "923bc2af4e5332c6"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/alu_pipeline_bmc_d8.smt2",
+   "sha": "05abf426d39745c9"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/alu_pipeline_kind_k1.smt2",
+   "sha": "10a45fe40733aed9"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/alu_pipeline_kind_k2.smt2",
+   "sha": "a6e7be380ee19806"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/alu_pipeline_kind_k4.smt2",
+   "sha": "ca0f1568a22e8c45"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/arbiter_fairness_bmc_d1.smt2",
+   "sha": "d4f4c18c4e32578c"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/arbiter_fairness_bmc_d16.smt2",
+   "sha": "5cea31f8f4ee6c12"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/arbiter_fairness_bmc_d2.smt2",
+   "sha": "cd0be0d0cf735145"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/arbiter_fairness_bmc_d4.smt2",
+   "sha": "26d6ce8843095c15"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/arbiter_fairness_bmc_d8.smt2",
+   "sha": "309c86361d2126e5"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/arbiter_fairness_kind_k1.smt2",
+   "sha": "26ef26dee8b4bee5"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/arbiter_fairness_kind_k2.smt2",
+   "sha": "6b0984412c98ab6e"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/arbiter_fairness_kind_k4.smt2",
+   "sha": "33879811df833c94"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/counter_overflow_bmc_d1.smt2",
+   "sha": "cc9db184369236ed"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/counter_overflow_bmc_d16.smt2",
+   "sha": "862d8a8c72671925"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/counter_overflow_bmc_d2.smt2",
+   "sha": "410fbaed16fb3b48"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/counter_overflow_bmc_d20.smt2",
+   "sha": "af6bfa0660d68930"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/counter_overflow_bmc_d4.smt2",
+   "sha": "abf01aefae120b9e"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/counter_overflow_bmc_d8.smt2",
+   "sha": "90e3540ad34f5b91"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/counter_overflow_kind_k1.smt2",
+   "sha": "5a3bf2e6fb67af9e"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/counter_overflow_kind_k2.smt2",
+   "sha": "e17238bd556b084c"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fifo_ptr_valid_bmc_d1.smt2",
+   "sha": "dc89b5ed183dae04"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fifo_ptr_valid_bmc_d16.smt2",
+   "sha": "71e9a3e009b8c6fb"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fifo_ptr_valid_bmc_d2.smt2",
+   "sha": "6cf80f58d22bd005"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fifo_ptr_valid_bmc_d4.smt2",
+   "sha": "fb3b377b4c6cd465"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fifo_ptr_valid_bmc_d8.smt2",
+   "sha": "711641391936dedc"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fifo_ptr_valid_kind_k1.smt2",
+   "sha": "ff2bbfb0d679eefb"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fifo_ptr_valid_kind_k2.smt2",
+   "sha": "e7a292c63c98ab21"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fifo_ptr_valid_kind_k4.smt2",
+   "sha": "e7b6ab8ee2ad405b"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fsm_onehot_bmc_d1.smt2",
+   "sha": "00eba5dee9eb27cd"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fsm_onehot_bmc_d16.smt2",
+   "sha": "e4793a5c9bb43b88"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fsm_onehot_bmc_d2.smt2",
+   "sha": "9bce90dd343c51fc"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fsm_onehot_bmc_d32.smt2",
+   "sha": "5a2e76976f02eff8"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fsm_onehot_bmc_d4.smt2",
+   "sha": "666c36497abd280a"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fsm_onehot_bmc_d8.smt2",
+   "sha": "d1c3ef9e6f93143c"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fsm_onehot_kind_k1.smt2",
+   "sha": "d6cd96d7a44d7787"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/fsm_onehot_kind_k2.smt2",
+   "sha": "bf939ef549d41136"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/regfile_rdwr_bmc_d1.smt2",
+   "sha": "91fa247ba0062fb8"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/regfile_rdwr_bmc_d2.smt2",
+   "sha": "d71c40c865c2689c"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/regfile_rdwr_bmc_d4.smt2",
+   "sha": "9a9bfd76a2245d79"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/regfile_rdwr_kind_k1.smt2",
+   "sha": "d1031fe9419aa1e6"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/regfile_rdwr_kind_k2.smt2",
+   "sha": "d09ba55ffd65b7fc"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/shift_register_bmc_d1.smt2",
+   "sha": "625e1e0514f707cb"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/shift_register_bmc_d16.smt2",
+   "sha": "6d539ed033c45ef5"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/shift_register_bmc_d2.smt2",
+   "sha": "01466f7cba042e89"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/shift_register_bmc_d4.smt2",
+   "sha": "d760f0df67895ebd"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/shift_register_bmc_d8.smt2",
+   "sha": "f8b5399bbf390045"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/shift_register_kind_k1.smt2",
+   "sha": "c1b1f0f8bed254c3"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/shift_register_kind_k2.smt2",
+   "sha": "ab7928664363cfe4"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/timer_watchdog_bmc_d1.smt2",
+   "sha": "b2c070a1e1254349"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/timer_watchdog_bmc_d16.smt2",
+   "sha": "8357ffa02097d427"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/timer_watchdog_bmc_d2.smt2",
+   "sha": "e0da675bb272199b"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/timer_watchdog_bmc_d32.smt2",
+   "sha": "23ac293fe2e96794"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/timer_watchdog_bmc_d4.smt2",
+   "sha": "b7267e2b98ec59b3"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/timer_watchdog_bmc_d8.smt2",
+   "sha": "f1f80ac959139e3e"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/timer_watchdog_kind_k1.smt2",
+   "sha": "db8aa92f8c0a3241"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/timer_watchdog_kind_k2.smt2",
+   "sha": "2c9e0837eb2cf722"
+  },
+  {
+   "cat": "tier2",
+   "path": "tests/formal/smt2/tier2/timer_watchdog_kind_k4.smt2",
+   "sha": "3ea2771af6e3acbe"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/cache_direct_1way_bmc_d1.smt2",
+   "sha": "47700406dcd37975"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/cache_direct_1way_bmc_d2.smt2",
+   "sha": "5fd2297bede311f3"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/cache_direct_1way_bmc_d4.smt2",
+   "sha": "fe23196da1ed888e"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/cache_direct_1way_bmc_d8.smt2",
+   "sha": "c93e94b421c3504a"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/dma_engine_small_bmc_d1.smt2",
+   "sha": "0b56015375c5cfc1"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/dma_engine_small_bmc_d2.smt2",
+   "sha": "8f97fa923b77431b"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/dma_engine_small_bmc_d4.smt2",
+   "sha": "9aceac965fe2958f"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/dma_engine_small_bmc_d8.smt2",
+   "sha": "bde53cb5c6bb76b4"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/fifo_8x16_bmc_d1.smt2",
+   "sha": "ea90f5cf61d4a0a4"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/fifo_8x16_bmc_d2.smt2",
+   "sha": "7475c3f8c8d73cda"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/fifo_8x16_bmc_d4.smt2",
+   "sha": "659dd9f3c21d89dc"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/fifo_8x16_bmc_d8.smt2",
+   "sha": "9ec540a5a76b89c4"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/regfile_addr_alias_bmc_d1.smt2",
+   "sha": "883ef12560426227"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/regfile_addr_alias_bmc_d2.smt2",
+   "sha": "0662f422c8fc1161"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/regfile_addr_alias_bmc_d4.smt2",
+   "sha": "b6aa5babca4ae6da"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/regfile_addr_alias_bmc_d8.smt2",
+   "sha": "50a0cbebab6a21ed"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/regfile_simple_bmc_d1.smt2",
+   "sha": "d882976306259286"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/regfile_simple_bmc_d2.smt2",
+   "sha": "e9acb3f326c01dbf"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/regfile_simple_bmc_d4.smt2",
+   "sha": "e93ff331a398b1fa"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/regfile_simple_bmc_d8.smt2",
+   "sha": "ad710db4a3cdb105"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/wide_datapath_128_bmc_d1.smt2",
+   "sha": "3bf97cbb3ea3da48"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/wide_datapath_128_bmc_d2.smt2",
+   "sha": "05b22a2cee39108d"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/wide_datapath_128_bmc_d4.smt2",
+   "sha": "efd627e474043a4f"
+  },
+  {
+   "cat": "tier3",
+   "path": "tests/formal/smt2/tier3/wide_datapath_128_bmc_d8.smt2",
+   "sha": "89b7c58de3914999"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a12_d128_unsat.smt2",
+   "sha": "c924a7d5fc3acca3"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a12_d16_unsat.smt2",
+   "sha": "89b2b3f9d865dd69"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a12_d32_unsat.smt2",
+   "sha": "616e14ea53320c17"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a12_d64_unsat.smt2",
+   "sha": "c6e7f7da4c3d8c10"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a16_d128_unsat.smt2",
+   "sha": "7769d169aff0c54a"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a16_d16_sat.smt2",
+   "sha": "2ee49c74f0c1e3af"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a16_d16_unsat.smt2",
+   "sha": "1a92f77f47815f11"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a16_d32_sat.smt2",
+   "sha": "3a6ffae40700813f"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a16_d32_unsat.smt2",
+   "sha": "773beebea342a87c"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a16_d64_unsat.smt2",
+   "sha": "a7c5669b56a3c58d"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a20_d128_unsat.smt2",
+   "sha": "308f98b165d884b6"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a20_d16_sat.smt2",
+   "sha": "ac0f3fa26c3babc2"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a20_d16_unsat.smt2",
+   "sha": "78b2ce73e2762c2e"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a20_d32_sat.smt2",
+   "sha": "b2f3ea94b0cedb4a"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a20_d32_unsat.smt2",
+   "sha": "a96781bace5bead3"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a20_d64_unsat.smt2",
+   "sha": "7ca473c9f07ec774"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a24_d128_unsat.smt2",
+   "sha": "cd90ca795926f5a2"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a24_d16_unsat.smt2",
+   "sha": "935c28f32c57635f"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a24_d32_unsat.smt2",
+   "sha": "d465be4eabea059a"
+  },
+  {
+   "cat": "tier4",
+   "path": "tests/formal/smt2/tier4/mem_a24_d64_unsat.smt2",
+   "sha": "bb5371c016819ca5"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/and_reduce_unsat.smt2",
+   "sha": "03ffc19160b28945"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/array_symbolic_index_sat.smt2",
+   "sha": "1058403cb63ff202"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/array_symbolic_index_unsat.smt2",
+   "sha": "ed8828a9447635a3"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/cdcl64_add_overflow_sat.smt2",
+   "sha": "694fab1526140a1c"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/cdcl64_extract_hi32_sat.smt2",
+   "sha": "9fb71ea89e5c0e91"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/cdcl64_extract_hibit_sat.smt2",
+   "sha": "1fd7b6e4e89a6693"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/cdcl64_ite_highbit_sat.smt2",
+   "sha": "18002e491350c825"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/cdcl64_xor_highbit_sat.smt2",
+   "sha": "c6a53e08ee0001bd"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/onehot8_sat.smt2",
+   "sha": "74fc495a6c0c228a"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/onehot_and_zero_unsat.smt2",
+   "sha": "3eb2d3d00b0d9a28"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/or_reduce_sat.smt2",
+   "sha": "3b3ef93dc69e993e"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/popcount8_eq3_sat.smt2",
+   "sha": "7c5adb9b3a66bfb4"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/popcount8_eq9_unsat.smt2",
+   "sha": "f61268d632a8ca5e"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/product4_chain_sat.smt2",
+   "sha": "351fc0756fe1d509"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/product_ff_ff_eq1_sat.smt2",
+   "sha": "b7eeb3749495469d"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/product_ff_ff_ne1_unsat.smt2",
+   "sha": "4d6f9692cc20c2c1"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/signext32to64_sat.smt2",
+   "sha": "fea27cf09ce10aac"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/signext32to64_unsat.smt2",
+   "sha": "81d4d9fabd4c08fe"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/signext_neg_value_sat.smt2",
+   "sha": "ec14d41f94ca5039"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/wide128_add_sat.smt2",
+   "sha": "706c9109f82225df"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/wide128_mul_unsat.smt2",
+   "sha": "3708f8cfa4ec4932"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/wildcard_mask_sat.smt2",
+   "sha": "5fb073cd5d22f35e"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/wildcard_mask_unsat.smt2",
+   "sha": "beb91c9de50f7cc7"
+  },
+  {
+   "cat": "gaps",
+   "path": "tests/formal/smt2/gaps/xor_reduce_sat.smt2",
+   "sha": "8763171d15dffc41"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_and_mask_sat.smt2",
+   "sha": "4e8eea903a54ecfc"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_and_mask_unsat.smt2",
+   "sha": "50a1ae3b82b9db98"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_concat_sat.smt2",
+   "sha": "a82f26e7fd544d78"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_eq_conflict_unsat.smt2",
+   "sha": "b6acb9c20ea46544"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_eq_small_sat.smt2",
+   "sha": "3f8814aa350407c2"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_hex_hibits_sat.smt2",
+   "sha": "9e7ec78d5b45fce4"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_hexmask_eq_wideunk.smt2",
+   "sha": "f17d72e25c2fce39"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_low_slice_sat.smt2",
+   "sha": "9656f81e88fbe2a9"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_low_slice_unsat.smt2",
+   "sha": "c331e36c7f17227b"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_msb_set_sat.smt2",
+   "sha": "80c1ac6504f7c303"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_range_sat.smt2",
+   "sha": "91d510a16ec7aef7"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w128_range_unsat.smt2",
+   "sha": "45c4d9cab5463b1d"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_add_carry_sat.smt2",
+   "sha": "1c472f00e79a6801"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_add_carry_unsat.smt2",
+   "sha": "fbac1c2e846b90de"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_and_or_mask_unsat.smt2",
+   "sha": "436b6a8fa475810d"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_array_data_sat.smt2",
+   "sha": "91906f1c726300dd"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_array_data_unsat.smt2",
+   "sha": "8da4fb0660c32008"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_array_index_alias_sat_arrunk.smt2",
+   "sha": "257ba9e7bcc669c2"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_array_index_bvN_unsat_arrunk.smt2",
+   "sha": "480e01ea0058dc78"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_array_store_index_unsat_arrunk.smt2",
+   "sha": "f8e8db7e7392d623"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_bin72_unsat.smt2",
+   "sha": "ba81018a0bdb43bd"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_bvN_big_sat.smt2",
+   "sha": "89017b882f35ddca"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_bvN_eq_hex_unsat.smt2",
+   "sha": "a72d0ba2fadcd5b7"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_bvN_wrap_8_sat.smt2",
+   "sha": "bc02d6561b2958f5"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_bvN_wrap_narrow_sat.smt2",
+   "sha": "bbc039858b701ad5"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_eq_hi_sat.smt2",
+   "sha": "34af55138b26889c"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_eq_hi_unsat.smt2",
+   "sha": "ffce6c4a1a1c767a"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_eq_lo_only_unsat.smt2",
+   "sha": "dc61a8a8354a1cd1"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_extract_lit_sat.smt2",
+   "sha": "2d590485bab5fc29"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_extract_lit_unsat.smt2",
+   "sha": "8a55f7c26a888a57"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_mul_odd_width_sat.smt2",
+   "sha": "dd5818076eec7bbd"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_range_sat.smt2",
+   "sha": "4692ef10876827c9"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_range_unsat.smt2",
+   "sha": "eeb007220ec720b7"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w2_shl_sat.smt2",
+   "sha": "4320ec4d4d055f33"
+  },
+  {
+   "cat": "wide",
+   "path": "tests/formal/smt2/wide/w65_add_wrap_sat.smt2",
+   "sha": "e144cb5bbc104331"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/rt_array_zext_select.smt2",
+   "sha": "155e4eca466ee46b"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/rt_ne_wide_vars.smt2",
+   "sha": "e0fa6fd533ef0142"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/rt_sign_extend_64.smt2",
+   "sha": "2be737b411a6dec6"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/rt_signed_gt.smt2",
+   "sha": "056cf1284afecdc9"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_array_index.smt2",
+   "sha": "9625fee8e9907e78"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_array_reduction_inherit.smt2",
+   "sha": "c4186dfc09d4b284"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_array_sum_with.smt2",
+   "sha": "44c27af9031996c5"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_assoc_arr_basic.smt2",
+   "sha": "9fa263893015de30"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_cond.smt2",
+   "sha": "21e52f0cb7b2f029"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_countones.smt2",
+   "sha": "1013551b6686641b"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_dist.smt2",
+   "sha": "b246c1c5d979acda"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_dist_foreach_if.smt2",
+   "sha": "674c03d5afd2b45c"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_dist_range.smt2",
+   "sha": "1aaf59045a2e74d0"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_dist_weight.smt2",
+   "sha": "81c7bb953677232e"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_dyn_array_reduction.smt2",
+   "sha": "c678766b2a941ea2"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_dyn_queue_basic.smt2",
+   "sha": "9a91eccb908a2340"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_foreach.smt2",
+   "sha": "ac872e5844841c09"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_func_call.smt2",
+   "sha": "6d0c7d492a61b2c8"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_implication_set.smt2",
+   "sha": "4889c95bfa0c7d96"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_inheritance.smt2",
+   "sha": "4252eb8ecdc07065"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_nested_class.smt2",
+   "sha": "4db3d94d1082db86"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_operators.smt2",
+   "sha": "12bab17180f5da43"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_rand_array_index.smt2",
+   "sha": "9c3136d2fab4fe92"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_redops.smt2",
+   "sha": "d50cb46b48959355"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_shift_width.smt2",
+   "sha": "33148e175856a216"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_solve_before.smt2",
+   "sha": "71c9a1f7c3595bbb"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_struct.smt2",
+   "sha": "99c7391112677e81"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_struct_complex.smt2",
+   "sha": "9e2e507a75bd9b3a"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_sysfunc.smt2",
+   "sha": "18faa4e48285543d"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_unpacked_array.smt2",
+   "sha": "456cd2954d624822"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_unq_arr_derived.smt2",
+   "sha": "f931096ef5db1f7e"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_constraint_unsat.smt2",
+   "sha": "b9bf5e6e39f5fff3"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_randc_constraint.smt2",
+   "sha": "12db7fd5c4a32c8a"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_randc_enum_constraint.smt2",
+   "sha": "ee7e0d117408bfdd"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_randc_wide_constraint.smt2",
+   "sha": "ec49fd55f2f1a124"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_randomize_complex_queue.smt2",
+   "sha": "c9e5bb8cf15aac2e"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_randomize_dist_conditional.smt2",
+   "sha": "99a1e1d36ec74208"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_randomize_dist_implication.smt2",
+   "sha": "db361690ee28f402"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_randomize_inside_cond.smt2",
+   "sha": "4d4855625688a9cd"
+  },
+  {
+   "cat": "verilator",
+   "path": "tests/formal/smt2/verilator/t_randomize_union.smt2",
+   "sha": "28fc684253379543"
+  }
+ ],
+ "hash": "35fa4e665b32",
+ "suite": "sat-core",
+ "weights": {
+  "gaps": 1.0,
+  "tier1": 1.0,
+  "tier2": 1.0,
+  "tier3": 1.0,
+  "tier4": 1.0,
+  "verilator": 2.0,
+  "wide": 1.0
+ }
+}
