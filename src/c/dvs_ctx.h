@@ -112,8 +112,10 @@ typedef struct dvs_ctx_s {
     uint32_t          *prop_constraint_id; /* constraint_id for each propagator */
     PropQueue          queue;         /* 16-level priority queue       */
     uint64_t           unassigned_mask; /* bit i set = var i unassigned */
-    Variable          *initial_vars;  /* saved copy at post-compile     */
-    uint32_t           initial_n_vars; /* n_vars at compile time        */
+    Variable          *initial_vars;  /* saved copy at post-compile,
+                                         * extended by incremental adds */
+    uint32_t           initial_n_vars; /* entries of initial_vars in use */
+    uint32_t           initial_vars_cap; /* entries allocated            */
     uint32_t          *assumption_var_ids;   /* var_id per assumption  */
     uint32_t          *assumption_priorities;/* priority per assumption*/
     uint32_t           n_assumptions;        /* number of assumptions  */

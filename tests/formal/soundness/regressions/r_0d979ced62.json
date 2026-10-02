@@ -1,0 +1,36 @@
+{
+ "why": "B67: seed=7 i=601 door=smt2-steps[1] expect=sat got=unsat (reset left an incremental assert's auxiliaries at the last model)",
+ "widths": {
+  "y": 6
+ },
+ "cons": [
+  [
+   "bvsle",
+   "bool",
+   [
+    "const",
+    0,
+    6
+   ],
+   [
+    "var",
+    "y",
+    6
+   ]
+  ],
+  [
+   "=",
+   "bool",
+   [
+    "var",
+    "y",
+    6
+   ],
+   [
+    "const",
+    1,
+    6
+   ]
+  ]
+ ]
+}
