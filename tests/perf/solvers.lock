@@ -1,0 +1,5 @@
+# Pinned tools for performance runs (docs/results_publishing_design.md §5.3).
+# pip requirement syntax: `pip install -r tests/perf/solvers.lock`.
+# Changing a pin changes the lock hash every run record carries, and the
+# trend charts mark that commit: the reference ratio's denominator changed.
+z3-solver==5.1.0.0

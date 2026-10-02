@@ -1,0 +1,86 @@
+# Performance and distribution runs for fvutils/dv-solve.
+# Design: docs/results_publishing_design.md.
+#
+# The job MEASURES and UPLOADS ONE ARTIFACT, perf-<kind>-<utc>-<sha>, holding
+# one gzipped run record. It never writes to git and holds no write
+# credential: tests/perf/consolidate.py turns artifacts into committed history
+# (by hand, at each release and at least monthly), and docs.yml renders from
+# that history plus the artifacts newer than it. Artifacts expire after 90
+# days on this instance, which is the consolidation deadline.
+#
+# Forgejo-only, like test.yml and nightly.yml: it publishes nothing, so it has
+# no GitHub twin and needs no release-authority gate.
+#
+# R0 (plumbing): dispatch-only and calibration-only. The schedule, the tag
+# trigger and the real suites arrive with R1/R5.
+
+name: Perf
+
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "Run kind recorded in the record"
+        default: manual
+        type: choice
+        options: [manual, nightly, ladder, release]
+
+concurrency:
+  group: perf          # one perf job at a time: two would measure each other
+  cancel-in-progress: false
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned tools
+        run: |
+          pip_install() {
+            python3 -m pip install -q "$@" && return 0
+            python3 -m pip install -q --break-system-packages "$@"
+          }
+          pip_install -r tests/perf/solvers.lock
+
+      - name: Collect
+        id: collect
+        # Exit 1 means the record is INVALID (a wrong answer). It is still
+        # written; the failure is deferred until after the upload so it can be
+        # diagnosed.
+        run: |
+          set +e
+          python3 -m tests.perf.collect --kind "${{ inputs.kind || 'manual' }}" \
+            --suites calib --out perf-out --github-output
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check the record for internal identifiers
+        # The record is public once uploaded and once consolidated.
+        run: |
+          pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          if zcat perf-out/*.json.gz | grep -nE "$pattern" ; then
+            echo "::error::internal identifier in the run record"
+            exit 1
+          fi
+
+      - name: Upload the run record
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: ${{ steps.collect.outputs.name }}
+          path: perf-out/*.json.gz
+          if-no-files-found: error
+
+      - name: Unconsolidated runs
+        # Also the R0 probe of whether the automatic job token may read this
+        # repo's artifacts; docs.yml needs the same access.
+        env:
+          FORGEJO_API_URL: ${{ github.server_url }}/api/v1
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -m tests.perf.history status --warn-after 60 --fail-after 80
+
+      - name: Fail on an invalid record
+        if: steps.collect.outputs.rc != '0'
+        run: |
+          echo "::error::the run record is invalid (collect exited ${{ steps.collect.outputs.rc }})"
+          exit 1
