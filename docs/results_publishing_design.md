@@ -10,7 +10,8 @@ token can list this repo's artifacts (download is confirmed in R2). R0 DONE
 `tests/perf/history/2026.jsonl`, one of them measured during the soundness
 nightly and correctly marked noisy (§10).
 
-R1 + R2 BUILT 2026-10-02 (pending the first nightly on the runner):
+R1 + R2 DONE 2026-10-02: the first scheduled nightly (05:00, 65 s, quiet host)
+was consolidated and the Results pages render it on dvkit.org. Built:
 `tools.py` + `tools.lock.json` (bitwuzla 0.8.2 from the Verilator 5.046
 bundle, boolector 3.2.4 from yosys-bin, sha256-pinned), `builds.py`,
 `suites.py` + `suites/sat-core.json`, `run_sat.py`, `normalize.py`, `svg.py`,
