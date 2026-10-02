@@ -4050,6 +4050,16 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         } else {
             ctx->var_holes_head = NULL;
         }
+        uint32_t vn_ref = dvs_pool_alloc(&ctx->pool,
+                                          ctx->n_vars_capacity * (uint32_t)sizeof(uint64_t),
+                                          (uint32_t)_Alignof(uint64_t));
+        if (vn_ref != EXPR_NULL) {
+            ctx->var_n_values = (uint64_t *)dvs_pool_ptr(&ctx->pool, vn_ref);
+            for (uint32_t i = 0; i < ctx->n_vars_capacity; i++)
+                ctx->var_n_values[i] = 0;
+        } else {
+            ctx->var_n_values = NULL;
+        }
     }
 
     /* ---- Exact domains for single-variable equality disjunctions ---- */
@@ -4115,6 +4125,10 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                 for (uint32_t a = 0; a + 1 < nv; a++)
                     for (int64_t x = vals[a] + 1; x < vals[a + 1]; x++)
                         dvs_solver_exclude_value(ctx, vid, x);
+                /* x takes one of nv values, whatever its bounds say. */
+                if (ctx->var_n_values && (ctx->var_n_values[vid] == 0
+                                          || nv < ctx->var_n_values[vid]))
+                    ctx->var_n_values[vid] = nv;
             }
         }
     }

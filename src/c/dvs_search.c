@@ -315,6 +315,21 @@ static int64_t _rand_range64(dvs_ctx_t *ctx, int64_t lo, int64_t hi) {
 /* domain, or EXPR_NULL if all variables are assigned.                */
 /* ------------------------------------------------------------------ */
 
+/* A variable's domain size for MRV, less one: its bounds' span, or fewer
+ * when holes leave it fewer values. `x in [512, 4096]` has bounds 512..4096
+ * but two values; measured by its bounds it is decided after every variable
+ * with fewer than 3585 values, and by then those decisions have mostly
+ * decided it (one in four values of `nlb in [1..256]` leaves 4096 legal under
+ * `nlb * x <= 0x40000`, so 4096 came up 13% of the time, not half). */
+static inline uint64_t _dom_size(const dvs_ctx_t *ctx, uint32_t i,
+                                 int64_t lo, int64_t hi) {
+    uint64_t dom = (uint64_t)hi - (uint64_t)lo;
+    if (ctx->var_n_values && ctx->var_n_values[i] != 0
+            && ctx->var_n_values[i] - 1u < dom)
+        dom = ctx->var_n_values[i] - 1u;
+    return dom;
+}
+
 static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
     /* VSIDS path: when LCG is active and we have non-zero activity
      * (i.e. at least one conflict has fired the bumper), pick the
@@ -373,7 +388,7 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
             int64_t lo = var_lo64(ctx, v);
             int64_t hi = var_hi64(ctx, v);
             if (lo == hi) continue;  /* singleton -- already assigned */
-            uint64_t dom = (uint64_t)hi - (uint64_t)lo;
+            uint64_t dom = _dom_size(ctx, i, lo, hi);
             if (v->flags & VAR_AUX) {
                 /* Aux is a low-priority decision: prefer real vars first. */
                 if (best_aux == EXPR_NULL || dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
@@ -394,7 +409,7 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
             int64_t lo = var_lo64(ctx, v);
             int64_t hi = var_hi64(ctx, v);
             if (lo == hi) continue;
-            uint64_t dom = (uint64_t)hi - (uint64_t)lo;
+            uint64_t dom = _dom_size(ctx, i, lo, hi);
             if (v->flags & VAR_AUX) {
                 if (best_aux == EXPR_NULL || dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
@@ -528,6 +543,17 @@ static int64_t _pick_avoiding_holes(dvs_ctx_t *ctx, uint32_t var_id,
     return cur + (int64_t)k;
 }
 
+enum { KEEP_NONE = 0, KEEP_SET = 1, KEEP_DEAD = 2 };
+
+static int _keep_draws_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("DVS_KEEP_DRAWS");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
 static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
                             const dvs_solve_opts_t *opts) {
     int64_t lo = var_lo64(ctx, &ctx->vars[var_id]);
@@ -557,15 +583,40 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
             return ps;
     }
 
+    /* A seeded solve keeps each var's first draw: when the search decides
+     * the var again -- after a backjump or a restart undid the decision for
+     * a conflict elsewhere -- it takes the same value if that is still in
+     * the domain. Drawing afresh instead makes every conflict a rejection of
+     * every decision made before it, so a branch of the problem that
+     * conflicts more (a wider op's longer chain of dependent fields) is drawn
+     * less, and the distribution follows the search rather than the
+     * constraints. A kept value whose own decision conflicts is dropped for
+     * the rest of the solve (KEEP_DEAD), and keeping stops at the first
+     * restart, so an infeasible kept value -- one in a gap of a union domain
+     * that only a propagator excludes (B18) -- is retried at most once. */
+    int keep = ctx->keep_on && var_id < ctx->keep_cap;
+    if (keep && ctx->keep_state[var_id] == KEEP_SET) {
+        const Variable *v = &ctx->vars[var_id];
+        int64_t kv = ctx->keep_val[var_id];
+        if (!var_b_lt(v, kv, lo) && !var_b_gt(v, kv, hi)
+                && !_is_hole(ctx, var_id, kv))
+            return kv;
+    }
+
+    int64_t v;
     /* Distribution-weighted selection if this variable has a dist constraint */
     if (ctx->dist_offsets && var_id < ctx->n_vars_capacity &&
         ctx->dist_offsets[var_id] != 0) {
-        int64_t v = _pick_value_dist(ctx, var_id, lo, hi);
-        return _pick_avoiding_holes(ctx, var_id, v, lo, hi);
+        v = _pick_value_dist(ctx, var_id, lo, hi);
+    } else {
+        v = _rand_range64(ctx, lo, hi);
     }
-
-    int64_t v = _rand_range64(ctx, lo, hi);
-    return _pick_avoiding_holes(ctx, var_id, v, lo, hi);
+    v = _pick_avoiding_holes(ctx, var_id, v, lo, hi);
+    if (keep && ctx->keep_state[var_id] == KEEP_NONE) {
+        ctx->keep_state[var_id] = KEEP_SET;
+        ctx->keep_val[var_id]   = v;
+    }
+    return v;
 }
 
 /* Which half of a conflict split to explore first.
@@ -769,6 +820,24 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
             ctx->phase_save[i] = var_lo64(ctx, &ctx->vars[i]);
     }
 
+    /* Kept draws (see _pick_value) are per solve: a seeded solve starts
+     * with none. DVS_KEEP_DRAWS=0 turns keeping off. */
+    ctx->keep_on = 0;
+    if (opts && opts->seed != 0 && _keep_draws_enabled() && ctx->n_vars > 0) {
+        if (ctx->keep_cap < ctx->n_vars) {
+            int64_t *kv = (int64_t *)realloc(ctx->keep_val,
+                                             ctx->n_vars * sizeof(int64_t));
+            if (kv) ctx->keep_val = kv;
+            uint8_t *ks = (uint8_t *)realloc(ctx->keep_state, ctx->n_vars);
+            if (ks) ctx->keep_state = ks;
+            if (kv && ks) ctx->keep_cap = ctx->n_vars;
+        }
+        if (ctx->keep_cap >= ctx->n_vars) {
+            memset(ctx->keep_state, KEEP_NONE, ctx->n_vars);
+            ctx->keep_on = 1;
+        }
+    }
+
     /* Default restart parameters: 100 conflicts per restart,
      * 10000 max restarts.  Caller can override via opts. */
     uint32_t max_conflicts  = (opts && opts->max_conflicts > 0)
@@ -900,6 +969,10 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
             pr = dvs_solver_propagate(ctx);
         }
 
+        /* The decision just made conflicted: its value is not kept. */
+        if (pr == PROP_CONFLICT && ctx->keep_on && x_id < ctx->keep_cap)
+            ctx->keep_state[x_id] = KEEP_DEAD;
+
         /* ── Conflict loop ── */
         while (pr == PROP_CONFLICT) {
             /* An aborted propagation proves nothing: no unsat, no learning. */
@@ -934,6 +1007,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                 trail_backtrack(ctx, 0);
                 local_conflicts = 0;
                 restart_count++;
+                ctx->keep_on = 0;   /* see _pick_value */
                 luby_idx++;
                 luby_limit = _luby(luby_idx) * max_conflicts;
 

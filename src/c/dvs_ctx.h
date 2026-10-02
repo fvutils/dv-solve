@@ -104,6 +104,12 @@ typedef struct dvs_ctx_s {
     uint32_t          *watcher_heads; /* array[n_vars] in static pool  */
     DecisionRecord    *decisions;     /* array[MAX_DECISION_DEPTH]     */
     int64_t           *phase_save;    /* last tried value per var      */
+    /* A seeded solve's first draw per var, kept for the rest of the solve
+     * (see _pick_value). keep_state: KEEP_NONE / KEEP_SET / KEEP_DEAD. */
+    int64_t           *keep_val;
+    uint8_t           *keep_state;
+    uint32_t           keep_cap;
+    uint8_t            keep_on;       /* keeping applies to this solve now */
     CheckpointMark     checkpoints[MAX_CHECKPOINTS];
     uint32_t           n_checkpoints;
     uint32_t          *prop_refs;     /* pool offsets of propagators   */
@@ -124,6 +130,10 @@ typedef struct dvs_ctx_s {
     uint32_t          *dist_offsets;  /* pool offset per var -> DistMeta, 0=none */
     /* Per-variable hole list for randc exclusions (Sprint 8) */
     uint32_t          *var_holes_head; /* pool offset per var -> HoleEntry, 0=none */
+    /* The size of the constant set an unconditional `x inside {...}` holds
+     * x to (0 = none): a bound on its domain's size for variable selection,
+     * which its bounds alone overstate by the holes between the values. */
+    uint64_t          *var_n_values;
     /* Union-find alias table: var_alias[i] == representative of var i.
      * If var_alias[i] == i, the var is its own representative.
      * NULL if aliasing is not enabled. */
