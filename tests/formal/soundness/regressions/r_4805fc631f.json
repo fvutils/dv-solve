@@ -1,0 +1,15 @@
+{
+ "why": "seed=2026100201 i=293 door=smt2-incr[2] expect=sat got=unsat",
+ "widths": {
+  "x": 65,
+  "y": 65
+ },
+ "cons": [
+  [
+   "true"
+  ],
+  [
+   "false"
+  ]
+ ]
+}

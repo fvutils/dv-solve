@@ -148,6 +148,16 @@ class Gen:
             a, b = rng.sample(names, 2)
             if self.widths[a] == self.widths[b]:
                 self.bins.add("shape:alias")
-                cons.append(("=", "bool", ("var", a, self.widths[a]), ("var", b, self.widths[b])))
+                w = self.widths[a]
+                cons.append(("=", "bool", ("var", a, w), ("var", b, w)))
+                if rng.random() < 0.5:
+                    # A guarded comparison on the variable compile merges away:
+                    # the gated compile path must act on the kept one.
+                    self.bins.add("shape:alias-guarded")
+                    k = self.const(w)
+                    cons.append(("ite", "bool", ("=", "bool", ("var", b, w), k),
+                                 (rng.choice(["bvult", "bvugt", "="]), "bool", ("var", b, w),
+                                  self.const(w)),
+                                 self.boolean(0)))
         self.bins.add(f"size:{len(cons)}")
         return Problem(dict(self.widths), cons, set(self.bins))

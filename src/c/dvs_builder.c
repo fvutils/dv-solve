@@ -319,6 +319,31 @@ static int _cut_list(dvs_problem_t *sp, dvs_expr_t *head, uint32_t *count,
     return 0;
 }
 
+/* Advance a newest-first list head past its items beyond `keep`. */
+static int _drop_newest(dvs_builder_t *b, dvs_expr_t *head, uint32_t *count,
+                        uint32_t keep) {
+    if (keep > *count) return -1;
+    while (*count > keep) {
+        if (*head == EXPR_NULL) return -1;
+        *head = *(const dvs_expr_t *)dvs_builder_ref_ptr(b, *head);
+        (*count)--;
+    }
+    return 0;
+}
+
+int dvs_builder_rewind(dvs_builder_t *b, const dvs_builder_mark_t *m) {
+    if (m->n_vars > b->n_vars || m->n_constraints > b->n_constraints ||
+        m->n_sources > b->n_sources || m->n_alldiffs > b->n_alldiffs ||
+        m->n_softs > b->n_softs || m->n_dists > b->n_dists)
+        return -1;
+    return (_drop_newest(b, &b->vars_head, &b->n_vars, m->n_vars) ||
+            _drop_newest(b, &b->constraints_head, &b->n_constraints, m->n_constraints) ||
+            _drop_newest(b, &b->sources_head, &b->n_sources, m->n_sources) ||
+            _drop_newest(b, &b->allDiff_head, &b->n_alldiffs, m->n_alldiffs) ||
+            _drop_newest(b, &b->softs_head, &b->n_softs, m->n_softs) ||
+            _drop_newest(b, &b->dists_head, &b->n_dists, m->n_dists)) ? -1 : 0;
+}
+
 dvs_problem_t *dvs_builder_finalize_since(dvs_builder_t *b,
                                      const dvs_builder_mark_t *m, size_t *out_size) {
     size_t sz = 0;

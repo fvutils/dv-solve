@@ -443,6 +443,7 @@ typedef struct {
     uint32_t             push_n_aux_problems[32];
     uint32_t             push_n_named[32];
     uint32_t             push_n_core_hist[32];
+    dvs_builder_mark_t   push_bmark[32];     /* builder position at each push */
     uint8_t              push_incomplete[32];  /* `incomplete` at each push */
     uint32_t             push_depth;
 

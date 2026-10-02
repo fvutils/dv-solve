@@ -1611,6 +1611,20 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
             int64_t vmax = (cv_w < 64) ? (int64_t)(((uint64_t)1 << cv_w) - 1)
                                        : INT64_MAX;
             int fold = -1;  /* -1 none, 0 false, 1 true */
+            if (cv_w >= 64) {
+                /* A 64-bit unsigned var: the constant is a 64-bit PATTERN, and
+                 * one >= 2^63 is negative as int64. Read as signed, `0 <= K`
+                 * folded to false (B64). Compare as unsigned; the only
+                 * decided cases are the ends of [0, 2^64-1]. */
+                uint64_t u = (uint64_t)cmp_cv;
+                switch (eff) {
+                case DVS_BIN_LT:  fold = (u == 0) ? 0 : -1; break;
+                case DVS_BIN_LTE: fold = (u == UINT64_MAX) ? 1 : -1; break;
+                case DVS_BIN_GT:  fold = (u == UINT64_MAX) ? 0 : -1; break;
+                case DVS_BIN_GTE: fold = (u == 0) ? 1 : -1; break;
+                default: break;
+                }
+            } else
             switch (eff) {
             case DVS_BIN_LT:  fold = (cmp_cv <= 0) ? 0 : (cmp_cv >  vmax ? 1 : -1); break;
             case DVS_BIN_LTE: fold = (cmp_cv <  0) ? 0 : (cmp_cv >= vmax ? 1 : -1); break;
@@ -3320,13 +3334,20 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                     /* Constant folding: CONST negated_op CONST */
                     if (_is_const(sp, inner->lhs, &lc2) && _is_const(sp, inner->rhs, &rc2)) {
                         int truth;
+                        /* As in the CONST op CONST fold: two sized unsigned
+                         * constants order as unsigned (a 64-bit pattern may be
+                         * >= 2^63). */
+                        const ExprConst *lce = (const ExprConst *)dvs_pool_ptr(&sp->pool, inner->lhs);
+                        const ExprConst *rce = (const ExprConst *)dvs_pool_ptr(&sp->pool, inner->rhs);
+                        int uns = lce->width && !lce->is_signed && rce->width && !rce->is_signed;
+                        uint64_t ul = (uint64_t)lc2, ur = (uint64_t)rc2;
                         switch (negated) {
                         case DVS_BIN_EQ:  truth = (lc2 == rc2); break;
                         case DVS_BIN_NEQ: truth = (lc2 != rc2); break;
-                        case DVS_BIN_LT:  truth = (lc2 <  rc2); break;
-                        case DVS_BIN_LTE: truth = (lc2 <= rc2); break;
-                        case DVS_BIN_GT:  truth = (lc2 >  rc2); break;
-                        case DVS_BIN_GTE: truth = (lc2 >= rc2); break;
+                        case DVS_BIN_LT:  truth = uns ? (ul <  ur) : (lc2 <  rc2); break;
+                        case DVS_BIN_LTE: truth = uns ? (ul <= ur) : (lc2 <= rc2); break;
+                        case DVS_BIN_GT:  truth = uns ? (ul >  ur) : (lc2 >  rc2); break;
+                        case DVS_BIN_GTE: truth = uns ? (ul >= ur) : (lc2 >= rc2); break;
                         default:      truth = 1;             break;
                         }
                         return truth ? 1 : -1;

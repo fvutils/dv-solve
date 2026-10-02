@@ -96,6 +96,14 @@ dvs_builder_mark_t dvs_builder_mark(const dvs_builder_t *b);
 dvs_problem_t *dvs_builder_finalize_since(dvs_builder_t *b,
                                      const dvs_builder_mark_t *mark, size_t *size);
 
+/**
+ * Drop every item added since `mark` (the builder then finalizes as it would
+ * have at the mark). Pool storage is not reclaimed. Returns -1 if `mark` is
+ * ahead of `b`. Used by the SMT-LIB2 frontend's (pop) when no CDCL context
+ * holds the scope.
+ */
+int dvs_builder_rewind(dvs_builder_t *b, const dvs_builder_mark_t *mark);
+
 /* ------------------------------------------------------------------ */
 /* Low-level allocation                                                */
 /* ------------------------------------------------------------------ */

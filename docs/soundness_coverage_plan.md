@@ -312,6 +312,10 @@ The original questions, for the record:
 | B58: assertions after a partly compiled first check were dropped | Fixed in the SMT-LIB2 frontend (§9.9) |
 | B60: `ite_value` retired itself with its branch operand still a range | Fixed (§9.10) |
 | B61: a self-referential strict compare at 31+ bits exhausted memory | Fixed: same-variable compares decided at once; a deadline and trail cap inside propagation turn any other climb into a timeout (§9.11) |
+| B62: `x <s x` cost the whole CDCL budget at 63 bits | Fixed: the frontend folds a comparison of a variable with itself (§9.12) |
+| B63: push/pop with variables wider than 64 bits kept popped assertions | Fixed: push records a builder mark, pop rewinds to it; a failed compile no longer leaves a half-built context (§9.12) |
+| B64: a Boolean `ite` branch comparing 64-bit constants folded as signed | Fixed (§9.12) |
+| B65: `ite_value_64` used signed min/max on unsigned 64-bit domains | Fixed (§9.12) |
 | Guard-gated propagators: the learnt clause did not cite the guard | Fixed: analysis adds `guard >= 1` for a gated propagator's step |
 | Minimised `get-unsat-core` | Done; tests pass, including 400 brute-force random cores and a 6000-case stress run |
 | Pinned regressions | `tests/formal/test_lcg_soundness.py` (B50 ×2, B51, the livelock); `test_signed_ops.py::test_divrem_of_variables_matches_z3` (B52); `test_bool_ite_constraint.py` and `tests/unit/test_gated_constraints.py` (B53); `tests/c/test_prop_exhaustive.c` (B54, B55, B57, mul) |
@@ -777,4 +781,37 @@ Coverage lessons:
 - **Resource exhaustion is an oracle outcome.** The campaign already treats
   a timeout as a failure. The regression tests now also cap memory, so a
   climb fails the test instead of the machine.
+
+### 9.12 B62–B65: the nightly job's first trial
+
+A 25-minute local trial of `nightly.sh` in the runner image (4 processes)
+found four bugs. Three are wrong answers, all on HEAD, and all at widths the
+narrow campaign never reaches:
+- **B64:** `_bool_to_var`'s range fold for an unsigned variable compared a
+  64-bit constant as signed, so `(ite false true (bvule #x0 K))` with
+  `K >= 2^63` answered `unsat`. The negated-compare constant fold had the
+  same flaw.
+- **B65:** `_fire_ite_value_64` intersected an unsigned 64-bit domain
+  `[0, 2^64-1]`, stored as `[0, -1]`, with signed min/max. `x <= ite(true, x,
+  y)` answered `unsat` through the builder at 64 bits only.
+- **B63:** with a variable wider than 64 bits there is no CDCL context.
+  `push` failed and recorded no scope, or later checkpointed a context that
+  was never compiled, and `pop` left the popped assertions in the builder the
+  bitblast path solves: a popped `false` answered `unsat`. Fix: every push
+  records a builder mark, `pop` rewinds to it (`dvs_builder_rewind`), and a
+  failed compile releases its context.
+- **B62** (speed): `(bvsgt x x)` lowered each side to its own
+  `x ^ 2^(w-1)` auxiliary and spent the full CDCL budget at 63 bits. The
+  frontend now folds same-variable comparisons.
+
+Coverage lessons:
+- **The 2^63 cliff is still the richest seam.** B64 and B65 are the fifth and
+  sixth instances, after B22, B26, B29 and B9. Every propagator and fold that
+  touches 64-bit unsigned values needs boundary-straddling domains in the
+  propagator harness, not only small widths. That is the next harness
+  extension.
+- **Wide × protocol is a cross.** Push/pop was tested at narrow widths only;
+  the bitblast-only route had its own, untested, scope handling.
+- **The nightly earns its budget on day one.** The first trial run found more
+  than the previous 12,000 narrow problems did.
 

@@ -154,7 +154,8 @@ def _campaign(build: Path, n: int, seed: int, extra_env=None, limit_ms: int = 10
                **(extra_env or {}))
     r = _run([sys.executable, "-m", "tests.formal.soundness.campaign", "--seed", str(seed),
               "--n", str(n), "--exe", str(build / "dv-solve-smt2"), "--out",
-              str(build / "mut_regressions"), "--builder-limit-ms", str(limit_ms)],
+              str(build / "mut_regressions"), "--builder-limit-ms", str(limit_ms),
+              "--wide", "0.1"],
              cwd=str(REPO), env=env, timeout=7200)
     stats = {}
     for line in r.stdout.splitlines():

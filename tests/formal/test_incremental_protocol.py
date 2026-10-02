@@ -242,3 +242,25 @@ def test_b14_blocking_clause_enumeration_yields_distinct_models() -> None:
     # The blocking clauses remove one candidate each; after all 5 the domain of
     # `a` under `a < 5` is exhausted.
     assert res == ["sat"] * 5 + ["unsat"], res
+
+
+@pytest.mark.parametrize("width", [8, 65])
+@pytest.mark.parametrize("cmds,expect", [
+    ("(assert true)(check-sat)(push 1)(assert false)(check-sat)(pop 1)(check-sat)",
+     ["sat", "unsat", "sat"]),
+    ("(push 1)(assert (= x (_ bv1 {w})))(push 1)(assert (= x (_ bv2 {w})))(pop 1)(check-sat)",
+     ["sat"]),
+    ("(push 1)(assert (= x (_ bv1 {w})))(check-sat)(push 1)(assert (= x (_ bv2 {w})))"
+     "(check-sat)(pop 1)(check-sat)(pop 1)(assert (= x (_ bv2 {w})))(check-sat)",
+     ["sat", "unsat", "sat", "sat"]),
+    ("(push 2)(assert (= x (_ bv3 {w})))(pop 2)(assert (= x (_ bv4 {w})))(check-sat)", ["sat"]),
+])
+def test_push_pop_with_wide_variables(width, cmds, expect):
+    # B63: with a variable wider than 64 bits there is no CDCL context (bitblast
+    # only). push failed and recorded no scope, or checkpointed a context that
+    # was never compiled, and pop left the popped assertions in the builder the
+    # bitblast path solves: a popped `false` answered unsat. Width 8 is the
+    # CDCL-context control. Found by the nightly campaign's wide mode.
+    out, _, _ = _run_interactive(
+        f"(set-logic QF_BV)(declare-const x (_ BitVec {width})){cmds.format(w=width)}(exit)")
+    assert _results(out) == expect

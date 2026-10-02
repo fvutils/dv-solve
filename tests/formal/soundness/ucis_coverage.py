@@ -19,7 +19,7 @@ COVERPOINTS = {
     "operator": ("op:", OPERATORS),
     "comparison": ("cmp:", CMP),
     "boolean": ("bool:", ["and", "or2", "or3", "or5", "not", "=>", "xor", "ite", "ite-eq-cond"]),
-    "operand_shape": ("shape:", ["shared-subterm", "same-operand", "alias"]),
+    "operand_shape": ("shape:", ["shared-subterm", "same-operand", "alias", "alias-guarded"]),
     "constant": ("const:", ["zero", "one", "max", "sign-min", "sign-max", "interior"]),
     "problem_size": ("size:", [str(n) for n in range(1, 8)]),
     "width": ("width:", ["narrow", "16", "32", "33", "63", "64", "65"]),

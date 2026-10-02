@@ -1079,6 +1079,22 @@ static dvs_expr_t _signed_divrem_expr(dvs_builder_t *b, dvs_expr_t S_, dvs_expr_
     return dvs_builder_expr_ite(b, msb_s, hi, lo);
 }
 
+/* Both operands are the same variable (after flattening). A comparison of a
+ * variable with itself is decided -- and left to the engines it is not:
+ * `x <s x` lowers each side to its own `x ^ 2^(w-1)` auxiliary, and the
+ * search spends its whole CDCL budget on it at 63 bits (B62). */
+static int _same_var(Smt2Frontend *fe, dvs_expr_t a, dvs_expr_t b) {
+    const void *pa = dvs_builder_ref_ptr(fe->builder, a);
+    const void *pb = dvs_builder_ref_ptr(fe->builder, b);
+    if (!pa || !pb || *(const ExprKind *)pa != EXPR_VAR || *(const ExprKind *)pb != EXPR_VAR)
+        return 0;
+    return ((const ExprVar *)pa)->var_id == ((const ExprVar *)pb)->var_id;
+}
+
+static TaggedExpr _bool_lit(Smt2Frontend *fe, int v) {
+    return (TaggedExpr){ { _bv_const(fe, v ? 1 : 0, 1), 1 }, 2, NULL };
+}
+
 /* Signed comparison `a <op>s b`, lowered via the MSB-flip identity
  *   a <s b  <=>  (a ^ 2^(w-1)) <u (b ^ 2^(w-1))
  * which maps signed order onto unsigned (offset-binary) order.
@@ -1097,6 +1113,8 @@ static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
     if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
     TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
     if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
+    if (_same_var(fe, a.te.ref, b.te.ref))
+        return _bool_lit(fe, binop == DVS_BIN_LTE || binop == DVS_BIN_GTE);
     uint16_t sw = a.te.width ? a.te.width : b.te.width;
     if (sw == 0 || sw > 64) {
         fprintf(fe->err, "error: signed compare of width %u unsupported\n",
@@ -1578,6 +1596,8 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL; \
         TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2])); \
         if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
+        if (_same_var(fe, a.te.ref, b.te.ref)) \
+            return _bool_lit(fe, binop == DVS_BIN_LTE || binop == DVS_BIN_GTE); \
         dvs_expr_t r = dvs_builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
         return (TaggedExpr){ { r, 1 }, 0, NULL }; \
     }
@@ -2894,6 +2914,11 @@ static int _ensure_compiled(Smt2Frontend *fe) {
     if (fe->problem) { free(fe->problem); fe->problem = NULL; }
     fe->problem = _explicit(dvs_builder_finalize(fe->builder, &fe->problem_size));
     if (!fe->problem) return -1;
+    /* The builder still holds every assertion; if no context comes of this
+     * (e.g. variables wider than 64 bits), the bitblast path re-finalizes
+     * from it after later asserts or a pop. A successful compile clears it. */
+    fe->builder_retained = 1;
+    fe->problem_dirty    = 0;
 
     /* The static ctx pool is a fixed-capacity, relocatable bump allocator by
      * design (32-bit offsets, snapshot wholesale for push/pop checkpoints), so
@@ -2938,6 +2963,15 @@ static int _ensure_compiled(Smt2Frontend *fe) {
             free(fe->ctx_buf); fe->ctx_buf = NULL;
             sz = (sz * 4 < (size_t)CTX_BUF_SIZE) ? sz * 4 : (size_t)CTX_BUF_SIZE;
             continue;
+        }
+        if (rc != -2) {
+            /* No usable context (e.g. a variable wider than 64 bits): release
+             * it. Leaving it made the next push checkpoint a context that was
+             * never compiled, and the pop then kept the popped assertions in
+             * the builder the bitblast path solves -- a wrong unsat (B63). */
+            dvs_solver_destroy(fe->ctx); fe->ctx = NULL;
+            dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
+            free(fe->ctx_buf); fe->ctx_buf = NULL;
         }
         return rc;
     }
@@ -4626,13 +4660,32 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->push_n_named[fe->push_depth] = fe->n_named;
             fe->push_n_core_hist[fe->push_depth] = fe->n_core_hist;
             fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
+            fe->push_bmark[fe->push_depth] = dvs_builder_mark(fe->builder);
             fe->push_depth++;
         }
         return 0;
     }
     if (crc < 0) {
-        fprintf(fe->err, "error: push: compile failed\n");
-        return -1;
+        /* No CDCL context (e.g. variables wider than 64 bits: bitblast only).
+         * The scope still has to exist: record a frame whose pop rewinds the
+         * builder. Failing the push instead left everything asserted after it
+         * in force forever -- a popped `false` answered unsat (B63). */
+        if (fe->push_depth + n > SMT2_MAX_PUSH) {
+            fprintf(fe->err, "error: push: max push depth exceeded\n");
+            return -1;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            fe->push_stack[fe->push_depth] = (uint32_t)-1;
+            fe->push_n_vars[fe->push_depth] = fe->n_vars;
+            fe->push_n_array_vars[fe->push_depth] = fe->n_array_vars;
+            fe->push_n_aux_problems[fe->push_depth] = fe->n_aux_problems;
+            fe->push_n_named[fe->push_depth] = fe->n_named;
+            fe->push_n_core_hist[fe->push_depth] = fe->n_core_hist;
+            fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
+            fe->push_bmark[fe->push_depth] = dvs_builder_mark(fe->builder);
+            fe->push_depth++;
+        }
+        return 0;
     }
     if (_flush_aux(fe) < 0) return -1;
     if (fe->has_result) dvs_solver_reset(fe->ctx);
@@ -4655,6 +4708,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->push_n_named[fe->push_depth - 1] = fe->n_named;
         fe->push_n_core_hist[fe->push_depth - 1] = fe->n_core_hist;
         fe->push_incomplete[fe->push_depth - 1] = (uint8_t)fe->incomplete;
+        fe->push_bmark[fe->push_depth - 1] = dvs_builder_mark(fe->builder);
     }
     return 0;
 }
@@ -4665,15 +4719,35 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
      * reach the ctx at the next flush -- a retracted assertion still enforced,
      * i.e. a wrong `unsat` (B37). This also ends CDCL retention: the builder
      * can no longer stand in for the full, current assertion set. */
-    if (fe->compiled) {
-        dvs_builder_reset(fe->builder);
-        fe->cdcl_retained = 0;
-        memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
-        fe->has_aux = 0;
-    }
     uint32_t n = 1;
     if (cmd->list.count == 2 && cmd->list.items[1]->kind == SEXPR_NUMERAL) {
         n = (uint32_t)cmd->list.items[1]->numval;
+    }
+    if (fe->compiled) {
+        if (fe->cdcl_retained && n <= fe->push_depth &&
+            dvs_builder_rewind(fe->builder, &fe->push_bmark[fe->push_depth - n]) == 0) {
+            /* Rewind to the outermost popped push instead: the builder then
+             * holds exactly the assertions still in scope, so retention (and
+             * the bitblast route, which finalizes from it) stays valid. A push
+             * flushes first, so everything up to its mark reached the ctx.
+             * Resetting the builder here left a bitblast-routed check after
+             * the pop solving a stale problem -- a wrong unsat (B63). */
+            fe->aux_mark = fe->push_bmark[fe->push_depth - n];
+        } else {
+            dvs_builder_reset(fe->builder);
+            fe->cdcl_retained = 0;
+            memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
+        }
+        fe->has_aux = 0;
+        if (fe->problem) fe->problem_dirty = 1;
+    } else if (n <= fe->push_depth) {
+        /* No compiled context: the scopes live only in the builder, which
+         * the bitblast path finalizes from. Rewind it to the outermost
+         * popped push, and make the next check-sat re-finalize (B63). */
+        if (dvs_builder_rewind(fe->builder, &fe->push_bmark[fe->push_depth - n]) != 0)
+            SMT2_TAINT(fe, "pop could not rewind the assertion set");
+        if (fe->problem) fe->problem_dirty = 1;
+        fe->has_result = 0;
     }
     for (uint32_t i = 0; i < n; i++) {
         if (fe->push_depth == 0) {

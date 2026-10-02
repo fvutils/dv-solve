@@ -2465,6 +2465,11 @@ static PropResult _fire_ite_value_64(Propagator *self, dvs_ctx_t *ctx) {
     uint32_t       cid  = ws->var_ids[1];
     uint32_t       aid  = ws->var_ids[2];
     uint32_t       bid  = ws->var_ids[3];
+    /* Bounds are compared in r's order: a 64-bit unsigned domain [0, 2^64-1]
+     * is stored as [0, -1], and signed min/max/</> on it saw an empty
+     * intersection where there was none -- `x <= ite(true, x, y)` came back
+     * unsat at 64 bits (B65, the 2^63 cliff of B22/B26). */
+    const Variable *rv  = &ctx->vars[rid];
 
     int64_t clo = var_lo64(ctx, &ctx->vars[cid]);
     int64_t chi = var_hi64(ctx, &ctx->vars[cid]);
@@ -2479,9 +2484,9 @@ static PropResult _fire_ite_value_64(Propagator *self, dvs_ctx_t *ctx) {
 
     if (clo == 1 && chi == 1) {
         /* cond is true: r == a */
-        int64_t lo = i64_max(rlo, alo);
-        int64_t hi = i64_min(rhi, ahi);
-        if (lo > hi) return PROP_CONFLICT;
+        int64_t lo = var_b_max(rv, rlo, alo);
+        int64_t hi = var_b_min(rv, rhi, ahi);
+        if (var_b_gt(rv, lo, hi)) return PROP_CONFLICT;
         if ((res = ctx_tighten_lb64(ctx, rid, lo)) != PROP_OK) return res;
         if ((res = ctx_tighten_ub64(ctx, rid, hi)) != PROP_OK) return res;
         if ((res = ctx_tighten_lb64(ctx, aid, lo)) != PROP_OK) return res;
@@ -2498,9 +2503,9 @@ static PropResult _fire_ite_value_64(Propagator *self, dvs_ctx_t *ctx) {
         if (rlo == rhi && alo == ahi && alo == rlo) return PROP_ENTAILED;
     } else if (clo == 0 && chi == 0) {
         /* cond is false: r == b */
-        int64_t lo = i64_max(rlo, blo);
-        int64_t hi = i64_min(rhi, bhi);
-        if (lo > hi) return PROP_CONFLICT;
+        int64_t lo = var_b_max(rv, rlo, blo);
+        int64_t hi = var_b_min(rv, rhi, bhi);
+        if (var_b_gt(rv, lo, hi)) return PROP_CONFLICT;
         if ((res = ctx_tighten_lb64(ctx, rid, lo)) != PROP_OK) return res;
         if ((res = ctx_tighten_ub64(ctx, rid, hi)) != PROP_OK) return res;
         if ((res = ctx_tighten_lb64(ctx, bid, lo)) != PROP_OK) return res;
@@ -2518,15 +2523,15 @@ static PropResult _fire_ite_value_64(Propagator *self, dvs_ctx_t *ctx) {
          * Without this, an aux r whose domain is already pinned by an
          * outer constraint cannot drive the search away from values that
          * couldn't possibly come from the surviving branch. */
-        int a_disjoint = (rhi < alo) || (rlo > ahi);
-        int b_disjoint = (rhi < blo) || (rlo > bhi);
+        int a_disjoint = var_b_lt(rv, rhi, alo) || var_b_gt(rv, rlo, ahi);
+        int b_disjoint = var_b_lt(rv, rhi, blo) || var_b_gt(rv, rlo, bhi);
         if (a_disjoint && b_disjoint) return PROP_CONFLICT;
         if (a_disjoint) {
             /* must be else-branch -> cond = 0 */
             if ((res = ctx_tighten_ub64(ctx, cid, 0)) != PROP_OK) return res;
-            int64_t lo = i64_max(rlo, blo);
-            int64_t hi = i64_min(rhi, bhi);
-            if (lo > hi) return PROP_CONFLICT;
+            int64_t lo = var_b_max(rv, rlo, blo);
+            int64_t hi = var_b_min(rv, rhi, bhi);
+            if (var_b_gt(rv, lo, hi)) return PROP_CONFLICT;
             if ((res = ctx_tighten_lb64(ctx, rid, lo)) != PROP_OK) return res;
             if ((res = ctx_tighten_ub64(ctx, rid, hi)) != PROP_OK) return res;
             if ((res = ctx_tighten_lb64(ctx, bid, lo)) != PROP_OK) return res;
@@ -2536,9 +2541,9 @@ static PropResult _fire_ite_value_64(Propagator *self, dvs_ctx_t *ctx) {
         if (b_disjoint) {
             /* must be then-branch -> cond = 1 */
             if ((res = ctx_tighten_lb64(ctx, cid, 1)) != PROP_OK) return res;
-            int64_t lo = i64_max(rlo, alo);
-            int64_t hi = i64_min(rhi, ahi);
-            if (lo > hi) return PROP_CONFLICT;
+            int64_t lo = var_b_max(rv, rlo, alo);
+            int64_t hi = var_b_min(rv, rhi, ahi);
+            if (var_b_gt(rv, lo, hi)) return PROP_CONFLICT;
             if ((res = ctx_tighten_lb64(ctx, rid, lo)) != PROP_OK) return res;
             if ((res = ctx_tighten_ub64(ctx, rid, hi)) != PROP_OK) return res;
             if ((res = ctx_tighten_lb64(ctx, aid, lo)) != PROP_OK) return res;
@@ -2546,8 +2551,8 @@ static PropResult _fire_ite_value_64(Propagator *self, dvs_ctx_t *ctx) {
             return PROP_OK;
         }
         /* Both branches still feasible: r is the interval hull of a, b. */
-        int64_t lo = i64_min(alo, blo);
-        int64_t hi = i64_max(ahi, bhi);
+        int64_t lo = var_b_min(rv, alo, blo);
+        int64_t hi = var_b_max(rv, ahi, bhi);
         if ((res = ctx_tighten_lb64(ctx, rid, lo)) != PROP_OK) return res;
         if ((res = ctx_tighten_ub64(ctx, rid, hi)) != PROP_OK) return res;
     }
