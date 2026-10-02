@@ -92,11 +92,16 @@ typedef struct {
 /* Array sort and value types                                          */
 /* ------------------------------------------------------------------ */
 
-/* Description of an (Array (_ BitVec M) (_ BitVec N)) sort. */
+/* Description of an (Array (_ BitVec M) (_ BitVec N)) sort.
+ *
+ * A nested (Array (_ BitVec I) (Array (_ BitVec J) (_ BitVec N))) -- Verilator's
+ * queues of queues and arrays in structs -- is one flat array keyed by the
+ * concatenation of both indices: addr_width = I + J, inner_addr = J. */
 typedef struct {
-    uint8_t  addr_width;   /* M */
+    uint8_t  addr_width;   /* M (I + J when nested) */
     uint8_t  data_width;   /* N */
-    uint8_t  _pad[2];
+    uint8_t  inner_addr;   /* J for a nested sort, else 0 */
+    uint8_t  _pad[1];
 } Smt2ArraySort;
 
 /* Frontend-side array value handle: vector of n_elems ExprRefs of width N.
@@ -146,11 +151,19 @@ typedef struct Smt2ArrayValue {
     uint32_t      n_sparse;
     uint32_t      sparse_cap;
     uint64_t     *sparse_idx;     /* concrete indices, n_sparse entries */
+    uint64_t     *sparse_idx_hi;  /* their bits 64..127 (128-bit keys: Verilator's
+                                   * string-keyed associative arrays) */
     uint32_t     *sparse_varid;   /* solver var_id of each index's element var.
                                    * Stored as var_id (not dvs_expr_t) so get-value
                                    * survives the dvs_builder_reset that follows
                                    * compilation -- like the dense path's
                                    * name->var lookup. */
+
+    /* Slice view: (select A k) of a nested array A at a constant k, an array
+     * of the inner sort whose element j is A's flat element (k ++ j). A
+     * per-command transient; only select reads it. */
+    struct Smt2ArrayValue *slice_of;
+    uint64_t      slice_lo, slice_hi;  /* k */
 } Smt2ArrayValue;
 
 /* Symbol-table entry for an array-typed declared variable. */

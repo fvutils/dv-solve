@@ -253,22 +253,42 @@ static void _flag_wide_arith(Smt2Frontend *fe, uint32_t width) {
 }
 
 /* Returns 1 on success (populates *out), 0 if not an Array sort,
- * -1 on malformed Array sort. */
-static int _parse_array_sort(Smt2Frontend *fe, const Sexpr *s, Smt2ArraySort *out) {
+ * -1 on malformed Array sort. A nested sort is accepted only where the caller
+ * handles one (`nested_ok`, the array declarations): elsewhere it is -1 as it
+ * always was. */
+static int _parse_array_sort_x(Smt2Frontend *fe, const Sexpr *s, Smt2ArraySort *out,
+                               int nested_ok) {
     /* (Array (_ BitVec M) (_ BitVec N)) */
     if (!s || s->kind != SEXPR_LIST) return 0;
     if (s->list.count != 3) return 0;
     if (!sexpr_is_symbol(s->list.items[0], "Array")) return 0;
 
     uint8_t addr_w = _parse_bitvec_sort(fe, s->list.items[1]);
-    uint8_t data_w = _parse_bitvec_sort(fe, s->list.items[2]);
+    if (addr_w == 0) return -1;
+    out->inner_addr = 0;
+    out->_pad[0] = 0;
 
-    if (addr_w == 0 || data_w == 0) return -1;
+    /* (Array (_ BitVec I) (Array (_ BitVec J) (_ BitVec N))): one flat array
+     * keyed by I ++ J (the key holds 128 bits). */
+    Smt2ArraySort inner;
+    if (nested_ok && _parse_array_sort_x(fe, s->list.items[2], &inner, 0) == 1) {
+        if ((uint32_t)addr_w + inner.addr_width > SMT2_MAX_BV_BITS) return -1;
+        out->addr_width = (uint8_t)(addr_w + inner.addr_width);
+        out->data_width = inner.data_width;
+        out->inner_addr = inner.addr_width;
+        return 1;
+    }
+
+    uint8_t data_w = _parse_bitvec_sort(fe, s->list.items[2]);
+    if (data_w == 0) return -1;
 
     out->addr_width = addr_w;
     out->data_width = data_w;
-    out->_pad[0] = out->_pad[1] = 0;
     return 1;
+}
+
+static int _parse_array_sort(Smt2Frontend *fe, const Sexpr *s, Smt2ArraySort *out) {
+    return _parse_array_sort_x(fe, s, out, 0);
 }
 
 /* Returns 1 if sort is an opaque (declare-sort) sort name. */
@@ -334,6 +354,23 @@ static int _parse_bv_sym_limbs(const Sexpr *sym, uint64_t *limbs, uint32_t n_lim
         }
     }
     return 1;
+}
+
+/* A constant array index, as the 128-bit key (lo, hi) reduced to `width` bits:
+ * a #x/#b literal of any accepted width or (_ bvN W). Returns 0 for anything
+ * else (a symbolic index). */
+static int _const_index(Smt2Frontend *fe, const Sexpr *s, uint32_t width,
+                        uint64_t *lo, uint64_t *hi);
+
+/* (k << J) | j over 128-bit keys: the flat key of element j of slice k. */
+static void _key_concat(uint64_t k_lo, uint64_t k_hi, uint64_t j_lo, uint64_t j_hi,
+                        uint32_t J, uint64_t *lo, uint64_t *hi) {
+    uint64_t sl, sh;
+    if (J == 0)       { sl = k_lo; sh = k_hi; }
+    else if (J >= 64) { sl = 0; sh = J >= 128 ? 0 : k_lo << (J - 64); }
+    else              { sl = k_lo << J; sh = (k_hi << J) | (k_lo >> (64 - J)); }
+    *lo = sl | j_lo;
+    *hi = sh | j_hi;
 }
 
 /* ------------------------------------------------------------------ */
@@ -412,9 +449,10 @@ static Smt2ArrayValue *_make_array_value(Smt2Frontend *fe, Smt2ArraySort sort) {
  * sparse, which answers `unknown` for what it cannot do: the refinement
  * compares model values as int64. */
 static int _abstract_sort(const Smt2Frontend *fe, Smt2ArraySort sort) {
+    if (sort.inner_addr) return 0;     /* nested: constant indices only, sparse */
+    if (sort.addr_width > 64 || sort.data_width > 64) return 0;
     if (fe->array_lazy) return 1;
-    return fe->array_auto && sort.addr_width > SMT2_MAX_ARRAY_ADDR_BITS
-        && sort.addr_width <= 64 && sort.data_width <= 64;
+    return fe->array_auto && sort.addr_width > SMT2_MAX_ARRAY_ADDR_BITS;
 }
 
 /* Declare a persistent array variable (element vars are solver vars).
@@ -432,8 +470,9 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
      * fresh vars; congruence is enforced at solve time. Registered in anodes[]
      * for uniform ownership/lookup with STORE/CONST/ITE nodes. A large array
      * otherwise starts sparse and is promoted on first need (_promote_sparse):
-     * constant-index-only arrays, Verilator's unpacked arrays, stay fast. */
-    if (fe->array_lazy) {
+     * constant-index-only arrays, Verilator's unpacked arrays, stay fast. A
+     * nested array is always sparse (constant indices only). */
+    if (fe->array_lazy && _abstract_sort(fe, sort)) {
         Smt2ArrayValue *base = _anode_new(fe, SMT2_ANODE_BASE, sort);
         if (!base) return NULL;
         Smt2ArrayVar *av = &fe->array_vars[fe->n_array_vars++];
@@ -445,9 +484,10 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
         return av;
     }
 
-    /* Sparse array: address space too large to expand densely. Element vars are
-     * created lazily on first select/store of each concrete index. */
-    if (sort.addr_width > SMT2_MAX_ARRAY_ADDR_BITS) {
+    /* Sparse array: address space too large to expand densely, or nested.
+     * Element vars are created lazily on first select/store of each concrete
+     * index. */
+    if (sort.addr_width > SMT2_MAX_ARRAY_ADDR_BITS || sort.inner_addr) {
         Smt2ArrayVar *av = &fe->array_vars[fe->n_array_vars++];
         uint32_t copy_len = nlen < SMT2_MAX_NAME - 1 ? nlen : SMT2_MAX_NAME - 1;
         memcpy(av->name, name, copy_len);
@@ -504,16 +544,20 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
  * `unknown` result rather than a wrong answer). */
 /* Returns 1 and sets *out_varid if concrete index `k` already has an element
  * var; else returns 0. */
-static int _sparse_find(Smt2ArrayValue *arr, uint64_t k, uint32_t *out_varid) {
+static int _sparse_find(Smt2ArrayValue *arr, uint64_t k, uint64_t k_hi,
+                        uint32_t *out_varid) {
     for (uint32_t i = 0; i < arr->n_sparse; i++)
-        if (arr->sparse_idx[i] == k) { *out_varid = arr->sparse_varid[i]; return 1; }
+        if (arr->sparse_idx[i] == k && arr->sparse_idx_hi[i] == k_hi) {
+            *out_varid = arr->sparse_varid[i];
+            return 1;
+        }
     return 0;
 }
 
 static dvs_expr_t _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
-                            uint64_t k, int create) {
+                            uint64_t k, uint64_t k_hi, int create) {
     uint32_t existing;
-    if (_sparse_find(arr, k, &existing))
+    if (_sparse_find(arr, k, k_hi, &existing))
         return dvs_builder_expr_var(fe->builder, existing);
     if (!create) return EXPR_NULL;
 
@@ -527,6 +571,9 @@ static dvs_expr_t _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
         uint64_t *ni = (uint64_t *)realloc(arr->sparse_idx, nc * sizeof(uint64_t));
         if (!ni) return EXPR_NULL;
         arr->sparse_idx = ni;
+        uint64_t *nh = (uint64_t *)realloc(arr->sparse_idx_hi, nc * sizeof(uint64_t));
+        if (!nh) return EXPR_NULL;
+        arr->sparse_idx_hi = nh;
         uint32_t *nv = (uint32_t *)realloc(arr->sparse_varid, nc * sizeof(uint32_t));
         if (!nv) return EXPR_NULL;
         arr->sparse_varid = nv;
@@ -541,6 +588,7 @@ static dvs_expr_t _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
     _add_var(fe, nm, (uint32_t)strlen(nm), var_id, arr->sort.data_width);
     _bump_n_vars(fe, var_id + 1);
     arr->sparse_idx[arr->n_sparse] = k;
+    arr->sparse_idx_hi[arr->n_sparse] = k_hi;
     arr->sparse_varid[arr->n_sparse] = var_id;
     arr->n_sparse++;
     _builder_touched(fe);
@@ -816,6 +864,34 @@ static const TaggedExpr TAGGED_NULL = { { EXPR_NULL, 0 }, 0, NULL };
 
 static TaggedExpr _translate_tagged(Smt2Frontend *fe, const Sexpr *s);
 
+static int _const_index(Smt2Frontend *fe, const Sexpr *s, uint32_t width,
+                        uint64_t *lo, uint64_t *hi) {
+    const Sexpr *r = _resolve_sym(fe, s);
+    uint64_t l[SMT2_BV_MAX_LIMBS];
+    for (uint32_t i = 0; i < SMT2_BV_MAX_LIMBS; i++) l[i] = 0;
+    if (!r || width == 0 || width > SMT2_MAX_BV_BITS) return 0;
+    if (r->kind == SEXPR_BITVEC) {
+        if (r->bv.width > SMT2_MAX_BV_BITS) return 0;
+        if (r->bv.width > 64) {
+            if (!r->bv.limbs) return 0;
+            for (uint32_t i = 0; i < (r->bv.width + 63u) / 64u; i++) l[i] = r->bv.limbs[i];
+        } else {
+            l[0] = r->bv.value;
+        }
+    } else if (r->kind == SEXPR_LIST && r->list.count == 3 &&
+               sexpr_is_symbol(r->list.items[0], "_")) {
+        if (!_parse_bv_sym_limbs(r->list.items[1], l, SMT2_BV_MAX_LIMBS)) return 0;
+    } else {
+        return 0;
+    }
+    if (width < 64)       { l[0] &= ((uint64_t)1 << width) - 1; l[1] = 0; }
+    else if (width == 64) { l[1] = 0; }
+    else if (width < 128) { l[1] &= ((uint64_t)1 << (width - 64)) - 1; }
+    *lo = l[0];
+    *hi = l[1];
+    return 1;
+}
+
 /* Translation-time select on an abstract array: return the read var's dvs_expr_t.
  * The read-over-write / congruence axioms relating it to the store chain are
  * emitted later by _emit_array_axioms (Phase A) or lazily on a model (Phase B). */
@@ -878,6 +954,7 @@ static int _promote_sparse(Smt2Frontend *fe, Smt2ArrayValue *arr) {
     }
     fe->n_areads_user = fe->n_areads;
     free(arr->sparse_idx);   arr->sparse_idx = NULL;
+    free(arr->sparse_idx_hi); arr->sparse_idx_hi = NULL;
     free(arr->sparse_varid); arr->sparse_varid = NULL;
     arr->n_sparse = arr->sparse_cap = 0;
     arr->is_sparse = 0;
@@ -1614,6 +1691,37 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return TAGGED_NULL;
         }
 
+        /* A nested array, or a slice of one: constant indices only. (select A
+         * k) is a slice view; (select slice j) is A's flat element k ++ j. */
+        if (arr->slice_of || arr->sort.inner_addr) {
+            uint64_t lo, hi;
+            uint32_t w = arr->slice_of ? arr->sort.addr_width
+                       : (uint32_t)(arr->sort.addr_width - arr->sort.inner_addr);
+            if (!_const_index(fe, s->list.items[2], w, &lo, &hi)) {
+                SMT2_TAINT(fe, "symbolic index into a nested array");
+                return TAGGED_NULL;
+            }
+            if (arr->slice_of) {
+                uint64_t klo, khi;
+                _key_concat(arr->slice_lo, arr->slice_hi, lo, hi, arr->sort.addr_width,
+                            &klo, &khi);
+                dvs_expr_t e = _sparse_elem(fe, arr->slice_of, klo, khi, /*create=*/1);
+                if (e == EXPR_NULL) { SMT2_TAINT(fe, "sparse-array element could not be materialized"); return TAGGED_NULL; }
+                return (TaggedExpr){ { e, arr->sort.data_width }, 1, NULL };
+            }
+            Smt2ArrayValue *sl = (Smt2ArrayValue *)_cmd_alloc(fe, sizeof(Smt2ArrayValue));
+            if (!sl) { SMT2_TAINT(fe, "nested-array slice allocation failed"); return TAGGED_NULL; }
+            memset(sl, 0, sizeof(*sl));
+            sl->sort.addr_width = arr->sort.inner_addr;
+            sl->sort.data_width = arr->sort.data_width;
+            sl->store_idx_varid = UINT32_MAX;
+            sl->store_val       = EXPR_NULL;
+            sl->slice_of = arr;
+            sl->slice_lo = lo;
+            sl->slice_hi = hi;
+            return (TaggedExpr){ { EXPR_NULL, 0 }, 0, sl };
+        }
+
         /* Word-level abstract path (DV_ARRAY): const or symbolic index alike
          * become a fresh read var; read-over-write / congruence deferred. */
         if (arr->is_abstract) {
@@ -1624,34 +1732,21 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
         /* Constant index path (rewrite R2 included): check if the sexpr is
          * a bitvec literal after substitution resolution. */
-        const Sexpr *idx_s = _resolve_sym(fe, s->list.items[2]);
-        if (idx_s) {
-            uint64_t k = 0;
-            int is_const = 0;
-            if (idx_s->kind == SEXPR_BITVEC && idx_s->bv.width <= 64) {  /* wide: general path */
-                k = idx_s->bv.value; is_const = 1;
-            } else if (idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
-                       sexpr_is_symbol(idx_s->list.items[0], "_")) {
-                uint64_t bv_val;
-                if (_parse_bv_sym(idx_s->list.items[1], &bv_val, NULL)) {
-                    k = bv_val; is_const = 1;
-                }
+        uint64_t k = 0, k_hi = 0;
+        if (_const_index(fe, s->list.items[2], arr->sort.addr_width, &k, &k_hi)) {
+            /* The array element is a VARIABLE (dvs_builder_expr_var), so tag it
+             * leaf_kind == 1 (var), NOT 2 (const). Tagging it const made the
+             * const-fold sites (e.g. zero_extend, boolean connectives) read
+             * the var's dvs_expr_t as an ExprConst and fold it to a garbage
+             * literal (0) -> wrong `unsat` for e.g.
+             * `(= ((_ zero_extend N) (select a i)) k)`. */
+            if (arr->is_sparse) {
+                dvs_expr_t e = _sparse_elem(fe, arr, k, k_hi, /*create=*/1);
+                if (e == EXPR_NULL) { SMT2_TAINT(fe, "sparse-array element could not be materialized"); return TAGGED_NULL; }
+                return (TaggedExpr){ { e, arr->sort.data_width }, 1, NULL };
             }
-            if (is_const) {
-                /* The array element is a VARIABLE (dvs_builder_expr_var), so tag it
-                 * leaf_kind == 1 (var), NOT 2 (const). Tagging it const made the
-                 * const-fold sites (e.g. zero_extend, boolean connectives) read
-                 * the var's dvs_expr_t as an ExprConst and fold it to a garbage
-                 * literal (0) -> wrong `unsat` for e.g.
-                 * `(= ((_ zero_extend N) (select a i)) k)`. */
-                if (arr->is_sparse) {
-                    dvs_expr_t e = _sparse_elem(fe, arr, k, /*create=*/1);
-                    if (e == EXPR_NULL) { SMT2_TAINT(fe, "sparse-array element could not be materialized"); return TAGGED_NULL; }
-                    return (TaggedExpr){ { e, arr->sort.data_width }, 1, NULL };
-                }
-                if (k < arr->n_elems)
-                    return (TaggedExpr){ { arr->elems[k], arr->sort.data_width }, 1, NULL };
-            }
+            if (k_hi == 0 && k < arr->n_elems)
+                return (TaggedExpr){ { arr->elems[k], arr->sort.data_width }, 1, NULL };
         }
 
         /* Symbolic index. A sparse (large-address) array cannot resolve one
@@ -1682,6 +1777,10 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return TAGGED_NULL;
         }
         Smt2ArrayValue *arr = arr_te.array;
+        if (arr->slice_of || arr->sort.inner_addr) {
+            SMT2_TAINT(fe, "store on a nested array");
+            return TAGGED_NULL;
+        }
         if (arr->is_sparse) _promote_sparse(fe, arr);
 
         /* Word-level abstract path (DV_ARRAY): build a STORE DAG node instead of
@@ -1949,6 +2048,11 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         TaggedExpr b = _translate_tagged(fe, s->list.items[2]);
 
         if (a.array != NULL && b.array != NULL) {
+            if (a.array->slice_of || a.array->sort.inner_addr ||
+                b.array->slice_of || b.array->sort.inner_addr) {
+                SMT2_TAINT(fe, "equality of nested arrays");
+                return TAGGED_NULL;
+            }
             /* Word-level abstract path: reify onto a boolean var; consistency +
              * extensionality axioms are emitted at solve time. */
             if ((a.array->is_abstract || b.array->is_abstract || a.array->is_sparse)
@@ -2164,6 +2268,11 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         TaggedExpr e = _translate_tagged(fe, s->list.items[3]);
 
         if (t.array != NULL && e.array != NULL) {
+            if (t.array->slice_of || t.array->sort.inner_addr ||
+                e.array->slice_of || e.array->sort.inner_addr) {
+                SMT2_TAINT(fe, "ite over nested arrays");
+                return TAGGED_NULL;
+            }
             /* Word-level abstract path: an ITE DAG node; select resolves it to
              * ite(cond, read(then,i), read(else,i)). */
             if ((t.array->is_abstract || e.array->is_abstract || t.array->is_sparse)
@@ -2642,7 +2751,7 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
 
     /* Case 2: declare-const / 0-arity declare-fun with Array sort */
     Smt2ArraySort array_sort;
-    int is_arr = _parse_array_sort(fe, sort_s, &array_sort);
+    int is_arr = _parse_array_sort_x(fe, sort_s, &array_sort, /*nested_ok=*/1);
     if (is_arr == 1) {
         /* Large address spaces are declared sparse inside _declare_array_const
          * (elements materialized lazily at the concrete indices used), so no
@@ -4663,8 +4772,101 @@ static void _emit_abs_array(Smt2Frontend *fe, Smt2ArrayVar *av) {
     free(val);
 }
 
+static void _emit_hex_key(FILE *out, uint64_t lo, uint64_t hi, uint32_t width);
+
+/* An element value of a sparse array, at its full data width. */
+static void _emit_sparse_elem(Smt2Frontend *fe, uint32_t vid, unsigned dw) {
+    if (dw > 64) {
+        uint64_t limbs[SMT2_BV_MAX_LIMBS];
+        uint32_t nl = (dw + 63u) / 64u;
+        _fe_get_var_value_wide(fe, vid, limbs, nl);
+        _emit_bv_bin_literal_wide(fe->out, limbs, nl, dw);
+    } else {
+        _emit_bv_bin_literal(fe->out, (uint64_t)_fe_get_var_value(fe, vid), dw);
+    }
+}
+
+/* (get-value (a)) on a sparse array: the default 0 with a store for every
+ * element some constraint made. A nested array is an outer store chain of
+ * inner arrays, one per outer key used. */
+static void _emit_sparse_array(Smt2Frontend *fe, Smt2ArrayVar *av) {
+    const Smt2ArrayValue *v = av->value;
+    unsigned dw = av->sort.data_width;
+    uint32_t J = av->sort.inner_addr;
+    uint32_t I = av->sort.addr_width - J;
+    if (!J) {
+        for (uint32_t i = 0; i < v->n_sparse; i++) fprintf(fe->out, "(store ");
+        fprintf(fe->out, "((as const (Array (_ BitVec %u) (_ BitVec %u))) ",
+                (unsigned)av->sort.addr_width, dw);
+        _emit_bv_bin_literal(fe->out, 0, dw);
+        fprintf(fe->out, ")");
+        for (uint32_t i = 0; i < v->n_sparse; i++) {
+            fprintf(fe->out, " ");
+            _emit_hex_key(fe->out, v->sparse_idx[i], v->sparse_idx_hi[i], av->sort.addr_width);
+            fprintf(fe->out, " ");
+            _emit_sparse_elem(fe, v->sparse_varid[i], dw);
+            fprintf(fe->out, ")");
+        }
+        return;
+    }
+    /* Split each flat key into (outer, inner) and group by outer. */
+    uint32_t n = v->n_sparse;
+    uint64_t *olo = (uint64_t *)calloc(n + 1, sizeof(uint64_t));
+    uint64_t *ohi = (uint64_t *)calloc(n + 1, sizeof(uint64_t));
+    uint32_t n_outer = 0;
+    uint64_t imask_lo = J >= 64 ? ~0ull : ((1ull << J) - 1u);
+    uint64_t imask_hi = J > 64 ? (J >= 128 ? ~0ull : ((1ull << (J - 64)) - 1u)) : 0;
+    #define _OUTER(i, lo, hi) do {                                              \
+        uint64_t _l = v->sparse_idx[i], _h = v->sparse_idx_hi[i];              \
+        if (J >= 64) { lo = J >= 128 ? 0 : _h >> (J - 64); hi = 0; }           \
+        else { lo = (_l >> J) | (_h << (64 - J)); hi = _h >> J; }              \
+    } while (0)
+    for (uint32_t i = 0; olo && ohi && i < n; i++) {
+        uint64_t lo, hi;
+        _OUTER(i, lo, hi);
+        uint32_t j = 0;
+        while (j < n_outer && !(olo[j] == lo && ohi[j] == hi)) j++;
+        if (j == n_outer) { olo[n_outer] = lo; ohi[n_outer++] = hi; }
+    }
+    for (uint32_t o = 0; o < n_outer; o++) fprintf(fe->out, "(store ");
+    fprintf(fe->out, "((as const (Array (_ BitVec %u) (Array (_ BitVec %u) (_ BitVec %u)))) "
+            "((as const (Array (_ BitVec %u) (_ BitVec %u))) ", I, J, dw, J, dw);
+    _emit_bv_bin_literal(fe->out, 0, dw);
+    fprintf(fe->out, "))");
+    for (uint32_t o = 0; o < n_outer; o++) {
+        fprintf(fe->out, " ");
+        _emit_hex_key(fe->out, olo[o], ohi[o], I);
+        fprintf(fe->out, " ");
+        uint32_t cnt = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            uint64_t lo, hi;
+            _OUTER(i, lo, hi);
+            if (lo == olo[o] && hi == ohi[o]) { fprintf(fe->out, "(store "); cnt++; }
+        }
+        fprintf(fe->out, "((as const (Array (_ BitVec %u) (_ BitVec %u))) ", J, dw);
+        _emit_bv_bin_literal(fe->out, 0, dw);
+        fprintf(fe->out, ")");
+        for (uint32_t i = 0; i < n && cnt; i++) {
+            uint64_t lo, hi;
+            _OUTER(i, lo, hi);
+            if (!(lo == olo[o] && hi == ohi[o])) continue;
+            fprintf(fe->out, " ");
+            _emit_hex_key(fe->out, v->sparse_idx[i] & imask_lo,
+                          v->sparse_idx_hi[i] & imask_hi, J);
+            fprintf(fe->out, " ");
+            _emit_sparse_elem(fe, v->sparse_varid[i], dw);
+            fprintf(fe->out, ")");
+        }
+        fprintf(fe->out, ")");
+    }
+    #undef _OUTER
+    free(olo);
+    free(ohi);
+}
+
 static void _emit_array_store_chain(Smt2Frontend *fe, Smt2ArrayVar *av) {
     if (av->value->is_abstract) { _emit_abs_array(fe, av); return; }
+    if (av->value->is_sparse)   { _emit_sparse_array(fe, av); return; }
     uint32_t n = av->value->n_elems;
     uint8_t aw = av->sort.addr_width;
     uint8_t dw = av->sort.data_width;
@@ -4841,6 +5043,25 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
         return r;
     }
 
+    /* ((_ zero_extend n) x), ((_ sign_extend n) x): Verilator indexes an
+     * array this way, and get-values the select. */
+    if (head->kind == SEXPR_LIST && head->list.count == 3 &&
+        sexpr_is_symbol(head->list.items[0], "_") &&
+        (sexpr_is_symbol(head->list.items[1], "zero_extend") ||
+         sexpr_is_symbol(head->list.items[1], "sign_extend")) &&
+        head->list.items[2]->kind == SEXPR_NUMERAL && s->list.count == 2) {
+        uint64_t n = head->list.items[2]->numval;
+        EvalRet inner = _eval_sexpr(fe, s->list.items[1], ok);
+        if (!*ok) return r;
+        if (!inner.width || inner.width + n > EVAL_MAX_W) { *ok = 0; return r; }
+        r.width = (uint16_t)(inner.width + n);
+        r.value = inner.value;
+        if (sexpr_is_symbol(head->list.items[1], "sign_extend") && n &&
+            ((inner.value >> (inner.width - 1)) & 1))
+            r.value |= _trunc(~(EvalVal)0, r.width) & ~_trunc(~(EvalVal)0, inner.width);
+        return r;
+    }
+
     if (head->kind != SEXPR_SYMBOL) { *ok = 0; return r; }
 
     /* Variadic logical: and, or */
@@ -4953,6 +5174,20 @@ static void _emit_bv_bin_literal(FILE *out, uint64_t val, unsigned width) {
     }
 }
 
+/* A 128-bit array key as `#x...`, zero-padded to `width` bits' digits. The
+ * hex form is what Verilator parses back (a width that is not a multiple of 4
+ * pads up to the next digit, as it always did). */
+static void _emit_hex_key(FILE *out, uint64_t lo, uint64_t hi, uint32_t width) {
+    uint32_t nd = (width + 3) / 4;
+    if (nd == 0) nd = 1;
+    fputs("#x", out);
+    for (uint32_t d = nd; d-- > 0;) {
+        uint32_t bit = d * 4;
+        uint64_t nib = bit >= 64 ? (bit >= 128 ? 0 : hi >> (bit - 64)) : lo >> bit;
+        fputc("0123456789abcdef"[nib & 0xF], out);
+    }
+}
+
 /* Print a term back as SMT-LIB, for echoing a get-value key. */
 static void _fprint_sexpr(FILE *out, const Sexpr *s) {
     switch (s->kind) {
@@ -5040,43 +5275,54 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
         }
 
         /* (select <arrayvar> <const-index>): a driver reads array elements
-         * this way (Verilator get-values each rand array element). Echo the
-         * select as the key and emit the element's model value. */
+         * this way (Verilator get-values each rand array element), and an
+         * element of a nested array as (select (select <arrayvar> k) j). Echo
+         * the select as the key and emit the element's model value. */
         if (name_s->kind == SEXPR_LIST && name_s->list.count == 3 &&
-            sexpr_is_symbol(name_s->list.items[0], "select") &&
-            name_s->list.items[1]->kind == SEXPR_SYMBOL) {
+            sexpr_is_symbol(name_s->list.items[0], "select")) {
             const Sexpr *arr_s = name_s->list.items[1];
-            Smt2ArrayVar *av = _find_array_var(fe, arr_s->sym.str, arr_s->sym.len);
-            const Sexpr *idx_s = _resolve_sym(fe, name_s->list.items[2]);
-            uint64_t k = 0; int is_const = 0;
-            if (idx_s && idx_s->kind == SEXPR_BITVEC && idx_s->bv.width <= 64) { k = idx_s->bv.value; is_const = 1; }
-            else if (idx_s && idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
-                     sexpr_is_symbol(idx_s->list.items[0], "_")) {
-                uint64_t bv; if (_parse_bv_sym(idx_s->list.items[1], &bv, NULL)) { k = bv; is_const = 1; }
+            const Sexpr *outer_idx = NULL;
+            if (arr_s->kind == SEXPR_LIST && arr_s->list.count == 3 &&
+                sexpr_is_symbol(arr_s->list.items[0], "select")) {
+                outer_idx = arr_s->list.items[2];
+                arr_s = arr_s->list.items[1];
             }
+            Smt2ArrayVar *av = arr_s->kind == SEXPR_SYMBOL
+                ? _find_array_var(fe, arr_s->sym.str, arr_s->sym.len) : NULL;
+            /* The select's shape must match the sort: nested takes two. */
+            if (av && (outer_idx != NULL) != (av->sort.inner_addr != 0)) av = NULL;
+            uint8_t dw = av ? av->sort.data_width : 0;
+            uint32_t ow = av ? (uint32_t)(av->sort.addr_width - av->sort.inner_addr) : 0;
+            uint32_t iw = av ? (av->sort.inner_addr ? av->sort.inner_addr
+                                                    : av->sort.addr_width) : 0;
+            uint64_t o_lo = 0, o_hi = 0, k = 0, k_hi = 0;
+            int is_const = 0, idx_evald = 0;
+            if (av && outer_idx && !_const_index(fe, outer_idx, ow, &o_lo, &o_hi)) av = NULL;
+            if (av) is_const = _const_index(fe, name_s->list.items[2], iw, &k, &k_hi);
             /* A non-constant index: the element its model value selects. */
-            int idx_evald = 0;
-            if (av && !is_const) {
+            if (av && !is_const && !outer_idx) {
                 int iok = 1;
                 EvalRet ie = _eval_sexpr(fe, name_s->list.items[2], &iok);
                 if (iok && ie.width <= 64) { k = (uint64_t)ie.value; is_const = 1; idx_evald = 1; }
             }
             if (av && is_const) {
-                uint8_t dw = av->sort.data_width, aw = av->sort.addr_width;
+                uint64_t f_lo = k, f_hi = k_hi;          /* flat key */
+                if (outer_idx) _key_concat(o_lo, o_hi, k, k_hi, iw, &f_lo, &f_hi);
                 int64_t val = 0;
                 uint32_t elem_vid = UINT32_MAX;   /* element var, for a wide read */
+                uint64_t seed_key = f_lo ^ (f_hi * 0xC2B2AE3D27D4EB4Full);
                 if (av->value->is_abstract) {
-                    if (!_abs_base_value(fe, av->value, k, &val))
-                        val = _free_elem_value(fe, k, arr_s->sym.len);
+                    if (!_abs_base_value(fe, av->value, f_lo, &val))
+                        val = _free_elem_value(fe, seed_key, arr_s->sym.len);
                 } else if (av->value->is_sparse) {
                     uint32_t vid;
-                    if (_sparse_find(av->value, k, &vid)) {
+                    if (_sparse_find(av->value, f_lo, f_hi, &vid)) {
                         val = _fe_get_var_value(fe, vid);
                         elem_vid = vid;
                     } else {
-                        val = _free_elem_value(fe, k, arr_s->sym.len);
+                        val = _free_elem_value(fe, seed_key, arr_s->sym.len);
                     }
-                } else if (k < av->value->n_elems) {
+                } else if (f_hi == 0 && f_lo < av->value->n_elems) {
                     /* Look the element var up by name ("arr[k]") rather than via
                      * value->elems[k]: that dvs_expr_t points into the builder
                      * arena, which is reset after compilation, so it is stale
@@ -5084,21 +5330,29 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
                     char en[SMT2_MAX_NAME + 16];
                     snprintf(en, sizeof(en), "%.*s[%llu]",
                              (int)arr_s->sym.len, arr_s->sym.str,
-                             (unsigned long long)k);
+                             (unsigned long long)f_lo);
                     Smt2Var *ev = _find_var(fe, en, (uint32_t)strlen(en));
                     if (ev) { val = _fe_get_var_value(fe, ev->var_id); elem_vid = ev->var_id; }
                 }
                 /* Emit ((select name #x<idx>) #b<value>): the key echoes the
-                 * select (hex index padded to the address width -- the form
+                 * select (hex indices padded to their widths -- the form
                  * drivers parse), the value is the element's model. */
                 if (idx_evald) {
                     fprintf(fe->out, "(");
                     _fprint_sexpr(fe->out, name_s);
                     fprintf(fe->out, " ");
                 } else {
-                    fprintf(fe->out, "((select %.*s #x%0*llx) ",
-                            (int)arr_s->sym.len, arr_s->sym.str,
-                            (int)((aw + 3) / 4), (unsigned long long)k);
+                    fprintf(fe->out, "((select ");
+                    if (outer_idx) {
+                        fprintf(fe->out, "(select %.*s ", (int)arr_s->sym.len, arr_s->sym.str);
+                        _emit_hex_key(fe->out, o_lo, o_hi, ow);
+                        fprintf(fe->out, ")");
+                    } else {
+                        fprintf(fe->out, "%.*s", (int)arr_s->sym.len, arr_s->sym.str);
+                    }
+                    fprintf(fe->out, " ");
+                    _emit_hex_key(fe->out, k, k_hi, iw);
+                    fprintf(fe->out, ") ");
                 }
                 if (dw > 64 && elem_vid != UINT32_MAX) {
                     uint64_t limbs[SMT2_BV_MAX_LIMBS];
@@ -5179,10 +5433,16 @@ static int _cmd_get_model(Smt2Frontend *fe, const Sexpr *cmd) {
     /* Array vars */
     for (uint32_t i = 0; i < fe->n_array_vars; i++) {
         Smt2ArrayVar *av = &fe->array_vars[i];
-        fprintf(fe->out, "  (define-fun %s () (Array (_ BitVec %u) (_ BitVec %u)) ",
-                av->name,
-                (unsigned)av->sort.addr_width,
-                (unsigned)av->sort.data_width);
+        if (av->sort.inner_addr)
+            fprintf(fe->out, "  (define-fun %s () (Array (_ BitVec %u) (Array (_ BitVec %u) "
+                    "(_ BitVec %u))) ", av->name,
+                    (unsigned)(av->sort.addr_width - av->sort.inner_addr),
+                    (unsigned)av->sort.inner_addr, (unsigned)av->sort.data_width);
+        else
+            fprintf(fe->out, "  (define-fun %s () (Array (_ BitVec %u) (_ BitVec %u)) ",
+                    av->name,
+                    (unsigned)av->sort.addr_width,
+                    (unsigned)av->sort.data_width);
         _emit_array_store_chain(fe, av);
         fprintf(fe->out, ")\n");
     }
@@ -5395,6 +5655,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             if (av->value && !av->value->is_abstract) {
                 free(av->value->elems);
                 free(av->value->sparse_idx);
+                free(av->value->sparse_idx_hi);
                 free(av->value->sparse_varid);
                 free(av->value);
             }
@@ -5413,6 +5674,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             for (uint32_t j = 0; j < v->n_sparse; j++) {
                 if (v->sparse_varid[j] >= fe->n_vars) continue;
                 v->sparse_idx[keep] = v->sparse_idx[j];
+                v->sparse_idx_hi[keep] = v->sparse_idx_hi[j];
                 v->sparse_varid[keep++] = v->sparse_varid[j];
             }
             v->n_sparse = keep;
@@ -5752,6 +6014,7 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
         if (fe->array_vars[i].value && !fe->array_vars[i].value->is_abstract) {
             free(fe->array_vars[i].value->elems);
             free(fe->array_vars[i].value->sparse_idx);
+            free(fe->array_vars[i].value->sparse_idx_hi);
             free(fe->array_vars[i].value->sparse_varid);
             free(fe->array_vars[i].value);
         }
@@ -5815,6 +6078,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
         if (fe->array_vars[i].value && !fe->array_vars[i].value->is_abstract) {
             free(fe->array_vars[i].value->elems);
             free(fe->array_vars[i].value->sparse_idx);
+            free(fe->array_vars[i].value->sparse_idx_hi);
             free(fe->array_vars[i].value->sparse_varid);
             free(fe->array_vars[i].value);
         }
