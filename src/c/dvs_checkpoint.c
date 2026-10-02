@@ -74,6 +74,12 @@ void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
      * undoes every trail entry recorded after dvs_solver_checkpoint(). */
     ctx->level_marks[m->decision_level].trail_top   = m->trail_top;
     ctx->level_marks[m->decision_level].trail_count = m->trail_count;
+    /* The stack mark too: the seal's push stands past every trail entry
+     * made between the checkpoint and the solve (its pins, its initial
+     * propagation), so popping to it kept their blocks. A context reused
+     * by checkpoint/pin/solve/restore then grew with every solve. */
+    if (ctx->dynamic)
+        ctx->level_marks[m->decision_level].stack_mark = m->stack_mark;
 
     /* Backtrack trail to undo all domain changes since checkpoint */
     trail_backtrack(ctx, m->decision_level);
