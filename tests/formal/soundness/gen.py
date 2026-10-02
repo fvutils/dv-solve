@@ -25,6 +25,18 @@ WIDE_WIDTHS = [{"x": 16, "y": 16}, {"x": 32, "y": 32}, {"x": 33, "y": 33, "z": 3
                {"x": 65, "y": 65}, {"a": 1, "x": 64, "y": 32}]
 
 
+WIDTH_CLASSES = ["1-8", "9-16", "17-32", "33-63", "64", "65+"]
+
+
+def width_class(w: int) -> str:
+    """Bucket a term width for the operator x width cross."""
+    if w <= 8: return "1-8"
+    if w <= 16: return "9-16"
+    if w <= 32: return "17-32"
+    if w <= 63: return "33-63"
+    return "64" if w == 64 else "65+"
+
+
 class Gen:
     def __init__(self, rng: random.Random, widths: dict, builder_safe: bool = False):
         self.rng = rng
@@ -87,6 +99,7 @@ class Gen:
             hw = rng.randrange(1, w)
             t = ("concat", w, self.bv(hw, depth - 1), self.bv(w - hw, depth - 1))
         self.bins.add("op:" + t[0])
+        self.bins.add(f"opw:{t[0]}:{width_class(w)}")
         self.pool.append(t)
         return t
 

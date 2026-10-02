@@ -11,22 +11,32 @@ package:
     deps:
     - name: zuspec-dataclasses
       url: https://github.com/zuspec/zuspec-dataclasses.git
+      dep-set: default-dev
     - name: zuspec-be-fv
       url: https://github.com/zuspec/zuspec-be-fv.git
+      dep-set: default-dev
     - name: zuspec-be-sv
       url: https://github.com/zuspec/zuspec-be-sv.git
+      dep-set: default-dev
     - name: zuspec-synth
       url: https://github.com/zuspec/zuspec-synth.git
+      dep-set: default-dev
     - name: pytest-dfm
       url: https://github.com/dv-flow/pytest-dfm.git
+      dep-set: default-dev
     - name: dv-flow-libhdlsim
       url: https://github.com/dv-flow/dv-flow-libhdlsim.git
+      dep-set: default-dev
     - name: yosys
       url: https://github.com/edapack/yosys-bin
       src: gh-rls
+      dep-set: default
     - name: verilator
       url: https://github.com/edapack/verilator-bin
       src: gh-rls
+    - name: covsight
+      url: https://github.com/covsight/covsight.git
+      dep-set: default-dev
     - name: scipy
       src: pypi
     # Build-time requirements. pyproject.toml declares these under

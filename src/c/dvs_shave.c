@@ -31,6 +31,8 @@ PropResult bounds_shave(dvs_ctx_t *ctx, uint32_t max_iters) {
                 if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, hi);
                 if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
                 trail_backtrack(ctx, 0);
+                /* An aborted probe proves nothing; do not prune on it. */
+                if (ctx->prop_aborted) return PROP_CONFLICT;
 
                 if (pr == PROP_CONFLICT) {
                     /* hi is infeasible; permanently exclude it */
@@ -56,6 +58,8 @@ PropResult bounds_shave(dvs_ctx_t *ctx, uint32_t max_iters) {
                 if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, lo);
                 if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
                 trail_backtrack(ctx, 0);
+                /* An aborted probe proves nothing; do not prune on it. */
+                if (ctx->prop_aborted) return PROP_CONFLICT;
 
                 if (pr == PROP_CONFLICT) {
                     PropResult er = ctx_tighten_lb64(ctx, x, lo + 1);

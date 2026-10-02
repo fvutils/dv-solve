@@ -176,7 +176,11 @@ def builder(p: Problem, time_limit_ms: int = 10000) -> list:
             ctx.reset()
             rc = ctx._lib.dvs_solver_solve(ctx._ctx, ctypes.byref(_SolveOpts(
                 seed=1, use_lcg=lcg, time_limit_ms=time_limit_ms)))
-            got = {SOLVE_OK: "sat", SOLVE_UNSAT: "unsat"}.get(rc, "timeout")
+            # SOLVE_TIMEOUT is the builder's honest "undecided within the
+            # budget" (it runs CDCL alone, with no escalation): `unknown`,
+            # not a hang. A hang shows as the 60 s subprocess timeout of the
+            # SMT-LIB2 doors instead.
+            got = {SOLVE_OK: "sat", SOLVE_UNSAT: "unsat"}.get(rc, "unknown")
             ok = True
             if got == "sat":
                 m = {n: ctx.get_value(ids[n]) & ((1 << w) - 1) for n, w in p.widths.items()}

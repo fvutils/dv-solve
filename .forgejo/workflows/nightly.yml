@@ -1,0 +1,39 @@
+# Nightly soundness campaign for fvutils/dv-solve on Forgejo Actions.
+#
+# Budget: 2 hours (BUDGET_MIN). Runs everything test.yml runs, then the
+# soundness campaign with fresh seeds for the rest of the budget -- on the
+# normal build, on the step-checker build and with wide variables -- and merges
+# the campaigns' UCIS coverage with covsight. On Sundays the mutation score runs
+# instead of the campaign. Details in tests/ci/nightly.sh and
+# docs/soundness_coverage_plan.md (P5).
+#
+# The artifact holds the merged coverage database (open it with
+# `covsight show summary|gaps coverage.cdb`), the reports, the campaign logs and
+# every failure, shrunk, as a replayable JSON problem.
+#
+# Test-only: no credentials, nothing published.
+
+name: Nightly soundness
+
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Soundness campaign
+        run: BUDGET_MIN=120 JOBS=12 OUT=nightly-out tests/ci/nightly.sh
+
+      - name: Upload results
+        if: always()
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: nightly-soundness
+          path: nightly-out/**
+          if-no-files-found: warn

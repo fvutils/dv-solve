@@ -267,7 +267,17 @@ stronger at once, and P0's own fixes need them to be trusted.
 
 ---
 
-## 7. Decisions needed
+## 7. Decisions (taken 2026-10-01)
+
+1. Coverage database: UCIS through covsight (in `packages/`).
+   `tests/formal/soundness/ucis_coverage.py` writes it; `covsight merge`,
+   `report` and `show gaps` read it.
+2. Where results live: the nightly Forgejo artifact for now.
+3. Nightly budget: 2 hours.
+4. What next: finish the coverage work (P4's missing stimuli) before the
+   builder `concat` completeness gap.
+
+The original questions, for the record:
 
 1. **Coverage database format:** UCIS through pyucis (recommended: it merges
    and fits existing tools) or plain JSON.
@@ -301,6 +311,7 @@ stronger at once, and P0's own fixes need them to be trusted.
 | `bounds_mul_32` ignored a zero factor | Fixed; found by the propagator harness (§9.7) |
 | B58: assertions after a partly compiled first check were dropped | Fixed in the SMT-LIB2 frontend (§9.9) |
 | B60: `ite_value` retired itself with its branch operand still a range | Fixed (§9.10) |
+| B61: a self-referential strict compare at 31+ bits exhausted memory | Fixed: same-variable compares decided at once; a deadline and trail cap inside propagation turn any other climb into a timeout (§9.11) |
 | Guard-gated propagators: the learnt clause did not cite the guard | Fixed: analysis adds `guard >= 1` for a gated propagator's step |
 | Minimised `get-unsat-core` | Done; tests pass, including 400 brute-force random cores and a 6000-case stress run |
 | Pinned regressions | `tests/formal/test_lcg_soundness.py` (B50 ×2, B51, the livelock); `test_signed_ops.py::test_divrem_of_variables_matches_z3` (B52); `test_bool_ite_constraint.py` and `tests/unit/test_gated_constraints.py` (B53); `tests/c/test_prop_exhaustive.c` (B54, B55, B57, mul) |
@@ -429,6 +440,15 @@ Holes it shows:
   `let`, `get-unsat-core` and the Verilator mode, none of which the
   generator produces yet. These are stimulus coverpoints still to add (§2.1).
 
+Stimulus coverage is now a UCIS database (covsight).
+`campaign --ucis FILE` writes covergroup `stimulus` and covergroup `outcome`.
+`stimulus` has coverpoints `operator`, `comparison`, `boolean`,
+`operand_shape`, `constant`, `problem_size`, `width`, and the cross
+`operator_x_width`, flattened so every combination is a declared bin. `outcome`
+has `door_x_answer`. Unhit bins are declared, so `covsight show gaps` lists
+them. gcov line and branch coverage stays in lcov form for now: covsight
+exports LCOV but does not import it.
+
 Named `DVS_COVER` counters (§4.2) are still to do. They are needed for the
 bins gcov cannot express, such as "learning seed kind × resolution kind".
 
@@ -463,24 +483,30 @@ The run also exposed two harness gaps, fixed: `disj_clause` had no harness
 case, and an earlier runner bug (stale objects between mutants) produced a
 misleading 14/18. The runner now restores files with fresh timestamps.
 
-### P5 — continuous (finding before starting)
+### P5 — continuous (set up on Forgejo)
 
-**No CI job runs the test suites today.**
-- `.github/workflows/wheels.yml` builds wheels and runs
-  `tests/wheel_smoke.py` (an import check).
-- `.forgejo/workflows/ci.yml` checks repository policy (no internal
-  identifiers, no publisher).
+Before this, no CI job ran the test suites:
+- `.github/workflows/wheels.yml` builds wheels and runs an import check;
+- `.forgejo/workflows/ci.yml` checks repository policy.
 
-ctest, the unit and formal suites, the propagator harness and the campaign
-smoke test run only when someone runs them by hand. P5 therefore starts with
-a test job, added as a pair (`.github/` and `.forgejo/`) per the CI rules:
-- build;
-- ctest;
-- `pytest tests/unit tests/formal`, including the campaign smoke test;
-- a `-DDVS_STEP_CHECK=ON` build running `test_lcg_stress.py`.
+Now two Forgejo workflows run on the local runner (container
+`catthehacker/ubuntu:act-22.04`; the runner has no host mounts, so the scripts
+fetch CaDiCaL's sources and z3 themselves):
 
-Then a nightly job: fresh seeds, `--wide 0.2`, the step-checker campaign and
-the mutation score. This needs the §7 budget decision.
+| Workflow | When | What |
+|---|---|---|
+| `test.yml` | every push and pull request | `tests/ci/run_tests.sh`: build; ctest (with the propagator harness); unit and formal suites (with the campaign smoke test and recorded regressions); the learning stress set on a `-DDVS_STEP_CHECK=ON` build. About 10 minutes. Trial-run in the runner image: ctest 20/20, 2698 passed, 132 skipped (tools the image lacks), stress 26/26. |
+| `nightly.yml` | 02:30 daily, and on demand | `tests/ci/nightly.sh`, a 2-hour budget. It runs everything `test.yml` does, then 12 campaign processes for the rest of the budget with fresh date-derived seeds: half normal (20% wide), a quarter on the step-checker build, a quarter wide-only. covsight merges their UCIS databases into `coverage.cdb`, `coverage.txt` and `gaps.json`. On Sundays the mutation score runs instead of the campaign. Every failure is shrunk to a JSON problem in the artifact and fails the job. |
+
+These are Forgejo-only by request. A test-only workflow cannot publish, and
+`.forgejo/workflows/` already shadows `.github/`, so the pair rule's hazard
+does not arise. A GitHub counterpart can be added later as a copy.
+
+Budget: 2 hours a night, as agreed. The suites take about 12 minutes of it,
+which leaves about 100 minutes × 12 processes for the campaign. Narrow
+problems run at about 70 per second per process; wide ones at one every few
+seconds. If the gap list stays stuck on bins that need the wide or checker
+runs, the first lever is more checker processes, then more time.
 
 ### Completeness gaps found (sound, but `unknown`)
 
@@ -718,4 +744,37 @@ Coverage lessons:
 - **The same front door with an option changed is a different door.** The
   builder with learning on had no test at all; the campaign's builder door
   now solves every problem with learning off and on.
+
+### 9.11 B61: a propagation with no end
+
+Found by the wide mode in its first 30 problems: dv-solve was killed for
+memory on `(bvult x x)` with 63-bit variables (z3: `unsat` in 0 ms). HEAD
+has it. It is probably also what exhausted memory during the first wide
+campaign, when the session's background tasks were stopped.
+
+`x < x`, `(x+y) > (x+y)` (identical sub-terms get separate auxiliary
+variables) and `x > (x | y)` (the backlog's B30) make the bound propagators
+climb one value per round. At 8 and 16 bits that ends in milliseconds; at 31
+bits and up it is 2^31+ rounds inside a single propagation. No deadline
+check runs there, and the trail grows until memory runs out.
+
+Fix:
+- The comparison and reification propagators decide same-variable
+  comparisons outright.
+- Propagation itself checks the solve's deadline and a trail cap of 8M
+  entries (256 MiB). On either it marks the context aborted.
+- An aborted propagation's conflict is never treated as `unsat`, is never
+  learnt from and never prunes during shaving. The solve reports a timeout,
+  so SMT-LIB2 escalates to bitblast, which answers these at once.
+
+`tests/formal/test_propagation_guard.py` runs them at 31–64 bits under a
+2 GiB memory limit.
+
+Coverage lessons:
+- **Width is a coverpoint for termination, not only for correctness.** The
+  same shape is instant at 16 bits and unbounded at 31. The narrow campaign
+  could never see it; the wide mode saw it at once.
+- **Resource exhaustion is an oracle outcome.** The campaign already treats
+  a timeout as a failure. The regression tests now also cap memory, so a
+  climb fails the test instead of the machine.
 

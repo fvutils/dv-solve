@@ -650,6 +650,7 @@ const char *dvs_solver_bail_reason_str(const dvs_ctx_t *ctx) {
     case DVS_BAIL_MAX_DEPTH:     return "decision depth limit";
     case DVS_BAIL_DEADLINE_CONF: return "wall-clock deadline (conflict analysis)";
     case DVS_BAIL_MAX_RESTARTS:  return "restart budget exhausted";
+    case DVS_BAIL_PROPAGATION:   return "propagation ran past the deadline or trail cap";
     default:                     return "no reason recorded";
     }
 }
@@ -673,6 +674,13 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (opts && opts->time_limit_ms > 0) tl = (double)opts->time_limit_ms / 1000.0;
         if (tl > 0.0) _deadline = _now_sec() + tl;
     }
+    /* Propagation checks the same deadline (and a trail cap) itself: a single
+     * propagation can climb for 2^w rounds without reaching the checks below.
+     * See prop_aborted in dvs_ctx.h. */
+    ctx->prop_aborted  = 0;
+    ctx->prop_deadline = _deadline;
+#define ABORTED() (ctx->prop_aborted \
+                   ? (ctx->bail_reason = DVS_BAIL_PROPAGATION, 1) : 0)
     uint64_t _tick = 0;   /* cheap gate for the clock_gettime checks */
 
     /* Decision-variable tie-break mode for this solve (default fast). */
@@ -743,7 +751,8 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                               : UINT32_MAX;
 
     /* Level-0 BCP */
-    if (dvs_solver_propagate(ctx) == PROP_CONFLICT) return DVS_SOLVE_UNSAT;
+    if (dvs_solver_propagate(ctx) == PROP_CONFLICT)
+        return ABORTED() ? DVS_SOLVE_TIMEOUT : DVS_SOLVE_UNSAT;
 
     /* Check for domains that became empty before search (e.g. from
      * conflicting bounds imposed externally before dvs_solver_solve).
@@ -771,6 +780,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
     uint32_t max_si = opts ? opts->max_shave_iters : 1000;
     if (max_si > 0) {
         PropResult sr = bounds_shave(ctx, max_si);
+        if (ABORTED()) return DVS_SOLVE_TIMEOUT;   /* a probe's verdict is void */
         if (sr == PROP_CONFLICT) return DVS_SOLVE_UNSAT;
     }
 
@@ -853,6 +863,8 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
 
         /* ── Conflict loop ── */
         while (pr == PROP_CONFLICT) {
+            /* An aborted propagation proves nothing: no unsat, no learning. */
+            if (ABORTED()) return DVS_SOLVE_TIMEOUT;
             ctx->conflict_count++;
             local_conflicts++;
 
@@ -906,7 +918,8 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
 
 
                 pr = dvs_solver_propagate(ctx);
-                if (pr == PROP_CONFLICT) return DVS_SOLVE_UNSAT;
+                if (pr == PROP_CONFLICT)
+                    return ABORTED() ? DVS_SOLVE_TIMEOUT : DVS_SOLVE_UNSAT;
                 break;  /* restart outer for-loop */
             }
 
@@ -1111,7 +1124,21 @@ static void _refine_readd_softs(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
 /* dvs_solver_solve — wrapper with assumption relaxation                   */
 /* ------------------------------------------------------------------ */
 
+static dvs_result_t _solver_solve_relax(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts);
+
 dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
+    dvs_result_t r = _solver_solve_relax(ctx, opts);
+    /* The propagation deadline belongs to this solve only: a later pin or
+     * incremental add must not abort on it. */
+    ctx->prop_deadline = 0.0;
+    if (ctx->prop_aborted) {
+        ctx->prop_aborted = 0;
+        return DVS_SOLVE_TIMEOUT;
+    }
+    return r;
+}
+
+static dvs_result_t _solver_solve_relax(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     /* Re-activate all soft assumptions at entry. dvs_solver_reset() restores the
      * assumption vars to [1,1] but does NOT touch assumption_active_mask, so on a
      * RE-SOLVE of a reused ctx (the backend's plan-reuse path) the mask would
@@ -1149,6 +1176,7 @@ dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     int relaxed_any = 0;
     for (;;) {
         dvs_result_t res = _solver_solve_core(ctx, opts);
+        if (ctx->prop_aborted) return DVS_SOLVE_TIMEOUT;   /* never relax on it */
         if (res == DVS_SOLVE_OK) {
             /* If we shed any soft to get here, the subtractive walk may have
              * dropped satisfiable softs as collateral; recover them greedily. */

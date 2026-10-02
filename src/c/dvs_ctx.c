@@ -50,6 +50,9 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     ctx->incremental_capacity_hint = 0;
     ctx->var_alias       = NULL;
     ctx->current_prop_ref  = EXPR_NULL;
+    ctx->prop_aborted      = 0;
+    ctx->prop_deadline     = 0.0;
+    ctx->prop_ticks        = 0;
     ctx->conflict_prop_ref = EXPR_NULL;
     ctx->conflict_clause_idx = EXPR_NULL;
     ctx->current_trail_flags = 0;

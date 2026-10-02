@@ -39,6 +39,8 @@ typedef struct {
 #define DVS_BAIL_MAX_DEPTH     2   /* decision_level hit ctx->max_depth      */
 #define DVS_BAIL_DEADLINE_CONF 3   /* wall-clock budget (conflict loop)      */
 #define DVS_BAIL_MAX_RESTARTS  4   /* restart budget exhausted               */
+#define DVS_BAIL_PROPAGATION   5   /* one propagation ran past the deadline or
+                                    * trail cap (ctx->prop_aborted, B61)      */
 
 const char *dvs_solver_bail_reason_str(const dvs_ctx_t *ctx);
 

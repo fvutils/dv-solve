@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <time.h>
 #include "dvs_propagator.h"
 #include "dvs_ctx.h"
 #include "dvs_trail.h"
@@ -232,7 +233,22 @@ PropResult ctx_tighten_ub64(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub) {
 /* Propagation loop                                                    */
 /* ------------------------------------------------------------------ */
 
+/* Trail entries beyond which a propagation is abandoned rather than allowed to
+ * exhaust memory (32 bytes each: 256 MiB). See prop_aborted in dvs_ctx.h. */
+#define DVS_PROP_TRAIL_CAP (1ull << 23)
+
+static int _prop_over_budget(dvs_ctx_t *ctx) {
+    if (ctx->trail_count > DVS_PROP_TRAIL_CAP) return 1;
+    if (ctx->prop_deadline > 0.0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        if ((double)ts.tv_sec + (double)ts.tv_nsec * 1e-9 > ctx->prop_deadline) return 1;
+    }
+    return 0;
+}
+
 PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
+    if (ctx->prop_aborted) return PROP_CONFLICT;
     /* Only a propagator that fails in THIS call is the conflict's culprit. */
     ctx->conflict_prop_ref = EXPR_NULL;
     /* A clause conflict recorded by an earlier, unanalysed conflict (e.g. a
@@ -255,6 +271,11 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
         p->flags      &= (uint8_t)~PROP_FLAG_IN_QUEUE;
 
         if (p->flags & PROP_FLAG_ENTAILED) continue;
+
+        if ((++ctx->prop_ticks & 0x3FFu) == 0 && _prop_over_budget(ctx)) {
+            ctx->prop_aborted = 1;
+            return PROP_CONFLICT;
+        }
 
         /* Guard-gated check: skip or entail based on guard variable */
         if (ctx->prop_guard_vars && p->prop_id < ctx->n_prop_refs_capacity) {

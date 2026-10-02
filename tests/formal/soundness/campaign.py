@@ -73,13 +73,17 @@ def record(p: Problem, why: str, out_dir: Path) -> Path:
 
 
 def campaign(seed: int, n: int, which, exe: str, out_dir: Path | None, log=print,
-             wide: float = 0.0):
+             wide: float = 0.0, minutes: float = 0.0):
     rng = random.Random(seed)
     stats = collections.Counter()
     bins = collections.Counter()
     failures = []
     t0 = time.time()
-    for i in range(n):
+    deadline = t0 + 60 * minutes if minutes else None
+    for i in range(n if not minutes else 1 << 30):
+        if deadline and time.time() > deadline:
+            break
+        stats["problems"] += 1
         # Half the problems keep to the operators the builder shares with
         # SMT-LIB, so every door sees a share of the stimulus.
         builder_safe = "builder" in which and rng.random() < 0.5
@@ -131,6 +135,10 @@ def main(argv=None) -> int:
     ap.add_argument("--doors", default="smt2,incr,builder")
     ap.add_argument("--exe", default=str(DEFAULT_EXE))
     ap.add_argument("--out", default=str(HERE / "regressions"))
+    ap.add_argument("--minutes", type=float, default=0.0,
+                    help="run for this long instead of --n problems")
+    ap.add_argument("--ucis", default="",
+                    help="write stimulus coverage to this UCIS (covsight NCDB) file")
     ap.add_argument("--wide", type=float, default=0.0,
                     help="share of problems with 16- to 65-bit variables (z3 is their oracle)")
     ap.add_argument("--builder-limit-ms", type=int, default=BUILDER_LIMIT_MS,
@@ -138,7 +146,10 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     globals()["BUILDER_LIMIT_MS"] = a.builder_limit_ms
     failures, stats, bins = campaign(a.seed, a.n, a.doors.split(","), a.exe, Path(a.out),
-                                     wide=a.wide)
+                                     wide=a.wide, minutes=a.minutes)
+    if a.ucis:
+        from . import ucis_coverage
+        ucis_coverage.write(a.ucis, bins, stats, f"campaign_seed{a.seed}", a.seed)
     print("STATS", dict(sorted(stats.items())))
     print("BINS", dict(sorted(bins.items())))
     return 1 if failures else 0

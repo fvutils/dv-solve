@@ -261,6 +261,9 @@ static PropResult _fire_bounds_lt_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
+    /* x < x has no solution. Left to the bound updates it climbs one value
+     * per round, which at 31+ bits never ends and exhausts memory (B61). */
+    if (xid == yid) return PROP_CONFLICT;
     Variable      *x   = &ctx->vars[xid];
     Variable      *y   = &ctx->vars[yid];
 
@@ -322,6 +325,7 @@ static PropResult _fire_bounds_ne_32(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
+    if (xid == yid) return PROP_CONFLICT;   /* x != x: see _fire_bounds_lt_32 */
     Variable      *x   = &ctx->vars[xid];
     Variable      *y   = &ctx->vars[yid];
 
@@ -918,6 +922,12 @@ static PropResult _fire_reification_eq_32(Propagator *self, dvs_ctx_t *ctx) {
     uint32_t       gid = ws->var_ids[0];
     uint32_t       xid = ws->var_ids[1];
     uint32_t       yid = ws->var_ids[2];
+    /* g <-> (x == x): g is 1. Otherwise g = 0 would leave x != x to search,
+     * which enumerates the whole domain (B61). */
+    if (xid == yid) {
+        if (var_hi64(ctx, &ctx->vars[gid]) == 0) return PROP_CONFLICT;
+        return ctx_tighten_lb64(ctx, gid, 1);
+    }
     Variable      *g   = &ctx->vars[gid];
     Variable      *x   = &ctx->vars[xid];
     Variable      *y   = &ctx->vars[yid];
@@ -1201,6 +1211,7 @@ static PropResult _fire_bounds_lt_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
+    if (xid == yid) return PROP_CONFLICT;   /* x < x: see _fire_bounds_lt_32 */
 
     PropResult r;
     /* `y.hi - 1` is applied in x's order and `x.lo + 1` in y's. Each wraps
@@ -1311,6 +1322,7 @@ static PropResult _fire_bounds_ne_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];
     uint32_t       yid = ws->var_ids[1];
+    if (xid == yid) return PROP_CONFLICT;   /* x != x: see _fire_bounds_lt_32 */
     int64_t xlo = var_lo64(ctx, &ctx->vars[xid]), xhi = var_hi64(ctx, &ctx->vars[xid]);
     int64_t ylo = var_lo64(ctx, &ctx->vars[yid]), yhi = var_hi64(ctx, &ctx->vars[yid]);
 
@@ -2722,6 +2734,12 @@ static PropResult _fire_reification_eq_64(Propagator *self, dvs_ctx_t *ctx) {
     uint32_t       gid = ws->var_ids[0];
     uint32_t       xid = ws->var_ids[1];
     uint32_t       yid = ws->var_ids[2];
+    /* g <-> (x == x): g is 1. Otherwise g = 0 would leave x != x to search,
+     * which enumerates the whole domain (B61). */
+    if (xid == yid) {
+        if (var_hi64(ctx, &ctx->vars[gid]) == 0) return PROP_CONFLICT;
+        return ctx_tighten_lb64(ctx, gid, 1);
+    }
     Variable      *g   = &ctx->vars[gid];
     Variable      *x   = &ctx->vars[xid];
     Variable      *y   = &ctx->vars[yid];

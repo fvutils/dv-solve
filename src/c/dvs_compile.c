@@ -4223,6 +4223,12 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
 
     /* ---- Run propagation to fixpoint ---- */
     PropResult pr = dvs_solver_propagate(ctx);
+    if (pr == PROP_CONFLICT && ctx->prop_aborted) {
+        /* Abandoned (trail cap), not refuted: leave the verdict to the solve,
+         * which re-propagates under its own deadline. */
+        ctx->prop_aborted = 0;
+        return n_uncompiled + 1;
+    }
     if (pr == PROP_CONFLICT) return -2;
 
     return n_uncompiled;

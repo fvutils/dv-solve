@@ -73,6 +73,17 @@ typedef struct dvs_ctx_s {
     uint64_t           conflict_count;
     uint64_t           rng_state;
     uint8_t            fair_pick;     /* dvs_solve_opts_t.fair_pick for this solve */
+    /* Propagation guard (B61). A self-referential strict compare can climb one
+     * value per round for 2^w rounds, growing the trail until memory runs out,
+     * with no deadline check reached. dvs_solver_propagate checks prop_deadline
+     * (set for the duration of a solve; 0 = none) and a trail-size cap, and on
+     * either sets prop_aborted and returns PROP_CONFLICT. Whoever acts on a
+     * propagation result must check prop_aborted first: that conflict proves
+     * nothing, so the answer is a timeout, never unsat, and nothing is learnt
+     * from it. */
+    uint8_t            prop_aborted;
+    double             prop_deadline;
+    uint32_t           prop_ticks;
     uint8_t            bail_reason;   /* DVS_BAIL_*: why the last solve returned
                                        * DVS_SOLVE_TIMEOUT. Purely diagnostic -- a
                                        * silent `unknown` used to give no clue
