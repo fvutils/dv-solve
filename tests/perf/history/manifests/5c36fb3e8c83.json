@@ -1,0 +1,88 @@
+{
+ "benches": [
+  {
+   "about": "x has exactly four bits set: `$countones(x) == 4`, 70 solutions",
+   "bins": null,
+   "n": 2000,
+   "name": "countones",
+   "sha": "0ebb637db9fabddc",
+   "space": 70
+  },
+  {
+   "about": "an OpenTitan timer shape: `thold == 0` is one solution of 1003",
+   "bins": null,
+   "n": 2000,
+   "name": "ot_aon_wkup",
+   "sha": "835e8a3e690ae77b",
+   "space": 1003
+  },
+  {
+   "about": "a plain range, `r < 1000`: every sampler should do well",
+   "bins": null,
+   "n": 2000,
+   "name": "range_1000",
+   "sha": "a628b11ed01b01ed",
+   "space": 1000
+  },
+  {
+   "about": "`x inside {[10:20], [100:150]}`: the small band is 11 of 62 solutions",
+   "bins": null,
+   "n": 2000,
+   "name": "disjoint_ranges",
+   "sha": "fbf5e911262d0de2",
+   "space": 62
+  },
+  {
+   "about": "`a + b == 100` (8-bit, wrapping): 256 solutions",
+   "bins": null,
+   "n": 2000,
+   "name": "sum_eq_const",
+   "sha": "ae34dace45906ca2",
+   "space": 256
+  },
+  {
+   "about": "`a < b` (6-bit): 2016 solutions, an ordering",
+   "bins": null,
+   "n": 2000,
+   "name": "a_lt_b",
+   "sha": "1488184ce8b5a9c6",
+   "space": 2016
+  },
+  {
+   "about": "`b inside {[a:a+10]}`, `a <= 80`: a range that depends on another variable",
+   "bins": null,
+   "n": 2000,
+   "name": "dep_range",
+   "sha": "2acae3e22d33d495",
+   "space": 891
+  },
+  {
+   "about": "`(x & 'hf) == 5`: 16 solutions spread by the high bits",
+   "bins": null,
+   "n": 2000,
+   "name": "bit_mask",
+   "sha": "3bb3d222c112b35c",
+   "space": 16
+  },
+  {
+   "about": "a word-aligned 32-bit address in a 1 GiB window: about 268 million solutions, in 256 equal bins",
+   "bins": 256,
+   "n": 2000,
+   "name": "addr_aligned",
+   "sha": "59c0bf40baecbb96",
+   "space": null
+  },
+  {
+   "about": "a packet header: `kind != 3`, `len` in 1..64 but at most 16 when `kind == 0`, `tag != 0`; binned by (kind, len), 144 bins",
+   "bins": 144,
+   "n": 2000,
+   "name": "packet",
+   "sha": "7c2bd8360b5ce28d",
+   "space": null
+  }
+ ],
+ "hash": "5c36fb3e8c83",
+ "kind": "rand",
+ "protocol": "verilator-5.046",
+ "suite": "rand-core"
+}
