@@ -7,8 +7,12 @@ s is solving time: CPU time minus the arm's own start-up cost (its time on a
 one-variable problem, measured in the same run), floored at MIN_SOLVE_MS so a
 near-zero side cannot produce an arbitrary ratio. Start-up is reported on its
 own; folding it into the ratio would score process start-up as solver speed.
-A fixture is excluded (None) when either side lacks a definite answer, or
-when both sides solve in under FLOOR_MARGIN_MS beyond start-up.
+A fixture is excluded (None) when either side lacks a correct definite
+answer, or when both sides solve in under FLOOR_MARGIN_MS beyond start-up.
+
+"Correct" means not contradicted by the reference solvers' agreed answer. A
+wrong answer is often a fast one (v0.1.0 answers a fixture `unsat` in 0.3 ms
+where the right answer is `sat`), so counting it would reward the bug.
 """
 from __future__ import annotations
 
@@ -28,15 +32,29 @@ def _definite(r) -> bool:
     return r is not None and r["verdict"] in ("sat", "unsat") and r["cpu_ms_min"] is not None
 
 
+def consensus(rows: list, suite: str) -> dict:
+    """fixture -> the answer the references agree on (absent when they split or none answered)."""
+    ans = {}
+    for r in rows:
+        if r["suite"] == suite and r["build"] == "ref" and r["verdict"] in ("sat", "unsat"):
+            ans.setdefault(r["fixture"], set()).add(r["verdict"])
+    return {f: a.pop() for f, a in ans.items() if len(a) == 1}
+
+
+def _correct(r, cons: dict) -> bool:
+    return _definite(r) and cons.get(r["fixture"], r["verdict"]) == r["verdict"]
+
+
 def ratios(record: dict, suite: str, other: str, head: str = HEAD) -> list:
     """Milli-neper ratios in manifest order; None where excluded."""
     man = record["manifests"][suite]
     idx = _index(record["sat"], suite)
+    cons = consensus(record["sat"], suite)
     fl = record.get("sat_floor", {}).get(suite, {})
     out = []
     for fx in man["fixtures"]:
         h, o = idx.get((fx["path"], head)), idx.get((fx["path"], other))
-        if not (_definite(h) and _definite(o)):
+        if not (_correct(h, cons) and _correct(o, cons)):
             out.append(None)
             continue
         sh = h["cpu_ms_min"] - (fl.get(head) or 0)
@@ -49,22 +67,24 @@ def ratios(record: dict, suite: str, other: str, head: str = HEAD) -> list:
 
 
 def solved(record: dict, suite: str) -> dict:
-    """Definite answers per arm key."""
+    """Correct definite answers per arm key."""
+    cons = consensus(record["sat"], suite)
     out = {}
     for r in record["sat"]:
         if r["suite"] == suite:
             k = f"{r['arm']}@{r['build']}"
-            out[k] = out.get(k, 0) + _definite(r)
+            out[k] = out.get(k, 0) + _correct(r, cons)
     return out
 
 
 def par2(record: dict, suite: str, budget_s: float) -> dict:
-    """Sum of CPU seconds, an unsolved fixture counting 2 × budget."""
+    """Sum of CPU seconds, an unsolved (or wrongly solved) fixture counting 2 × budget."""
+    cons = consensus(record["sat"], suite)
     out = {}
     for r in record["sat"]:
         if r["suite"] == suite:
             k = f"{r['arm']}@{r['build']}"
-            t = r["cpu_ms_min"] / 1000 if _definite(r) else 2 * budget_s
+            t = r["cpu_ms_min"] / 1000 if _correct(r, cons) else 2 * budget_s
             out[k] = round(out.get(k, 0) + t, 2)
     return out
 

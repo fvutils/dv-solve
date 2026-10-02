@@ -85,3 +85,13 @@ def test_render_placeholder_without_data(tmp_path, monkeypatch):
     monkeypatch.setattr(render, "load_records", lambda d: [])
     assert render.render(None, tmp_path) == "placeholder"
     assert "toctree" in (tmp_path / "index.md").read_text()
+
+
+def test_wrong_answer_is_not_a_fast_answer():
+    """v0.1.0 answers t_constraint_operators `unsat` in 0.3 ms; the answer is sat."""
+    rec = _record()
+    for r in rec["sat"]:
+        if r["build"] == "anchor" and r["fixture"] == FX[0]["path"]:
+            r["verdict"], r["cpu_ms_min"] = "unsat", 1.3
+    assert normalize.ratios(rec, "sat-core", "dv-smt2@anchor")[0] is None
+    assert normalize.solved(rec, "sat-core")["dv-smt2@anchor"] == 4

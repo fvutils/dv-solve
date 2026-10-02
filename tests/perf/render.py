@@ -129,7 +129,7 @@ def page_index(rec: dict, s: dict) -> str:
          "{doc}`methodology` explains how each one is produced.", "",
          provenance(rec), "",
          "## At a glance", ""]
-    L += [f"| Solver | Answered (of {s['n']}) | Start-up, CPU ms | dv-solve speed-up | Wrong answers |",
+    L += [f"| Solver | Answered correctly (of {s['n']}) | Start-up, CPU ms | dv-solve speed-up | Wrong answers |",
           "|---|---|---|---|---|"]
     wrong = {HEAD: len(s["wrong_head"]), "dv-smt2@anchor": len(s["wrong_anchor"])}
     for k in [HEAD] + COMPARE:
@@ -160,12 +160,13 @@ def page_sat(rec: dict, s: dict, gen: Path) -> str:
     rows = [r for r in rec["sat"] if r["suite"] == SUITE]
     keys = [k for k in ARMS if any(f"{r['arm']}@{r['build']}" == k for r in rows)]
     by = {(r["fixture"], f"{r['arm']}@{r['build']}"): r for r in rows}
+    cons = normalize.consensus(rows, SUITE)
+    ok = lambda r: normalize._correct(r, cons)
 
     # Cactus: definite answers only, raw CPU time (start-up included, as a user sees it).
     series = {}
     for k in keys:
-        ts = sorted(r["cpu_ms_min"] for r in rows
-                    if f"{r['arm']}@{r['build']}" == k and r["verdict"] in ("sat", "unsat"))
+        ts = sorted(r["cpu_ms_min"] for r in rows if f"{r['arm']}@{r['build']}" == k and ok(r))
         series[_name(rec, k)] = ts
     (gen / "sat-cactus.svg").write_text(svg.cactus(series, "CPU time per fixture, ms (log scale)",
                                                    "fixtures answered"))
@@ -194,7 +195,7 @@ def page_sat(rec: dict, s: dict, gen: Path) -> str:
          "others' dialect.", "",
          provenance(rec), "",
          "## Fixtures answered within a time", "",
-         "Each line counts the fixtures a solver answered `sat` or `unsat` within "
+         "Each line counts the fixtures a solver answered correctly within "
          "the CPU time on the x axis, start-up included; further right is slower, "
          "higher is more answered.", "",
          "![Fixtures answered against CPU time](_gen/sat-cactus.svg)", "",
@@ -208,13 +209,12 @@ def page_sat(rec: dict, s: dict, gen: Path) -> str:
              "dv-smt2@anchor": (rec.get("anchor") or {}).get("tag", "anchor")}
     for c in cats:
         L.append(f"- **{c}** (weight {man['weights'].get(c, 1.0):g}): {man.get('about', {}).get(c, '')}")
-    L += ["", "Fixtures answered `sat` or `unsat`:", "",
+    L += ["", "Fixtures answered correctly (`sat` or `unsat`, agreeing with the references):", "",
           "| Category | Fixtures | " + " | ".join(short[k] for k in [HEAD] + COMPARE) + " |",
           "|---|---|" + "---|" * (1 + len(COMPARE))]
     for c in cats:
         fxs = [f for f in man["fixtures"] if f["cat"] == c]
-        ans = [str(sum(1 for f in fxs if (by.get((f["path"], k)) or {}).get("verdict") in ("sat", "unsat")))
-               for k in [HEAD] + COMPARE]
+        ans = [str(sum(1 for f in fxs if ok(by.get((f["path"], k))))) for k in [HEAD] + COMPARE]
         L.append(f"| {c} | {len(fxs)} | {' | '.join(ans)} |")
     rats = {k: normalize.ratios(rec, SUITE, k) for k in COMPARE}
     L += ["", "dv-solve speed-up against each solver, as a geometric mean over the "
@@ -258,7 +258,8 @@ def page_sat(rec: dict, s: dict, gen: Path) -> str:
 
     L += ["", "## Every fixture", "",
           "CPU ms, minimum over the repetitions; `–` is no definite answer "
-          "(`unknown`, timeout or error). "
+          "(`unknown`, timeout or error); `wrong` is an answer the reference "
+          "solvers contradict. "
           "Download: {download}`all measurements as CSV <_gen/sat-core.csv>`.", "",
           "| Fixture | Category | Answer | " + " | ".join(_name(rec, k) for k in keys) + " |",
           "|---|---|---|" + "---|" * len(keys)]
@@ -267,7 +268,7 @@ def page_sat(rec: dict, s: dict, gen: Path) -> str:
         cells = []
         for k in keys:
             r = by.get((f["path"], k))
-            cells.append(_ms(r["cpu_ms_min"]) if r and r["verdict"] in ("sat", "unsat") else "–")
+            cells.append(_ms(r["cpu_ms_min"]) if ok(r) else ("wrong" if r and r["verdict"] in ("sat", "unsat") else "–"))
         L.append(f"| `{Path(f['path']).stem}` | {f['cat']} | {h.get('verdict', '–')} | {' | '.join(cells)} |")
     L.append("")
     return "\n".join(L)
