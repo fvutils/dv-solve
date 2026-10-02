@@ -682,11 +682,33 @@ static PropResult _fire_bounds_mod_32(Propagator *self, dvs_ctx_t *ctx) {
     return PROP_OK;
 }
 
+/* Record `r == a % b` for the value picker when b is a positive constant
+ * and nothing is signed (see DvsModLink). */
+static void _note_mod_link(dvs_ctx_t *ctx, uint32_t ref, uint32_t r_id,
+                           uint32_t a_id, uint32_t b_id) {
+    if (ref == EXPR_NULL) return;
+    const Variable *r = &ctx->vars[r_id], *a = &ctx->vars[a_id], *b = &ctx->vars[b_id];
+    if ((r->flags | a->flags | b->flags) & VAR_SIGNED) return;
+    int64_t blo = var_lo64(ctx, b), bhi = var_hi64(ctx, b);
+    if (blo != bhi || blo <= 1) return;
+    if (ctx->n_mod_links == ctx->mod_links_cap) {
+        uint32_t cap = ctx->mod_links_cap ? 2 * ctx->mod_links_cap : 8;
+        DvsModLink *m = (DvsModLink *)realloc(ctx->mod_links, cap * sizeof(DvsModLink));
+        if (!m) return;
+        ctx->mod_links = m;
+        ctx->mod_links_cap = cap;
+    }
+    ctx->mod_links[ctx->n_mod_links++] =
+        (DvsModLink){ .a = a_id, .r = r_id, .prop = ctx->n_props - 1, .b = blo };
+}
+
 uint32_t prop_add_bounds_mod_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                   uint32_t b_id, uint8_t priority) {
     uint32_t ids[3] = { r_id, a_id, b_id };
-    return _alloc_prop(ctx, _fire_bounds_mod_32, priority, 3, ids,
-                       sizeof(BoundsMod_32_t));
+    uint32_t ref = _alloc_prop(ctx, _fire_bounds_mod_32, priority, 3, ids,
+                               sizeof(BoundsMod_32_t));
+    _note_mod_link(ctx, ref, r_id, a_id, b_id);
+    return ref;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2555,7 +2577,9 @@ static PropResult _fire_bounds_mod_64(Propagator *self, dvs_ctx_t *ctx) {
 
 uint32_t prop_add_bounds_mod_64(dvs_ctx_t *c, uint32_t r, uint32_t a, uint32_t b, uint8_t p) {
     uint32_t ids[3]={r,a,b};
-    return _alloc_prop(c, _fire_bounds_mod_64, p, 3, ids, sizeof(BoundsMod_64_t));
+    uint32_t ref = _alloc_prop(c, _fire_bounds_mod_64, p, 3, ids, sizeof(BoundsMod_64_t));
+    _note_mod_link(c, ref, r, a, b);
+    return ref;
 }
 
 static PropResult _fire_unary_neg_64(Propagator *self, dvs_ctx_t *ctx) {

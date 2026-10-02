@@ -543,6 +543,44 @@ static int64_t _pick_avoiding_holes(dvs_ctx_t *ctx, uint32_t var_id,
     return cur + (int64_t)k;
 }
 
+/* A drawn value of `a` moved to a remainder that `r == a % b` still allows
+ * (DvsModLink). `x % 8 == 0` under a decided guard fixes r to 0, and the
+ * propagator then aligns only a's bounds: a uniform draw between them meets
+ * it one time in 8, and the other 7 are conflicts. Conflicts are rejections
+ * of the decisions made before them, so the branch that set the guard was
+ * drawn less (the NVMe bench's 4096-byte sectors, with
+ * `(lba_bytes == 4096) -> (slba % 8 == 0)`, came up 5% of the time, not
+ * half). The move keeps the draw's quotient and takes a remainder at random
+ * from r's domain, so the values that remain are drawn uniformly. While r
+ * still spans [0, b-1] -- the guard undecided -- there is nothing to move. */
+static int64_t _pick_mod_aligned(dvs_ctx_t *ctx, uint32_t var_id, int64_t v,
+                                 int64_t lo, int64_t hi) {
+    if (!ctx->n_mod_links || (ctx->vars[var_id].flags & VAR_SIGNED)) return v;
+    uint64_t ulo = (uint64_t)lo, uhi = (uint64_t)hi;
+    for (uint32_t i = 0; i < ctx->n_mod_links; i++) {
+        const DvsModLink *ml = &ctx->mod_links[i];
+        uint32_t a = ml->a, r = ml->r;
+        if (ctx->var_alias) {
+            while (ctx->var_alias[a] != a) a = ctx->var_alias[a];
+            while (ctx->var_alias[r] != r) r = ctx->var_alias[r];
+        }
+        if (a != var_id) continue;
+        uint64_t b = (uint64_t)ml->b;
+        uint64_t rlo = (uint64_t)var_lo64(ctx, &ctx->vars[r]);
+        uint64_t rhi = (uint64_t)var_hi64(ctx, &ctx->vars[r]);
+        if (rhi > b - 1) rhi = b - 1;
+        if (rlo > rhi || (rlo == 0 && rhi == b - 1)) continue;
+        uint64_t uv = (uint64_t)v, rem = uv % b;
+        if (rem >= rlo && rem <= rhi) continue;
+        uint64_t t = rlo + _rand64(ctx) % (rhi - rlo + 1);
+        uint64_t c = uv - rem + t;
+        if (c > uhi || c < uv - rem) c -= b;     /* past hi, or wrapped */
+        if (c < ulo) c += b;
+        if (c >= ulo && c <= uhi) v = (int64_t)c;
+    }
+    return v;
+}
+
 enum { KEEP_NONE = 0, KEEP_SET = 1, KEEP_DEAD = 2 };
 
 static int _keep_draws_enabled(void) {
@@ -610,6 +648,7 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
         v = _pick_value_dist(ctx, var_id, lo, hi);
     } else {
         v = _rand_range64(ctx, lo, hi);
+        v = _pick_mod_aligned(ctx, var_id, v, lo, hi);
     }
     v = _pick_avoiding_holes(ctx, var_id, v, lo, hi);
     if (keep && ctx->keep_state[var_id] == KEEP_NONE) {

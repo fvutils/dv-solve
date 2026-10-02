@@ -68,6 +68,14 @@ typedef struct {
     uint8_t          lcg_pristine;
 } CheckpointMark;
 
+/* `r == a % b` with b a positive constant, all unsigned: the value picker
+ * draws `a` with a remainder r still allows (see _pick_value). */
+typedef struct {
+    uint32_t a, r;
+    uint32_t prop;     /* its propagator's id: dropped with it on restore */
+    int64_t  b;
+} DvsModLink;
+
 typedef struct dvs_ctx_s {
     Variable          *vars;          /* pointer into static pool      */
     uint32_t           n_vars;        /* number of compiled variables  */
@@ -110,6 +118,9 @@ typedef struct dvs_ctx_s {
     uint8_t           *keep_state;
     uint32_t           keep_cap;
     uint8_t            keep_on;       /* keeping applies to this solve now */
+    DvsModLink        *mod_links;
+    uint32_t           n_mod_links;
+    uint32_t           mod_links_cap;
     CheckpointMark     checkpoints[MAX_CHECKPOINTS];
     uint32_t           n_checkpoints;
     uint32_t          *prop_refs;     /* pool offsets of propagators   */
