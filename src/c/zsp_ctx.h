@@ -62,6 +62,10 @@ typedef struct {
      * wires bbsolver to re-use a kissat instance across check-sat
      * calls. See LevelMark.sat_arena_top for the rationale. */
     size_t           sat_arena_top;
+    /* The LCG had learnt nothing yet (or did not exist): a restore returns
+     * it to its initial state (lcg_reset), so a context reused across
+     * checkpoint/solve/restore searches exactly as a freshly compiled one. */
+    uint8_t          lcg_pristine;
 } CheckpointMark;
 
 typedef struct SolveCtx {

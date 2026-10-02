@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "zsp_ctx.h"
+#include "zsp_diffcycle.h"
 #include "zsp_propagator.h"
 #include "zsp_problem.h"
 #include "zsp_sv.h"
@@ -4328,6 +4329,10 @@ static int _solver_compile_body(SolveCtx *ctx, SolveProblem *sp) {
             ctx->initial_n_vars = 0;
         }
     }
+
+    /* Negative-cycle detection over the difference relations just compiled
+     * (zsp_diffcycle.h). */
+    if (diffcycle_build(ctx) < 0) return -1;
 
     /* Return count of uncompiled constraints (0 = all compiled, >0 = partial,
        negative values reserved for hard errors above). */

@@ -29,10 +29,13 @@ _CTX_BUF_SIZE = 1 << 20  # 1 MiB — headroom for propagators + decisions
 
 # ------------------------------------------------------------------ #
 # SolveOpts ctypes struct                                              #
-# Layout (must match zsp_search.h exactly):                            #
+# Layout (must match SolveOpts in zsp_search.h exactly):               #
 #   seed(uint64=8) + max_conflicts(uint32=4) + max_restarts(uint32=4)  #
-#   + use_phase_save(uint8=1) + _pad[3] + max_shave_iters(uint32=4)   #
-#   → total 24 bytes                                                   #
+#   + use_phase_save, use_lcg, fair_pick (uint8 each) + _pad[1]        #
+#   + max_shave_iters(uint32=4) + time_limit_ms(uint32=4)              #
+#   → total 32 bytes (28 + tail padding to the uint64's alignment)     #
+# The C side reads every field, so a short struct here is a read past  #
+# the end of the caller's buffer (test_solve_opts_layout.py).          #
 # ------------------------------------------------------------------ #
 class _SolveOpts(ctypes.Structure):
     _fields_ = [
@@ -44,6 +47,7 @@ class _SolveOpts(ctypes.Structure):
         ("fair_pick",      ctypes.c_uint8),
         ("_pad",           ctypes.c_uint8 * 1),
         ("max_shave_iters", ctypes.c_uint32),
+        ("time_limit_ms",  ctypes.c_uint32),
     ]
 
 
@@ -195,6 +199,8 @@ class SolveCtx:
         use_phase_save: bool = False,
         max_shave_iters: int = 0,
         fair_pick: bool = False,
+        time_limit_ms: int = 0,
+        use_lcg: bool = False,
     ) -> int:
         """Search for a solution.
 
@@ -206,8 +212,23 @@ class SolveCtx:
         Args:
             seed: Selects which solution is returned. The same seed gives the
                 same solution.
-            max_conflicts: Give up after this many conflicts; 0 for no limit.
-            max_restarts: Give up after this many restarts; 0 for no limit.
+            max_conflicts: The restart unit: the search restarts after
+                ``luby(i) * max_conflicts`` conflicts (0: 100). It is NOT a
+                total budget -- a large value means the search hardly ever
+                restarts, which makes heavy-tailed problems slower, not
+                bounded.
+            max_restarts: Give up (``SOLVE_TIMEOUT``) after this many
+                restarts (0: 10000). This, with ``max_conflicts``, is the
+                deterministic bound on one solve.
+            time_limit_ms: Wall-clock bound on this solve, in milliseconds
+                (0: the ``DV_CDCL_TIME_LIMIT`` environment default, 10 s).
+                Unlike the restart bound it depends on the machine.
+            use_lcg: Learn clauses from conflicts (lazy clause generation)
+                and backjump, instead of backtracking chronologically. Much
+                faster on problems whose conflicts come from early decisions.
+                A :meth:`restore` to a checkpoint taken before any learning
+                forgets everything learnt, so a reused context still solves
+                exactly as a fresh one.
             use_phase_save: Search tuning; leave at the default.
             max_shave_iters: Search tuning; leave at the default.
             fair_pick: See below.
@@ -225,6 +246,8 @@ class SolveCtx:
             use_phase_save=1 if use_phase_save else 0,
             fair_pick=1 if fair_pick else 0,
             max_shave_iters=max_shave_iters,
+            time_limit_ms=time_limit_ms,
+            use_lcg=1 if use_lcg else 0,
         )
         return self._lib.solver_solve(self._ctx, ctypes.byref(opts))
 

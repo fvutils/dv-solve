@@ -254,6 +254,32 @@ uint64_t lcg_n_learnt(const LCGCtx *lcg)   { return lcg ? lcg->n_learnt : 0; }
 uint64_t lcg_n_analyses(const LCGCtx *lcg) { return lcg ? lcg->n_analyses : 0; }
 uint32_t lcg_n_clauses(const LCGCtx *lcg)  { return lcg ? lcg->clause_db.n_clauses : 0; }
 
+void lcg_reset(LCGCtx *lcg) {
+    ClauseDB *db = &lcg->clause_db;
+    if (db->clauses) memset(db->clauses, 0, db->clauses_cap * sizeof(Clause *));
+    db->n_clauses = 0;
+    if (db->watch_lb) memset(db->watch_lb, 0, db->n_watch_vars * sizeof(WatchEntry *));
+    if (db->watch_ub) memset(db->watch_ub, 0, db->n_watch_vars * sizeof(WatchEntry *));
+    db->arena_used     = 0;
+    db->n_propagations = 0;
+    db->n_conflicts    = 0;
+
+    VSIDS *vs = &lcg->vsids;
+    if (vs->activity) memset(vs->activity, 0, vs->n_vars * sizeof(double));
+    vs->var_inc = 1.0;
+
+    /* seen[] / seen_lit[] are sized by the same n_vars as the VSIDS. */
+    if (lcg->seen)     memset(lcg->seen, 0, 2u * vs->n_vars * sizeof(uint8_t));
+    if (lcg->seen_lit) memset(lcg->seen_lit, 0, 2u * vs->n_vars * sizeof(Literal));
+    lcg->n_learnt   = 0;
+    lcg->n_analyses = 0;
+}
+
+int lcg_is_pristine(const LCGCtx *lcg) {
+    return lcg->n_analyses == 0 && lcg->clause_db.n_clauses == 0 &&
+           lcg->clause_db.arena_used == 0;
+}
+
 void lcg_destroy(LCGCtx *lcg) {
     clause_db_destroy(&lcg->clause_db);
     vsids_destroy(&lcg->vsids);

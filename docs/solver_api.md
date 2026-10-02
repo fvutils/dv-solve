@@ -110,11 +110,16 @@ satisfied with all soft constraints active.
 ```c
 typedef struct {
     uint64_t seed;              // RNG seed (0 = keep current)
-    uint32_t max_conflicts;     // per-restart conflict budget (0 = 100)
-    uint32_t max_restarts;      // total restart budget (0 = 10000)
+    uint32_t max_conflicts;     // restart unit: restart after luby(i) * this
+                                //   many conflicts (0 = 100). Not a total budget.
+    uint32_t max_restarts;      // total restart budget (0 = 10000); then SOLVE_TIMEOUT
     uint8_t  use_phase_save;    // 1 = remember last tried value
-    uint8_t  _pad[3];
+    uint8_t  use_lcg;           // 1 = lazy clause generation (CDCL)
+    uint8_t  fair_pick;         // 1 = random tie-break among smallest domains
+    uint8_t  _pad[1];
     uint32_t max_shave_iters;   // bounds shaving budget (0 = 1000)
+    uint32_t time_limit_ms;     // wall-clock budget for this solve
+                                //   (0 = DV_CDCL_TIME_LIMIT env default, 10 s)
 } SolveOpts;
 ```
 

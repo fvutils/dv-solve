@@ -151,6 +151,7 @@ set(ZSP_SOURCES
     src/c/zsp_costguided.c
     src/c/zsp_lcg.c
     src/c/zsp_explain.c
+    src/c/zsp_diffcycle.c
     src/c/zsp_clause_prop.c
     src/c/zsp_sat.c
     src/c/zsp_sat_kissat.c

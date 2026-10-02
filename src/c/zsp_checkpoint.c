@@ -18,6 +18,7 @@ int solver_checkpoint(SolveCtx *ctx) {
     m->n_vars_at_cp   = ctx->n_vars;
     m->n_props_at_cp  = ctx->n_props;
     m->n_clauses_at_cp = ctx->lcg ? ((LCGCtx *)ctx->lcg)->clause_db.n_clauses : 0;
+    m->lcg_pristine   = ctx->lcg ? (uint8_t)lcg_is_pristine((LCGCtx *)ctx->lcg) : 1;
     m->trail_top      = ctx->trail_top;
     m->trail_count    = ctx->trail_count;
     /* Phase B.1 step 5 (plumbing slice): SAT-arena top is zero today —
@@ -101,8 +102,19 @@ void solver_restore(SolveCtx *ctx, uint32_t cp) {
      * vars in the post-pop scope — keeping the clauses around would
      * mis-interpret them against the new vars and produce spurious
      * unsat results. Set to NULL (the arena memory stays; clause_db
-     * scans skip NULL entries). */
-    if (ctx->lcg) {
+     * scans skip NULL entries).
+     *
+     * When the LCG had learnt nothing at the checkpoint -- the
+     * checkpoint/pin/solve/restore pattern, checkpointing a freshly
+     * compiled context -- restore it to exactly that: lcg_reset also
+     * clears the watch lists, the arena and the VSIDS activity. Leaving
+     * those made the next solve on the context pick decisions by the
+     * previous solve's activity (a reused context then answered
+     * differently from a fresh one), and the arena, never reclaimed,
+     * filled after enough solves and silently stopped learning. */
+    if (ctx->lcg && m->lcg_pristine) {
+        lcg_reset((LCGCtx *)ctx->lcg);
+    } else if (ctx->lcg) {
         ClauseDB *db = &((LCGCtx *)ctx->lcg)->clause_db;
         for (uint32_t i = m->n_clauses_at_cp; i < db->n_clauses; i++) {
             db->clauses[i] = NULL;

@@ -200,6 +200,11 @@ typedef struct {
 
 int  lcg_init(LCGCtx *lcg, uint32_t n_vars);
 void lcg_destroy(LCGCtx *lcg);
+/** Return `lcg` to the state lcg_init left it in: no clauses, no watches,
+ *  an empty arena, zero activity, zero statistics. Keeps its allocations. */
+void lcg_reset(LCGCtx *lcg);
+/** Has `lcg` learnt nothing since lcg_init / lcg_reset? */
+int  lcg_is_pristine(const LCGCtx *lcg);
 
 /* Diagnostic accessors */
 uint64_t lcg_n_learnt(const LCGCtx *lcg);

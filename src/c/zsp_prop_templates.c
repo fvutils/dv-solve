@@ -6,6 +6,7 @@
 #include "zsp_lcg.h"
 #include "zsp_explain.h"
 #include "zsp_i128.h"
+#include "zsp_diffcycle.h"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -4331,4 +4332,56 @@ void contra_register_explanations(SolveCtx *ctx) {
             }
         }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Difference relations (zsp_diffcycle.c)                              */
+/*                                                                     */
+/* Which of the propagators above state a difference relation, and     */
+/* over which variables. Identified here, by fire function, because    */
+/* that is where the fire functions are visible.                       */
+/* ------------------------------------------------------------------ */
+
+int prop_difference_relations(const Propagator *p, const SolveCtx *ctx,
+                              DiffRel out[2]) {
+    (void)ctx;
+    if (p->flags & PROP_FLAG_WIDE_WATCH) return 0;
+    const PropWatchSect *ws = (const PropWatchSect *)((const char *)p + sizeof(Propagator));
+    PropResult (*f)(Propagator *, SolveCtx *) = p->fire;
+    memset(out, 0, 2 * sizeof(DiffRel));
+    if (f == _fire_bounds_le_32 || f == _fire_bounds_le_64 ||
+        f == _fire_bounds_lt_32 || f == _fire_bounds_lt_64) {
+        out[0].kind = DREL_LE;               /* x <= y (+ 0 | - 1) */
+        out[0].v[0] = ws->var_ids[0];
+        out[0].v[1] = ws->var_ids[1];
+        out[0].c    = (f == _fire_bounds_lt_32 || f == _fire_bounds_lt_64) ? -1 : 0;
+        return 1;
+    }
+    if (f == _fire_bounds_eq_32 || f == _fire_bounds_eq_64) {
+        out[0].kind = DREL_LE; out[0].v[0] = ws->var_ids[0]; out[0].v[1] = ws->var_ids[1];
+        out[1].kind = DREL_LE; out[1].v[0] = ws->var_ids[1]; out[1].v[1] = ws->var_ids[0];
+        return 2;
+    }
+    if (f == _fire_bounds_add_32 || f == _fire_bounds_add_64) {
+        out[0].kind = DREL_SUM;              /* exact integer add */
+        out[0].v[0] = ws->var_ids[0]; out[0].v[1] = ws->var_ids[1]; out[0].v[2] = ws->var_ids[2];
+        return 1;
+    }
+    if (f == _fire_bvadd_64 || f == _fire_bvsub_64) {
+        const BvBin_64_t *bp = (const BvBin_64_t *)p;
+        out[0].kind  = (f == _fire_bvadd_64) ? DREL_SUM : DREL_SUB;
+        out[0].width = bp->width;
+        out[0].v[0] = ws->var_ids[0]; out[0].v[1] = ws->var_ids[1]; out[0].v[2] = ws->var_ids[2];
+        return 1;
+    }
+    if (f == _fire_bvadd_const_64) {
+        const BvAddConst_64_t *bp = (const BvAddConst_64_t *)p;
+        out[0].kind  = DREL_ADDC;
+        out[0].width = bp->width;
+        out[0].v[0]  = ws->var_ids[0];
+        out[0].v[1]  = ws->var_ids[1];
+        out[0].c     = (int64_t)bp->c;       /* residue in [0, 2^width) */
+        return 1;
+    }
+    return 0;
 }

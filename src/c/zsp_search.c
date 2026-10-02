@@ -441,6 +441,12 @@ static SolveResult _solver_solve_core(SolveCtx *ctx, const SolveOpts *opts) {
             }
         }
     }
+    /* `use_lcg` is per solve: an LCG created by an earlier solve learns only
+     * in solves that ask for it. (It used to stay on once created, so a
+     * caller could not run a plain chronological solve on the context.) */
+    if (ctx->lcg)
+        ((LCGCtx *)ctx->lcg)->enabled = (opts && opts->use_lcg) ? 1 : 0;
+
     /* Register explain callbacks every solve — propagators added by
      * compile-time aux materialisation or incremental paths after the
      * first solve would otherwise miss their explain wiring. The walk
@@ -1070,6 +1076,9 @@ int solver_solve_n(SolveCtx *ctx, uint32_t n_solves,
     if (!ctx || !var_ids || !out) return 0;
 
     SolveOpts opts;
+    /* Zero first: SolveOpts has fields this list does not name
+     * (time_limit_ms), and solver_solve reads them all. */
+    memset(&opts, 0, sizeof(opts));
     opts.max_conflicts  = 100;
     opts.max_restarts   = 10000;
     opts.use_phase_save = 0;

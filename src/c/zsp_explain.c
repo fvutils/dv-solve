@@ -140,12 +140,22 @@ int explain_bounds_ne(Propagator *self, SolveCtx *ctx,
     uint32_t other = (var_id == xid) ? yid : xid;
     out->n_lits = 0;
 
-    /* x != y propagates when one is singleton.
-     * If other is singleton at value v, and var's bound was at v,
-     * the reason is "other == v" (i.e., other >= v AND other <= v). */
-    int64_t other_val = var_lo64(ctx, &ctx->vars[other]);
-    out->lits[out->n_lits++] = _mk_lb(other, other_val);
-    out->lits[out->n_lits++] = _mk_ub(other, other_val);
+    /* x != y propagates when one is singleton at v and v is an ENDPOINT of
+     * the other's domain: that endpoint is shaved off. The reason is
+     * "other == v" AND "var's bound was at v" -- without the second literal
+     * the learnt clause says `other == v -> var != v .. its old bound`,
+     * which is false whenever var's domain was wider (8-queens: LCG learnt
+     * `v3 != 1` from `v2 != v3` shaving v2 in [0, 1] to [0, 0], and reported
+     * a satisfiable board UNSAT on 9 of 200 seeds).
+     *
+     * v is recovered from the new bound (lb: v + 1, ub: v - 1), not read
+     * from `other`'s domain now: the explanation must describe the state the
+     * bound was set in. */
+    (void)ctx;
+    int64_t v = is_lb ? new_bound - 1 : new_bound + 1;
+    out->lits[out->n_lits++] = _mk_lb(other, v);
+    out->lits[out->n_lits++] = _mk_ub(other, v);
+    out->lits[out->n_lits++] = is_lb ? _mk_lb(var_id, v) : _mk_ub(var_id, v);
     return 0;
 }
 
