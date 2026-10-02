@@ -1,0 +1,4 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 72))
+(assert (bvugt x #b111111111111111111111111111111111111111111111111111111111111111111111111))
+(check-sat)

@@ -8,9 +8,12 @@ z3 and dv-solve parse the identical text) built from the operators dv-solve
 supports — including wide (>64-bit) vars/ops from Phase W1. The same seed always
 produces the same problem, so a failing case is fully reproducible.
 
-Constants use only the ``(_ bvK W)`` form with ``K`` fitting in 63 bits (W1's
-sound constant range), so a disagreement with z3 is a real solver bug, not the
-documented wide-``#x``-literal limitation.
+By default constants use only the ``(_ bvK W)`` form with ``K`` fitting in 63
+bits. ``generate_problem(seed, wide_lits=True)`` instead draws constants over
+each width's full range -- including values >= 2^64 for >64-bit widths
+(Phase W2) and boundary values around 2^63 / 2^64 / 2^W -- and spells them as
+``#x…``, ``#b…`` or ``(_ bvK W)`` (occasionally with K >= 2^W, which SMT-LIB /
+z3 reduce mod 2^W).
 
 Used by ``test_fuzz_cross_check.py``. Also runnable standalone to eyeball or
 persist a sample:  ``python3 tests/formal/fuzz_bv_smt2.py [seed]``
@@ -53,8 +56,9 @@ def _split_args(s: str) -> list[str] | None:
 
 
 class _Gen:
-    def __init__(self, rng: random.Random):
+    def __init__(self, rng: random.Random, wide_lits: bool = False):
         self.rng = rng
+        self.wide_lits = wide_lits
         self.vars: dict[str, int] = {}   # name -> width
         self._n = 0
 
@@ -72,10 +76,30 @@ class _Gen:
         return self._new_var(width)
 
     def _const(self, width: int) -> str:
+        if self.wide_lits:
+            return self._wide_const(width)
         # Keep K within 63 bits (W1's sound constant range) and within 2**width.
         hi = (1 << width) - 1
         hi = min(hi, (1 << 63) - 1)
         return f"(_ bv{self.rng.randint(0, hi)} {width})"
+
+    def _wide_const(self, width: int) -> str:
+        """Full-range constant of `width` bits, in a random literal spelling."""
+        r = self.rng
+        top = (1 << width) - 1
+        edges = [0, 1, top, top - 1, 1 << (width - 1), (1 << (width - 1)) - 1]
+        for e in (63, 64):                    # the int64 / uint64 cliffs
+            if e < width:
+                edges += [1 << e, (1 << e) - 1, (1 << e) + 1]
+        k = r.choice(edges) if r.random() < 0.4 else r.randint(0, top)
+        form = r.random()
+        if form < 0.35 and width % 4 == 0:
+            return f"#x{k:0{width // 4}x}"
+        if form < 0.65:
+            return f"#b{k:0{width}b}"
+        if r.random() < 0.1:                  # unreduced K: value is K mod 2^W
+            k += (1 << width) * r.randint(1, 3)
+        return f"(_ bv{k} {width})"
 
     def term(self, width: int, depth: int) -> str:
         """A BV term of exactly `width` bits."""
@@ -193,9 +217,9 @@ class _Gen:
         return f"({op} {' '.join(self.pred(depth-1) for _ in range(n))})"
 
 
-def generate_problem(seed: int) -> str:
+def generate_problem(seed: int, wide_lits: bool = False) -> str:
     rng = random.Random(seed)
-    g = _Gen(rng)
+    g = _Gen(rng, wide_lits)
     depth = rng.randint(2, 4)
     n_asserts = rng.randint(1, 3)
     # Each assert is emitted either as a plain Bool predicate or in Verilator's

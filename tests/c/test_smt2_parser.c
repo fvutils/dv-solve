@@ -179,6 +179,36 @@ static void test_parse_bitvec_literal(void) {
     sexpr_arena_destroy(&arena);
 }
 
+/* A literal wider than 64 bits keeps its full value in limbs (W2). */
+static void test_parse_bitvec_literal_wide(void) {
+    const char *input = "#x8000000000000001fedcba9876543210 #b1"
+                        "0000000000000000000000000000000000000000000000000000000000000011 #xFF";
+    Smt2Lexer lex; smt2_lexer_init(&lex, input, strlen(input));
+    SexprArena arena; sexpr_arena_init(&arena, 0);
+
+    Sexpr *s = sexpr_parse(&lex, &arena);
+    ASSERT_TRUE(s != NULL);
+    ASSERT_EQ_INT(s->kind, SEXPR_BITVEC);
+    ASSERT_EQ_INT(s->bv.width, 128);
+    ASSERT_TRUE(s->bv.limbs != NULL);
+    ASSERT_EQ_U64(s->bv.limbs[0], 0xfedcba9876543210ULL);
+    ASSERT_EQ_U64(s->bv.limbs[1], 0x8000000000000001ULL);
+    ASSERT_EQ_U64(s->bv.value, 0xfedcba9876543210ULL);
+
+    s = sexpr_parse(&lex, &arena);
+    ASSERT_TRUE(s != NULL);
+    ASSERT_EQ_INT(s->bv.width, 65);
+    ASSERT_TRUE(s->bv.limbs != NULL);
+    ASSERT_EQ_U64(s->bv.limbs[0], 3);
+    ASSERT_EQ_U64(s->bv.limbs[1], 1);
+
+    s = sexpr_parse(&lex, &arena);          /* narrow: no limbs */
+    ASSERT_TRUE(s != NULL);
+    ASSERT_TRUE(s->bv.limbs == NULL);
+
+    sexpr_arena_destroy(&arena);
+}
+
 static void test_parse_keyword(void) {
     const char *input = ":produce-models";
     Smt2Lexer lex; smt2_lexer_init(&lex, input, strlen(input));
@@ -255,6 +285,7 @@ int main(void) {
     RUN(test_parse_bv_literal_indexed);
     RUN(test_parse_declare_const);
     RUN(test_parse_bitvec_literal);
+    RUN(test_parse_bitvec_literal_wide);
     RUN(test_parse_keyword);
     RUN(test_parse_multiple);
     RUN(test_parse_empty_list);
