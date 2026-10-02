@@ -27,7 +27,11 @@ typedef struct Sexpr {
     union {
         struct { const char *str; uint32_t len; }        sym;   /* SYMBOL/KEYWORD/STRING */
         uint64_t                                         numval;/* NUMERAL */
-        struct { uint64_t value; uint32_t width; }       bv;    /* BITVEC */
+        /* BITVEC: `value` is the low 64 bits. A literal wider than 64 bits
+         * also carries its full value in `limbs` (little-endian, ceil(width/64)
+         * limbs, arena-owned); limbs is NULL when width <= 64. */
+        struct { uint64_t value; uint32_t width;
+                 const uint64_t *limbs; }                bv;    /* BITVEC */
         struct { struct Sexpr **items; uint32_t count; }  list;  /* LIST */
     };
 } Sexpr;

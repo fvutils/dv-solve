@@ -1,0 +1,5 @@
+(set-logic QF_ABV)
+(declare-const a (Array (_ BitVec 8) (_ BitVec 128)))
+(declare-const i (_ BitVec 8))
+(assert (= (select (store a i #x8000000000000001ffffffffffffffff) #x05) #x8000000000000001ffffffffffffffff))(assert (distinct (select a #x05) #x8000000000000001ffffffffffffffff))(assert (distinct i #x05))
+(check-sat)

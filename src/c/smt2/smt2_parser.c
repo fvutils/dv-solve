@@ -151,6 +151,18 @@ static Sexpr *_parse_one(Smt2Lexer *lex, SexprArena *arena) {
         s->kind     = SEXPR_BITVEC;
         s->bv.value = tok.numval;
         s->bv.width = tok.bv_width;
+        s->bv.limbs = NULL;
+        if (tok.bv_width > 64) {
+            /* The token's numval is only the low 64 bits; keep the full value
+             * so the frontend never sees a silently truncated wide literal. */
+            uint32_t nl = (tok.bv_width + 63u) / 64u;
+            uint64_t *limbs = (uint64_t *)sexpr_arena_alloc(
+                arena, nl * sizeof(uint64_t), _Alignof(uint64_t));
+            if (!limbs ||
+                smt2_bvlit_limbs(tok.start, tok.length, limbs, nl) != 0)
+                return NULL;
+            s->bv.limbs = limbs;
+        }
         return s;
     }
     case TOK_KEYWORD: {

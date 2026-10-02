@@ -8,6 +8,7 @@
 #include "dvs_lcg.h"
 #include "dvs_bbsolver.h"
 #include "dvs_cube.h"
+#include "dvs_i128.h"
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -297,8 +298,41 @@ static int _parse_bv_sym(const Sexpr *sym, uint64_t *val_out, int *overflow_out)
         if (v > (UINT64_MAX - d) / 10u) ovf = 1;
         v = v * 10u + d;
     }
+    /* A caller that does not ask about overflow (the array constant-index
+     * shortcuts, which key elements by a uint64) must not see a truncated
+     * value: report "not a constant" so it takes its general path instead. */
     if (overflow_out) *overflow_out = ovf;
+    else if (ovf) return 0;
     *val_out = v;
+    return 1;
+}
+
+/* Limbs needed to hold the widest accepted bit-vector value. */
+#define SMT2_BV_MAX_LIMBS ((SMT2_MAX_BV_BITS + 63) / 64)
+
+/* Parse the `bvN` symbol of `(_ bvN W)` into little-endian 64-bit limbs, as
+ * N modulo 2^(64*n_limbs). SMT-LIB's value is N mod 2^W and the caller sizes
+ * n_limbs so that W <= 64*n_limbs, so the low W bits are exact even when N
+ * itself needs more bits than the limbs hold. Returns 1 on success, 0 if `sym`
+ * is not a `bvN` symbol. */
+static int _parse_bv_sym_limbs(const Sexpr *sym, uint64_t *limbs, uint32_t n_limbs) {
+    if (sym->kind != SEXPR_SYMBOL) return 0;
+    if (sym->sym.len < 3) return 0;
+    if (sym->sym.str[0] != 'b' || sym->sym.str[1] != 'v') return 0;
+    for (uint32_t k = 0; k < n_limbs; k++) limbs[k] = 0;
+    for (uint32_t i = 2; i < sym->sym.len; i++) {
+        char c = sym->sym.str[i];
+        if (c < '0' || c > '9') return 0;
+        /* limbs = limbs * 10 + d, carried through 32-bit halves (portable:
+         * no 128-bit product needed). */
+        uint64_t carry = (uint64_t)(c - '0');
+        for (uint32_t k = 0; k < n_limbs; k++) {
+            uint64_t lo = (limbs[k] & 0xFFFFFFFFu) * 10u + carry;
+            uint64_t hi = (limbs[k] >> 32) * 10u + (lo >> 32);
+            limbs[k] = (hi << 32) | (lo & 0xFFFFFFFFu);
+            carry = hi >> 32;
+        }
+    }
     return 1;
 }
 
@@ -1270,6 +1304,43 @@ static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
     return (TaggedExpr){ { r, 1 }, 0, NULL };
 }
 
+/* A bit-vector constant wider than 64 bits (W2), given as little-endian limbs.
+ *
+ * EXPR_CONST carries an int64 value, so a wide constant is built from sized
+ * <=64-bit chunks through the ordinary expression builders: a zero_extend of
+ * the low limb when every higher limb is zero, else a concat of the chunks.
+ * The result is tagged complex (leaf_kind 0), never const: the const-fold
+ * sites read ExprConst.value as the whole value, which for a wide constant it
+ * is not. Like every >64-bit term it is bitblast-only. */
+static TaggedExpr _wide_const(Smt2Frontend *fe, const uint64_t *limbs, uint32_t width) {
+    if (width > SMT2_MAX_BV_BITS || !limbs) {
+        SMT2_TAINT(fe, "bitvector constant wider than the widest supported sort");
+        return TAGGED_NULL;
+    }
+    fe->needs_bitblast = 1;
+    uint32_t nl = (width + 63u) / 64u;
+    uint64_t v[SMT2_BV_MAX_LIMBS];
+    for (uint32_t i = 0; i < nl; i++) v[i] = limbs[i];
+    uint32_t top_w = width - 64u * (nl - 1u);
+    if (top_w < 64) v[nl - 1] &= ((uint64_t)1 << top_w) - 1;
+
+    int hi_zero = 1;
+    for (uint32_t i = 1; i < nl; i++)
+        if (v[i]) hi_zero = 0;
+
+    dvs_expr_t r;
+    if (hi_zero) {
+        dvs_expr_t lo = _bv_const(fe, (int64_t)v[0], 64);
+        r = dvs_builder_expr_extend(fe->builder, lo, 64, (uint8_t)width, 0);
+    } else {
+        r = _bv_const(fe, (int64_t)v[nl - 1], (uint16_t)top_w);
+        for (uint32_t i = nl - 1; i-- > 0;)
+            r = dvs_builder_expr_concat(fe->builder, r, _bv_const(fe, (int64_t)v[i], 64), 64);
+    }
+    if (r == EXPR_NULL) return TAGGED_NULL;
+    return (TaggedExpr){ { r, (uint16_t)width }, 0, NULL };
+}
+
 static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     if (s->list.count == 0) return TAGGED_NULL;
 
@@ -1283,13 +1354,24 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         int bv_ovf = 0;
         if (_parse_bv_sym(op, &bv_val, &bv_ovf)) {
             if (s->list.items[2]->kind != SEXPR_NUMERAL) return TAGGED_NULL;
-            uint16_t w = (uint16_t)s->list.items[2]->numval;
-            if (bv_ovf) {
-                /* Constant value needs > 64 bits (W1 stores const values as
-                 * 64-bit): answer `unknown` rather than use a truncated value. */
-                SMT2_TAINT(fe, "bitvector constant value needs more than 64 bits");
-                return TAGGED_NULL;
+            uint64_t wn = s->list.items[2]->numval;
+            if (wn > 64 || bv_ovf) {
+                /* A wide sort, or N >= 2^64: re-read N exactly (mod 2^128,
+                 * which is exact mod 2^W for every accepted W). */
+                if (wn > SMT2_MAX_BV_BITS) {
+                    SMT2_TAINT(fe, "bitvector constant wider than the widest supported sort");
+                    return TAGGED_NULL;
+                }
+                uint64_t limbs[SMT2_BV_MAX_LIMBS];
+                _parse_bv_sym_limbs(op, limbs, SMT2_BV_MAX_LIMBS);
+                if (wn > 64) return _wide_const(fe, limbs, (uint32_t)wn);
+                bv_val = limbs[0];
             }
+            /* The value is N mod 2^W (as z3 reads it). An unreduced N >= 2^W
+             * made the CDCL engine answer a wrong `unsat` on e.g.
+             * `(= x8 (_ bv300 8))`; reduce it here, for every width. */
+            if (wn > 0 && wn < 64) bv_val &= ((uint64_t)1 << wn) - 1;
+            uint16_t w = (uint16_t)wn;
             dvs_expr_t r = _bv_const(fe, (int64_t)bv_val, w);
             return (TaggedExpr){ { r, w }, 2, NULL };
         }
@@ -1546,7 +1628,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (idx_s) {
             uint64_t k = 0;
             int is_const = 0;
-            if (idx_s->kind == SEXPR_BITVEC) {
+            if (idx_s->kind == SEXPR_BITVEC && idx_s->bv.width <= 64) {  /* wide: general path */
                 k = idx_s->bv.value; is_const = 1;
             } else if (idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
                        sexpr_is_symbol(idx_s->list.items[0], "_")) {
@@ -1653,7 +1735,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (idx_s) {
             uint64_t k = 0;
             int is_const = 0;
-            if (idx_s->kind == SEXPR_BITVEC) {
+            if (idx_s->kind == SEXPR_BITVEC && idx_s->bv.width <= 64) {  /* wide: general path */
                 k = idx_s->bv.value; is_const = 1;
             } else if (idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
                        sexpr_is_symbol(idx_s->list.items[0], "_")) {
@@ -2186,14 +2268,10 @@ static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s) {
         return (TaggedExpr){ { r, 64 }, 2, NULL };
     }
     case SEXPR_BITVEC: {
-        /* A `#x…`/`#b…` literal wider than 64 bits was truncated to 64 bits at
-         * the lexer (Sexpr.bv.value is uint64), so its true value is
-         * unrecoverable here. W1 answers `unknown` rather than risk a wrong
-         * result; wide-valued literals await the W2 multi-limb literal path. */
-        if (s->bv.width > 64) {
-            SMT2_TAINT(fe, "bitvector literal wider than 64 bits (value truncated by the lexer)");
-            return TAGGED_NULL;
-        }
+        /* A `#x…`/`#b…` literal wider than 64 bits carries its full value in
+         * limbs (Sexpr.bv.value is only the low 64 bits). */
+        if (s->bv.width > 64)
+            return _wide_const(fe, s->bv.limbs, s->bv.width);
         dvs_expr_t r = _bv_const(fe, (int64_t)s->bv.value, (uint16_t)s->bv.width);
         return (TaggedExpr){ { r, (uint16_t)s->bv.width }, 2, NULL };
     }
@@ -2233,6 +2311,15 @@ static const Sexpr *_sexpr_deep_copy(SexprArena *arena, const Sexpr *src) {
         break;
     case SEXPR_BITVEC:
         dst->bv = src->bv;
+        if (src->bv.limbs) {
+            /* A wide literal's limbs live in the source arena: copy them too. */
+            uint32_t nl = (src->bv.width + 63u) / 64u;
+            uint64_t *l = (uint64_t *)sexpr_arena_alloc(
+                arena, nl * sizeof(uint64_t), _Alignof(uint64_t));
+            if (!l) return NULL;
+            memcpy(l, src->bv.limbs, nl * sizeof(uint64_t));
+            dst->bv.limbs = l;
+        }
         break;
     case SEXPR_LIST: {
         dst->list.count = src->list.count;
@@ -4587,10 +4674,34 @@ static void _emit_array_store_chain(Smt2Frontend *fe, Smt2ArrayVar *av) {
 
     /* Pre-gather element values by looking up "name[i]" in the var table */
     int64_t *vals = (int64_t *)alloca(n * sizeof(int64_t));
+    uint32_t *vids = (uint32_t *)alloca(n * sizeof(uint32_t));
     for (uint32_t i = 0; i < n; i++) {
         snprintf(elem_name, sizeof(elem_name), "%s[%u]", av->name, i);
         Smt2Var *vvar = _find_var(fe, elem_name, (uint32_t)strlen(elem_name));
         vals[i] = vvar ? _fe_get_var_value(fe, vvar->var_id) : 0;
+        vids[i] = vvar ? vvar->var_id : UINT32_MAX;
+    }
+
+    if (dw > 64) {
+        /* A wide element value does not fit `(_ bvN W)`'s int64 print: emit
+         * each element as a full-width `#b…` literal instead. */
+        uint64_t limbs[SMT2_BV_MAX_LIMBS];
+        uint32_t nl = (dw + 63u) / 64u;
+        for (uint32_t i = 1; i < n; i++) fprintf(fe->out, "(store ");
+        fprintf(fe->out, "((as const (Array (_ BitVec %u) (_ BitVec %u))) ",
+                (unsigned)aw, (unsigned)dw);
+        for (uint32_t j = 0; j < nl; j++) limbs[j] = 0;
+        if (vids[0] != UINT32_MAX) _fe_get_var_value_wide(fe, vids[0], limbs, nl);
+        _emit_bv_bin_literal_wide(fe->out, limbs, nl, (unsigned)dw);
+        fprintf(fe->out, ")");
+        for (uint32_t i = 1; i < n; i++) {
+            fprintf(fe->out, " (_ bv%u %u) ", i, (unsigned)aw);
+            for (uint32_t j = 0; j < nl; j++) limbs[j] = 0;
+            if (vids[i] != UINT32_MAX) _fe_get_var_value_wide(fe, vids[i], limbs, nl);
+            _emit_bv_bin_literal_wide(fe->out, limbs, nl, (unsigned)dw);
+            fprintf(fe->out, ")");
+        }
+        return;
     }
 
     /* Emit (store (store ... (as const ...) ...) ...) chain.
@@ -4617,13 +4728,38 @@ static void _emit_array_store_chain(Smt2Frontend *fe, Smt2ArrayVar *av) {
 /* on success; sets *ok=0 on unsupported/unknown shapes.               */
 /* ------------------------------------------------------------------ */
 
-typedef struct { uint64_t value; uint16_t width; } EvalRet;
+/* The evaluator's value type: 128 bits where the compiler has them, so every
+ * accepted width (SMT2_MAX_BV_BITS) folds exactly; otherwise 64 bits. A value
+ * wider than EVAL_MAX_W is refused (*ok = 0), never truncated: get-value then
+ * emits an honest error placeholder rather than a wrong value. */
+#if defined(DVS_HAVE_INT128)
+typedef unsigned __int128 EvalVal;
+#define EVAL_MAX_W 128
+#else
+typedef uint64_t EvalVal;
+#define EVAL_MAX_W 64
+#endif
+
+typedef struct { EvalVal value; uint16_t width; } EvalRet;
 
 static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok);
 
-static uint64_t _trunc(uint64_t v, uint16_t w) {
-    if (w == 0 || w >= 64) return v;
-    return v & (((uint64_t)1 << w) - 1);
+static EvalVal _trunc(EvalVal v, uint16_t w) {
+    if (w == 0 || w >= EVAL_MAX_W) return v;
+    return v & (((EvalVal)1 << w) - 1);
+}
+
+/* Little-endian limbs -> EvalVal (the caller has checked width <= EVAL_MAX_W). */
+static EvalVal _eval_from_limbs(const uint64_t *limbs, uint32_t n_limbs) {
+    EvalVal v = 0;
+    for (uint32_t i = n_limbs; i-- > 0;) {
+#if EVAL_MAX_W > 64
+        v = (v << 64) | (EvalVal)limbs[i];
+#else
+        v = (EvalVal)limbs[i];
+#endif
+    }
+    return v;
 }
 
 static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
@@ -4631,11 +4767,13 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
     if (!*ok || !s) { *ok = 0; return r; }
 
     if (s->kind == SEXPR_BITVEC) {
-        /* This evaluator carries a 64-bit value; a wider literal was truncated
-         * at the lexer, so refuse to fold it (get-value emits an honest error
-         * placeholder rather than a wrong value). */
-        if (s->bv.width > 64) { *ok = 0; return r; }
-        r.value = s->bv.value;
+        if (s->bv.width > EVAL_MAX_W) { *ok = 0; return r; }
+        if (s->bv.width > 64) {
+            if (!s->bv.limbs) { *ok = 0; return r; }
+            r.value = _eval_from_limbs(s->bv.limbs, (s->bv.width + 63u) / 64u);
+        } else {
+            r.value = s->bv.value;
+        }
         r.width = (uint16_t)s->bv.width;
         return r;
     }
@@ -4646,8 +4784,16 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
         if (fd && fd->n_params == 0) return _eval_sexpr(fe, fd->body, ok);
         Smt2Var *v = _find_var(fe, s->sym.str, s->sym.len);
         if (v) {
-            int64_t val = _fe_get_var_value(fe, v->var_id);
-            r.value = _trunc((uint64_t)val, v->width);
+            if (v->width > EVAL_MAX_W) { *ok = 0; return r; }
+            if (v->width > 64) {
+                uint64_t limbs[SMT2_BV_MAX_LIMBS];
+                uint32_t nl = (v->width + 63u) / 64u;
+                _fe_get_var_value_wide(fe, v->var_id, limbs, nl);
+                r.value = _trunc(_eval_from_limbs(limbs, nl), v->width);
+            } else {
+                int64_t val = _fe_get_var_value(fe, v->var_id);
+                r.value = _trunc((EvalVal)(uint64_t)val, v->width);
+            }
             r.width = v->width;
             return r;
         }
@@ -4668,15 +4814,12 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
         s->list.items[1]->kind == SEXPR_SYMBOL &&
         s->list.items[2]->kind == SEXPR_NUMERAL) {
         const Sexpr *bv = s->list.items[1];
-        if (bv->sym.len > 2 && bv->sym.str[0] == 'b' && bv->sym.str[1] == 'v') {
-            uint64_t val = 0;
-            for (uint32_t i = 2; i < bv->sym.len; i++) {
-                if (bv->sym.str[i] < '0' || bv->sym.str[i] > '9') { *ok = 0; return r; }
-                val = val * 10 + (uint64_t)(bv->sym.str[i] - '0');
-            }
-            r.width = (uint16_t)s->list.items[2]->numval;
-            if (r.width > 64) { *ok = 0; return r; }  /* 64-bit eval; don't fold wide */
-            r.value = _trunc(val, r.width);
+        uint64_t limbs[SMT2_BV_MAX_LIMBS];
+        if (_parse_bv_sym_limbs(bv, limbs, SMT2_BV_MAX_LIMBS)) {
+            uint64_t wn = s->list.items[2]->numval;
+            if (wn > EVAL_MAX_W) { *ok = 0; return r; }  /* never fold truncated */
+            r.width = (uint16_t)wn;
+            r.value = _trunc(_eval_from_limbs(limbs, (EVAL_MAX_W + 63) / 64), r.width);
             return r;
         }
     }
@@ -4688,10 +4831,11 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
         head->list.items[2]->kind == SEXPR_NUMERAL &&
         head->list.items[3]->kind == SEXPR_NUMERAL &&
         s->list.count == 2) {
-        uint32_t hi = (uint32_t)head->list.items[2]->numval;
-        uint32_t lo = (uint32_t)head->list.items[3]->numval;
+        uint64_t hi = head->list.items[2]->numval;
+        uint64_t lo = head->list.items[3]->numval;
         EvalRet inner = _eval_sexpr(fe, s->list.items[1], ok);
         if (!*ok) return r;
+        if (hi < lo || hi >= EVAL_MAX_W) { *ok = 0; return r; }
         r.width = (uint16_t)(hi - lo + 1);
         r.value = _trunc(inner.value >> lo, r.width);
         return r;
@@ -4755,6 +4899,8 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
         EvalRet r = _eval_sexpr(fe, s->list.items[1], ok);
         for (uint32_t i = 2; i < s->list.count && *ok; i++) {
             EvalRet b = _eval_sexpr(fe, s->list.items[i], ok);
+            /* A result past EVAL_MAX_W cannot be held: refuse, never truncate. */
+            if (!r.width || !b.width || r.width + b.width > EVAL_MAX_W) { *ok = 0; return r; }
             r.width = r.width + b.width;
             r.value = _trunc((r.value << b.width) | b.value, r.width);
         }
@@ -4777,6 +4923,7 @@ static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
         if (sexpr_is_symbol(head, "bvugt")) { r.value = (a.value > b.value) ? 1 : 0; r.width = 1; return r; }
         if (sexpr_is_symbol(head, "bvuge")) { r.value = (a.value >= b.value) ? 1 : 0; r.width = 1; return r; }
         if (sexpr_is_symbol(head, "concat")) {
+            if (!a.width || !b.width || a.width + b.width > EVAL_MAX_W) { *ok = 0; return r; }
             r.width = a.width + b.width;
             r.value = _trunc((a.value << b.width) | b.value, r.width);
             return r;
@@ -4816,7 +4963,12 @@ static void _fprint_sexpr(FILE *out, const Sexpr *s) {
     case SEXPR_NUMERAL:
         fprintf(out, "%llu", (unsigned long long)s->numval); break;
     case SEXPR_BITVEC:
-        _emit_bv_bin_literal(out, s->bv.value, (unsigned)s->bv.width); break;
+        if (s->bv.width > 64 && s->bv.limbs)
+            _emit_bv_bin_literal_wide(out, s->bv.limbs, (s->bv.width + 63u) / 64u,
+                                      (unsigned)s->bv.width);
+        else
+            _emit_bv_bin_literal(out, s->bv.value, (unsigned)s->bv.width);
+        break;
     case SEXPR_LIST:
         fprintf(out, "(");
         for (uint32_t i = 0; i < s->list.count; i++) {
@@ -4827,6 +4979,18 @@ static void _fprint_sexpr(FILE *out, const Sexpr *s) {
         break;
     default: break;
     }
+}
+
+/* Emit an evaluator value of `width` bits; wider than 64 bits spans limbs. */
+static void _emit_eval_value(FILE *out, EvalVal v, unsigned width) {
+    uint64_t limbs[(EVAL_MAX_W + 63) / 64];
+    for (uint32_t i = 0; i < (EVAL_MAX_W + 63) / 64; i++) {
+        limbs[i] = (uint64_t)v;
+#if EVAL_MAX_W > 64
+        v >>= 64;
+#endif
+    }
+    _emit_bv_bin_literal_wide(out, limbs, (EVAL_MAX_W + 63) / 64, width);
 }
 
 static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
@@ -4885,7 +5049,7 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
             Smt2ArrayVar *av = _find_array_var(fe, arr_s->sym.str, arr_s->sym.len);
             const Sexpr *idx_s = _resolve_sym(fe, name_s->list.items[2]);
             uint64_t k = 0; int is_const = 0;
-            if (idx_s && idx_s->kind == SEXPR_BITVEC) { k = idx_s->bv.value; is_const = 1; }
+            if (idx_s && idx_s->kind == SEXPR_BITVEC && idx_s->bv.width <= 64) { k = idx_s->bv.value; is_const = 1; }
             else if (idx_s && idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
                      sexpr_is_symbol(idx_s->list.items[0], "_")) {
                 uint64_t bv; if (_parse_bv_sym(idx_s->list.items[1], &bv, NULL)) { k = bv; is_const = 1; }
@@ -4895,20 +5059,23 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
             if (av && !is_const) {
                 int iok = 1;
                 EvalRet ie = _eval_sexpr(fe, name_s->list.items[2], &iok);
-                if (iok) { k = ie.value; is_const = 1; idx_evald = 1; }
+                if (iok && ie.width <= 64) { k = (uint64_t)ie.value; is_const = 1; idx_evald = 1; }
             }
             if (av && is_const) {
                 uint8_t dw = av->sort.data_width, aw = av->sort.addr_width;
                 int64_t val = 0;
+                uint32_t elem_vid = UINT32_MAX;   /* element var, for a wide read */
                 if (av->value->is_abstract) {
                     if (!_abs_base_value(fe, av->value, k, &val))
                         val = _free_elem_value(fe, k, arr_s->sym.len);
                 } else if (av->value->is_sparse) {
                     uint32_t vid;
-                    if (_sparse_find(av->value, k, &vid))
+                    if (_sparse_find(av->value, k, &vid)) {
                         val = _fe_get_var_value(fe, vid);
-                    else
+                        elem_vid = vid;
+                    } else {
                         val = _free_elem_value(fe, k, arr_s->sym.len);
+                    }
                 } else if (k < av->value->n_elems) {
                     /* Look the element var up by name ("arr[k]") rather than via
                      * value->elems[k]: that dvs_expr_t points into the builder
@@ -4919,7 +5086,7 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
                              (int)arr_s->sym.len, arr_s->sym.str,
                              (unsigned long long)k);
                     Smt2Var *ev = _find_var(fe, en, (uint32_t)strlen(en));
-                    if (ev) val = _fe_get_var_value(fe, ev->var_id);
+                    if (ev) { val = _fe_get_var_value(fe, ev->var_id); elem_vid = ev->var_id; }
                 }
                 /* Emit ((select name #x<idx>) #b<value>): the key echoes the
                  * select (hex index padded to the address width -- the form
@@ -4933,7 +5100,14 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
                             (int)arr_s->sym.len, arr_s->sym.str,
                             (int)((aw + 3) / 4), (unsigned long long)k);
                 }
-                _emit_bv_bin_literal(fe->out, (uint64_t)val, (unsigned)dw);
+                if (dw > 64 && elem_vid != UINT32_MAX) {
+                    uint64_t limbs[SMT2_BV_MAX_LIMBS];
+                    uint32_t nl = (dw + 63u) / 64u;
+                    _fe_get_var_value_wide(fe, elem_vid, limbs, nl);
+                    _emit_bv_bin_literal_wide(fe->out, limbs, nl, (unsigned)dw);
+                } else {
+                    _emit_bv_bin_literal(fe->out, (uint64_t)val, (unsigned)dw);
+                }
                 fprintf(fe->out, ")");
                 continue;
             }
@@ -4951,14 +5125,14 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
              * canonical form (limited to what we evaluated). */
             if (name_s->kind == SEXPR_SYMBOL) {
                 fprintf(fe->out, "(%.*s ", (int)name_s->sym.len, name_s->sym.str);
-                _emit_bv_bin_literal(fe->out, (uint64_t)ev.value, (unsigned)w);
+                _emit_eval_value(fe->out, ev.value, (unsigned)w);
                 fprintf(fe->out, ")");
             } else {
                 /* For a list expression, smtbmc typically only queries
                  * symbols, so this branch is rarely hit. Print a
                  * minimal valid response. */
                 fprintf(fe->out, "(? ");
-                _emit_bv_bin_literal(fe->out, (uint64_t)ev.value, (unsigned)w);
+                _emit_eval_value(fe->out, ev.value, (unsigned)w);
                 fprintf(fe->out, ")");
             }
             continue;
