@@ -7,6 +7,7 @@ Writes, under tests/perf/history/:
   <year>.jsonl              trend lines appended, kept sorted by utc, deduplicated
   releases/<tag>.json.gz    the full record of a release run (earliest valid wins)
   machines/<id>.json        a machine class the history has not seen before
+  manifests/<hash>.json     a resolved suite (fixture order of the ratio arrays)
 It never commits: review the diff, run the internal-identifier grep, and
 commit it like any other change. Running it twice changes nothing.
 """
@@ -30,7 +31,7 @@ def _write_jsonl(path: Path, lines: list) -> None:
 def consolidate(records: list, root: Path = history.HISTORY) -> dict:
     """records: [(artifact name, run record)]. Returns a summary."""
     summary = {"runs": 0, "lines": 0, "invalid": 0, "noisy": 0, "releases": [],
-               "machines": [], "rejected": [], "range": None}
+               "machines": [], "manifests": [], "rejected": [], "range": None}
     by_year = {}
     for p in root.glob("*.jsonl"):
         by_year[p.stem] = {schema.line_key(l): l for l in history.committed_lines_from(p)}
@@ -56,6 +57,12 @@ def consolidate(records: list, root: Path = history.HISTORY) -> dict:
             mp.write_text(json.dumps({k: m[k] for k in ("id", "cpu", "cores", "mem_gb", "kernel")},
                                      indent=1, sort_keys=True) + "\n")
             summary["machines"].append(m["id"])
+        for man in rec.get("manifests", {}).values():
+            mp = root / "manifests" / f"{man['hash']}.json"
+            if not mp.exists():
+                mp.parent.mkdir(parents=True, exist_ok=True)
+                mp.write_text(json.dumps(man, indent=1, sort_keys=True) + "\n")
+                summary["manifests"].append(man["hash"])
         ref = rec["run"]["ref"]
         if rec["kind"] == "release" and rec["valid"] and ref.startswith("refs/tags/"):
             tag = ref[len("refs/tags/"):]

@@ -61,10 +61,11 @@ def validate(rec: dict) -> list:
 def trend_lines(rec: dict, artifact: str) -> list:
     """The committed summary of a run: one line per build measured in it.
 
-    R0 records hold only calibration, which belongs to the run rather than to
-    a build, so they produce one `head` line. Later suites add their per-build
-    sections here (design §4.3).
+    Calibration belongs to the run; SAT suites add per-fixture ratios of the
+    head build against the anchor and each reference, aligned to the suite's
+    manifest (design §4.3). Ladder runs will add one line per release build.
     """
+    from . import normalize
     m = rec["machine"]
     line = {
         "h": TREND, "utc": rec["run"]["utc"], "commit": rec["run"]["commit"],
@@ -76,6 +77,21 @@ def trend_lines(rec: dict, artifact: str) -> list:
     }
     if not rec["valid"]:
         line["reason"] = rec.get("reason", "")
+    sat = {}
+    for name, man in rec.get("manifests", {}).items():
+        if not any(r["suite"] == name for r in rec.get("sat", [])):
+            continue
+        keys = sorted({f"{r['arm']}@{r['build']}" for r in rec["sat"] if r["suite"] == name})
+        sat[name] = {
+            "m": man["hash"],
+            "vs": {k: normalize.ratios(rec, name, k) for k in keys if k != normalize.HEAD},
+            "solved": normalize.solved(rec, name),
+            "par2_s": normalize.par2(rec, name, rec["budgets"][name]),
+            "floor_ms": rec["sat_floor"].get(name, {}),
+            "disagree": len(rec.get("sat_disagree", {}).get(name, [])),
+        }
+    if sat:
+        line["sat"] = sat
     return [line]
 
 

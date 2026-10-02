@@ -10,6 +10,25 @@ token can list this repo's artifacts (download is confirmed in R2). R0 DONE
 `tests/perf/history/2026.jsonl`, one of them measured during the soundness
 nightly and correctly marked noisy (§10).
 
+R1 + R2 BUILT 2026-10-02 (pending the first nightly on the runner):
+`tools.py` + `tools.lock.json` (bitwuzla 0.8.2 from the Verilator 5.046
+bundle, boolector 3.2.4 from yosys-bin, sha256-pinned), `builds.py`,
+`suites.py` + `suites/sat-core.json`, `run_sat.py`, `normalize.py`, `svg.py`,
+`render.py`; `perf.yml` nightly at 05:00; `docs.yml` renders
+`docs/site/results/` (index, sat; methodology is hand-written). Changes from
+the design as first written:
+- **The anchor is built from its tag, not installed.** The `v0.1.0` wheel
+  carries only the libraries, not the `dv-solve-smt2` CLI; the CLI target
+  builds from the tag's source in about 2 s. `v0.1.0`'s CLI also keeps its
+  ~10 MB frontend struct on the stack and overflows the default 8 MB stack,
+  so every arm runs with a 64 MB stack limit.
+- **Speed-ups compare solving time,** CPU time minus each arm's own start-up
+  cost (§5.4).
+- **Model replay is not done yet.** Answers are checked against the
+  references; the 34 fixtures that ask for a model are a later addition.
+- **Charts are hand-written SVG** (`svg.py`), not matplotlib: byte-stable
+  output and no new docs dependency.
+
 This document builds on `docs/ci_benchmark_publishing_plan.md` (2026-09-30)
 and replaces its §4 (harness), §5 (history), §6 (workflow) and §7
 (phasing). That plan's §1 review, §2 page content and §3 swizzle driver still
@@ -157,7 +176,7 @@ it. This follows the soundness-first rule.
  tag v*  ──▶│ perf.yml   on tag          release snapshot (fuller suites)              │
  weekly  ──▶│ perf.yml   Sat 05:00       ladder: last K releases + main, same job      │
  dispatch ─▶│                            manual / backfill of an old tag               │
-            │   build wheel (+ anchor/ladder wheels from PyPI)                         │
+            │   build dv-solve-smt2 (+ anchor/ladder builds from their tags)           │
             │   provision pinned solvers (tests/perf/solvers.lock)                     │
             │   calib → sat-* → rand-* → scenario   → run.json.gz (+ valid flag)       │
             │   upload artifact perf-<kind>-<utc>-<sha>     (no write credential)      │
@@ -415,9 +434,10 @@ marked `noisy` and drawn hollow.
 Every run also measures a **frozen dv-solve build**, the anchor. It is
 `v0.1.0` until it is deliberately moved.
 
-- **Where the build comes from:** the anchor is always a release, so it is
-  installed from its published wheel (`dv-solve==0.1.0` from PyPI) and never
-  rebuilt. Toolchain drift can therefore never break it.
+- **Where the build comes from:** the anchor is always a release tag, and
+  its `dv-solve-smt2` target is built from the tag's source in each run
+  (about 2 s; `tests/perf/builds.py`). The published wheels carry only the
+  libraries, so installing them would not give the CLI.
 - **What is reported:** the core trend quantity is
   ```
   speedup_vs_anchor(f) = cpu(anchor, f) / cpu(head, f)        (same job)
@@ -463,9 +483,13 @@ Rules for what goes into a score:
   comparison run, enter `r_f`.
 - Fixtures that **time out** are counted separately, as solved@budget and
   PAR-2, and never enter a ratio.
-- A fixture where both sides take under 0.5 ms CPU is reported in the
-  "startup floor" view and **excluded from ratios**. At that scale a ratio
-  measures process start-up, not solving.
+- **Ratios compare solving time:** each side's CPU time minus its own
+  start-up cost (its time on a one-variable problem, measured in the same
+  run), floored at 0.5 ms. Start-up is reported separately.
+- A fixture where both sides solve within 1 ms of start-up is counted as
+  answered but **excluded from ratios**: at that scale a ratio measures noise.
+  In the first runs this left 33–122 of the 215 fixtures with a usable ratio,
+  depending on the pair compared.
 
 Starting weights:
 - `verilator` and `scenario`: 2.0. This is the product's use case.
@@ -473,7 +497,7 @@ Starting weights:
 - `sat-hard`: 1.0, but kept as a separate headline because it is a different
   regime.
 
-Changing a weight changes the manifest hash. The renderer recomputes
+The manifest hash covers fixtures and categories, not weights. The renderer recomputes
 **every** historical point from raw records with the current weights. Weights
 are a property of the view, not of the stored data.
 
@@ -550,10 +574,10 @@ Rules for when a run is skipped or marked:
 The job's steps:
 
 1. Checkout.
-2. Install the anchor and ladder builds from their published wheels on PyPI
-   (pip cache kept by the runner).
-3. Build the head wheel.
-4. Provision solvers from the lock file.
+2. Install pip tools; fetch and verify the pinned solver tarballs.
+3. Build the head `dv-solve-smt2`; the anchor and ladder builds are built
+   from their tags by `collect`.
+4. (merged into 2)
 5. Run `python3 -m tests.perf.collect --kind … --out run.json`.
 6. Validate the record against the schema.
 7. Grep it for internal identifiers.
@@ -715,9 +739,9 @@ current job reads artifacts back through the API.
   `collect` records them if they are available, and they become the primary
   quantity if they turn out to be.
 - **The anchor rots.** An old build can stop compiling against newer
-  toolchains. The anchor is therefore installed from its published wheel,
-  not built: `dv-solve==0.1.0` is on PyPI. A future anchor is always a
-  release, so it always has a published wheel.
+  toolchains, and the anchor is built from source because the wheels carry no
+  CLI. Shipping `dv-solve-smt2` in the wheels would remove the risk for future
+  anchors; until then a failed anchor build fails the run loudly.
 - **Swizzle fidelity.** The `z3-swizzle` arm only means something if it
   matches real Verilator. Hence the fidelity test, and the protocol version
   in every record and on every page.
@@ -751,7 +775,7 @@ history plus release snapshots are committed here by consolidation (§4).
      so the move is not a workflow edit.
    - If the cpuset turns out awkward to set up in the runner config, the
      label alone is still worth having.
-2. **Anchor: `v0.1.0` from PyPI.** It stays the anchor until a release
+2. **Anchor: `v0.1.0`, built from its tag.** It stays the anchor until a release
    exists that runs every arm in `rand-core` (in particular `dv-swizzle`).
    The anchor then moves once, with an anchor link (§5.2). After that, the
    anchor moves only when a release is a year old, so the trend is chained

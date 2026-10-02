@@ -105,8 +105,8 @@ def machine() -> dict:
 
 def tool_versions() -> dict:
     """Versions of the pinned tools actually on PATH, plus the lock hash."""
-    lock = (_REPO / "tests/perf/solvers.lock").read_bytes()
-    tools = {"lock_sha": hashlib.sha256(lock).hexdigest()[:12]}
+    from .tools import lock_sha
+    tools = {"lock_sha": lock_sha()}
     try:
         v = subprocess.run(["z3", "--version"], capture_output=True, text=True).stdout.split()
         tools["z3"] = v[2] if len(v) > 2 else None

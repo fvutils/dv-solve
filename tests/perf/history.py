@@ -1,7 +1,8 @@
 """Committed trend history plus the artifacts not yet consolidated (design §4).
 
     python3 -m tests.perf.history status [--warn-after 60] [--fail-after 80]
-    python3 -m tests.perf.history fetch --out DIR
+    python3 -m tests.perf.history fetch --out DIR [--latest]
+    python3 -m tests.perf.history measured --commit SHA --kind nightly [--max-age-days 7]
 
 Forgejo access comes from the environment, never from a tracked file:
   FORGEJO_API_URL   e.g. <server>/api/v1   (falls back to GITHUB_API_URL)
@@ -110,18 +111,54 @@ def unconsolidated(arts: list, lines: list) -> list:
     return [(n, i) for n, i in arts if schema.ARTIFACT_RE.match(n)["utc"] > cut]
 
 
-def fetch(out: Path, lines: list = None) -> list:
-    """Download every unconsolidated record into out/; return [(artifact, record)]."""
+def _has_sat(rec: dict) -> bool:
+    return bool(rec.get("valid") and rec.get("sat"))
+
+
+def fetch(out: Path, lines: list = None, latest: bool = False) -> list:
+    """Download every unconsolidated record into out/; return [(artifact, record)].
+
+    latest: also make sure the newest valid record with SAT results is there,
+    even if it was consolidated already (the pages show its full detail, which
+    the committed trend lines do not keep). Looks back at most 10 artifacts.
+    """
     fj = Forgejo()
     lines = committed_lines() if lines is None else lines
+    arts = fj.perf_artifacts()
     got = []
     out.mkdir(parents=True, exist_ok=True)
-    for name, aid in unconsolidated(fj.perf_artifacts(), lines):
+
+    def take(name, aid):
         for fn, rec in fj.records(aid):
             with gzip.GzipFile(out / Path(fn).name, "wb", mtime=0) as f:
                 f.write(json.dumps(rec, sort_keys=True).encode())
             got.append((name, rec))
+
+    pending = unconsolidated(arts, lines)
+    for name, aid in pending:
+        take(name, aid)
+    if latest and not any(_has_sat(r) for _, r in got):
+        older = [a for a in arts if a not in pending]
+        for name, aid in list(reversed(older))[:10]:
+            take(name, aid)
+            if _has_sat(got[-1][1]):
+                break
     return got
+
+
+def measured(commit: str, kind: str, max_age_days: float) -> bool:
+    """A valid `kind` record for `commit`, younger than max_age_days, exists."""
+    for l in committed_lines():
+        if (l["commit"].startswith(commit[:7]) and l["kind"] == kind and l["valid"]
+                and _utc_age_days(l["utc"]) < max_age_days):
+            return True
+    fj = Forgejo()
+    for name, aid in fj.perf_artifacts():
+        m = schema.ARTIFACT_RE.match(name)
+        if m["kind"] == kind and commit.startswith(m["sha"]) and _utc_age_days(m["utc"]) < max_age_days:
+            if any(r.get("valid") for _, r in fj.records(aid)):
+                return True
+    return False
 
 
 def main(argv=None) -> int:
@@ -132,13 +169,25 @@ def main(argv=None) -> int:
     st.add_argument("--fail-after", type=float, default=None)
     fe = sub.add_parser("fetch")
     fe.add_argument("--out", required=True)
+    fe.add_argument("--latest", action="store_true")
+    me = sub.add_parser("measured")
+    me.add_argument("--commit", required=True)
+    me.add_argument("--kind", default="nightly")
+    me.add_argument("--max-age-days", type=float, default=7)
     a = ap.parse_args(argv)
 
     lines = committed_lines()
     try:
         if a.cmd == "fetch":
-            got = fetch(Path(a.out), lines)
-            print(f"fetched {len(got)} unconsolidated run record(s)")
+            got = fetch(Path(a.out), lines, a.latest)
+            print(f"fetched {len(got)} run record(s)")
+            return 0
+        if a.cmd == "measured":
+            yes = measured(a.commit, a.kind, a.max_age_days)
+            print("measured" if yes else "not measured")
+            if os.environ.get("GITHUB_OUTPUT"):
+                with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                    f.write(f"measured={'true' if yes else 'false'}\n")
             return 0
         pending = unconsolidated(Forgejo().perf_artifacts(), lines)
     except AccessError as e:

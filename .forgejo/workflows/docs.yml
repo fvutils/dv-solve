@@ -36,10 +36,14 @@
 
 name: Docs
 
+# The 06:30 schedule re-renders the Results pages after the nightly perf run
+# (05:00, perf.yml), so they lag main by at most about a day.
 on:
-  - push
-  - pull_request
-  - workflow_dispatch
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 6 * * *'
 
 jobs:
   docs:
@@ -75,6 +79,32 @@ jobs:
           pip_install --upgrade pip
           pip_install -r docs/site/requirements.txt
 
+      - name: Fetch perf run records
+        # The Results pages (docs/site/results/) are rendered from the
+        # committed history plus the perf-* artifacts not yet consolidated
+        # (tests/perf/history.py). FAIL CLOSED: a build without them would
+        # deploy pages showing nothing, or quietly older numbers. Pull
+        # requests render from the committed history alone and are never
+        # published.
+        if: github.event_name != 'pull_request'
+        env:
+          FORGEJO_API_URL: ${{ github.server_url }}/api/v1
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 -m tests.perf.history fetch --out perf-records --latest
+          python3 -m tests.perf.history status --warn-after 60
+
+      - name: Render the Results pages
+        # --max-age-days: once SAT results exist, results older than 10 days
+        # mean the nightly perf job has stopped; fail rather than publish
+        # stale numbers as current.
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            python3 -m tests.perf.render
+          else
+            python3 -m tests.perf.render --records perf-records --max-age-days 10
+          fi
+
       - name: Build HTML docs
         # -W: a broken cross-reference or a failed autodoc import fails the
         # build instead of shipping a page with a hole in it. --keep-going
@@ -90,10 +120,13 @@ jobs:
             || { echo "::error::no index.html in the build output"; exit 1; }
           n=$(find "$out" -name '*.html' | wc -l)
           echo "generated pages: $n"
-          # A local build produced 23 pages on 2026-10-01 (D5). The floor is
-          # set well BELOW that: it catches a COLLAPSED build, not a deleted
-          # page. Raise it as the site grows.
-          [ "$n" -ge 16 ] || { echo "::error::only $n pages built; refusing to call this a doc set."; exit 1; }
+          # A local build produced 27 pages on 2026-10-02 (with Results). The
+          # floor is set well BELOW that: it catches a COLLAPSED build, not a
+          # deleted page. Raise it as the site grows.
+          [ "$n" -ge 20 ] || { echo "::error::only $n pages built; refusing to call this a doc set."; exit 1; }
+          for p in results/index results/sat results/methodology; do
+            test -s "$out/$p.html" || { echo "::error::results page $p.html missing"; exit 1; }
+          done
           # The generated site is public too: make sure no internal identifier
           # reached it through generated content.
           pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'

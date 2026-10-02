@@ -1,6 +1,10 @@
 """Run the perf suites and write one gzipped run record (design §6.1).
 
-    python3 -m tests.perf.collect --kind manual --suites calib --out perf-out
+    python3 -m tests.perf.collect --kind manual --suites calib,sat-core --out perf-out
+
+The head build is build/dv-solve-smt2 (--head-bin to override); the anchor
+release is built from its tag under --build-root. Pinned solvers come from
+$DVS_PERF_TOOLS or a developer checkout's packages/ (tests/perf/tools.py).
 
 Writes perf-out/<artifact-name>.json.gz and prints the artifact name. With
 --github-output, also appends `name=<artifact-name>` to $GITHUB_OUTPUT so the
@@ -21,9 +25,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import calib, schema
+from . import builds, calib, run_sat, schema, suites, tools
 
-SUITES = ("calib",)          # grows with R1+ (sat-core, rand-core, ...)
+SUITES = ("calib", "sat-core")
 NOISY_LOAD = 4.0             # host 1-min load above this marks the run noisy
 
 
@@ -43,7 +47,26 @@ def _dv_version():
         return None
 
 
-def collect(kind: str, suites: list) -> dict:
+def _sat(rec: dict, name: str, a) -> None:
+    spec = suites.load(name)
+    head = builds.head_bin(a.head_bin)
+    anchor = None
+    if a.anchor != "none":
+        anchor = builds.build_tag(a.anchor, Path(a.build_root))
+        rec["anchor"] = {"tag": a.anchor, "commit": builds.tag_commit(a.anchor)}
+    paths = {n: tools.path(n) for n in ("z3", "bitwuzla", "boolector")}
+    arms = run_sat.make_arms(head, anchor, paths)
+    res = run_sat.run_suite(spec, arms, a.workers)
+    rec["manifests"][name] = suites.manifest_record(spec)
+    rec["sat"] += res["rows"]
+    rec["sat_floor"][name] = res["floor"]
+    rec["sat_disagree"][name] = res["disagree"]
+    rec["budgets"][name] = spec["budget_s"]
+    if res["invalid"] and rec["valid"]:
+        rec["valid"], rec["reason"] = False, f"{name}: {res['invalid']}"
+
+
+def collect(kind: str, suite_names: list, a=None) -> dict:
     load0 = calib.loadavg()
     utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_number = os.environ.get("GITHUB_RUN_NUMBER")
@@ -56,10 +79,17 @@ def collect(kind: str, suites: list) -> dict:
         "tools": calib.tool_versions(),
         "anchor": None,
         "calib": {},
+        "manifests": {}, "budgets": {},
+        "sat": [], "sat_floor": {}, "sat_disagree": {},
     }
     try:
-        if "calib" in suites:
+        if "calib" in suite_names:
             rec["calib"] = calib.calibrate()
+        if any(n != "calib" for n in suite_names):
+            rec["tools"].update(tools.check(["z3", "bitwuzla", "boolector"]))
+        for n in suite_names:
+            if n != "calib":
+                _sat(rec, n, a)
     except RuntimeError as e:
         rec["valid"], rec["reason"] = False, str(e)
     load1 = calib.loadavg()
@@ -75,13 +105,17 @@ def main(argv=None) -> int:
                     help=f"comma-separated, from {', '.join(SUITES)}")
     ap.add_argument("--out", default="perf-out")
     ap.add_argument("--github-output", action="store_true")
+    ap.add_argument("--head-bin", help="head dv-solve-smt2 (default build/dv-solve-smt2)")
+    ap.add_argument("--anchor", default=builds.ANCHOR, help="anchor release tag, or 'none'")
+    ap.add_argument("--build-root", default="perf-builds", help="where tag builds go")
+    ap.add_argument("--workers", type=int, default=0, help="0: a quarter of the physical cores")
     a = ap.parse_args(argv)
     suites = [s for s in a.suites.split(",") if s]
     unknown = set(suites) - set(SUITES)
     if unknown:
         ap.error(f"unknown suites: {', '.join(sorted(unknown))}")
 
-    rec = collect(a.kind, suites)
+    rec = collect(a.kind, suites, a)
     errs = schema.validate(rec)
     if errs:
         print("record fails its own schema:\n  " + "\n  ".join(errs), file=sys.stderr)
