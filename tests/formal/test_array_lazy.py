@@ -79,3 +79,20 @@ def test_fuzz_array_lazy(seed, z3_oracle, tmp_path):
     f = tmp_path / f"arr_{seed}.smt2"
     f.write_text(generate_problem(seed))
     _check(f, z3_oracle)
+
+
+def test_incremental_check_is_not_a_spurious_sat():
+    """A second check-sat used to solve the skeleton with the reads free and no
+    array lemmas: i == j, a[i] != a[j] answered `sat`. Until the engine refines
+    incrementally, a later check answers `unknown`."""
+    import subprocess
+    if not _DV.is_available():
+        pytest.skip("dv-solve-smt2 binary not built")
+    exe = Path(__file__).resolve().parents[2] / "build" / "dv-solve-smt2"
+    script = ("(set-logic QF_ABV)(declare-fun a () (Array (_ BitVec 32) (_ BitVec 8)))"
+              "(declare-const i (_ BitVec 32))(declare-const j (_ BitVec 32))"
+              "(assert (= i j))(check-sat)"
+              "(assert (not (= (select a i) (select a j))))(check-sat)")
+    r = subprocess.run([str(exe), "--interactive"], input=script, capture_output=True,
+                       text=True, timeout=60, env={**os.environ, "DV_ARRAY": "1"})
+    assert r.stdout.split()[-1] in ("unsat", "unknown"), r.stdout

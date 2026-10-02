@@ -3959,6 +3959,19 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         && (fe->n_areads > 0 || fe->n_aeqs > 0)) {
         return _check_sat_array(fe);
     }
+    /* A later incremental check would solve the skeleton with the reads as
+     * free vars and no array lemmas -- a spurious `sat`. Answer `unknown`
+     * until the lazy engine refines incrementally. */
+    if (fe->array_lazy && !fe->array_eager && (fe->problem || fe->compiled)
+        && (fe->n_areads > 0 || fe->n_aeqs > 0)) {
+        if (fe->print_stats || getenv("DV_LOG"))
+            fprintf(fe->err, "cdcl-unknown: abstract arrays in an incremental check\n");
+        SMT2_EMIT_UNKNOWN(fe);
+        fflush(fe->out);
+        fe->last_result = DVS_SOLVE_TIMEOUT;
+        fe->has_result = 1;
+        return 0;
+    }
 
     /* DV_ARRAY=eager: emit the one-shot Ackermann axioms into the builder before
      * the first finalize (correctness oracle). */
