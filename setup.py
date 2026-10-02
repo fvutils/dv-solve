@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #****************************************************************************
-"""Supplies the one field pyproject.toml declares dynamic: the version.
+"""Supplies the version, and a build_ext that builds the native code.
 
 Everything else about this package -- name, dependencies, packages,
 package-data, the cmake and extra-data configuration the ivpm_build backend
@@ -40,11 +40,26 @@ inside the manylinux container while succeeding under a local `uv build`.
 build-backend is ivpm_build.backend, which wraps setuptools.build_meta; that
 wrapper runs cmake and stages the native libraries, then delegates to
 setuptools, which picks up this setup.py.
+
+The build_ext override is for the other way in: `python setup.py build_ext
+--inplace` in a workspace set up by `ivpm update -d dev`. The stock build_ext
+returns at once when there are no ext_modules -- and there are none, since the
+native library is loaded via ctypes -- so without the override that command
+succeeds and builds nothing. It drives the same CmakeBuilder the backend uses,
+leaving the libraries in build/lib and dv-solve-smt2 in build/bin, which is
+where dv_solve looks in a source checkout.
+
+Under the backend this runs cmake a second time: the backend reports
+has_ext_modules() as True so the wheel is platform-tagged, which makes
+bdist_wheel run build_ext. That pass reconfigures and finds nothing to
+rebuild. ivpm_build is imported inside run() because it is only guaranteed to
+be installed where a build happens, not wherever setup.py is evaluated.
 """
 
 import os
 
 from setuptools import setup
+from setuptools.command.build_ext import build_ext as _build_ext
 
 proj_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -57,4 +72,12 @@ def _get_version():
     return glb["_pkg_version"]
 
 
-setup(version=_get_version())
+class build_ext(_build_ext):
+
+    def run(self):
+        from ivpm_build.cmake.cmake_builder import CmakeBuilder
+        CmakeBuilder(proj_dir, debug=bool(self.debug)).run()
+        super().run()
+
+
+setup(version=_get_version(), cmdclass={"build_ext": build_ext})

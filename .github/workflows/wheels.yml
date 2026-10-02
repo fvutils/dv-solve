@@ -10,6 +10,8 @@ on:
       - "cmake/**"
       - "src/c/**"
       - "pyproject.toml"
+      - "setup.py"
+      - "ivpm.yaml"
       - ".github/workflows/wheels.yml"
 
 # Cancel an in-progress run when a newer commit is pushed to the same ref,
@@ -59,6 +61,19 @@ jobs:
         with:
           arch: x64
 
+      - name: Fetch CaDiCaL sources
+        # cmake/cadical.cmake builds CaDiCaL from <packages>/cadical, which only
+        # `ivpm update` creates; a bare checkout has no packages/ and configure
+        # stops with FATAL_ERROR. The 'use' dep-set is CaDiCaL alone, and
+        # --py-skip-install skips the venv -- cibuildwheel provisions the build
+        # requirements itself. On Linux cibuildwheel copies the project
+        # directory, packages/ included, into the manylinux container.
+        # pipx rather than pip: the macOS runners' python3 is Homebrew's, which
+        # refuses pip installs (PEP 668). Skipped on Windows: MSVC builds force
+        # DVS_WITH_CADICAL=OFF.
+        if: runner.os != 'Windows'
+        run: pipx run ivpm update -d use -a --py-skip-install
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.0
         env:
@@ -98,6 +113,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install cmake/ninja
         run: brew install cmake ninja
+      - name: Fetch CaDiCaL sources
+        # See the same step in build_wheels.
+        run: pipx run ivpm update -d use -a --py-skip-install
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.0
         env:
