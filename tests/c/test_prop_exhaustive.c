@@ -41,15 +41,32 @@ struct Case {
     int (*holds)(const int64_t *v, const Case *c);
     int64_t k[4];           /* case parameters (constants, widths, bits) */
     int samples;            /* 0: every box; else this many random boxes */
+    int custom;             /* use dlo/dhi as the domains (64-bit edges) */
+    int64_t dlo[MAXV], dhi[MAXV];
 };
 
 static int64_t vmin(const Case *c, int i) {
+    if (c->custom) return c->dlo[i];
     return c->is_signed[i] ? -((int64_t)1 << (c->width[i] - 1)) : 0;
 }
 static int64_t vmax(const Case *c, int i) {
+    if (c->custom) return c->dhi[i];
     return c->is_signed[i] ? ((int64_t)1 << (c->width[i] - 1)) - 1
                            : ((int64_t)1 << c->width[i]) - 1;
 }
+/* Order key of value `a` of variable `i`: an unsigned 64-bit variable orders
+ * its bit patterns as unsigned (a value >= 2^63 is negative as int64), every
+ * other variable as signed. All harness comparisons go through this, so a
+ * domain may straddle 2^63 or sit at the top of the range. */
+static uint64_t key(const Case *c, int i, int64_t a) {
+    int u64 = c->width[i] >= 64 && !c->is_signed[i];
+    return u64 ? (uint64_t)a : ((uint64_t)a ^ (1ull << 63));
+}
+static int64_t unkey(const Case *c, int i, uint64_t k) {
+    int u64 = c->width[i] >= 64 && !c->is_signed[i];
+    return (int64_t)(u64 ? k : (k ^ (1ull << 63)));
+}
+
 static int64_t wrapw(int64_t x, int w, int sgn) {
     uint64_t m = (w >= 64) ? ~0ULL : ((1ULL << w) - 1);
     uint64_t u = (uint64_t)x & m;
@@ -124,6 +141,13 @@ static int h_clog2(const int64_t *v, const Case *c) {
     while (((uint64_t)1 << r) < a) r++;
     return v[0] == r;
 }
+
+/* Unsigned 64-bit versions (values are bit patterns). */
+static int h_le_u(const int64_t *v, const Case *c) { (void)c; return (uint64_t)v[0] <= (uint64_t)v[1]; }
+static int h_lt_u(const int64_t *v, const Case *c) { (void)c; return (uint64_t)v[0] <  (uint64_t)v[1]; }
+static int h_reif_u(const int64_t *v, const Case *c) { (void)c; return v[0] == ((uint64_t)v[1] <= (uint64_t)v[2]); }
+static int h_add64(const int64_t *v, const Case *c) { (void)c; return (uint64_t)v[0] == (uint64_t)v[1] + (uint64_t)v[2]; }
+static int h_sub64(const int64_t *v, const Case *c) { (void)c; return (uint64_t)v[0] == (uint64_t)v[1] - (uint64_t)v[2]; }
 
 /* ---- constructors ---- */
 #define ADD2(fn) static uint32_t a_##fn(dvs_ctx_t *x, const Case *c) { (void)c; return prop_add_##fn(x, 0, 1, 0); }
@@ -283,6 +307,29 @@ static const Case CASES[] = {
     { "reif_eq_64 w6", 3, {1, 6, 6}, {0}, a_reification_eq_64, h_reif_eq, {0}, 40000 },
     { "ne_64 w6", 2, {6, 6}, {0}, a_bounds_ne_64, h_ne, {0}, 40000 },
     { "countones w6", 2, {3, 6}, {0}, a_countones, h_countones, {0}, 40000 },
+    /* 64-bit edges: domains straddling 2^63 (stored as INT64_MAX/INT64_MIN)
+     * and at the top of the unsigned range (stored as -4..-1), where B22,
+     * B26, B64 and B65 lived. */
+#define AT63 INT64_MAX - 2, INT64_MAX - 2, INT64_MAX - 2, INT64_MAX - 2
+#define TO63 INT64_MIN + 2, INT64_MIN + 2, INT64_MIN + 2, INT64_MIN + 2
+#define U64 64, 64, 64, 64
+    { "le_64 u @2^63", 2, {U64}, {0}, a_bounds_le_64, h_le_u, {0}, 0, 1, {AT63}, {TO63} },
+    { "lt_64 u @2^63", 2, {U64}, {0}, a_bounds_lt_64, h_lt_u, {0}, 0, 1, {AT63}, {TO63} },
+    { "lt_64 u @top", 2, {U64}, {0}, a_bounds_lt_64, h_lt_u, {0}, 0, 1, {-4, -6}, {-1, -1} },
+    { "eq_64 u @2^63", 2, {U64}, {0}, a_bounds_eq_64, h_eq, {0}, 0, 1, {AT63}, {TO63} },
+    { "ne_64 u @top", 2, {U64}, {0}, a_bounds_ne_64, h_ne, {0}, 0, 1, {-4, -4}, {-1, -1} },
+    { "lt_64 s @min/max", 2, {U64}, {1, 1}, a_bounds_lt_64, h_lt, {0}, 0, 1,
+      {INT64_MIN, INT64_MAX - 3}, {INT64_MIN + 3, INT64_MAX} },
+    { "reif_64 u @2^63", 3, {1, 64, 64}, {0}, a_reification_64, h_reif_u, {0}, 0, 1,
+      {0, INT64_MAX - 2, INT64_MAX - 2}, {1, INT64_MIN + 2, INT64_MIN + 2} },
+    { "reif_eq_64 u @top", 3, {1, 64, 64}, {0}, a_reification_eq_64, h_reif_eq, {0}, 0, 1,
+      {0, -4, -4}, {1, -1, -1} },
+    { "ite u64 @2^63", 4, {64, 1, 64, 64}, {0}, a_ite, h_ite, {0}, 0, 1,
+      {INT64_MAX - 1, 0, INT64_MAX - 1, INT64_MAX - 1}, {INT64_MIN + 1, 1, INT64_MIN + 1, INT64_MIN + 1} },
+    { "bvadd w64 @top", 3, {U64}, {0}, a_bvadd_64, h_add64, {64}, 0, 1, {-4, -4, 0}, {-1, -1, 3} },
+    { "bvsub w64 @2^63", 3, {U64}, {0}, a_bvsub_64, h_sub64, {64}, 0, 1, {AT63}, {TO63} },
+    { "band u64 @2^63", 3, {U64}, {0}, a_bounds_band_64, h_band, {0}, 0, 1, {AT63}, {TO63} },
+    { "bxor u64 @top", 3, {U64}, {0}, a_bounds_bxor_64, h_bxor, {0}, 0, 1, {-4, -4, 0}, {-1, -1, 3} },
 };
 
 /* ---- harness ---- */
@@ -311,14 +358,16 @@ static int own_bound_added(const Propagator *p) {
           || p->explain == explain_ite_value || p->explain == explain_reification);
 }
 
-static int lit_holds(const Literal *l, const int64_t *v) {
-    return l->is_lb ? v[l->var_id] >= l->bound : v[l->var_id] <= l->bound;
+static int lit_holds(const Case *c, const Literal *l, const int64_t *v) {
+    uint64_t kv = key(c, (int)l->var_id, v[l->var_id]), kb = key(c, (int)l->var_id, l->bound);
+    return l->is_lb ? kv >= kb : kv <= kb;
 }
 
 /* Iterate over every assignment in [lo[i], hi[i]]. */
 static int next_point(int nv, const int64_t *lo, const int64_t *hi, int64_t *v) {
     for (int i = 0; i < nv; i++) {
-        if (v[i] < hi[i]) { v[i]++; return 1; }
+        /* +1 on the bit pattern is the next value in either order. */
+        if (v[i] != hi[i]) { v[i] = (int64_t)((uint64_t)v[i] + 1); return 1; }
         v[i] = lo[i];
     }
     return 0;
@@ -333,8 +382,8 @@ static int implied(const Case *c, const Literal *ante, uint32_t n, const Literal
         if (!c->holds(v, c)) continue;
         int ok = 1;
         for (uint32_t j = 0; j < n && ok; j++)
-            if (ante[j].var_id >= (uint32_t)c->nv || !lit_holds(&ante[j], v)) ok = 0;
-        if (ok && !lit_holds(lit, v)) return 0;
+            if (ante[j].var_id >= (uint32_t)c->nv || !lit_holds(c, &ante[j], v)) ok = 0;
+        if (ok && !lit_holds(c, lit, v)) return 0;
     } while (next_point(c->nv, lo, hi, v));
     return 1;
 }
@@ -384,7 +433,7 @@ static void run_case(const Case *c) {
             for (int i = 0; i < c->nv; i++) {
                 nl[i] = var_lo64(ctx, &ctx->vars[i]);
                 nh[i] = var_hi64(ctx, &ctx->vars[i]);
-                if (nl[i] > nh[i]) empty = 1;
+                if (key(c, i, nl[i]) > key(c, i, nh[i])) empty = 1;
             }
             if (r == PROP_CONFLICT || empty) {
                 if (nsol > 0 && errs++ < max_report)
@@ -394,7 +443,8 @@ static void run_case(const Case *c) {
                 do {
                     if (!c->holds(v, c)) continue;
                     for (int i = 0; i < c->nv; i++)
-                        if (v[i] < nl[i] || v[i] > nh[i]) {
+                        if (key(c, i, v[i]) < key(c, i, nl[i]) ||
+                            key(c, i, v[i]) > key(c, i, nh[i])) {
                             if (errs++ < max_report) {
                                 printf("FAIL %s: pruned solution (", c->name);
                                 for (int j = 0; j < c->nv; j++) printf("%s%lld", j ? "," : "", (long long)v[j]);
@@ -478,7 +528,8 @@ static void run_case(const Case *c) {
                 }
                 int empty2 = 0;
                 for (int i = 0; i < c->nv; i++)
-                    if (var_lo64(ctx, &ctx->vars[i]) > var_hi64(ctx, &ctx->vars[i])) empty2 = 1;
+                    if (key(c, i, var_lo64(ctx, &ctx->vars[i])) >
+                        key(c, i, var_hi64(ctx, &ctx->vars[i]))) empty2 = 1;
                 if (r2 != PROP_CONFLICT && !empty2) {
                     n_incomplete++;
                     if (errs++ < max_report) {
@@ -495,22 +546,23 @@ static void run_case(const Case *c) {
         if (c->samples) {
             if (++sampled >= c->samples) break;
             for (int i = 0; i < c->nv; i++) {
-                int64_t lo = vmin(c, i), span = vmax(c, i) - lo + 1;
-                int64_t a = lo + (int64_t)(rnd() % (uint64_t)span), b;
+                uint64_t klo = key(c, i, vmin(c, i)), khi = key(c, i, vmax(c, i));
+                uint64_t span = khi - klo + 1;
+                uint64_t a = klo + rnd() % span, b;
                 uint64_t shape = rnd() % 10;
                 if (shape < 3) b = a;                                        /* point */
-                else if (shape < 7) b = a + (int64_t)(rnd() % 4);            /* narrow */
-                else b = lo + (int64_t)(rnd() % (uint64_t)span);             /* any */
-                if (b > vmax(c, i)) b = vmax(c, i);
-                if (b < a) { int64_t t = a; a = b; b = t; }
-                bl[i] = a; bh[i] = b;
+                else if (shape < 7) b = a + rnd() % 4;                       /* narrow */
+                else b = klo + rnd() % span;                                 /* any */
+                if (b > khi) b = khi;
+                if (b < a) { uint64_t t = a; a = b; b = t; }
+                bl[i] = unkey(c, i, a); bh[i] = unkey(c, i, b);
             }
             continue;
         }
         int i = 0;
         for (; i < c->nv; i++) {
-            if (bh[i] < vmax(c, i)) { bh[i]++; break; }
-            if (bl[i] < vmax(c, i)) { bl[i]++; bh[i] = bl[i]; break; }
+            if (bh[i] != vmax(c, i)) { bh[i] = (int64_t)((uint64_t)bh[i] + 1); break; }
+            if (bl[i] != vmax(c, i)) { bl[i] = (int64_t)((uint64_t)bl[i] + 1); bh[i] = bl[i]; break; }
             bl[i] = bh[i] = vmin(c, i);
         }
         if (i == c->nv) break;

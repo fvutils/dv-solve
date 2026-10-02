@@ -359,17 +359,20 @@ instrumented build and are not documented for users.
 
 **Propagator harness** (`tests/c/test_prop_exhaustive.c`, in ctest, ~30 s).
 This is the per-constraint narrowing checker of §3.2, done exhaustively
-rather than at run time. Each of 73 cases adds one propagator to a context
+rather than at run time. Each of 86 cases adds one propagator to a context
 of 1–4 small variables (2–3 bits exhaustively; 6 bits sampled for the
 bit-level ones; unsigned and signed) and runs it on every box of
-sub-intervals. Checks, against a truth function written in the test:
+sub-intervals. Thirteen 64-bit cases use custom domains that straddle 2^63
+or sit at the top of the unsigned range, where B22, B26, B64 and B65 lived;
+the harness orders values through a key that is unsigned for unsigned 64-bit
+variables. Checks, against a truth function written in the test:
 - a conflict only when the box holds no solution;
 - no solution pruned;
 - a conflict on every violating fixed point (completeness);
 - every explanation, given in the state the propagator saw, implies its bound
   over the full domains.
 
-It checks 630,000 explanations per run. `disj_clause` (the `or` of comparisons)
+It checks 653,000 explanations per run. `disj_clause` (the `or` of comparisons)
 was added after the mutation campaign showed it was not covered (§P4). It found the `bounds_mul_32` zero
 factor, B55 and B57 directly, and would have found B54.
 
@@ -480,8 +483,8 @@ Missed (5), each a missing stimulus:
 | no guard literal in learnt clauses | after B53 only array selects create guarded propagators, and no door generates arrays | array stimulus (QF_ABV) in the generator |
 | no forced resolution of the domain-emptying step | the fallbacks (tautology / duplicate) now absorb it on every problem tried | a learning stress problem where the emptying step is the lone current-level literal |
 | stale culprit propagator (B51) | no problem exhausts a domain split with learning on | stress problems built to exhaust splits |
-| 64-bit unsigned compared as signed | narrow campaign has no 64-bit variables; the wide campaign was not part of the run | run `--wide` in the mutation campaign |
-| no alias resolve in the gated compile path | needs `x == y` merged plus a guarded `x op K`; SMT-LIB2 masks it (validation + bitblast) and the builder door rarely draws both | bias the generator: alias + `ite(x == K, ...)` on the merged variable in builder-safe problems |
+| 64-bit unsigned compared as signed (**caught since**, by the 64-bit boundary harness cases: 104 failures) | narrow campaign has no 64-bit variables; the wide campaign was not part of the run | run `--wide` in the mutation campaign |
+| no alias resolve in the gated compile path (**caught since**, by the campaign, after the `alias-guarded` shape was added) | needs `x == y` merged plus a guarded `x op K`; SMT-LIB2 masks it (validation + bitblast) and the builder door rarely draws both | bias the generator: alias + `ite(x == K, ...)` on the merged variable in builder-safe problems |
 
 The run also exposed two harness gaps, fixed: `disj_clause` had no harness
 case, and an earlier runner bug (stale objects between mutants) produced a
@@ -808,8 +811,8 @@ Coverage lessons:
 - **The 2^63 cliff is still the richest seam.** B64 and B65 are the fifth and
   sixth instances, after B22, B26, B29 and B9. Every propagator and fold that
   touches 64-bit unsigned values needs boundary-straddling domains in the
-  propagator harness, not only small widths. That is the next harness
-  extension.
+  propagator harness, not only small widths. Done: 13 boundary cases
+  (§P1), all passing on the fixed code.
 - **Wide × protocol is a cross.** Push/pop was tested at narrow widths only;
   the bitblast-only route had its own, untested, scope handling.
 - **The nightly earns its budget on day one.** The first trial run found more
