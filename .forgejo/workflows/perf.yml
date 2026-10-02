@@ -57,16 +57,27 @@ jobs:
             python3 -m pip install -q "$@" && return 0
             python3 -m pip install -q --break-system-packages "$@"
           }
-          pip_install cmake ninja -r tests/perf/solvers.lock
+          pip_install cmake ninja scipy -r tests/perf/solvers.lock
           python3 -m tests.perf.tools fetch --dest perf-tools
 
-      - name: Build dv-solve-smt2
+      - name: Build dv-solve-smt2 and the library
         if: steps.seen.outputs.measured != 'true'
         run: |
           [ -d packages/cadical ] || git clone -q --depth 1 -b rel-3.0.0 \
               https://github.com/arminbiere/cadical.git packages/cadical
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build -j8 --target dv-solve-smt2
+          cmake --build build -j8 --target dv-solve-smt2 dv_solve
+
+      - name: Swizzle fidelity
+        # The Verilator rows of the randomization page mean something only if
+        # tests/perf/vlt_protocol.py says what Verilator 5.046 says: compare it
+        # with a real simulation (pinned Verilator, z3), command by command
+        # and in distribution.
+        if: steps.seen.outputs.measured != 'true'
+        run: |
+          python3 -m pip install -q pytest 2>/dev/null || python3 -m pip install -q --break-system-packages pytest
+          DVS_PERF_TOOLS=perf-tools DVS_REQUIRE_FIDELITY=1 \
+            python3 -m pytest -q -p no:cacheprovider tests/unit/test_vlt_protocol.py
 
       - name: Collect
         id: collect
@@ -77,7 +88,7 @@ jobs:
         run: |
           set +e
           DVS_PERF_TOOLS=perf-tools python3 -m tests.perf.collect --kind "$KIND" \
-            --suites calib,sat-core --out perf-out --github-output
+            --suites calib,sat-core,rand-core --out perf-out --github-output
           echo "rc=$?" >> "$GITHUB_OUTPUT"
 
       - name: Check the record for internal identifiers

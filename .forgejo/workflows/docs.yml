@@ -124,7 +124,7 @@ jobs:
           # floor is set well BELOW that: it catches a COLLAPSED build, not a
           # deleted page. Raise it as the site grows.
           [ "$n" -ge 20 ] || { echo "::error::only $n pages built; refusing to call this a doc set."; exit 1; }
-          for p in results/index results/sat results/methodology; do
+          for p in results/index results/sat results/randomization results/methodology; do
             test -s "$out/$p.html" || { echo "::error::results page $p.html missing"; exit 1; }
           done
           # The generated site is public too: make sure no internal identifier

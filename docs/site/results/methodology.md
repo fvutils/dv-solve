@@ -55,6 +55,51 @@ than 40% of the total. The weights are a choice about presentation: they are
 applied when the pages are rendered, so changing them never needs a new
 measurement.
 
+## Randomization
+
+Each benchmark of the `rand-core` suite is a small constrained-random
+problem, written once and given to every solver in the same form. Each solver
+randomizes it 2000 times, and the solutions are scored against the exact
+answer: the benchmarks with at most 16 random bits are enumerated in full,
+and the two with 32-bit fields are scored on bins of solutions whose sizes
+are known exactly.
+
+| Solver | How it is driven |
+|---|---|
+| Verilator + dv-solve, z3, bitwuzla | one solver process for all 2000 calls, sent exactly the commands Verilator 5.046 sends for each randomize() |
+| dv-solve API | dv-solve's library called directly, one compiled problem solved with a new seed each call, as SystemVerilog DPI and zuspec do |
+| true random | a random choice among all solutions: what a perfect sampler scores at the same sample size |
+
+The scores:
+
+- **Coverage:** the share of solutions (or bins) returned at least once.
+- **Excess JSD:** the Jensen-Shannon divergence, in bits, between the
+  solutions returned and a uniform choice among all solutions, minus the same
+  divergence for the true random sample. A finite sample is never exactly
+  uniform, so the true random row is the floor; 0 is as good as true random.
+- **Thin:** for benchmarks with a rare branch (`thold == 0` in a timer, the
+  small band of two ranges), how often it comes up relative to its share of
+  the solutions; 1 is ideal.
+- **CPU per call:** for the Verilator rows, the solver process's CPU time
+  divided by the number of calls; for the API row, the time inside the solve
+  call. Verilator's own side is not counted for any solver.
+
+Randomization benchmarks run one at a time: next to parallel runs z3's CPU
+time roughly doubles while dv-solve's hardly changes, so running them side by
+side would favour dv-solve.
+
+Verilator does not ask its solver for a random solution. For each
+randomize() it sends the constraints and asks for any solution; then, up to
+four times, it adds a random parity constraint over about half of all the
+random bits and asks again, keeping the last solution found. The command
+sequence used here is checked against a real Verilator 5.046 simulation
+before every run, command by command and in the distribution of the values
+it returns (`tests/unit/test_vlt_protocol.py`); a run whose check fails
+publishes nothing.
+
+Every solution any solver returns is checked against the constraints. A
+solution from the version being measured that violates them fails the job.
+
 ## Correctness
 
 Every `sat` or `unsat` that dv-solve gives is checked against the reference
@@ -86,6 +131,6 @@ With a build of dv-solve in `build/` and the pinned solvers available:
 
 ```sh
 python3 -m tests.perf.tools fetch --dest perf-tools
-DVS_PERF_TOOLS=perf-tools python3 -m tests.perf.collect --suites sat-core --out perf-out
+DVS_PERF_TOOLS=perf-tools python3 -m tests.perf.collect --suites sat-core,rand-core --out perf-out
 python3 -m tests.perf.render --records perf-out
 ```

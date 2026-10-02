@@ -5,7 +5,9 @@
 Inputs: the committed history (tests/perf/history/) and any full run records
 in --records (fetched artifacts: `python3 -m tests.perf.history fetch`). The
 "current" numbers come from the newest valid run record that has SAT data.
-Writes index.md and sat.md plus _gen/*.svg and _gen/*.csv; methodology.md is
+Writes index.md, sat.md and randomization.md plus _gen/*.svg and _gen/*.csv
+(randomization comes from the newest valid record with rand-core data, which
+may be a different run); methodology.md is
 hand-written and tracked. With no SAT record at all, writes placeholder pages
 so the site still builds.
 """
@@ -113,6 +115,12 @@ def summary(rec: dict) -> dict:
     return out
 
 
+RAND_PLACEHOLDER = """# Randomization
+
+No performance run with randomization results has been recorded yet. This
+page fills in after the next nightly performance run; see {doc}`methodology`.
+"""
+
 PLACEHOLDER = """# {title}
 
 No performance run with SAT results has been recorded yet. This page fills in
@@ -121,14 +129,15 @@ it will show and how the numbers are produced.
 """
 
 
-def page_index(rec: dict, s: dict) -> str:
+def page_index(rec: dict, s: dict, rrec=None, rs=None) -> str:
     L = ["# Results", "",
-         "How dv-solve compares, as an SMT-LIB2 solver, with the reference solvers "
-         "bitwuzla and z3 on the same machine in the same run. The numbers are "
+         "How dv-solve compares with the reference solvers bitwuzla and z3 on "
+         "the same machine in the same run: as an SMT-LIB2 solver, and as the "
+         "constraint solver behind randomize(). The numbers are "
          "regenerated from the latest nightly performance run; "
          "{doc}`methodology` explains how each one is produced.", "",
          provenance(rec), "",
-         "## At a glance", ""]
+         "## SMT-LIB2 solving at a glance", ""]
     L += [f"| Solver | Answered correctly (of {s['n']}) | Start-up, CPU ms | dv-solve speed-up | Wrong answers |",
           "|---|---|---|---|---|"]
     wrong = {HEAD: len(s["wrong_head"]), "dv-smt2@anchor": len(s["wrong_anchor"])}
@@ -150,8 +159,19 @@ def page_index(rec: dict, s: dict) -> str:
           f"dv-solve answers `unknown` on {s['n'] - s['solved'].get(HEAD, 0)} "
           "fixtures that use constructs it does not yet decide "
           "({doc}`../concepts/soundness`).", "",
-          "Details per category and per fixture: {doc}`sat`.", "",
-          "```{toctree}", ":hidden:", "", "sat", "methodology", "```", ""]
+          "Details per category and per fixture: {doc}`sat`.", ""]
+    if rrec:
+        L += ["## Randomization at a glance", ""] + rand_glance(rrec, rs)
+        L += ["",
+              "The Verilator rows drive each solver with Verilator's own randomize() "
+              "protocol. Excess JSD measures how far the solutions are from a true "
+              "random choice, beyond the sampling noise of a true random sample; "
+              "0 is ideal."
+              + (f" Under Verilator, dv-solve is {_factor(rs['speedup'])} faster "
+                 "per randomize() than z3, Verilator's default solver."
+                 if rs["speedup"] else ""), "",
+              "Details per benchmark, with the distributions: {doc}`randomization`.", ""]
+    L += ["```{toctree}", ":hidden:", "", "sat", "randomization", "methodology", "```", ""]
     return "\n".join(L)
 
 
@@ -274,17 +294,207 @@ def page_sat(rec: dict, s: dict, gen: Path) -> str:
     return "\n".join(L)
 
 
+# ---- randomization ----------------------------------------------------------
+
+RAND = "rand-core"
+# arm -> display name; the order is the table and legend order.
+RARMS = {
+    "uniform": "true random (ideal)",
+    "dv-api@head": "dv-solve API",
+    "dv-swizzle@head": "Verilator + dv-solve",
+    "z3-swizzle": "Verilator + z3 {z3}",
+    "bitwuzla-swizzle": "Verilator + bitwuzla {bitwuzla}",
+    "dv-swizzle@anchor": "Verilator + dv-solve {anchor}",
+}
+RREF = "z3-swizzle"          # what a Verilator user gets by default
+
+
+def _rname(rec: dict, arm: str) -> str:
+    t = rec["tools"]
+    return RARMS.get(arm, arm).format(z3=t.get("z3", ""), bitwuzla=t.get("bitwuzla", ""),
+                                      anchor=(rec.get("anchor") or {}).get("tag", "anchor"))
+
+
+def current_rand(records: list):
+    ok = [r for r in records if r.get("valid") and r.get("rand")]
+    return max(ok, key=lambda r: r["run"]["utc"]) if ok else None
+
+
+def rand_summary(rec: dict) -> dict:
+    """Per arm: geometric-mean CPU ms per call and mean excess JSD, over the
+    benchmarks every arm answered; per benchmark: rows by arm."""
+    rows = [r for r in rec["rand"] if "error" not in r]
+    by = {(r["bench"], r["arm"]): r for r in rows}
+    benches = [b["name"] for b in rec["manifests"][RAND]["benches"]]
+    arms = [a for a in RARMS if any(r["arm"] == a for r in rec["rand"])]
+    xjsd = {}
+    for b in benches:
+        u = by.get((b, "uniform"))
+        for a in arms:
+            r = by.get((b, a))
+            if u and r:
+                xjsd[(b, a)] = max(0.0, r["jsd"] - u["jsd"])
+    out = {"benches": benches, "arms": arms, "by": by, "xjsd": xjsd, "arm": {}}
+    for a in arms:
+        got = [b for b in benches if (b, a) in by]
+        cpu = [by[(b, a)]["cpu_ms"] for b in got if by[(b, a)].get("cpu_ms")]
+        out["arm"][a] = {
+            "n": len(got),
+            "cpu_ms": math.exp(sum(math.log(c) for c in cpu) / len(cpu)) if cpu else None,
+            "xjsd": sum(xjsd[(b, a)] for b in got) / len(got) if got else None,
+            "errors": sum(1 for r in rec["rand"] if r["arm"] == a and "error" in r),
+            "bad": sum(by[(b, a)].get("bad", 0) for b in got),
+        }
+    ref = out["arm"].get(RREF, {}).get("cpu_ms")
+    head = out["arm"].get("dv-swizzle@head", {}).get("cpu_ms")
+    out["speedup"] = ref / head if ref and head else None
+    return out
+
+
+def _x(v) -> str:
+    return "–" if v is None else f"{v:.3f}"
+
+
+def _cpu(v) -> str:
+    if v is None:
+        return "–"
+    return f"{v * 1000:.0f} µs" if v < 0.1 else (f"{v:.2f} ms" if v < 10 else f"{v:.0f} ms")
+
+
+def rand_glance(rec: dict, rs: dict) -> list:
+    L = ["| Randomization | CPU per randomize() | Excess JSD (0 is ideal) |", "|---|---|---|"]
+    for a in rs["arms"]:
+        if a == "uniform":
+            continue
+        s = rs["arm"][a]
+        L.append(f"| {_rname(rec, a)} | {_cpu(s['cpu_ms'])} | {_x(s['xjsd'])} |")
+    return L
+
+
+def page_rand(rec: dict, rs: dict, gen: Path) -> str:
+    man = rec["manifests"][RAND]
+    benches = {b["name"]: b for b in man["benches"]}
+    by, arms = rs["by"], rs["arms"]
+
+    pts = [(_rname(rec, a), by[(b, a)]["cpu_ms"], rs["xjsd"][(b, a)])
+           for b in rs["benches"] for a in arms
+           if a != "uniform" and (b, a) in by and by[(b, a)].get("cpu_ms")]
+    (gen / "rand-quality-cost.svg").write_text(svg.scatter(
+        pts, "CPU per randomize(), ms (log scale)", "excess JSD (lower is better)"))
+    panels = {b: {_rname(rec, a): by[(b, a)]["hist"] for a in arms if (b, a) in by}
+              for b in rs["benches"]}
+    (gen / "rand-histograms.svg").write_text(svg.small_multiples(panels))
+    cost = {b: {_rname(rec, a): by[(b, a)].get("cpu_ms") for a in arms
+                if a != "uniform" and (b, a) in by} for b in rs["benches"]}
+    (gen / "rand-cost.svg").write_text(svg.dotplot(cost, "CPU per randomize(), ms (log scale)"))
+
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(["benchmark", "arm", "n", "coverage", "jsd", "excess_jsd", "chi2_p", "thin",
+                "distinct", "cpu_ms_per_call", "wall_ms_p50", "wall_ms_p95", "wall_ms_p99",
+                "check_sats_per_call", "bad_models"])
+    for r in rec["rand"]:
+        if "error" in r:
+            w.writerow([r["bench"], _rname(rec, r["arm"]), "error: " + r["error"]])
+            continue
+        w.writerow([r["bench"], _rname(rec, r["arm"]), r["n"], r["cov"], r["jsd"],
+                    rs["xjsd"].get((r["bench"], r["arm"])), r["chi2p"], r.get("thin"),
+                    r["distinct"], r.get("cpu_ms"), r.get("p50_ms"), r.get("p95_ms"),
+                    r.get("p99_ms"), r.get("checks"), r["bad"]])
+    (gen / "rand-core.csv").write_text(buf.getvalue())
+
+    n = man["benches"][0]["n"] if man["benches"] else 0
+    sp = rs["speedup"]
+    L = ["# Randomization", "",
+         f"Each benchmark is randomized {n} times by every solver, and the "
+         "solutions are compared with the exact distribution of a true random "
+         "choice among all solutions. The Verilator rows use Verilator "
+         f"{man['protocol'].split('-')[-1]}'s own randomize() protocol (below), "
+         "with the solver it would run; the dv-solve API row is dv-solve called "
+         "directly, as from SystemVerilog DPI or zuspec.", "",
+         provenance(rec), "",
+         "## At a glance", ""]
+    L += rand_glance(rec, rs)
+    L += ["",
+          "CPU per call is a geometric mean over the benchmarks; for the "
+          "Verilator rows it is the solver process's CPU time, which covers the "
+          "five solver queries each call makes, and for the API row the time "
+          "inside the solve call. Excess JSD is the distance from the ideal "
+          "distribution beyond what a true random sample of the same size "
+          "shows, averaged over the benchmarks: 0 is as good as true random."
+          + (f" Under Verilator, dv-solve is {_factor(sp)} faster per "
+             "randomize() than z3, Verilator's default solver." if sp else ""), "",
+          "## Quality against cost", "",
+          "One dot per benchmark and solver. Further left is cheaper, lower is "
+          "closer to true random.", "",
+          "![Excess JSD against CPU per randomize()](_gen/rand-quality-cost.svg)", "",
+          "## How often each solution comes up", "",
+          "For each benchmark, every solution (or bin of solutions, for the two "
+          "with 32-bit fields) sorted from most to least frequent, as a multiple "
+          "of how often a true random choice would pick it. The ideal is a flat "
+          "line at 1; a sampler that keeps returning the same few solutions "
+          "starts high and drops to the floor, which stands for never.", "",
+          "![Solution frequency, sorted](_gen/rand-histograms.svg)", "",
+          "## Cost per randomize()", "",
+          "Per benchmark, the CPU each solver spends on one randomize().", "",
+          "![CPU per randomize() by solver](_gen/rand-cost.svg)", "",
+          "## The benchmarks", ""]
+    for b in rs["benches"]:
+        L.append(f"- **{b}**: {benches[b]['about']}")
+    L += ["", "## Every benchmark", "",
+          "Coverage is the share of solutions (or bins) returned at least once; "
+          "a true random sample of the same size does not reach 100% when there "
+          "are more solutions than calls. Thin is how often the rarest branch "
+          "comes up relative to its share (1 is ideal; see the benchmark list). "
+          "Download: {download}`all measurements as CSV <_gen/rand-core.csv>`.", ""]
+    for b in rs["benches"]:
+        L += [f"### {b}", "",
+              "| Solver | Coverage | Excess JSD | Thin | CPU per call | Wall p50 / p99 |",
+              "|---|---|---|---|---|---|"]
+        for a in arms:
+            r = by.get((b, a))
+            if r is None:
+                err = next((x["error"] for x in rec["rand"] if x["bench"] == b and x["arm"] == a
+                            and "error" in x), None)
+                if err:
+                    L.append(f"| {_rname(rec, a)} | failed: {err} | | | | |")
+                continue
+            th = "–" if r.get("thin") is None else f"{r['thin']:.2f}"
+            wall = "–" if a == "uniform" else f"{r['p50_ms']:.2f} / {r['p99_ms']:.2f} ms"
+            L.append(f"| {_rname(rec, a)} | {r['cov'] * 100:.0f}% | {_x(rs['xjsd'][(b, a)])} | "
+                     f"{th} | {_cpu(r.get('cpu_ms')) if a != 'uniform' else '–'} | {wall} |")
+        L.append("")
+    L += ["## Verilator's randomize() protocol", "",
+          "Verilator does not ask its solver for a random solution. For each "
+          "randomize() it sends the constraints and asks for any solution; then, "
+          "up to four times, it adds a random parity constraint over about half "
+          "of all the random bits and asks again, keeping the last solution "
+          "found. The solver's own choice of solution decides the rest. These "
+          "measurements drive each solver with exactly that sequence of "
+          "commands; a test compares it with a real Verilator "
+          f"{man['protocol'].split('-')[-1]} simulation, command by command and "
+          "in the distribution of the values it returns "
+          "(`tests/unit/test_vlt_protocol.py`).", ""]
+    return "\n".join(L)
+
+
 def render(records_dir, out: Path) -> str:
     gen = out / "_gen"
     gen.mkdir(parents=True, exist_ok=True)
-    rec = current(load_records(records_dir))
+    records = load_records(records_dir)
+    rec, rrec = current(records), current_rand(records)
+    rs = rand_summary(rrec) if rrec else None
+    if rrec:
+        (out / "randomization.md").write_text(page_rand(rrec, rs, gen))
+    else:
+        (out / "randomization.md").write_text(RAND_PLACEHOLDER)
     if rec is None:
         (out / "index.md").write_text(PLACEHOLDER.format(title="Results") +
-                                      "\n```{toctree}\n:hidden:\n\nsat\nmethodology\n```\n")
+                                      "\n```{toctree}\n:hidden:\n\nsat\nrandomization\nmethodology\n```\n")
         (out / "sat.md").write_text(PLACEHOLDER.format(title="SMT-LIB2 solving"))
         return "placeholder"
     s = summary(rec)
-    (out / "index.md").write_text(page_index(rec, s))
+    (out / "index.md").write_text(page_index(rec, s, rrec, rs))
     (out / "sat.md").write_text(page_sat(rec, s, gen))
     return rec["run"]["utc"]
 

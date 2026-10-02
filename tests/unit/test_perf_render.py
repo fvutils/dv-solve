@@ -95,3 +95,62 @@ def test_wrong_answer_is_not_a_fast_answer():
             r["verdict"], r["cpu_ms_min"] = "unsat", 1.3
     assert normalize.ratios(rec, "sat-core", "dv-smt2@anchor")[0] is None
     assert normalize.solved(rec, "sat-core")["dv-smt2@anchor"] == 4
+
+
+def _rand_rows():
+    def row(bench, arm, build, jsd, cpu, cov=1.0, bad=0):
+        r = {"bench": bench, "arm": arm, "build": build, "n": 100, "cov": cov, "jsd": jsd,
+             "chi2p": 0.5, "distinct": 0.5, "off": 0, "bad": bad, "hist": [1.0, 1.0]}
+        if arm != "uniform":
+            r.update(cpu_ms=cpu, p50_ms=cpu, p95_ms=cpu, p99_ms=cpu, checks=5.0)
+        return r
+    rows = []
+    for b in ("countones", "packet"):
+        rows += [row(b, "uniform", "ref", 0.10, None),
+                 row(b, "dv-api@head", "head", 0.11, 0.002),
+                 row(b, "dv-swizzle@head", "head", 0.12, 0.5),
+                 row(b, "z3-swizzle", "ref", 0.30, 5.0, cov=0.7),
+                 row(b, "bitwuzla-swizzle", "ref", 0.05, 20.0)]   # below the floor
+    rows.append({"bench": "packet", "arm": "dv-swizzle@anchor", "build": "anchor",
+                 "error": "randomize() took over 10 s"})
+    return rows
+
+
+def _rand_record():
+    rec = _record()
+    rec["manifests"]["rand-core"] = {
+        "hash": "r", "suite": "rand-core", "kind": "rand", "protocol": "verilator-5.046",
+        "benches": [{"name": "countones", "n": 100, "sha": "0", "about": "c", "space": 70,
+                     "bins": None},
+                    {"name": "packet", "n": 100, "sha": "1", "about": "p", "space": None,
+                     "bins": 144}]}
+    rec["rand"] = _rand_rows()
+    return rec
+
+
+def test_rand_summary_excess_jsd_and_speedup():
+    rs = render.rand_summary(_rand_record())
+    assert abs(rs["arm"]["z3-swizzle"]["xjsd"] - 0.20) < 1e-9
+    assert rs["arm"]["bitwuzla-swizzle"]["xjsd"] == 0.0      # under the floor is noise, not 0-
+    assert abs(rs["speedup"] - 10.0) < 1e-9                  # 5 ms against 0.5 ms
+    assert rs["arm"]["dv-swizzle@anchor"]["errors"] == 1
+
+
+def test_rand_trend_line():
+    line = schema.trend_lines(_rand_record(), "perf-nightly-20261003T050000Z-aaaaaaa")[0]
+    r = line["rand"]["rand-core"]
+    assert r["m"] == "r" and r["protocol"] == "verilator-5.046" and r["errors"] == 1
+    assert r["b"]["countones"]["z3-swizzle"] == [5.0, 0.2, 0.7]
+    assert "uniform" not in r["b"]["countones"]
+
+
+def test_render_randomization_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(render, "load_records", lambda d: [_rand_record()])
+    render.render(None, tmp_path)
+    page = (tmp_path / "randomization.md").read_text()
+    index = (tmp_path / "index.md").read_text()
+    assert "Verilator + z3 5.1.0" in page and "failed: randomize()" in page
+    assert "dv-solve is 10" in page and "faster per randomize()" in page
+    assert "## Randomization at a glance" in index and "randomization" in index
+    for f in ("rand-quality-cost.svg", "rand-histograms.svg", "rand-cost.svg", "rand-core.csv"):
+        assert (tmp_path / "_gen" / f).stat().st_size > 0

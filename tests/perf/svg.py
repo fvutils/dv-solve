@@ -2,7 +2,8 @@
 
 Hand-written rather than matplotlib: the output is byte-stable for the same
 data (no embedded dates or ids), and the docs build gains no dependency.
-Only what the pages draw: lines/steps on a log-x axis, and a strip plot.
+Only what the pages draw: steps on a log-x axis, a strip plot, a scatter, a
+dot plot and small multiples.
 """
 from __future__ import annotations
 
@@ -103,5 +104,113 @@ def strip(groups: dict, title_y: str, ref_label: str) -> str:
             jitter = ((j * 7919) % 21 - 10) * pw / len(cats) / 60
             s.append(f'<circle cx="{X(i) + jitter:.1f}" cy="{Y(v):.1f}" r="3.2" '
                      f'fill="{PALETTE[0]}" fill-opacity="0.65"/>')
+    s.append("</svg>")
+    return "\n".join(s) + "\n"
+
+
+def scatter(points: list, title_x: str, title_y: str) -> str:
+    """points: [(series, x > 0, y)]. Log x, linear y from 0; one colour per series."""
+    if not points:
+        return ""
+    xs = [p[1] for p in points]
+    ys = [p[2] for p in points]
+    lo = 10 ** math.floor(math.log10(min(xs)))
+    hi = 10 ** math.ceil(math.log10(max(xs)))
+    top = max(ys + [0.1])
+    top = math.ceil(top * 10) / 10
+    pw, ph = W - ML - MR, H - MT - MB
+    X = lambda v: ML + pw * (math.log10(v) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))
+    Y = lambda v: MT + ph - ph * max(v, 0) / top
+    xt = [(X(t), f"{t:g}") for t in _log_ticks(lo, hi)]
+    step = 0.1 if top <= 0.6 else 0.2
+    yt = [(Y(i * step), f"{i * step:.1f}") for i in range(int(round(top / step)) + 1)]
+    s = _frame(title_x, title_y, xt, yt)
+    names = list(dict.fromkeys(p[0] for p in points))
+    for name, x, y in points:
+        c = PALETTE[names.index(name) % len(PALETTE)]
+        s.append(f'<circle cx="{X(x):.1f}" cy="{Y(y):.1f}" r="4" fill="{c}" fill-opacity="0.75"/>')
+    s += _legend(names)
+    s.append("</svg>")
+    return "\n".join(s) + "\n"
+
+
+def small_multiples(panels: dict, cols: int = 2) -> str:
+    """panels: {title: {series: [sorted frequency / uniform expectation]}}.
+
+    One panel per title, x = rank (most to least frequent), log y from 0.01
+    to 100 with 1 (the uniform expectation) dashed; zero is drawn at 0.01.
+    """
+    if not panels:
+        return ""
+    names = list(dict.fromkeys(n for p in panels.values() for n in p))
+    rows = math.ceil(len(panels) / cols)
+    pw, ph, gx, gy, top = 300, 120, 50, 44, 34
+    width = cols * (pw + gx) + 190
+    height = top + rows * (ph + gy)
+    lo, hi = 0.01, 100.0
+    s = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+         f'font-family="sans-serif" font-size="11" role="img">',
+         f'<rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff"/>']
+    for i, (title, series) in enumerate(panels.items()):
+        ox = gx + (i % cols) * (pw + gx)
+        oy = top + (i // cols) * (ph + gy)
+        Y = lambda v: oy + ph - ph * (math.log10(min(max(v, lo), hi)) - math.log10(lo)) \
+            / (math.log10(hi) - math.log10(lo))
+        s.append(f'<rect x="{ox}" y="{oy}" width="{pw}" height="{ph}" fill="none" stroke="#999"/>')
+        s.append(f'<text x="{ox}" y="{oy - 6}" font-weight="bold">{escape(title)}</text>')
+        for t in (0.01, 1, 100):
+            s.append(f'<text x="{ox - 4}" y="{Y(t) + 4:.1f}" text-anchor="end">{t:g}</text>')
+        s.append(f'<line x1="{ox}" y1="{Y(1):.1f}" x2="{ox + pw}" y2="{Y(1):.1f}" '
+                 f'stroke="#333" stroke-dasharray="4 3"/>')
+        for name, fr in series.items():
+            if not fr:
+                continue
+            c = PALETTE[names.index(name) % len(PALETTE)]
+            n = len(fr)
+            X = lambda k: ox + pw * (k + 0.5) / n                        # noqa: E731
+            d = "M" + "L".join(f"{X(k):.1f},{Y(v):.1f}" for k, v in enumerate(fr))
+            s.append(f'<path d="{d}" fill="none" stroke="{c}" stroke-width="1.6"/>')
+    x = cols * (pw + gx) + 10
+    for i, n in enumerate(names):
+        y = top + 10 + 18 * i
+        c = PALETTE[i % len(PALETTE)]
+        s.append(f'<line x1="{x}" y1="{y}" x2="{x + 18}" y2="{y}" stroke="{c}" stroke-width="2.5"/>')
+        s.append(f'<text x="{x + 24}" y="{y + 4}">{escape(n)}</text>')
+    s.append("</svg>")
+    return "\n".join(s) + "\n"
+
+
+def dotplot(rows: dict, title_x: str) -> str:
+    """rows: {row label: {series: value > 0}}. One row per label, log x, one
+    colour per series: the per-benchmark cost of every solver side by side."""
+    vals = [v for r in rows.values() for v in r.values() if v and v > 0]
+    if not vals:
+        return ""
+    names = list(dict.fromkeys(n for r in rows.values() for n in r))
+    lo = 10 ** math.floor(math.log10(min(vals)))
+    hi = 10 ** math.ceil(math.log10(max(vals)))
+    ml, rh = 120, 26
+    height = MT + MB + rh * len(rows)
+    pw = W - ml - MR
+    X = lambda v: ml + pw * (math.log10(v) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))
+    s = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {height}" '
+         f'font-family="sans-serif" font-size="12" role="img">',
+         f'<rect x="0" y="0" width="{W}" height="{height}" fill="#ffffff"/>',
+         f'<rect x="{ml}" y="{MT}" width="{pw}" height="{rh * len(rows)}" fill="none" stroke="#999"/>']
+    for t in _log_ticks(lo, hi):
+        s.append(f'<line x1="{X(t):.1f}" y1="{MT}" x2="{X(t):.1f}" y2="{MT + rh * len(rows)}" '
+                 f'stroke="#eee"/>')
+        s.append(f'<text x="{X(t):.1f}" y="{MT + rh * len(rows) + 16}" text-anchor="middle">'
+                 f'{t:g}</text>')
+    s.append(f'<text x="{ml + pw / 2}" y="{height - 8}" text-anchor="middle">{escape(title_x)}</text>')
+    for i, (label, r) in enumerate(rows.items()):
+        y = MT + rh * i + rh / 2
+        s.append(f'<text x="{ml - 6}" y="{y + 4:.1f}" text-anchor="end">{escape(label)}</text>')
+        for name, v in r.items():
+            if v and v > 0:
+                c = PALETTE[names.index(name) % len(PALETTE)]
+                s.append(f'<circle cx="{X(v):.1f}" cy="{y:.1f}" r="4.5" fill="{c}" '
+                         f'fill-opacity="0.8"/>')
+    s += _legend(names)
     s.append("</svg>")
     return "\n".join(s) + "\n"

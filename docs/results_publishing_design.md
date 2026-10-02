@@ -30,6 +30,31 @@ the design as first written:
 - **Charts are hand-written SVG** (`svg.py`), not matplotlib: byte-stable
   output and no new docs dependency.
 
+R3 BUILT 2026-10-02: `vlt_protocol.py` (Verilator 5.046's randomize() over a
+pipe), `rand_benches.py` (the rand-core benchmarks in the soundness IR),
+`run_rand.py`, `suites/rand-core.json`, the `randomization` page, and
+`tests/unit/test_vlt_protocol.py`, which passes the exit criterion: against a
+real Verilator 5.046 + z3 simulation the driver sends the same commands
+(hash bits abstracted) and z3 returns the same distribution on `a < b`
+(two-sample chi-square). `perf.yml` runs that test before collecting and
+fails the run if it fails or cannot run. Building it found B67, a
+wrong-`unsat` in every incremental session (fixed 7f8384d). Changes from the
+design as first written:
+- **Ground truth is computed, not committed.** The IR's own evaluator
+  enumerates every benchmark of at most 16 bits in under a second, sharing
+  no code with any solver; `tests/perf/truth/` is not needed.
+- **Two wide benchmarks are scored on bins** (`addr_aligned`, `packet`),
+  whose exact sizes are known, so the 16-cell limit of Verilator's hash shows
+  on realistic 32-bit fields too.
+- **Randomization runs one benchmark at a time** (`--rand-workers 1`): next
+  to 3 parallel neighbours z3's CPU per call doubled while dv-solve's moved by
+  under 5%, so parallel runs would flatter dv-solve.
+- **bitwuzla's cost grows within a session:** 1 ms per call at the start, 11
+  ms after 2000 calls on `a < b` (bitwuzla 0.8.2 does not release everything
+  on `(reset)`). It is what a Verilator user of bitwuzla gets, so it is
+  measured as is.
+- **No `dv-scenario` arm yet** (R6).
+
 This document builds on `docs/ci_benchmark_publishing_plan.md` (2026-09-30)
 and replaces its §4 (harness), §5 (history), §6 (workflow) and §7
 (phasing). That plan's §1 review, §2 page content and §3 swizzle driver still

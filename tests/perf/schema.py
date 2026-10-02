@@ -92,6 +92,23 @@ def trend_lines(rec: dict, artifact: str) -> list:
         }
     if sat:
         line["sat"] = sat
+    rand = {}
+    for name, man in rec.get("manifests", {}).items():
+        if man.get("kind") != "rand":
+            continue
+        rows = [r for r in rec.get("rand", []) if "error" not in r]
+        uni = {r["bench"]: r["jsd"] for r in rows if r["arm"] == "uniform"}
+        # per benchmark and arm: [CPU ms per call, excess JSD, coverage]
+        rand[name] = {"m": man["hash"], "protocol": man.get("protocol"), "b": {}}
+        for r in rows:
+            if r["arm"] == "uniform" or r["bench"] not in uni:
+                continue
+            rand[name]["b"].setdefault(r["bench"], {})[r["arm"]] = [
+                round(r["cpu_ms"], 4) if r.get("cpu_ms") is not None else None,
+                round(max(0.0, r["jsd"] - uni[r["bench"]]), 4), round(r["cov"], 4)]
+        rand[name]["errors"] = sum(1 for r in rec.get("rand", []) if "error" in r)
+    if rand:
+        line["rand"] = rand
     return [line]
 
 
