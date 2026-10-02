@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from .fuzz_array_smt2 import generate_problem
+from .fuzz_array_smt2 import generate_problem, generate_session
 from .harness.dv_solve_smt2_solver import DvSolveSMT2ArraySolver
 from .harness.z3_solver import Z3Solver
 
@@ -83,8 +83,7 @@ def test_fuzz_array_lazy(seed, z3_oracle, tmp_path):
 
 def test_incremental_check_is_not_a_spurious_sat():
     """A second check-sat used to solve the skeleton with the reads free and no
-    array lemmas: i == j, a[i] != a[j] answered `sat`. Until the engine refines
-    incrementally, a later check answers `unknown`."""
+    array lemmas: i == j, a[i] != a[j] answered `sat` (B70)."""
     import subprocess
     if not _DV.is_available():
         pytest.skip("dv-solve-smt2 binary not built")
@@ -95,4 +94,36 @@ def test_incremental_check_is_not_a_spurious_sat():
               "(assert (not (= (select a i) (select a j))))(check-sat)")
     r = subprocess.run([str(exe), "--interactive"], input=script, capture_output=True,
                        text=True, timeout=60, env={**os.environ, "DV_ARRAY": "1"})
-    assert r.stdout.split()[-1] in ("unsat", "unknown"), r.stdout
+    assert r.stdout.split()[-1] == "unsat", r.stdout
+
+
+_EXE = Path(__file__).resolve().parents[2] / "build" / "dv-solve-smt2"
+_VERDICTS = {"sat", "unsat", "unknown"}
+
+
+def _answers(cmd, script, env=None):
+    import subprocess
+    r = subprocess.run(cmd, input=script, capture_output=True, text=True,
+                       timeout=60, env=env)
+    return [w for w in r.stdout.split() if w in _VERDICTS]
+
+
+@pytest.mark.parametrize("mode", ["auto", "lazy"])
+@pytest.mark.parametrize("seed", _SEEDS)
+def test_fuzz_array_session(seed, mode, z3_oracle):
+    """Incremental sessions -- asserts, push and pop between check-sats -- on
+    arrays of every address width, each answer cross-checked against z3. `auto`
+    is the default routing (large arrays promoted to the word-level engine on
+    first need); `lazy` is DV_ARRAY=1 (every array abstract)."""
+    if not _EXE.is_file():
+        pytest.skip("dv-solve-smt2 binary not built")
+    script = generate_session(seed)
+    env = {k: v for k, v in os.environ.items() if k != "DV_ARRAY"}
+    if mode == "lazy":
+        env["DV_ARRAY"] = "1"
+    dv = _answers([str(_EXE), "--interactive"], script, env)
+    z = _answers(["z3", "-in"], script)
+    assert len(dv) == len(z) == script.count("(check-sat)"), (dv, z, script)
+    for n, (a, b) in enumerate(zip(dv, z)):
+        if a in _ANSWERS and b in _ANSWERS:
+            assert a == b, f"check-sat #{n}: dv={a} z3={b}\n{script}"

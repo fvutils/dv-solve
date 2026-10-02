@@ -45,6 +45,26 @@ static void _cmd_alloc_reset(Smt2Frontend *fe) {
 /* Helpers: symbol table                                               */
 /* ------------------------------------------------------------------ */
 
+/* Raise n_vars, the next free var id, to `n`. vars[] doubles as the name table
+ * and every slot below n_vars is scanned, so the skipped slots get empty names.
+ * Raising it bare left them uninitialized -- or past vars_cap, for the vars the
+ * array engine mints in the problem -- and the next lookup read off the end. */
+static void _bump_n_vars(Smt2Frontend *fe, uint32_t n) {
+    if (n <= fe->n_vars) return;
+    if (n > fe->vars_cap) {
+        uint32_t nc = fe->vars_cap ? fe->vars_cap : 16;
+        while (nc < n) nc *= 2;
+        Smt2Var *g = (Smt2Var *)realloc(fe->vars, nc * sizeof(Smt2Var));
+        if (g) { fe->vars = g; fe->vars_cap = nc; }
+    }
+    uint32_t top = n < fe->vars_cap ? n : fe->vars_cap;
+    for (uint32_t i = fe->n_vars; i < top; i++) {
+        memset(&fe->vars[i], 0, sizeof(Smt2Var));
+        fe->vars[i].var_id = UINT32_MAX;
+    }
+    fe->n_vars = n;   /* ids stay unique even if the table could not grow */
+}
+
 static int _add_var(Smt2Frontend *fe, const char *name, uint32_t len,
                     uint32_t var_id, uint8_t width) {
     /* Grow to fit. n_vars may have been bumped past vars_cap by
@@ -70,11 +90,18 @@ static int _add_var(Smt2Frontend *fe, const char *name, uint32_t len,
      * value. Routing here is central — it covers scalar, aux, array-element,
      * and function-return vars alike. */
     if (width > 64) fe->needs_bitblast = 1;
+    /* n_vars is also the next free id (_next_var_id). An id taken past it --
+     * _next_var_id skips the ids a compile used internally -- must move it on,
+     * or the next declaration got the SAME id: after a compile with internal
+     * vars, `declare z; declare w; z != w` was unsat, and every element of an
+     * array declared then was one var. */
+    if (var_id + 1 > fe->n_vars) _bump_n_vars(fe, var_id + 1);
     return 0;
 }
 
 static Smt2Var *_find_var(Smt2Frontend *fe, const char *name, uint32_t len) {
-    for (uint32_t i = 0; i < fe->n_vars; i++) {
+    uint32_t n = fe->n_vars < fe->vars_cap ? fe->n_vars : fe->vars_cap;
+    for (uint32_t i = 0; i < n; i++) {
         if (strlen(fe->vars[i].name) == len &&
             memcmp(fe->vars[i].name, name, len) == 0)
             return &fe->vars[i];
@@ -305,7 +332,7 @@ static uint32_t _fresh_aux(Smt2Frontend *fe, uint16_t width) {
     /* If _next_var_id skipped past fe->n_vars to dodge backend-internal
      * aux slots, sync fe->n_vars up so the next allocation doesn't
      * collide with the var we just claimed. */
-    if (var_id + 1 > fe->n_vars) fe->n_vars = var_id + 1;
+    _bump_n_vars(fe, var_id + 1);
     _builder_touched(fe);
     return var_id;
 }
@@ -328,6 +355,8 @@ static Smt2ArrayValue *_make_array_value(Smt2Frontend *fe, Smt2ArraySort sort) {
     uint32_t n = 1u << sort.addr_width;
     Smt2ArrayValue *av = (Smt2ArrayValue *)_cmd_alloc(fe, sizeof(Smt2ArrayValue));
     if (!av) return NULL;
+    /* is_abstract is read on every array operand, not only under DV_ARRAY. */
+    memset(av, 0, sizeof(*av));
     dvs_expr_t *elems = (dvs_expr_t *)_cmd_alloc(fe, n * sizeof(dvs_expr_t));
     if (!elems) return NULL;
     av->sort             = sort;
@@ -343,6 +372,17 @@ static Smt2ArrayValue *_make_array_value(Smt2Frontend *fe, Smt2ArraySort sort) {
     return av;
 }
 
+/* An array of this sort is word-level abstract: always under DV_ARRAY, and by
+ * default when its address space is too large to expand densely and something
+ * needs more than the sparse path's constant indices. Wider than 64 bits stays
+ * sparse, which answers `unknown` for what it cannot do: the refinement
+ * compares model values as int64. */
+static int _abstract_sort(const Smt2Frontend *fe, Smt2ArraySort sort) {
+    if (fe->array_lazy) return 1;
+    return fe->array_auto && sort.addr_width > SMT2_MAX_ARRAY_ADDR_BITS
+        && sort.addr_width <= 64 && sort.data_width <= 64;
+}
+
 /* Declare a persistent array variable (element vars are solver vars).
  * Uses plain malloc so it survives command boundaries. */
 static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
@@ -356,7 +396,9 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
     /* Word-level abstract array (DV_ARRAY): a BASE leaf node with no dense
      * elems[] and no per-element vars, for any address width. Reads become
      * fresh vars; congruence is enforced at solve time. Registered in anodes[]
-     * for uniform ownership/lookup with STORE/CONST/ITE nodes. */
+     * for uniform ownership/lookup with STORE/CONST/ITE nodes. A large array
+     * otherwise starts sparse and is promoted on first need (_promote_sparse):
+     * constant-index-only arrays, Verilator's unpacked arrays, stay fast. */
     if (fe->array_lazy) {
         Smt2ArrayValue *base = _anode_new(fe, SMT2_ANODE_BASE, sort);
         if (!base) return NULL;
@@ -463,7 +505,7 @@ static dvs_expr_t _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
     char nm[SMT2_MAX_NAME];
     snprintf(nm, sizeof(nm), "__arr%u_%llu", var_id, (unsigned long long)k);
     _add_var(fe, nm, (uint32_t)strlen(nm), var_id, arr->sort.data_width);
-    if (var_id + 1 > fe->n_vars) fe->n_vars = var_id + 1;
+    _bump_n_vars(fe, var_id + 1);
     arr->sparse_idx[arr->n_sparse] = k;
     arr->sparse_varid[arr->n_sparse] = var_id;
     arr->n_sparse++;
@@ -486,7 +528,7 @@ static uint32_t _fresh_read_var(Smt2Frontend *fe, uint16_t width) {
     char name[SMT2_MAX_NAME];
     snprintf(name, sizeof(name), "__rd%u", var_id);
     _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint8_t)width);
-    if (var_id + 1 > fe->n_vars) fe->n_vars = var_id + 1;
+    _bump_n_vars(fe, var_id + 1);
     _builder_touched(fe);
     return var_id;
 }
@@ -683,9 +725,25 @@ static void _aread_put_last(Smt2Frontend *fe) {
 /* Find (or create) the read variable for select(node, idx). Dedups by var_id
  * when the index is a plain variable, else by dvs_expr_t identity. Records the
  * read in areads[]. Returns the read var_id (UINT32_MAX on OOM). */
+/* Drop the reads a solve appended past areads[n_areads_user) -- they live in
+ * fe->problem's pool, not the builder -- and the per-solve marks on the rest.
+ * Called before a translation adds a read and before a solve starts. */
+static void _abs_drop_solve_state(Smt2Frontend *fe) {
+    if (fe->n_areads > fe->n_areads_user) {
+        fe->n_areads = fe->n_areads_user;
+        if (fe->aread_hash) {
+            memset(fe->aread_hash, 0, fe->aread_hash_cap * sizeof(uint32_t));
+            for (uint32_t i = 0; i < fe->n_areads; i++) _aread_hash_put(fe, i);
+        }
+    }
+    for (uint32_t i = 0; i < fe->n_areads; i++) fe->areads[i].emitted = 0;
+    for (uint32_t e = 0; e < fe->n_aeqs; e++) fe->aeqs[e].wit_idx_ref = EXPR_NULL;
+}
+
 static uint32_t _abs_find_or_create_read(Smt2Frontend *fe, Smt2ArrayValue *node,
                                          dvs_expr_t idx_ref, uint32_t idx_varid,
                                          uint16_t width) {
+    if (fe->n_areads > fe->n_areads_user) _abs_drop_solve_state(fe);
     uint32_t slot = _aread_lookup(fe, node, idx_varid, idx_ref);
     if (slot != UINT32_MAX) return fe->areads[slot].read_varid;
     if (fe->n_areads == fe->areads_cap) {
@@ -706,6 +764,7 @@ static uint32_t _abs_find_or_create_read(Smt2Frontend *fe, Smt2ArrayValue *node,
     r->width      = width;
     r->emitted    = 0;
     _aread_put_last(fe);
+    fe->n_areads_user = fe->n_areads;
     return rv;
 }
 
@@ -733,6 +792,70 @@ static TaggedExpr _abs_select(Smt2Frontend *fe, Smt2ArrayValue *node,
     uint32_t rv = _abs_find_or_create_read(fe, node, idx_ref, idxv, w);
     if (rv == UINT32_MAX) { SMT2_TAINT(fe, "abstract-array read var could not be created"); return TAGGED_NULL; }
     return (TaggedExpr){ { dvs_builder_expr_var(fe->builder, rv), w }, 1, NULL };
+}
+
+/* Turn a sparse array into an abstract BASE node in place, when something
+ * needs more than constant indices (a symbolic index, store, array = or ite).
+ * Each element var already made for a constant index becomes a read at that
+ * index, so constraints already built on it keep their meaning. Returns 0, or
+ * -1 when the array cannot be promoted (the caller taints). */
+static int _promote_sparse(Smt2Frontend *fe, Smt2ArrayValue *arr) {
+    if (arr->is_abstract) return 0;
+    if (!arr->is_sparse || !_abstract_sort(fe, arr->sort)) return -1;
+    /* A pop frees the nodes made in its scope; the declaration it belongs to
+     * must go with it, or the array would point at a freed node. */
+    uint32_t ai = UINT32_MAX;
+    for (uint32_t i = 0; i < fe->n_array_vars; i++)
+        if (fe->array_vars[i].value == arr) { ai = i; break; }
+    if (ai == UINT32_MAX) return -1;
+    if (fe->push_depth > 0 && ai < fe->push_n_array_vars[fe->push_depth - 1]) return -1;
+    if (fe->n_anodes == fe->anodes_cap) {
+        uint32_t nc = fe->anodes_cap ? fe->anodes_cap * 2 : 16;
+        Smt2ArrayValue **grow = (Smt2ArrayValue **)realloc(
+            fe->anodes, nc * sizeof(Smt2ArrayValue *));
+        if (!grow) return -1;
+        fe->anodes = grow;
+        fe->anodes_cap = nc;
+    }
+    if (fe->n_areads > fe->n_areads_user) _abs_drop_solve_state(fe);
+    if (fe->n_areads + arr->n_sparse > fe->areads_cap) {
+        uint32_t nc = fe->areads_cap ? fe->areads_cap : 32;
+        while (nc < fe->n_areads + arr->n_sparse) nc *= 2;
+        Smt2ArrayRead *grow = (Smt2ArrayRead *)realloc(fe->areads, nc * sizeof(Smt2ArrayRead));
+        if (!grow) return -1;
+        fe->areads = grow;
+        fe->areads_cap = nc;
+    }
+    fe->anodes[fe->n_anodes++] = arr;
+    arr->is_abstract     = 1;
+    arr->akind           = SMT2_ANODE_BASE;
+    arr->store_idx_ref   = EXPR_NULL;
+    arr->cond_ref        = EXPR_NULL;
+    for (uint32_t i = 0; i < arr->n_sparse; i++) {
+        _aread_reserve_one(fe);
+        Smt2ArrayRead *r = &fe->areads[fe->n_areads++];
+        r->node       = arr;
+        r->idx_ref    = _bv_const(fe, (int64_t)arr->sparse_idx[i], arr->sort.addr_width);
+        r->idx_varid  = UINT32_MAX;
+        r->read_varid = arr->sparse_varid[i];
+        r->width      = arr->sort.data_width;
+        r->emitted    = 0;
+        _aread_put_last(fe);
+    }
+    fe->n_areads_user = fe->n_areads;
+    free(arr->sparse_idx);   arr->sparse_idx = NULL;
+    free(arr->sparse_varid); arr->sparse_varid = NULL;
+    arr->n_sparse = arr->sparse_cap = 0;
+    arr->is_sparse = 0;
+    return 0;
+}
+
+/* Promote whichever of two array operands is sparse, so both are abstract.
+ * Returns 1 when both are abstract afterwards. */
+static int _promote_pair(Smt2Frontend *fe, Smt2ArrayValue *a, Smt2ArrayValue *b) {
+    if (!a->is_abstract && _promote_sparse(fe, a) < 0) return 0;
+    if (!b->is_abstract && _promote_sparse(fe, b) < 0) return 0;
+    return 1;
 }
 
 /* Reify an abstract array equality (a == b) onto a fresh boolean var and record
@@ -1268,7 +1391,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return TAGGED_NULL;
         }
 
-        if (fe->array_lazy) {
+        if (_abstract_sort(fe, sort)) {
             val_te = _flatten_to_var(fe, val_te);
             Smt2ArrayValue *arr = _anode_new(fe, SMT2_ANODE_CONST, sort);
             if (!arr) { SMT2_TAINT(fe, "abstract const-array node allocation failed"); return TAGGED_NULL; }
@@ -1411,7 +1534,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
         /* Word-level abstract path (DV_ARRAY): const or symbolic index alike
          * become a fresh read var; read-over-write / congruence deferred. */
-        if (fe->array_lazy && arr->is_abstract) {
+        if (arr->is_abstract) {
             idx_te = _flatten_to_var(fe, idx_te);
             if (idx_te.te.ref == EXPR_NULL) { SMT2_TAINT(fe, "abstract-array select index not flattenable to a var"); return TAGGED_NULL; }
             return _abs_select(fe, arr, idx_te.te.ref);
@@ -1450,8 +1573,14 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         }
 
         /* Symbolic index. A sparse (large-address) array cannot resolve one
-         * without enumerating 2^M entries -> honest unknown rather than a wrong
+         * without enumerating 2^M entries: promote it to the word-level engine,
+         * or, where that is not possible, an honest unknown rather than a wrong
          * answer. Dense arrays lower to an ITE tree over their elements. */
+        if (arr->is_sparse && _promote_sparse(fe, arr) == 0) {
+            idx_te = _flatten_to_var(fe, idx_te);
+            if (idx_te.te.ref == EXPR_NULL) { SMT2_TAINT(fe, "abstract-array select index not flattenable to a var"); return TAGGED_NULL; }
+            return _abs_select(fe, arr, idx_te.te.ref);
+        }
         if (arr->is_sparse) {
             fprintf(fe->err, "error: symbolic index into a large (sparse) array "
                              "is unsupported -> result will be unknown\n");
@@ -1471,11 +1600,12 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return TAGGED_NULL;
         }
         Smt2ArrayValue *arr = arr_te.array;
+        if (arr->is_sparse) _promote_sparse(fe, arr);
 
         /* Word-level abstract path (DV_ARRAY): build a STORE DAG node instead of
          * an elementwise ITE array; select resolves it via read-over-write. This
          * also handles large (sparse) address spaces the dense path bails on. */
-        if (fe->array_lazy && arr->is_abstract) {
+        if (arr->is_abstract) {
             TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
             if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
                 fprintf(fe->err, "error: store: index must be a BV\n");
@@ -1739,7 +1869,8 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (a.array != NULL && b.array != NULL) {
             /* Word-level abstract path: reify onto a boolean var; consistency +
              * extensionality axioms are emitted at solve time. */
-            if (fe->array_lazy && a.array->is_abstract && b.array->is_abstract) {
+            if ((a.array->is_abstract || b.array->is_abstract || a.array->is_sparse)
+                && _promote_pair(fe, a.array, b.array)) {
                 dvs_expr_t p = _abs_array_eq(fe, a.array, b.array);
                 if (p == EXPR_NULL) { SMT2_TAINT(fe, "abstract-array equality could not be reified"); return TAGGED_NULL; }
                 return (TaggedExpr){ { p, 1 }, 1, NULL };
@@ -1953,7 +2084,8 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (t.array != NULL && e.array != NULL) {
             /* Word-level abstract path: an ITE DAG node; select resolves it to
              * ite(cond, read(then,i), read(else,i)). */
-            if (fe->array_lazy && t.array->is_abstract && e.array->is_abstract) {
+            if ((t.array->is_abstract || e.array->is_abstract || t.array->is_sparse)
+                && _promote_pair(fe, t.array, e.array)) {
                 Smt2ArrayValue *node = _anode_ite(fe, c.te.ref, t.array, e.array);
                 if (!node) { SMT2_TAINT(fe, "abstract-array ite node allocation failed"); return TAGGED_NULL; }
                 return (TaggedExpr){ { EXPR_NULL, 0 }, 0, node };
@@ -3299,7 +3431,7 @@ static uint32_t _abs_read_inplace(Smt2Frontend *fe, Smt2ArrayValue *node,
     if (problem_add_var(fe->problem, id, (uint8_t)w, 0, 0,
                         _bv_unsigned_hi(w)) == EXPR_NULL)
         return UINT32_MAX;   /* pool slack exhausted -> caller bails to unknown */
-    if (id + 1 > fe->n_vars) fe->n_vars = id + 1;
+    _bump_n_vars(fe, id + 1);
     _aread_reserve_one(fe);
     Smt2ArrayRead *r = &fe->areads[fe->n_areads++];
     r->node = node; r->idx_ref = idx_ref; r->idx_varid = idx_varid;
@@ -3427,7 +3559,7 @@ static int _array_emit_extensionality(Smt2Frontend *fe) {
         if (fe->n_vars > kid) kid = fe->n_vars;
         if (problem_add_var(P, kid, (uint8_t)aw, 0, 0,
                             _bv_unsigned_hi(aw)) == EXPR_NULL) return -1;
-        if (kid + 1 > fe->n_vars) fe->n_vars = kid + 1;
+        _bump_n_vars(fe, kid + 1);
         dvs_expr_t kref = expr_var(P, kid);
         fe->aeqs[e].wit_idx_ref = kref;
         uint32_t rA = _abs_read_inplace(fe, A, kref, kid, dw);
@@ -3620,24 +3752,112 @@ static int _array_refine(Smt2Frontend *fe) {
 
 static void _free_bb(Smt2Frontend *fe);
 
-/* Lazy array engine driver. Mirrors _check_sat_bitblast's result reporting. */
+/* Run the refinement loop on the solver's raw model to a fixpoint: it ends
+ * only on a model the array theory accepts. */
+static int _array_refine_loop(Smt2Frontend *fe, int rc) {
+    while (rc == DVS_BB_SAT) {
+        int added = _array_refine(fe);
+        if (added < 0) return DVS_BB_UNKNOWN;
+        if (added == 0) break;                     /* model satisfies the theory */
+        rc = dvs_bbsolver_resolve_raw(fe->bb_solver);
+    }
+    return rc;
+}
+
+/* A seeded solve: draw a random model of the refined instance. Re-solve under
+ * a random cube -- random polarities on a random subset of the variables' bit
+ * literals -- halving the cube while it is unsat or over budget, and refine
+ * each cube's model to the array theory as usual. Assumptions retract between
+ * solves and lemmas are theory-valid, so whatever cube is drawn the answer is
+ * sound; with every cube refused the converged raw model stands. */
+#define SMT2_ARRAY_CUBE_MAX      32
+#define SMT2_ARRAY_CUBE_CONFLICTS 2000
+static int _array_diversify(Smt2Frontend *fe, uint64_t seed) {
+    uint32_t cap = 4096;
+    int32_t *pool = (int32_t *)malloc(cap * sizeof(int32_t));
+    if (!pool) return DVS_BB_SAT;
+    uint32_t n = dvs_bbsolver_split_lits(fe->bb_solver, pool, cap);
+    uint64_t x = seed * 0x9E3779B97F4A7C15ull + 0xD1B54A32D192ED03ull;
+    #define _RND() (x ^= x << 13, x ^= x >> 7, x ^= x << 17, x)
+    int32_t cube[SMT2_ARRAY_CUBE_MAX];
+    uint32_t k = n < SMT2_ARRAY_CUBE_MAX ? n : SMT2_ARRAY_CUBE_MAX;
+    int rc = DVS_BB_SAT;
+    while (k > 0) {
+        /* k distinct literals (partial Fisher-Yates), random polarities. */
+        for (uint32_t i = 0; i < k; i++) {
+            uint32_t j = i + (uint32_t)(_RND() % (n - i));
+            int32_t t = pool[i]; pool[i] = pool[j]; pool[j] = t;
+            cube[i] = (_RND() & 1) ? pool[i] : -pool[i];
+        }
+        int crc = dvs_bbsolver_solve_assuming(fe->bb_solver, cube, k,
+                                              SMT2_ARRAY_CUBE_CONFLICTS);
+        while (crc == DVS_BB_SAT) {
+            int added = _array_refine(fe);
+            if (added < 0) { free(pool); return DVS_BB_UNKNOWN; }
+            if (added == 0) {
+                /* Accepted. Also re-randomize its don't-care bits (a var only
+                 * array reads constrain, like an index, is otherwise left at
+                 * the solver's phase); keep that only if the theory accepts. */
+                if (dvs_bbsolver_rediversify(fe->bb_solver, seed) == 0) {
+                    added = _array_refine(fe);
+                    if (added < 0) { free(pool); return DVS_BB_UNKNOWN; }
+                    if (added > 0) {
+                        crc = dvs_bbsolver_solve_assuming(fe->bb_solver, cube, k,
+                                                          SMT2_ARRAY_CUBE_CONFLICTS);
+                        continue;
+                    }
+                }
+                free(pool);
+                return DVS_BB_SAT;
+            }
+            crc = dvs_bbsolver_solve_assuming(fe->bb_solver, cube, k,
+                                              SMT2_ARRAY_CUBE_CONFLICTS);
+        }
+        if (crc == DVS_BB_ERROR) break;
+        k /= 2;
+    }
+    #undef _RND
+    free(pool);
+    /* The solver's model is a refused cube's: converge the raw model again. */
+    rc = _array_refine_loop(fe, dvs_bbsolver_resolve_raw(fe->bb_solver));
+    return rc;
+}
+
+/* Lazy array engine driver. Mirrors _check_sat_bitblast's result reporting.
+ *
+ * Every check-sat solves the full assertion set from the builder, which the
+ * caller guarantees holds it: lemmas from an earlier check are theory-valid
+ * but live in the old problem, so the refinement rediscovers what it needs. */
 static int _check_sat_array(Smt2Frontend *fe) {
     _free_bb(fe);
     if (fe->problem)   { free(fe->problem); fe->problem = NULL; }
+    _abs_drop_solve_state(fe);
+    fe->cache_valid = 0;
 
-    /* Finalize the BV skeleton with pool headroom for in-place lemmas + reads. */
+    /* The refinement compares index and data model values as int64. */
+    for (uint32_t i = 0; i < fe->n_anodes; i++) {
+        if (fe->anodes[i]->sort.addr_width > 64 || fe->anodes[i]->sort.data_width > 64) {
+            if (fe->print_stats || getenv("DV_LOG"))
+                fprintf(fe->err, "cdcl-unknown: abstract array wider than 64 bits\n");
+            SMT2_EMIT_UNKNOWN(fe); fflush(fe->out);
+            fe->last_result = DVS_SOLVE_TIMEOUT; fe->has_result = 1;
+            return 0;
+        }
+    }
+
+    /* Finalize the BV skeleton with pool headroom for in-place lemmas + reads.
+     * The builder keeps every assertion, for a later check or a pop. */
     uint32_t vu = dvs_builder_virtual_used(fe->builder);
     uint32_t reserve = vu > (32u << 20) ? vu : (32u << 20);   /* >= 32 MB slack */
     fe->problem = _explicit(dvs_builder_finalize_reserve(fe->builder, &fe->problem_size, reserve));
     if (!fe->problem) { SMT2_EMIT_UNKNOWN(fe); fflush(fe->out); return -1; }
-    dvs_builder_reset(fe->builder);
-    fe->builder_retained = 0;
-    fe->cdcl_retained = 0;
-    memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
+    fe->problem_dirty = 0;
     fe->has_aux = 0;
+    if (!fe->compiled) fe->builder_retained = 1;
 
     /* Incremental CaDiCaL backend is required for assert + resolve. */
     fe->bb_solver = dvs_bbsolver_new_backend(NULL, fe->problem, /*cadical=*/1);
+    fe->bb_over_problem = 1;
     if (!fe->bb_solver || !dvs_bbsolver_is_incremental(fe->bb_solver)) {
         SMT2_EMIT_UNKNOWN(fe); fflush(fe->out);
         return -1;
@@ -3645,16 +3865,14 @@ static int _check_sat_array(Smt2Frontend *fe) {
 
     int rc = dvs_bbsolver_prepare(fe->bb_solver, fe->seed);
     if (rc == DVS_BB_ENCODE_READY) {
-        /* resolve_raw: refinement must read the TRUE model (diversify randomizes
-         * don't-care bits, which include lazily-unconstrained read vars). */
+        /* Refine on the raw model first: diversification randomizes don't-care
+         * bits, which include the lazily-unconstrained read vars, so refining
+         * diversified models costs many more rounds. Then, for a seeded solve,
+         * draw a diversified model and refine that until the theory accepts
+         * it, so repeated randomizes differ. */
         if (_array_emit_extensionality(fe) < 0) rc = DVS_BB_UNKNOWN;
-        else rc = dvs_bbsolver_resolve_raw(fe->bb_solver);
-        while (rc == DVS_BB_SAT) {
-            int added = _array_refine(fe);
-            if (added < 0) { rc = DVS_BB_UNKNOWN; break; }
-            if (added == 0) break;                 /* model satisfies the theory */
-            rc = dvs_bbsolver_resolve_raw(fe->bb_solver);
-        }
+        else rc = _array_refine_loop(fe, dvs_bbsolver_resolve_raw(fe->bb_solver));
+        if (rc == DVS_BB_SAT && fe->seed) rc = _array_diversify(fe, fe->seed);
     }
 
     fe->bb_model_valid = (rc == DVS_BB_SAT);
@@ -3666,6 +3884,7 @@ static int _check_sat_array(Smt2Frontend *fe) {
         fe->last_result = DVS_SOLVE_UNSAT; fe->has_result = 1;
     } else {
         SMT2_EMIT_UNKNOWN(fe);
+        fe->last_result = DVS_SOLVE_TIMEOUT; fe->has_result = 1;
     }
     fflush(fe->out);
     return rc == DVS_BB_ERROR ? -1 : 0;
@@ -3679,6 +3898,7 @@ static int _check_sat_array(Smt2Frontend *fe) {
 static void _free_bb(Smt2Frontend *fe) {
     if (fe->bb_solver)  { dvs_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
     if (fe->bb_problem) { free(fe->bb_problem); fe->bb_problem = NULL; }
+    fe->bb_over_problem = 0;
 }
 
 /* Solve `p` with the bit-blast engine. `owned`, if non-NULL, is `p` handed
@@ -3952,20 +4172,19 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     if (fe->verilator_mode)
         fe->seed = ++fe->div_counter;
 
-    /* DV_ARRAY lazy engine: its own finalize + lemmas-on-demand refinement loop.
-     * Only on the first check-sat (single-query benchmarks); a later incremental
-     * check falls through to the standard path. */
-    if (fe->array_lazy && !fe->array_eager && !fe->problem && !fe->compiled
-        && (fe->n_areads > 0 || fe->n_aeqs > 0)) {
-        return _check_sat_array(fe);
-    }
-    /* A later incremental check would solve the skeleton with the reads as
-     * free vars and no array lemmas -- a spurious `sat`. Answer `unknown`
-     * until the lazy engine refines incrementally. */
-    if (fe->array_lazy && !fe->array_eager && (fe->problem || fe->compiled)
-        && (fe->n_areads > 0 || fe->n_aeqs > 0)) {
+    /* Abstract arrays: the lazy engine's own finalize + lemmas-on-demand
+     * refinement, from the builder, on every check-sat. Any other path would
+     * solve the skeleton with the reads as free vars and no array lemmas -- a
+     * spurious `sat` (B70). A CDCL context compiled before the first array
+     * owns fe->problem; unless the builder was retained beside it, the full
+     * assertion set is gone, so answer `unknown`. */
+    if (fe->n_anodes > 0 && (fe->n_areads > 0 || fe->n_aeqs > 0)
+        && (!fe->array_eager || fe->problem || fe->compiled)) {
+        /* (DV_ARRAY=eager emits its axioms once, before the first finalize.) */
+        if (!fe->array_eager && !fe->compiled && (!fe->problem || fe->builder_retained))
+            return _check_sat_array(fe);
         if (fe->print_stats || getenv("DV_LOG"))
-            fprintf(fe->err, "cdcl-unknown: abstract arrays in an incremental check\n");
+            fprintf(fe->err, "cdcl-unknown: abstract arrays after a CDCL compile\n");
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
         fe->last_result = DVS_SOLVE_TIMEOUT;
@@ -4289,7 +4508,76 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
 /* Array model output helper                                           */
 /* ------------------------------------------------------------------ */
 
+static void _emit_bv_bin_literal(FILE *out, uint64_t val, unsigned width);
+
+/* Model value of element `k` of an abstract array's BASE node: the value of any
+ * read on it whose index takes the value k (congruence makes them agree).
+ * Returns 0 if no read lands on k -- the element is unconstrained. */
+static int _abs_base_value(Smt2Frontend *fe, const Smt2ArrayValue *base,
+                           uint64_t k, int64_t *out) {
+    if (!fe->bb_solver || !fe->bb_model_valid || !fe->problem) return 0;
+    uint16_t aw = base->sort.addr_width;
+    uint64_t mask = aw >= 64 ? ~0ull : ((1ull << aw) - 1u);
+    for (uint32_t i = 0; i < fe->n_areads; i++) {
+        if (fe->areads[i].node != base) continue;
+        if (((uint64_t)_abs_mval_ref(fe, fe->areads[i].idx_ref) & mask) != (k & mask))
+            continue;
+        *out = _abs_mval_var(fe, fe->areads[i].read_varid);
+        return 1;
+    }
+    return 0;
+}
+
+/* A seeded-random value for an array element no constraint references: a DV
+ * solver should randomize unconstrained elements, not return 0. */
+static int64_t _free_elem_value(const Smt2Frontend *fe, uint64_t k, uint32_t name_len) {
+    if (!fe->seed) return 0;
+    uint64_t x = fe->seed
+        + 0x9E3779B97F4A7C15ULL * (k + 1)
+        + 0xD1B54A32D192ED03ULL * (name_len + 1);
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return (int64_t)(x ^ (x >> 31));
+}
+
+/* (get-value (a)) on an abstract array: the default 0 with a store for every
+ * index some read landed on. */
+static void _emit_abs_array(Smt2Frontend *fe, Smt2ArrayVar *av) {
+    const Smt2ArrayValue *base = av->value;
+    uint8_t aw = av->sort.addr_width, dw = av->sort.data_width;
+    uint64_t mask = aw >= 64 ? ~0ull : ((1ull << aw) - 1u);
+    uint32_t n = 0;
+    uint64_t *idx = (uint64_t *)malloc((fe->n_areads + 1) * sizeof(uint64_t));
+    int64_t  *val = (int64_t *)malloc((fe->n_areads + 1) * sizeof(int64_t));
+    if (idx && val && fe->bb_solver && fe->bb_model_valid && fe->problem) {
+        for (uint32_t i = 0; i < fe->n_areads; i++) {
+            if (fe->areads[i].node != base) continue;
+            uint64_t k = (uint64_t)_abs_mval_ref(fe, fe->areads[i].idx_ref) & mask;
+            uint32_t j = 0;
+            while (j < n && idx[j] != k) j++;
+            if (j < n) continue;
+            idx[n] = k;
+            val[n++] = _abs_mval_var(fe, fe->areads[i].read_varid);
+        }
+    }
+    for (uint32_t i = 0; i < n; i++) fprintf(fe->out, "(store ");
+    fprintf(fe->out, "((as const (Array (_ BitVec %u) (_ BitVec %u))) ",
+            (unsigned)aw, (unsigned)dw);
+    _emit_bv_bin_literal(fe->out, 0, (unsigned)dw);
+    fprintf(fe->out, ")");
+    for (uint32_t i = 0; i < n; i++) {
+        fprintf(fe->out, " ");
+        _emit_bv_bin_literal(fe->out, idx[i], (unsigned)aw);
+        fprintf(fe->out, " ");
+        _emit_bv_bin_literal(fe->out, (uint64_t)val[i], (unsigned)dw);
+        fprintf(fe->out, ")");
+    }
+    free(idx);
+    free(val);
+}
+
 static void _emit_array_store_chain(Smt2Frontend *fe, Smt2ArrayVar *av) {
+    if (av->value->is_abstract) { _emit_abs_array(fe, av); return; }
     uint32_t n = av->value->n_elems;
     uint8_t aw = av->sort.addr_width;
     uint8_t dw = av->sort.data_width;
@@ -4518,6 +4806,29 @@ static void _emit_bv_bin_literal(FILE *out, uint64_t val, unsigned width) {
     }
 }
 
+/* Print a term back as SMT-LIB, for echoing a get-value key. */
+static void _fprint_sexpr(FILE *out, const Sexpr *s) {
+    switch (s->kind) {
+    case SEXPR_SYMBOL: case SEXPR_KEYWORD:
+        fprintf(out, "%.*s", (int)s->sym.len, s->sym.str); break;
+    case SEXPR_STRING:
+        fprintf(out, "\"%.*s\"", (int)s->sym.len, s->sym.str); break;
+    case SEXPR_NUMERAL:
+        fprintf(out, "%llu", (unsigned long long)s->numval); break;
+    case SEXPR_BITVEC:
+        _emit_bv_bin_literal(out, s->bv.value, (unsigned)s->bv.width); break;
+    case SEXPR_LIST:
+        fprintf(out, "(");
+        for (uint32_t i = 0; i < s->list.count; i++) {
+            if (i) fprintf(out, " ");
+            _fprint_sexpr(out, s->list.items[i]);
+        }
+        fprintf(out, ")");
+        break;
+    default: break;
+    }
+}
+
 static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
     if (!fe->has_result || fe->last_result != DVS_SOLVE_OK) {
         fprintf(fe->err, "error: get-value requires a prior sat result\n");
@@ -4579,24 +4890,25 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
                      sexpr_is_symbol(idx_s->list.items[0], "_")) {
                 uint64_t bv; if (_parse_bv_sym(idx_s->list.items[1], &bv, NULL)) { k = bv; is_const = 1; }
             }
+            /* A non-constant index: the element its model value selects. */
+            int idx_evald = 0;
+            if (av && !is_const) {
+                int iok = 1;
+                EvalRet ie = _eval_sexpr(fe, name_s->list.items[2], &iok);
+                if (iok) { k = ie.value; is_const = 1; idx_evald = 1; }
+            }
             if (av && is_const) {
                 uint8_t dw = av->sort.data_width, aw = av->sort.addr_width;
                 int64_t val = 0;
-                if (av->value->is_sparse) {
+                if (av->value->is_abstract) {
+                    if (!_abs_base_value(fe, av->value, k, &val))
+                        val = _free_elem_value(fe, k, arr_s->sym.len);
+                } else if (av->value->is_sparse) {
                     uint32_t vid;
-                    if (_sparse_find(av->value, k, &vid)) {
+                    if (_sparse_find(av->value, k, &vid))
                         val = _fe_get_var_value(fe, vid);
-                    } else if (fe->seed) {
-                        /* Element never referenced by a constraint: fully free,
-                         * so give it a seeded-random value (a DV solver should
-                         * randomize unconstrained elements, not return 0). */
-                        uint64_t x = fe->seed
-                            + 0x9E3779B97F4A7C15ULL * (k + 1)
-                            + 0xD1B54A32D192ED03ULL * (arr_s->sym.len + 1);
-                        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
-                        x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
-                        val = (int64_t)(x ^ (x >> 31));
-                    }
+                    else
+                        val = _free_elem_value(fe, k, arr_s->sym.len);
                 } else if (k < av->value->n_elems) {
                     /* Look the element var up by name ("arr[k]") rather than via
                      * value->elems[k]: that dvs_expr_t points into the builder
@@ -4612,9 +4924,15 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
                 /* Emit ((select name #x<idx>) #b<value>): the key echoes the
                  * select (hex index padded to the address width -- the form
                  * drivers parse), the value is the element's model. */
-                fprintf(fe->out, "((select %.*s #x%0*llx) ",
-                        (int)arr_s->sym.len, arr_s->sym.str,
-                        (int)((aw + 3) / 4), (unsigned long long)k);
+                if (idx_evald) {
+                    fprintf(fe->out, "(");
+                    _fprint_sexpr(fe->out, name_s);
+                    fprintf(fe->out, " ");
+                } else {
+                    fprintf(fe->out, "((select %.*s #x%0*llx) ",
+                            (int)arr_s->sym.len, arr_s->sym.str,
+                            (int)((aw + 3) / 4), (unsigned long long)k);
+                }
                 _emit_bv_bin_literal(fe->out, (uint64_t)val, (unsigned)dw);
                 fprintf(fe->out, ")");
                 continue;
@@ -4673,8 +4991,9 @@ static int _cmd_get_model(Smt2Frontend *fe, const Sexpr *cmd) {
     }
     fprintf(fe->out, "(\n");
     /* BV/Bool vars */
-    for (uint32_t i = 0; i < fe->n_vars; i++) {
+    for (uint32_t i = 0; i < fe->n_vars && i < fe->vars_cap; i++) {
         Smt2Var *v = &fe->vars[i];
+        if (!v->name[0]) continue;                 /* an unnamed id (_bump_n_vars) */
         if (strncmp(v->name, "__aux", 5) == 0) continue;
         /* Skip array element vars (they appear as part of array model) */
         if (strchr(v->name, '[') != NULL) continue;
@@ -4736,35 +5055,62 @@ typedef struct {
 
 #define SMT2_MAX_PUSH 32
 
+/* Record the abstract-array state a pop of frame `d` returns to: translation
+ * counts only, a solve's own reads are rebuilt by the next solve. */
+static void _abs_push_frame(Smt2Frontend *fe, uint32_t d) {
+    fe->push_n_anodes[d] = fe->n_anodes;
+    fe->push_n_areads[d] = fe->n_areads_user;
+    fe->push_n_aeqs[d]   = fe->n_aeqs;
+}
+
+/* Pop the abstract-array state back to frame `d`: nodes, reads and equalities
+ * made inside the scope go (their vars went with the builder rewind). Nodes
+ * made before it never point at later ones. */
+static void _abs_pop_frame(Smt2Frontend *fe, uint32_t d) {
+    _abs_drop_solve_state(fe);
+    if (fe->push_n_areads[d] < fe->n_areads) {
+        fe->n_areads = fe->n_areads_user = fe->push_n_areads[d];
+        if (fe->aread_hash) {
+            memset(fe->aread_hash, 0, fe->aread_hash_cap * sizeof(uint32_t));
+            for (uint32_t i = 0; i < fe->n_areads; i++) _aread_hash_put(fe, i);
+        }
+    }
+    if (fe->push_n_aeqs[d] < fe->n_aeqs) fe->n_aeqs = fe->push_n_aeqs[d];
+    for (uint32_t i = fe->push_n_anodes[d]; i < fe->n_anodes; i++) free(fe->anodes[i]);
+    if (fe->push_n_anodes[d] < fe->n_anodes) fe->n_anodes = fe->push_n_anodes[d];
+}
+
 static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
     _end_assumptions(fe);
     uint32_t n = 1;
     if (cmd->list.count == 2 && cmd->list.items[1]->kind == SEXPR_NUMERAL) {
         n = (uint32_t)cmd->list.items[1]->numval;
     }
-    int crc = _ensure_compiled(fe);
-    if (crc == -2) {
-        /* Compile-time UNSAT: simulate a dead push so pop can restore state. */
-        fe->last_result = DVS_SOLVE_UNSAT;
-        fe->has_result = 1;
-        if (fe->push_depth < SMT2_MAX_PUSH) {
-            fe->push_stack[fe->push_depth] = (uint32_t)-1;
-            fe->push_n_vars[fe->push_depth] = fe->n_vars;
-            fe->push_n_array_vars[fe->push_depth] = fe->n_array_vars;
-            fe->push_n_aux_problems[fe->push_depth] = fe->n_aux_problems;
-            fe->push_n_named[fe->push_depth] = fe->n_named;
-            fe->push_n_core_hist[fe->push_depth] = fe->n_core_hist;
-            fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
-            fe->push_bmark[fe->push_depth] = dvs_builder_mark(fe->builder);
-            fe->push_depth++;
-        }
-        return 0;
+    /* Abstract arrays solve from the builder (_check_sat_array), so their
+     * scopes live there: no CDCL context, the frame only marks the builder. */
+    int crc = (fe->n_anodes > 0 && !fe->compiled) ? -1 : _ensure_compiled(fe);
+    /* Compile-time UNSAT, or the assertions since the last push conflicting as
+     * they reach the context: the scope pushed from is unsat. Failing the push
+     * on the latter made the next pop drop the scope holding the conflicting
+     * assertion -- `x == 3; push; x == 4; push; pop` answered sat. Record dead
+     * frames (no checkpoint) instead: everything asserted under them stays in
+     * the context until the pop of the scope that is unsat, whose checkpoint
+     * takes it all back. */
+    int dead = (crc == -2);
+    if (crc >= 0) {
+        int frc = _flush_aux(fe);
+        if (frc == -2) dead = 1;
+        else if (frc < 0) return -1;
     }
-    if (crc < 0) {
+    if (dead || crc < 0) {
         /* No CDCL context (e.g. variables wider than 64 bits: bitblast only).
          * The scope still has to exist: record a frame whose pop rewinds the
          * builder. Failing the push instead left everything asserted after it
          * in force forever -- a popped `false` answered unsat (B63). */
+        if (dead) {
+            fe->last_result = DVS_SOLVE_UNSAT;
+            fe->has_result = 1;
+        }
         if (fe->push_depth + n > SMT2_MAX_PUSH) {
             fprintf(fe->err, "error: push: max push depth exceeded\n");
             return -1;
@@ -4777,12 +5123,12 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->push_n_named[fe->push_depth] = fe->n_named;
             fe->push_n_core_hist[fe->push_depth] = fe->n_core_hist;
             fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
+            _abs_push_frame(fe, fe->push_depth);
             fe->push_bmark[fe->push_depth] = dvs_builder_mark(fe->builder);
             fe->push_depth++;
         }
         return 0;
     }
-    if (_flush_aux(fe) < 0) return -1;
     if (fe->has_result) dvs_solver_reset(fe->ctx);
     fe->has_result = 0;
 
@@ -4803,6 +5149,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->push_n_named[fe->push_depth - 1] = fe->n_named;
         fe->push_n_core_hist[fe->push_depth - 1] = fe->n_core_hist;
         fe->push_incomplete[fe->push_depth - 1] = (uint8_t)fe->incomplete;
+        _abs_push_frame(fe, fe->push_depth - 1);
         fe->push_bmark[fe->push_depth - 1] = dvs_builder_mark(fe->builder);
     }
     return 0;
@@ -4881,6 +5228,22 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             av->name[0] = '\0';
         }
         fe->n_array_vars = target_n_arr;
+        /* A sparse array declared before the push keeps element vars made
+         * inside it in its table; those vars are gone with the n_vars rewind,
+         * and a later select of that index read a dangling var (a crash). Vars
+         * are numbered upward, so they are exactly the entries past n_vars. */
+        for (uint32_t i = 0; i < fe->n_array_vars; i++) {
+            Smt2ArrayValue *v = fe->array_vars[i].value;
+            if (!v || !v->is_sparse) continue;
+            uint32_t keep = 0;
+            for (uint32_t j = 0; j < v->n_sparse; j++) {
+                if (v->sparse_varid[j] >= fe->n_vars) continue;
+                v->sparse_idx[keep] = v->sparse_idx[j];
+                v->sparse_varid[keep++] = v->sparse_varid[j];
+            }
+            v->n_sparse = keep;
+        }
+        _abs_pop_frame(fe, fe->push_depth);
 
         /* Drop aux problems added between push and pop. The solver-side
          * propagators those aux problems compiled were already marked
@@ -5185,6 +5548,9 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
     const char *da = getenv("DV_ARRAY");
     fe->array_lazy = (da && da[0] && strcmp(da, "0") != 0) ? 1 : 0;
     fe->array_eager = (da && strcmp(da, "eager") == 0) ? 1 : 0;
+    /* Unset: only arrays too large to expand densely are abstract. DV_ARRAY=0:
+     * none are (a symbolic index into one is `unknown`). */
+    fe->array_auto = !(da && strcmp(da, "0") == 0);
 }
 
 void smt2_frontend_destroy(Smt2Frontend *fe) {
@@ -5240,8 +5606,15 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     FILE    *out = fe->out, *err = fe->err;
     int      print_stats = fe->print_stats, verilator_mode = fe->verilator_mode;
     int      array_lazy = fe->array_lazy, array_eager = fe->array_eager;
+    int      array_auto = fe->array_auto;
     uint64_t div_counter = fe->div_counter;
     uint32_t reseed_period = fe->reseed_period;
+    /* The array engine's bb_solver was built over fe->problem, freed below. */
+    if (fe->bb_over_problem && fe->bb_solver) {
+        dvs_bbsolver_free(fe->bb_solver);
+        fe->bb_solver = NULL;
+        fe->cache_valid = 0;
+    }
     dvs_bbsolver_t *bb = fe->bb_solver;
     dvs_problem_t   *bb_problem = fe->bb_problem;   /* backs bb; carried with it */
     uint64_t cached_fp = fe->cached_fp;
@@ -5295,6 +5668,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->verilator_mode = verilator_mode;
     fe->array_lazy = array_lazy;
     fe->array_eager = array_eager;
+    fe->array_auto = array_auto;
     fe->div_counter = div_counter;
     fe->reseed_period = reseed_period;
     fe->bb_solver = bb;
