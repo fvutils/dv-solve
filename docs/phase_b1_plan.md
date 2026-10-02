@@ -12,12 +12,12 @@ already drives the 118-fixture cross-check to 0 disagreements vs z3.
 Phase B.1 takes ownership of the Kissat sources by **forking** them into
 `src/c/sat/kissat/` and then incrementally adapting:
 
-1. Route all allocations through `zsp_alloc_t` so the SAT layer's RSS
+1. Route all allocations through `dvs_alloc_t` so the SAT layer's RSS
    joins the dv-solve allocator vtable (hugepages, NUMA pools, snapshot
    regions become possible).
 2. Add **incremental support** — assumptions, push/pop, partial state
    reset between `check-sat` calls.
-3. Migrate the clause arena to use `zsp_pool` / `zsp_arena` 32-bit
+3. Migrate the clause arena to use `dvs_pool` / `dvs_arena` 32-bit
    reference handles so clauses are compactable and the arena can be
    marked/rolled back to dv-solve checkpoint levels.
 4. Integrate with the dv-solve **trail and `LevelMark` checkpoints** so
@@ -56,12 +56,12 @@ kissat_nalloc(kissat*, size_t, size_t)
 ```
 
 These currently call libc `malloc`/`realloc`/`free` directly. The
-adaptation: add a `zsp_alloc_t *` field to the `kissat` struct
+adaptation: add a `dvs_alloc_t *` field to the `kissat` struct
 (`src/c/sat/kissat/src/internal.h`), thread it through the wrappers, and
-route all backing calls through `ZSP_ALLOC` / `ZSP_RELEASE` when set
+route all backing calls through `DVS_ALLOC` / `DVS_RELEASE` when set
 (fall back to libc when NULL for upstream compatibility).
 
-zsp_sat.c then plumbs `alloc` through when constructing the kissat
+dvs_sat.c then plumbs `alloc` through when constructing the kissat
 instance.
 
 Validation: all 13 ctest suites, 118-fixture cross-check, identical
@@ -71,34 +71,34 @@ results.
 
 Commit `ab475bd` added public observers on the kissat clause arena
 (`kissat_arena_size_bytes` / `kissat_arena_capacity_bytes` and the
-`zsp_sat_arena_*` wrappers). Full STACK→zsp_arena migration deferred —
+`dvs_sat_arena_*` wrappers). Full STACK→dvs_arena migration deferred —
 no observable behavior on its own, only load-bearing once step 5 wants
 to roll back the arena to checkpoint levels.
 
 ## What B.1 step 3 (incremental API surface) landed
 
 Commit `eee4f9a` added the public incremental-API surface on
-`zsp_sat.{h,c}` with conservative correct-but-non-incremental
+`dvs_sat.{h,c}` with conservative correct-but-non-incremental
 semantics on the existing non-incremental kissat fork:
 
-  - `zsp_sat_push/pop/push_depth/is_tainted` — push/pop track frame
+  - `dvs_sat_push/pop/push_depth/is_tainted` — push/pop track frame
     depth and snapshot the clause count. A pop after clauses were
     added in the popped frame marks the solver "tainted"; the next
-    solve returns `ZSP_SAT_UNKNOWN`. Callers poll `is_tainted()` to
+    solve returns `DVS_SAT_UNKNOWN`. Callers poll `is_tainted()` to
     know when to rebuild.
-  - `zsp_sat_assume(lit)` — queues a literal replayed as a unit
+  - `dvs_sat_assume(lit)` — queues a literal replayed as a unit
     clause at the next solve. One-shot (becomes permanent), matching
     the current rebuild-per-check-sat caller model.
-  - `zsp_sat_failed(lit)` — placeholder; always 0 today.
+  - `dvs_sat_failed(lit)` — placeholder; always 0 today.
 
-Test: `test_zsp_sat_incremental` (11 assertions, all pass).
+Test: `test_dvs_sat_incremental` (11 assertions, all pass).
 Validation: 15/15 ctest under ASan, cross-check 105 pass / 13 skip / 0
 fail (no regression).
 
 Rationale for shipping the surface as a stub: `(push)/(pop)` and
 `(check-sat-assuming)` already work end-to-end at the SMT2 frontend
 layer (`_cmd_push`, `_cmd_pop`, `_cmd_check_sat_assuming`) via
-`solver_checkpoint`, which rebuilds the bbsolver on each check-sat —
+`dvs_solver_checkpoint`, which rebuilds the bbsolver on each check-sat —
 correctness is not the gap. Real incremental kissat (trail snapshot,
 learned-clause DB preservation, restart on solve, real assumption
 tracking) is a multi-day refactor that delivers no observable
@@ -132,28 +132,28 @@ the SAT-side state.
 ## What B.1 step 4 should do — clause arena migration
 
 Kissat already keeps clauses in a single word-arena (`src/c/sat/kissat/src/arena.{h,c}`). The
-adaptation here is to swap the bespoke arena for a `zsp_arena_t`
+adaptation here is to swap the bespoke arena for a `dvs_arena_t`
 instance (already in place per `cmake/kissat.cmake` and tested via
-`test_zsp_arena`). This is mostly about replacing the
-`STACK(ward)`-macro-driven allocation paths with `zsp_arena_alloc()`
+`test_dvs_arena`). This is mostly about replacing the
+`STACK(ward)`-macro-driven allocation paths with `dvs_arena_alloc()`
 calls.
 
 Open question: keep `STACK` macros for the other Kissat stacks
-(trail, queue, etc.) or migrate everything to zsp_stack? Probably keep
+(trail, queue, etc.) or migrate everything to dvs_stack? Probably keep
 the other stacks as-is initially — only the clause arena needs the
-zsp_arena treatment to support compaction across dv-solve checkpoints.
+dvs_arena treatment to support compaction across dv-solve checkpoints.
 
 ## What B.1 step 5 should do — trail / LevelMark integration
 
 This is the crossover work where dv-solve's strengths matter most.
-The idea: extend `LevelMark` (currently in `zsp_trail.h`) with a SAT-
+The idea: extend `LevelMark` (currently in `dvs_trail.h`) with a SAT-
 arena top, so a single `LevelMark` records the position of all
 dv-solve-side trail entries plus the SAT-side clause arena. A
-`zsp_levelmark_pop()` then rolls back both layers in one step.
+`dvs_levelmark_pop()` then rolls back both layers in one step.
 
 Concretely: when CDCL backtracks, it currently rolls back its own trail
 only. With this integration, CDCL backtrack participates in the
-dv-solve checkpoint system, and a `solver_restore()` from dv-solve
+dv-solve checkpoint system, and a `dvs_solver_restore()` from dv-solve
 can reach into the SAT layer's clause DB.
 
 This is the foundation for the Phase D "checkpoint-keyed arena marks"
@@ -161,7 +161,7 @@ crossover technique — neither bitwuzla nor CaDiCaL can do this.
 
 ## What B.1 step 6 — and 7 — should do
 
-Step 6: integrate the kissat fork with the existing `zsp_sat.{h,c}`
+Step 6: integrate the kissat fork with the existing `dvs_sat.{h,c}`
 abstraction so callers see the same API but get the forked /
 adapted kissat underneath. Probably no API change at all — the
 abstraction was designed for this.
@@ -187,10 +187,10 @@ Suggested order:
    (commit `eee4f9a`)
 5. ✅ **Step 5 (plumbing slice)**: LevelMark + CheckpointMark gain a
    `sat_arena_top` field; kissat exposes `kissat_arena_size_words()`
-   and zsp_sat exposes `zsp_sat_arena_save_mark()`. No behavior
+   and dvs_sat exposes `dvs_sat_arena_save_mark()`. No behavior
    change yet — fields populate to 0 until SolveCtx grows a
-   zsp_sat handle. (commit `eb1c7cd`)
-6. ⏭ **Step 4 (full)**: STACK→zsp_arena migration of the clause arena.
+   dvs_sat handle. (commit `eb1c7cd`)
+6. ⏭ **Step 4 (full)**: STACK→dvs_arena migration of the clause arena.
    Bundled with the next step-5 chunk — only load-bearing once
    LevelMark needs to actually roll back the arena.
 7. ⏭ **Step 5 (deep / arena rewind)**: invalidate kissat watches /

@@ -1,0 +1,51 @@
+{
+ "why": "seed=2026100200 i=625 door=smt2-incr expect=unsat got=timeout",
+ "widths": {
+  "x": 63,
+  "y": 63
+ },
+ "cons": [
+  [
+   "bvsgt",
+   "bool",
+   [
+    "var",
+    "x",
+    63
+   ],
+   [
+    "var",
+    "x",
+    63
+   ]
+  ],
+  [
+   "bvugt",
+   "bool",
+   [
+    "var",
+    "y",
+    63
+   ],
+   [
+    "var",
+    "x",
+    63
+   ]
+  ],
+  [
+   "=",
+   "bool",
+   [
+    "var",
+    "y",
+    63
+   ],
+   [
+    "var",
+    "x",
+    63
+   ]
+  ]
+ ]
+}

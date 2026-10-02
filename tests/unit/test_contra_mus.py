@@ -33,10 +33,10 @@ class ContraResult(ctypes.Structure):
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -54,11 +54,11 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     lib.contra_analyze_unsat.restype  = ctypes.c_int
     lib.contra_analyze_unsat.argtypes = [
@@ -70,9 +70,9 @@ def _setup(lib: ctypes.CDLL):
 
 
 def _make_ctx(lib):
-    ba = lib.zsp_block_alloc_create(None, 4096)
+    ba = lib.dvs_block_alloc_create(None, 4096)
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
     return ctx_buf, ctx, ba
 
@@ -91,13 +91,13 @@ def _get_mus(lib, sp):
 
     n_calls = result.n_solver_calls
     lib.contra_result_free(ctypes.byref(result))
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
     return mus, n_calls
 
 
-def test_mus_2_of_2(libzsp_debug):
+def test_mus_2_of_2(libdvs_debug):
     """Trivial MUS: {x >= 10, x <= 5}. MUS size should be 2."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -114,10 +114,10 @@ def test_mus_2_of_2(libzsp_debug):
     assert mus == {1, 2}, f"Expected MUS {{1,2}}, got {mus}"
 
 
-def test_mus_2_of_5(libzsp_debug):
+def test_mus_2_of_5(libdvs_debug):
     """5 constraints, known MUS of size 2. Only the contradictory pair
     should remain after minimization."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -153,13 +153,13 @@ def test_mus_2_of_5(libzsp_debug):
     assert len(mus) == 2, f"MUS not minimal, got {mus}"
 
 
-def test_mus_is_minimal(libzsp_debug):
+def test_mus_is_minimal(libdvs_debug):
     """Verify that the MUS is truly minimal: removing any single
     constraint makes the remainder satisfiable."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
-    # Set up solver_solve for verification
+    # Set up dvs_solver_solve for verification
     class SolveOpts(ctypes.Structure):
         _fields_ = [
             ("seed",           ctypes.c_uint64),
@@ -168,9 +168,10 @@ def test_mus_is_minimal(libzsp_debug):
             ("use_phase_save", ctypes.c_uint8),
             ("_pad",           ctypes.c_uint8 * 3),
             ("max_shave_iters", ctypes.c_uint32),
+            ("time_limit_ms",   ctypes.c_uint32),
         ]
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
     sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
@@ -231,9 +232,9 @@ def test_mus_is_minimal(libzsp_debug):
             lib.problem_add_constraint(sub_sp, lib.expr_binary(sub_sp, op, ve, ce))
 
         ctx_buf2, ctx2, ba2 = _make_ctx(lib)
-        rc = lib.solver_compile(ctx2, sub_sp)
+        rc = lib.dvs_solver_compile(ctx2, sub_sp)
         if rc >= 0:
-            res = lib.solver_solve(ctx2, None)
+            res = lib.dvs_solver_solve(ctx2, None)
             assert res == 0, (
                 f"MUS minus C{removed_cid} should be SAT but got {res}. "
                 f"MUS={mus_list}"
@@ -244,13 +245,13 @@ def test_mus_is_minimal(libzsp_debug):
             f"MUS minus C{removed_cid} is UNSAT at compile time! "
             f"MUS={mus_list}"
         )
-        lib.zsp_block_alloc_destroy(ba2)
+        lib.dvs_block_alloc_destroy(ba2)
 
 
-def test_mus_single_constraint_domain(libzsp_debug):
+def test_mus_single_constraint_domain(libdvs_debug):
     """Single constraint that conflicts with variable domain bounds.
     MUS should have size 1."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -270,10 +271,10 @@ def test_mus_single_constraint_domain(libzsp_debug):
     assert len(mus) == 1, f"Expected MUS of size 1, got {mus}"
 
 
-def test_mus_budget_exhaustion(libzsp_debug):
+def test_mus_budget_exhaustion(libdvs_debug):
     """With max_solver_calls=2 on a problem that needs more,
     partial result should be returned."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     class ContraOpts(ctypes.Structure):
@@ -332,13 +333,13 @@ def test_mus_budget_exhaustion(libzsp_debug):
     assert result.n_solver_calls <= 5  # might exceed budget slightly
 
     lib.contra_result_free(ctypes.byref(result))
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_level0_fast_path(libzsp_debug):
+def test_level0_fast_path(libdvs_debug):
     """Trivially-UNSAT problem (compile-time conflict) should trigger
     the level-0 fast path with correct MUS."""
-    lib = libzsp_debug
+    lib = libdvs_debug
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()

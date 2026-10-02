@@ -17,10 +17,10 @@ _CTX_BUF_SIZE = 524288
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -39,19 +39,19 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_concat.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint8]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
     lib.ctx_tighten_lb64.restype  = ctypes.c_int
     lib.ctx_tighten_lb64.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
@@ -73,12 +73,13 @@ def _setup(lib: ctypes.CDLL):
             ("use_phase_save", ctypes.c_uint8),
             ("_pad",           ctypes.c_uint8 * 3),
             ("max_shave_iters", ctypes.c_uint32),
+            ("time_limit_ms",   ctypes.c_uint32),
         ]
     lib._SolveOpts = SolveOpts
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 BIN_EQ  = 10
@@ -93,19 +94,19 @@ def _make_ctx(lib, var_specs):
     for i, (width, is_signed, lo, hi) in enumerate(var_specs):
         ref = lib.problem_add_var(sp, i, width, is_signed, lo, hi)
         assert ref != EXPR_NULL
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
     return sp_buf, ctx_buf, ba, sp, ctx
 
 
 def _lo(lib, ctx, i):
-    return lib.zsp_var_lo64(ctx, i)
+    return lib.dvs_var_lo64(ctx, i)
 
 
 def _hi(lib, ctx, i):
-    return lib.zsp_var_hi64(ctx, i)
+    return lib.dvs_var_hi64(ctx, i)
 
 
 def _fix(lib, ctx, i, v):
@@ -117,10 +118,10 @@ def _fix(lib, ctx, i, v):
 # Direct propagator tests                                             #
 # ------------------------------------------------------------------ #
 
-def test_concat_basic(libzsp):
+def test_concat_basic(libdvs):
     """r = {a, b}; a=8-bit, b=8-bit, r=16-bit.
     Fix a=0xAB, b=0xCD. Verify r=0xABCD."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -134,18 +135,18 @@ def test_concat_basic(libzsp):
     _fix(lib, ctx, 1, 0xAB)
     _fix(lib, ctx, 2, 0xCD)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 0xABCD
     assert _hi(lib, ctx, 0) == 0xABCD
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_concat_backward(libzsp):
+def test_concat_backward(libdvs):
     """r = {a, b}; fix r=0x1234 -> a=0x12, b=0x34."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -158,7 +159,7 @@ def test_concat_backward(libzsp):
 
     _fix(lib, ctx, 0, 0x1234)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 1) == 0x12
@@ -166,12 +167,12 @@ def test_concat_backward(libzsp):
     assert _lo(lib, ctx, 2) == 0x34
     assert _hi(lib, ctx, 2) == 0x34
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_concat_forward_bounds(libzsp):
+def test_concat_forward_bounds(libdvs):
     """r = {a, b}; a=[1,3], b=[0,255] -> r in [0x100, 0x3FF]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -182,18 +183,18 @@ def test_concat_forward_bounds(libzsp):
 
     lib.prop_add_bounds_concat_64(ctx, 0, 1, 2, 8, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) >= 0x100   # (1 << 8) | 0
     assert _hi(lib, ctx, 0) <= 0x3FF   # (3 << 8) | 0xFF
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_concat_lo_constrained(libzsp):
+def test_concat_lo_constrained(libdvs):
     """lo_width=8, so lo must be in [0, 255]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx(lib, [
@@ -204,22 +205,22 @@ def test_concat_lo_constrained(libzsp):
 
     lib.prop_add_bounds_concat_64(ctx, 0, 1, 2, 8, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # lo should be tightened to [0, 255]
     assert _hi(lib, ctx, 2) <= 0xFF
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 # ------------------------------------------------------------------ #
 # Compilation / end-to-end tests                                      #
 # ------------------------------------------------------------------ #
 
-def test_concat_compile_e2e(libzsp):
+def test_concat_compile_e2e(libdvs):
     """r == concat(a, b) via problem builder, then solve."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -238,27 +239,27 @@ def test_concat_compile_e2e(libzsp):
     eq_e  = lib.expr_binary(sp, BIN_EQ, v_r, cat_e)
     lib.problem_add_constraint(sp, eq_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0xBEEF)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    r  = lib.solver_get_value(ctx, 0)
-    hi = lib.solver_get_value(ctx, 1)
-    lo = lib.solver_get_value(ctx, 2)
+    r  = lib.dvs_solver_get_value(ctx, 0)
+    hi = lib.dvs_solver_get_value(ctx, 1)
+    lo = lib.dvs_solver_get_value(ctx, 2)
     expected = (hi << 8) | lo
     assert r == expected, f"r={r:#x} != {{hi,lo}} = {expected:#x} (hi={hi:#x}, lo={lo:#x})"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_concat_compile_fixed(libzsp):
+def test_concat_compile_fixed(libdvs):
     """r == concat(0xAB, 0xCD) with fixed operands. Verify r=0xABCD."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -277,16 +278,16 @@ def test_concat_compile_fixed(libzsp):
     eq_e  = lib.expr_binary(sp, BIN_EQ, v_r, cat_e)
     lib.problem_add_constraint(sp, eq_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     opts = lib._SolveOpts(seed=0x1111)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    r = lib.solver_get_value(ctx, 0)
+    r = lib.dvs_solver_get_value(ctx, 0)
     assert r == 0xABCD, f"r={r:#x}, expected 0xABCD"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

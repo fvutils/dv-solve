@@ -5,9 +5,9 @@
 #include <time.h>
 #include <sys/resource.h>
 #include "smt2/smt2_frontend.h"
-#include "zsp_lcg.h"
-#include "zsp_bbsolver.h"
-#include "zsp_cube.h"
+#include "dvs_lcg.h"
+#include "dvs_bbsolver.h"
+#include "dvs_cube.h"
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -282,7 +282,7 @@ static int _parse_bv_sym(const Sexpr *sym, uint64_t *val_out, int *overflow_out)
 static uint32_t _next_var_id(Smt2Frontend *fe) {
     /* The frontend allocates IDs starting from its own n_vars, but the
      * backend may have allocated extra internal aux vars (constant-aux
-     * for reification, ITE result aux, etc.) inside solver_compile that
+     * for reification, ITE result aux, etc.) inside dvs_solver_compile that
      * the frontend never saw. Skip past those so a fresh frontend aux
      * doesn't collide with a backend slot already in use. */
     uint32_t id = fe->n_vars;
@@ -293,12 +293,12 @@ static uint32_t _next_var_id(Smt2Frontend *fe) {
 static uint32_t _fresh_aux(Smt2Frontend *fe, uint16_t width) {
     uint32_t var_id = _next_var_id(fe);
     int64_t max_val = _bv_unsigned_hi(width);
-    ExprRef vref = builder_add_var(fe->builder, var_id, (uint8_t)width, 0, 0, max_val);
+    dvs_expr_t vref = dvs_builder_add_var(fe->builder, var_id, (uint8_t)width, 0, 0, max_val);
     /* Mark aux vars as VAR_AUX so search never decides them: they are
      * fully determined by their defining constraint. With the ITE_value
      * cond back-propagation in place, propagation can pin them on its
      * own through whichever branch is consistent with r's domain. */
-    builder_mark_var_aux(fe->builder, vref);
+    dvs_builder_mark_var_aux(fe->builder, vref);
     char name[SMT2_MAX_NAME];
     snprintf(name, sizeof(name), "__aux%u", var_id);
     _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint8_t)width);
@@ -328,7 +328,7 @@ static Smt2ArrayValue *_make_array_value(Smt2Frontend *fe, Smt2ArraySort sort) {
     uint32_t n = 1u << sort.addr_width;
     Smt2ArrayValue *av = (Smt2ArrayValue *)_cmd_alloc(fe, sizeof(Smt2ArrayValue));
     if (!av) return NULL;
-    ExprRef *elems = (ExprRef *)_cmd_alloc(fe, n * sizeof(ExprRef));
+    dvs_expr_t *elems = (dvs_expr_t *)_cmd_alloc(fe, n * sizeof(dvs_expr_t));
     if (!elems) return NULL;
     av->sort             = sort;
     av->n_elems          = n;
@@ -398,7 +398,7 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
     if (!av->value) { fe->n_array_vars--; return NULL; }
     av->value->sort   = sort;
     av->value->n_elems = n_elems;
-    av->value->elems  = (ExprRef *)malloc(n_elems * sizeof(ExprRef));
+    av->value->elems  = (dvs_expr_t *)malloc(n_elems * sizeof(dvs_expr_t));
     if (!av->value->elems) {
         free(av->value); av->value = NULL;
         fe->n_array_vars--;
@@ -408,20 +408,20 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
     for (uint32_t i = 0; i < n_elems; i++) {
         uint32_t var_id = _next_var_id(fe);
         int64_t max_val = _bv_unsigned_hi(sort.data_width);
-        builder_add_var(fe->builder, var_id, sort.data_width, 0, 0,
+        dvs_builder_add_var(fe->builder, var_id, sort.data_width, 0, 0,
                         max_val);
         char elem_name[SMT2_MAX_NAME];
         snprintf(elem_name, sizeof(elem_name), "%.*s[%u]", (int)copy_len, name, i);
         _add_var(fe, elem_name, (uint32_t)strlen(elem_name), var_id,
                  sort.data_width);
-        av->value->elems[i] = builder_expr_var(fe->builder, var_id);
+        av->value->elems[i] = dvs_builder_expr_var(fe->builder, var_id);
     }
 
     _builder_touched(fe);
     return av;
 }
 
-/* Look up (or lazily materialize) the element ExprRef for concrete index `k`
+/* Look up (or lazily materialize) the element dvs_expr_t for concrete index `k`
  * in a sparse array. Each index maps to a real solver var, so all accesses to
  * that index -- across constraints and get-value -- observe the same variable.
  * Returns EXPR_NULL if the sparse table is full (which the caller turns into an
@@ -434,11 +434,11 @@ static int _sparse_find(Smt2ArrayValue *arr, uint64_t k, uint32_t *out_varid) {
     return 0;
 }
 
-static ExprRef _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
+static dvs_expr_t _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
                             uint64_t k, int create) {
     uint32_t existing;
     if (_sparse_find(arr, k, &existing))
-        return builder_expr_var(fe->builder, existing);
+        return dvs_builder_expr_var(fe->builder, existing);
     if (!create) return EXPR_NULL;
 
     if (arr->n_sparse >= SMT2_MAX_SPARSE_ELEMS) {
@@ -459,7 +459,7 @@ static ExprRef _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
 
     uint32_t var_id = _next_var_id(fe);
     int64_t max_val = _bv_unsigned_hi(arr->sort.data_width);
-    builder_add_var(fe->builder, var_id, arr->sort.data_width, 0, 0, max_val);
+    dvs_builder_add_var(fe->builder, var_id, arr->sort.data_width, 0, 0, max_val);
     char nm[SMT2_MAX_NAME];
     snprintf(nm, sizeof(nm), "__arr%u_%llu", var_id, (unsigned long long)k);
     _add_var(fe, nm, (uint32_t)strlen(nm), var_id, arr->sort.data_width);
@@ -468,7 +468,7 @@ static ExprRef _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
     arr->sparse_varid[arr->n_sparse] = var_id;
     arr->n_sparse++;
     _builder_touched(fe);
-    return builder_expr_var(fe->builder, var_id);
+    return dvs_builder_expr_var(fe->builder, var_id);
 }
 
 /* ------------------------------------------------------------------ */
@@ -482,7 +482,7 @@ static ExprRef _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
 static uint32_t _fresh_read_var(Smt2Frontend *fe, uint16_t width) {
     uint32_t var_id = _next_var_id(fe);
     int64_t max_val = _bv_unsigned_hi(width);
-    builder_add_var(fe->builder, var_id, (uint8_t)width, 0, 0, max_val);
+    dvs_builder_add_var(fe->builder, var_id, (uint8_t)width, 0, 0, max_val);
     char name[SMT2_MAX_NAME];
     snprintf(name, sizeof(name), "__rd%u", var_id);
     _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint8_t)width);
@@ -527,25 +527,25 @@ static Smt2ArrayValue *_anode_new(Smt2Frontend *fe, uint8_t akind,
  * meets: `(bvadd x #x03)` over an 8-bit x must wrap at 8 bits. Every
  * BV-valued constant this front end emits is therefore SIZED. Widths are
  * bounded by SMT2_MAX_BV_BITS (128), which fits the node's uint8_t. */
-static ExprRef _bv_const(Smt2Frontend *fe, int64_t value, uint16_t width) {
+static dvs_expr_t _bv_const(Smt2Frontend *fe, int64_t value, uint16_t width) {
     if (width == 0 || width > 255)
-        return builder_expr_const(fe->builder, value, 0);
-    return builder_expr_const_sized(fe->builder, value, 0, (uint8_t)width);
+        return dvs_builder_expr_const(fe->builder, value, 0);
+    return dvs_builder_expr_const_sized(fe->builder, value, 0, (uint8_t)width);
 }
 
-/* Mark a problem this front end finalized as already explicit (zsp_sv.h):
+/* Mark a problem this front end finalized as already explicit (dvs_sv.h):
  * SMT-LIB semantics are exact bit-vector semantics, every constant is sized,
  * so SystemVerilog elaboration must leave it alone. */
-static SolveProblem *_explicit(SolveProblem *p) {
-    if (p) p->flags |= ZSP_PROBLEM_F_EXPLICIT;
+static dvs_problem_t *_explicit(dvs_problem_t *p) {
+    if (p) p->flags |= DVS_PROBLEM_F_EXPLICIT;
     return p;
 }
 
-static int _same_operand(Smt2Frontend *fe, ExprRef a, ExprRef b) {
+static int _same_operand(Smt2Frontend *fe, dvs_expr_t a, dvs_expr_t b) {
     if (a == b) return 1;
     if (a == EXPR_NULL || b == EXPR_NULL) return 0;
-    ExprKind *ka = (ExprKind *)builder_ref_ptr(fe->builder, a);
-    ExprKind *kb = (ExprKind *)builder_ref_ptr(fe->builder, b);
+    ExprKind *ka = (ExprKind *)dvs_builder_ref_ptr(fe->builder, a);
+    ExprKind *kb = (ExprKind *)dvs_builder_ref_ptr(fe->builder, b);
     if (!ka || !kb || *ka != *kb) return 0;
     if (*ka == EXPR_VAR)
         return ((ExprVar *)ka)->var_id == ((ExprVar *)kb)->var_id;
@@ -557,7 +557,7 @@ static int _same_operand(Smt2Frontend *fe, ExprRef a, ExprRef b) {
 
 /* Find or create a hash-consed abstract STORE node store(parent, idx, val). */
 static Smt2ArrayValue *_anode_store(Smt2Frontend *fe, Smt2ArrayValue *parent,
-                                    ExprRef idx_ref, ExprRef val_ref) {
+                                    dvs_expr_t idx_ref, dvs_expr_t val_ref) {
     for (uint32_t i = 0; i < fe->n_anodes; i++) {
         Smt2ArrayValue *n = fe->anodes[i];
         if (n->akind == SMT2_ANODE_STORE && n->parent == parent &&
@@ -574,7 +574,7 @@ static Smt2ArrayValue *_anode_store(Smt2Frontend *fe, Smt2ArrayValue *parent,
 }
 
 /* Find or create a hash-consed abstract ITE node ite(cond, then, else). */
-static Smt2ArrayValue *_anode_ite(Smt2Frontend *fe, ExprRef cond_ref,
+static Smt2ArrayValue *_anode_ite(Smt2Frontend *fe, dvs_expr_t cond_ref,
                                   Smt2ArrayValue *then_n, Smt2ArrayValue *else_n) {
     for (uint32_t i = 0; i < fe->n_anodes; i++) {
         Smt2ArrayValue *n = fe->anodes[i];
@@ -590,9 +590,9 @@ static Smt2ArrayValue *_anode_ite(Smt2Frontend *fe, ExprRef cond_ref,
     return n;
 }
 
-/* var_id of an index ExprRef if it is a plain EXPR_VAR, else UINT32_MAX. */
-static uint32_t _idx_varid(Smt2Frontend *fe, ExprRef idx_ref) {
-    ExprVar *ev = (ExprVar *)builder_ref_ptr(fe->builder, idx_ref);
+/* var_id of an index dvs_expr_t if it is a plain EXPR_VAR, else UINT32_MAX. */
+static uint32_t _idx_varid(Smt2Frontend *fe, dvs_expr_t idx_ref) {
+    ExprVar *ev = (ExprVar *)dvs_builder_ref_ptr(fe->builder, idx_ref);
     if (ev && ev->kind == EXPR_VAR) return ev->var_id;
     return UINT32_MAX;
 }
@@ -603,7 +603,7 @@ static uint32_t _idx_varid(Smt2Frontend *fe, ExprRef idx_ref) {
  * is a deterministic function of idx_ref (_idx_varid), so the key is well
  * defined from (node, idx_ref) alone and lookups/inserts stay consistent. */
 static uint32_t _aread_key_hash(const Smt2ArrayValue *node,
-                                uint32_t idx_varid, ExprRef idx_ref) {
+                                uint32_t idx_varid, dvs_expr_t idx_ref) {
     uint64_t h = (uint64_t)(uintptr_t)node * 0x9E3779B97F4A7C15ull;
     uint64_t k = (idx_varid != UINT32_MAX) ? ((uint64_t)idx_varid << 1) | 1u
                                            : ((uint64_t)idx_ref  << 1);
@@ -639,7 +639,7 @@ static int _aread_hash_reserve(Smt2Frontend *fe, uint32_t need) {
 /* Look up the areads slot for (node, idx), or UINT32_MAX. Uses the hash when
  * present, else a linear scan (identical match test). */
 static uint32_t _aread_lookup(Smt2Frontend *fe, const Smt2ArrayValue *node,
-                              uint32_t idx_varid, ExprRef idx_ref) {
+                              uint32_t idx_varid, dvs_expr_t idx_ref) {
     if (fe->aread_hash) {
         uint32_t mask = fe->aread_hash_cap - 1;
         uint32_t h = _aread_key_hash(node, idx_varid, idx_ref) & mask;
@@ -681,10 +681,10 @@ static void _aread_put_last(Smt2Frontend *fe) {
 }
 
 /* Find (or create) the read variable for select(node, idx). Dedups by var_id
- * when the index is a plain variable, else by ExprRef identity. Records the
+ * when the index is a plain variable, else by dvs_expr_t identity. Records the
  * read in areads[]. Returns the read var_id (UINT32_MAX on OOM). */
 static uint32_t _abs_find_or_create_read(Smt2Frontend *fe, Smt2ArrayValue *node,
-                                         ExprRef idx_ref, uint32_t idx_varid,
+                                         dvs_expr_t idx_ref, uint32_t idx_varid,
                                          uint16_t width) {
     uint32_t slot = _aread_lookup(fe, node, idx_varid, idx_ref);
     if (slot != UINT32_MAX) return fe->areads[slot].read_varid;
@@ -723,22 +723,22 @@ static const TaggedExpr TAGGED_NULL = { { EXPR_NULL, 0 }, 0, NULL };
 
 static TaggedExpr _translate_tagged(Smt2Frontend *fe, const Sexpr *s);
 
-/* Translation-time select on an abstract array: return the read var's ExprRef.
+/* Translation-time select on an abstract array: return the read var's dvs_expr_t.
  * The read-over-write / congruence axioms relating it to the store chain are
  * emitted later by _emit_array_axioms (Phase A) or lazily on a model (Phase B). */
 static TaggedExpr _abs_select(Smt2Frontend *fe, Smt2ArrayValue *node,
-                              ExprRef idx_ref) {
+                              dvs_expr_t idx_ref) {
     uint16_t w = node->sort.data_width;
     uint32_t idxv = _idx_varid(fe, idx_ref);
     uint32_t rv = _abs_find_or_create_read(fe, node, idx_ref, idxv, w);
     if (rv == UINT32_MAX) { SMT2_TAINT(fe, "abstract-array read var could not be created"); return TAGGED_NULL; }
-    return (TaggedExpr){ { builder_expr_var(fe->builder, rv), w }, 1, NULL };
+    return (TaggedExpr){ { dvs_builder_expr_var(fe->builder, rv), w }, 1, NULL };
 }
 
 /* Reify an abstract array equality (a == b) onto a fresh boolean var and record
  * it; the consistency + extensionality axioms are emitted by _emit_array_axioms.
- * Returns the boolean var's ExprRef, or EXPR_NULL on OOM. */
-static ExprRef _abs_array_eq(Smt2Frontend *fe, Smt2ArrayValue *a,
+ * Returns the boolean var's dvs_expr_t, or EXPR_NULL on OOM. */
+static dvs_expr_t _abs_array_eq(Smt2Frontend *fe, Smt2ArrayValue *a,
                              Smt2ArrayValue *b) {
     if (fe->n_aeqs == fe->aeqs_cap) {
         uint32_t nc = fe->aeqs_cap ? fe->aeqs_cap * 2 : 16;
@@ -751,7 +751,7 @@ static ExprRef _abs_array_eq(Smt2Frontend *fe, Smt2ArrayValue *a,
     uint32_t p = _fresh_read_var(fe, 1);
     Smt2ArrayEq *e = &fe->aeqs[fe->n_aeqs++];
     e->a = a; e->b = b; e->p_varid = p; e->wit_idx_ref = EXPR_NULL;
-    return builder_expr_var(fe->builder, p);
+    return dvs_builder_expr_var(fe->builder, p);
 }
 static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s);
 
@@ -822,9 +822,9 @@ static TaggedExpr _flatten_to_var(Smt2Frontend *fe, TaggedExpr tg) {
     if (tg.leaf_kind == 1 || tg.leaf_kind == 2) return tg;
 
     uint32_t aux_id = _fresh_aux(fe, tg.te.width);
-    ExprRef aux_ref = builder_expr_var(fe->builder, aux_id);
-    ExprRef eq = builder_expr_binary(fe->builder, BIN_EQ, aux_ref, tg.te.ref);
-    builder_add_constraint(fe->builder, eq);
+    dvs_expr_t aux_ref = dvs_builder_expr_var(fe->builder, aux_id);
+    dvs_expr_t eq = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, aux_ref, tg.te.ref);
+    dvs_builder_add_constraint(fe->builder, eq);
 
     TaggedExpr result;
     result.te.ref   = aux_ref;
@@ -886,7 +886,7 @@ static TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
     if (!v) {
         uint32_t var_id = _next_var_id(fe);
         int64_t max_val = _bv_unsigned_hi(width);
-        builder_add_var(fe->builder, var_id, width, 0, 0, max_val);
+        dvs_builder_add_var(fe->builder, var_id, width, 0, 0, max_val);
         if (_add_var(fe, mangled, (uint32_t)mlen, var_id, width) < 0) {
             fprintf(fe->err, "error: out of memory creating mangled var\n");
             return TAGGED_NULL;
@@ -894,7 +894,7 @@ static TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
         v = _find_var(fe, mangled, (uint32_t)mlen);
         _builder_touched(fe);
     }
-    ExprRef r = builder_expr_var(fe->builder, v->var_id);
+    dvs_expr_t r = dvs_builder_expr_var(fe->builder, v->var_id);
     return (TaggedExpr){ { r, v->width }, 1, NULL };
 }
 
@@ -945,14 +945,14 @@ static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
 /* ------------------------------------------------------------------ */
 
 static TaggedExpr _array_select(Smt2Frontend *fe, Smt2ArrayValue *arr,
-                                 ExprRef idx) {
+                                 dvs_expr_t idx) {
     uint32_t n = arr->n_elems;
 
     /* R1 rewrite: select(store(a, i, v), i) = v
      * The store handler records the var_id of its symbolic index.  If the
      * select index is the same variable, return the stored value directly. */
     if (arr->store_idx_varid != UINT32_MAX) {
-        ExprVar *ev = (ExprVar *)builder_ref_ptr(fe->builder, idx);
+        ExprVar *ev = (ExprVar *)dvs_builder_ref_ptr(fe->builder, idx);
         if (ev && ev->kind == EXPR_VAR && ev->var_id == arr->store_idx_varid)
             return (TaggedExpr){ { arr->store_val, arr->sort.data_width }, 0, NULL };
     }
@@ -962,11 +962,11 @@ static TaggedExpr _array_select(Smt2Frontend *fe, Smt2ArrayValue *arr,
     }
 
     /* Linear chain from n-2 down to 0; last element is the fallthrough. */
-    ExprRef result = arr->elems[n - 1];
+    dvs_expr_t result = arr->elems[n - 1];
     for (int32_t i = (int32_t)n - 2; i >= 0; i--) {
-        ExprRef idx_const = _bv_const(fe, (int64_t)i, arr->sort.addr_width);
-        ExprRef cond = builder_expr_binary(fe->builder, BIN_EQ, idx, idx_const);
-        result = builder_expr_ite(fe->builder, cond, arr->elems[i], result);
+        dvs_expr_t idx_const = _bv_const(fe, (int64_t)i, arr->sort.addr_width);
+        dvs_expr_t cond = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, idx, idx_const);
+        result = dvs_builder_expr_ite(fe->builder, cond, arr->elems[i], result);
     }
     return (TaggedExpr){ { result, arr->sort.data_width }, 0, NULL };
 }
@@ -999,11 +999,11 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
     }
 
     if (sexpr_is_symbol(s, "true")) {
-        ExprRef r = _bv_const(fe, 1, 1);
+        dvs_expr_t r = _bv_const(fe, 1, 1);
         return (TaggedExpr){ { r, 1 }, 2, NULL };
     }
     if (sexpr_is_symbol(s, "false")) {
-        ExprRef r = _bv_const(fe, 0, 1);
+        dvs_expr_t r = _bv_const(fe, 0, 1);
         return (TaggedExpr){ { r, 1 }, 2, NULL };
     }
 
@@ -1016,7 +1016,7 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
     /* BV/Bool variable */
     Smt2Var *v = _find_var(fe, s->sym.str, s->sym.len);
     if (v) {
-        ExprRef r = builder_expr_var(fe->builder, v->var_id);
+        dvs_expr_t r = dvs_builder_expr_var(fe->builder, v->var_id);
         return (TaggedExpr){ { r, v->width }, 1, NULL };
     }
 
@@ -1035,31 +1035,64 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
 /* List expression translation                                         */
 /* ------------------------------------------------------------------ */
 
+/* SMT-LIB unsigned division (is_rem=0) or remainder (is_rem=1) of two
+ * width-`w` operands, with the zero-divisor case made explicit: a/0 is all
+ * ones and a%0 is a. A nonzero constant divisor needs no guard. */
+static dvs_expr_t _udivrem_expr(Smt2Frontend *fe, dvs_expr_t A, dvs_expr_t B,
+                                uint16_t w, int is_rem) {
+    dvs_builder_t *b = fe->builder;
+    dvs_expr_t q = dvs_builder_expr_binary(b, is_rem ? DVS_BIN_MOD : DVS_BIN_DIV, A, B);
+    const void *bp = dvs_builder_ref_ptr(b, B);
+    if (bp && *(const ExprKind *)bp == EXPR_CONST &&
+        ((const ExprConst *)bp)->value != 0)
+        return q;
+    dvs_expr_t zero = _bv_const(fe, 0, w);
+    dvs_expr_t b_is_zero = dvs_builder_expr_binary(b, DVS_BIN_EQ, B, zero);
+    dvs_expr_t at_zero = is_rem ? A : dvs_builder_expr_unary(b, DVS_UN_INVERT, zero);
+    return dvs_builder_expr_ite(b, b_is_zero, at_zero, q);
+}
+
 /* Build the SMT-LIB signed division (is_rem=0) or remainder (is_rem=1) of two
  * width-`w` operands, lowered to unsigned bvudiv/bvurem + sign muxing (round
- * toward zero). Reused by bvsdiv/bvsrem and by bvsmod. Returns an ExprRef of
+ * toward zero). Reused by bvsdiv/bvsrem and by bvsmod. Returns an dvs_expr_t of
  * width `w`. The caller must set fe->needs_bitblast (the composed ITE is unsound
  * on the CDCL bounds engine). */
-static ExprRef _signed_divrem_expr(SolveProblemBuilder *b, ExprRef S_, ExprRef T_,
+static dvs_expr_t _signed_divrem_expr(dvs_builder_t *b, dvs_expr_t S_, dvs_expr_t T_,
                                    uint16_t w, int is_rem) {
-    uint32_t uop = is_rem ? BIN_MOD : BIN_DIV;
-    ExprRef msb_s = builder_expr_extract(b, S_, w - 1, w - 1);
-    ExprRef msb_t = builder_expr_extract(b, T_, w - 1, w - 1);
-    ExprRef nS = builder_expr_unary(b, UN_NEG, S_);
-    ExprRef nT = builder_expr_unary(b, UN_NEG, T_);
-    ExprRef q00 = builder_expr_binary(b, uop, S_, T_);
-    ExprRef q10 = builder_expr_unary(b, UN_NEG, builder_expr_binary(b, uop, nS, T_));
-    ExprRef q01, q11;
+    uint32_t uop = is_rem ? DVS_BIN_MOD : DVS_BIN_DIV;
+    dvs_expr_t msb_s = dvs_builder_expr_extract(b, S_, w - 1, w - 1);
+    dvs_expr_t msb_t = dvs_builder_expr_extract(b, T_, w - 1, w - 1);
+    dvs_expr_t nS = dvs_builder_expr_unary(b, DVS_UN_NEG, S_);
+    dvs_expr_t nT = dvs_builder_expr_unary(b, DVS_UN_NEG, T_);
+    dvs_expr_t q00 = dvs_builder_expr_binary(b, uop, S_, T_);
+    dvs_expr_t q10 = dvs_builder_expr_unary(b, DVS_UN_NEG, dvs_builder_expr_binary(b, uop, nS, T_));
+    dvs_expr_t q01, q11;
     if (is_rem) {   /* remainder: sign follows the dividend s */
-        q01 = builder_expr_binary(b, uop, S_, nT);
-        q11 = builder_expr_unary(b, UN_NEG, builder_expr_binary(b, uop, nS, nT));
+        q01 = dvs_builder_expr_binary(b, uop, S_, nT);
+        q11 = dvs_builder_expr_unary(b, DVS_UN_NEG, dvs_builder_expr_binary(b, uop, nS, nT));
     } else {        /* quotient: sign = sign(s) xor sign(t) */
-        q01 = builder_expr_unary(b, UN_NEG, builder_expr_binary(b, uop, S_, nT));
-        q11 = builder_expr_binary(b, uop, nS, nT);
+        q01 = dvs_builder_expr_unary(b, DVS_UN_NEG, dvs_builder_expr_binary(b, uop, S_, nT));
+        q11 = dvs_builder_expr_binary(b, uop, nS, nT);
     }
-    ExprRef hi = builder_expr_ite(b, msb_t, q11, q10);   /* s < 0 */
-    ExprRef lo = builder_expr_ite(b, msb_t, q01, q00);   /* s >= 0 */
-    return builder_expr_ite(b, msb_s, hi, lo);
+    dvs_expr_t hi = dvs_builder_expr_ite(b, msb_t, q11, q10);   /* s < 0 */
+    dvs_expr_t lo = dvs_builder_expr_ite(b, msb_t, q01, q00);   /* s >= 0 */
+    return dvs_builder_expr_ite(b, msb_s, hi, lo);
+}
+
+/* Both operands are the same variable (after flattening). A comparison of a
+ * variable with itself is decided -- and left to the engines it is not:
+ * `x <s x` lowers each side to its own `x ^ 2^(w-1)` auxiliary, and the
+ * search spends its whole CDCL budget on it at 63 bits (B62). */
+static int _same_var(Smt2Frontend *fe, dvs_expr_t a, dvs_expr_t b) {
+    const void *pa = dvs_builder_ref_ptr(fe->builder, a);
+    const void *pb = dvs_builder_ref_ptr(fe->builder, b);
+    if (!pa || !pb || *(const ExprKind *)pa != EXPR_VAR || *(const ExprKind *)pb != EXPR_VAR)
+        return 0;
+    return ((const ExprVar *)pa)->var_id == ((const ExprVar *)pb)->var_id;
+}
+
+static TaggedExpr _bool_lit(Smt2Frontend *fe, int v) {
+    return (TaggedExpr){ { _bv_const(fe, v ? 1 : 0, 1), 1 }, 2, NULL };
 }
 
 /* Signed comparison `a <op>s b`, lowered via the MSB-flip identity
@@ -1074,12 +1107,14 @@ static ExprRef _signed_divrem_expr(SolveProblemBuilder *b, ExprRef S_, ExprRef T
  * sees a clean var-vs-const inequality (it reifies var-vs-const, not var-vs-var).
  * A signed compare of two vars stays var-vs-var -> uncompiled -> sound `unknown`. */
 static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
-                                        BinOp binop) {
+                                        dvs_binop_t binop) {
     if (s->list.count != 3) return TAGGED_NULL;
     TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
     if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
     TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
     if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
+    if (_same_var(fe, a.te.ref, b.te.ref))
+        return _bool_lit(fe, binop == DVS_BIN_LTE || binop == DVS_BIN_GTE);
     uint16_t sw = a.te.width ? a.te.width : b.te.width;
     if (sw == 0 || sw > 64) {
         fprintf(fe->err, "error: signed compare of width %u unsupported\n",
@@ -1088,27 +1123,27 @@ static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
     }
     int64_t  bias_val = (int64_t)(1ULL << (sw - 1));
     uint64_t mask     = (sw < 64) ? (((uint64_t)1 << sw) - 1) : ~0ULL;
-    ExprRef  bias     = _bv_const(fe, bias_val, sw);
+    dvs_expr_t  bias     = _bv_const(fe, bias_val, sw);
 
     /* variable side: flip then flatten to a var (materialises the bxor) */
-    ExprRef   af  = builder_expr_binary(fe->builder, BIN_BXOR, a.te.ref, bias);
+    dvs_expr_t   af  = dvs_builder_expr_binary(fe->builder, DVS_BIN_BXOR, a.te.ref, bias);
     TaggedExpr aff = _flatten_to_var(fe, (TaggedExpr){ { af, sw }, 0, NULL });
     if (aff.te.ref == EXPR_NULL) return TAGGED_NULL;
 
     /* rhs: fold the flip when constant, else materialise (var-var -> unknown) */
-    ExprRef bref;
-    const void *bp = builder_ref_ptr(fe->builder, b.te.ref);
+    dvs_expr_t bref;
+    const void *bp = dvs_builder_ref_ptr(fe->builder, b.te.ref);
     if (bp && *(const ExprKind *)bp == EXPR_CONST) {
         int64_t bval = ((const ExprConst *)bp)->value;
         bref = _bv_const(fe,
                    (int64_t)(((uint64_t)bval ^ (uint64_t)bias_val) & mask), sw);
     } else {
-        ExprRef bf = builder_expr_binary(fe->builder, BIN_BXOR, b.te.ref, bias);
+        dvs_expr_t bf = dvs_builder_expr_binary(fe->builder, DVS_BIN_BXOR, b.te.ref, bias);
         TaggedExpr bff = _flatten_to_var(fe, (TaggedExpr){ { bf, sw }, 0, NULL });
         if (bff.te.ref == EXPR_NULL) return TAGGED_NULL;
         bref = bff.te.ref;
     }
-    ExprRef r = builder_expr_binary(fe->builder, binop, aff.te.ref, bref);
+    dvs_expr_t r = dvs_builder_expr_binary(fe->builder, binop, aff.te.ref, bref);
     return (TaggedExpr){ { r, 1 }, 0, NULL };
 }
 
@@ -1132,7 +1167,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                 SMT2_TAINT(fe, "bitvector constant value needs more than 64 bits");
                 return TAGGED_NULL;
             }
-            ExprRef r = _bv_const(fe, (int64_t)bv_val, w);
+            dvs_expr_t r = _bv_const(fe, (int64_t)bv_val, w);
             return (TaggedExpr){ { r, w }, 2, NULL };
         }
         fprintf(fe->err, "error: unexpected indexed identifier\n");
@@ -1169,15 +1204,15 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
              * literal. Sign-extend is skipped here -- downstream type
              * interpretation of signed constants is fragile. */
             if (!sign && inner.leaf_kind == 2 && new_width < 64) {
-                ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, inner.te.ref);
+                ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, inner.te.ref);
                 uint64_t v = (uint64_t)ec->value & (((uint64_t)1 << new_width) - 1);
-                ExprRef cr = _bv_const(fe, (int64_t)v, new_width);
+                dvs_expr_t cr = _bv_const(fe, (int64_t)v, new_width);
                 return (TaggedExpr){ { cr, new_width }, 2, NULL };
             }
 
             inner = _flatten_to_var(fe, inner);
             if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
-            ExprRef r = builder_expr_extend(fe->builder, inner.te.ref,
+            dvs_expr_t r = dvs_builder_expr_extend(fe->builder, inner.te.ref,
                                             (uint8_t)inner.te.width,
                                             (uint8_t)new_width, sign);
             return (TaggedExpr){ { r, new_width }, 0, NULL };
@@ -1192,7 +1227,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             inner = _flatten_to_var(fe, inner);
             if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
 
-            ExprRef r = builder_expr_extract(fe->builder, inner.te.ref, hi, lo);
+            dvs_expr_t r = dvs_builder_expr_extract(fe->builder, inner.te.ref, hi, lo);
             return (TaggedExpr){ { r, (uint16_t)(hi - lo + 1) }, 0, NULL };
         }
 
@@ -1204,9 +1239,9 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             TaggedExpr inner = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
             if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
             uint16_t w = inner.te.width;
-            ExprRef acc = inner.te.ref;              /* N==1 is the identity */
+            dvs_expr_t acc = inner.te.ref;              /* N==1 is the identity */
             for (uint64_t i = 1; i < rep_n; i++)
-                acc = builder_expr_concat(fe->builder, acc, inner.te.ref, w);
+                acc = dvs_builder_expr_concat(fe->builder, acc, inner.te.ref, w);
             return (TaggedExpr){ { acc, (uint16_t)(w * rep_n) }, 0, NULL };
         }
 
@@ -1398,14 +1433,14 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                 }
             }
             if (is_const) {
-                /* The array element is a VARIABLE (builder_expr_var), so tag it
+                /* The array element is a VARIABLE (dvs_builder_expr_var), so tag it
                  * leaf_kind == 1 (var), NOT 2 (const). Tagging it const made the
                  * const-fold sites (e.g. zero_extend, boolean connectives) read
-                 * the var's ExprRef as an ExprConst and fold it to a garbage
+                 * the var's dvs_expr_t as an ExprConst and fold it to a garbage
                  * literal (0) -> wrong `unsat` for e.g.
                  * `(= ((_ zero_extend N) (select a i)) k)`. */
                 if (arr->is_sparse) {
-                    ExprRef e = _sparse_elem(fe, arr, k, /*create=*/1);
+                    dvs_expr_t e = _sparse_elem(fe, arr, k, /*create=*/1);
                     if (e == EXPR_NULL) { SMT2_TAINT(fe, "sparse-array element could not be materialized"); return TAGGED_NULL; }
                     return (TaggedExpr){ { e, arr->sort.data_width }, 1, NULL };
                 }
@@ -1498,7 +1533,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                 }
             }
             if (is_const) {
-                memcpy(new_arr->elems, arr->elems, arr->n_elems * sizeof(ExprRef));
+                memcpy(new_arr->elems, arr->elems, arr->n_elems * sizeof(dvs_expr_t));
                 if (k < arr->n_elems)
                     new_arr->elems[k] = val_te.te.ref;
                 return (TaggedExpr){ { EXPR_NULL, 0 }, 0, new_arr };
@@ -1510,17 +1545,17 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         idx_te = _flatten_to_var(fe, idx_te);
         val_te = _flatten_to_var(fe, val_te);
         {
-            ExprVar *ev = (ExprVar *)builder_ref_ptr(fe->builder, idx_te.te.ref);
+            ExprVar *ev = (ExprVar *)dvs_builder_ref_ptr(fe->builder, idx_te.te.ref);
             if (ev && ev->kind == EXPR_VAR) {
                 new_arr->store_idx_varid = ev->var_id;
                 new_arr->store_val       = val_te.te.ref;
             }
         }
         for (uint32_t j = 0; j < arr->n_elems; j++) {
-            ExprRef j_const = _bv_const(fe, (int64_t)j, arr->sort.addr_width);
-            ExprRef cond = builder_expr_binary(fe->builder, BIN_EQ,
+            dvs_expr_t j_const = _bv_const(fe, (int64_t)j, arr->sort.addr_width);
+            dvs_expr_t cond = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ,
                                                idx_te.te.ref, j_const);
-            new_arr->elems[j] = builder_expr_ite(fe->builder, cond,
+            new_arr->elems[j] = dvs_builder_expr_ite(fe->builder, cond,
                                                   val_te.te.ref, arr->elems[j]);
         }
         return (TaggedExpr){ { EXPR_NULL, 0 }, 0, new_arr };
@@ -1547,7 +1582,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
              * Same lesson as B4: never reuse a raw composed sub-expr. */ \
             a = _flatten_to_var(fe, a); \
             if (a.te.ref == EXPR_NULL) return TAGGED_NULL; \
-            a.te.ref = builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
+            a.te.ref = dvs_builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
             a.leaf_kind = 0;   /* composed: must be re-flattened next round */ \
         } \
         _flag_wide_arith(fe, a.te.width); \
@@ -1561,25 +1596,47 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL; \
         TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2])); \
         if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
-        ExprRef r = builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
+        if (_same_var(fe, a.te.ref, b.te.ref)) \
+            return _bool_lit(fe, binop == DVS_BIN_LTE || binop == DVS_BIN_GTE); \
+        dvs_expr_t r = dvs_builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
         return (TaggedExpr){ { r, 1 }, 0, NULL }; \
     }
 
-    BINOP_CASE("bvadd", BIN_ADD)
-    BINOP_CASE("bvsub", BIN_SUB)
-    BINOP_CASE("bvmul", BIN_MUL)
-    BINOP_CASE("bvudiv", BIN_DIV)
-    BINOP_CASE("bvurem", BIN_MOD)
-    BINOP_CASE("bvand", BIN_BAND)
-    BINOP_CASE("bvor", BIN_BOR)
-    BINOP_CASE("bvxor", BIN_BXOR)
-    BINOP_CASE("bvshl", BIN_LSHIFT)
-    BINOP_CASE("bvlshr", BIN_RSHIFT)
+    /* Unsigned division and remainder. SMT-LIB defines a zero divisor:
+     * (bvudiv a 0) = all ones, (bvurem a 0) = a. The engines' own DIV/MOD
+     * leave the result unconstrained at a zero divisor (SystemVerilog's x),
+     * so unless the divisor is a nonzero constant, guard it here; without the
+     * guard a model could pick any value and `unsat` problems came back `sat`
+     * (B52). */
+    {
+        int is_udiv = (oplen == 6 && memcmp(op, "bvudiv", 6) == 0);
+        int is_urem = (oplen == 6 && memcmp(op, "bvurem", 6) == 0);
+        if (is_udiv || is_urem) {
+            if (s->list.count != 3) return TAGGED_NULL;
+            TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+            if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
+            TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+            if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
+            uint16_t w = a.te.width ? a.te.width : b.te.width;
+            _flag_wide_arith(fe, w);
+            dvs_expr_t q = _udivrem_expr(fe, a.te.ref, b.te.ref, w, is_urem);
+            return (TaggedExpr){ { q, w }, 0, NULL };
+        }
+    }
 
-    CMPOP_CASE("bvult", BIN_LT)
-    CMPOP_CASE("bvule", BIN_LTE)
-    CMPOP_CASE("bvugt", BIN_GT)
-    CMPOP_CASE("bvuge", BIN_GTE)
+    BINOP_CASE("bvadd", DVS_BIN_ADD)
+    BINOP_CASE("bvsub", DVS_BIN_SUB)
+    BINOP_CASE("bvmul", DVS_BIN_MUL)
+    BINOP_CASE("bvand", DVS_BIN_BAND)
+    BINOP_CASE("bvor", DVS_BIN_BOR)
+    BINOP_CASE("bvxor", DVS_BIN_BXOR)
+    BINOP_CASE("bvshl", DVS_BIN_LSHIFT)
+    BINOP_CASE("bvlshr", DVS_BIN_RSHIFT)
+
+    CMPOP_CASE("bvult", DVS_BIN_LT)
+    CMPOP_CASE("bvule", DVS_BIN_LTE)
+    CMPOP_CASE("bvugt", DVS_BIN_GT)
+    CMPOP_CASE("bvuge", DVS_BIN_GTE)
 
     /* Signed comparisons — see _translate_signed_cmp (MSB-flip lowering that
      * materialises the variable side's xor and folds a constant operand). */
@@ -1587,10 +1644,10 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     if (oplen == sizeof(name)-1 && memcmp(op, name, oplen) == 0) \
         return _translate_signed_cmp(fe, s, binop);
 
-    SCMPOP_CASE("bvslt", BIN_LT)
-    SCMPOP_CASE("bvsle", BIN_LTE)
-    SCMPOP_CASE("bvsgt", BIN_GT)
-    SCMPOP_CASE("bvsge", BIN_GTE)
+    SCMPOP_CASE("bvslt", DVS_BIN_LT)
+    SCMPOP_CASE("bvsle", DVS_BIN_LTE)
+    SCMPOP_CASE("bvsgt", DVS_BIN_GT)
+    SCMPOP_CASE("bvsge", DVS_BIN_GTE)
 
 #undef BINOP_CASE
 #undef CMPOP_CASE
@@ -1624,7 +1681,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             if (tb.te.ref == EXPR_NULL) return TAGGED_NULL;
             uint16_t w = sa.te.width ? sa.te.width : tb.te.width;
             if (w == 0) return TAGGED_NULL;
-            ExprRef r = _signed_divrem_expr(fe->builder, sa.te.ref, tb.te.ref,
+            dvs_expr_t r = _signed_divrem_expr(fe->builder, sa.te.ref, tb.te.ref,
                                             w, is_srem);
             return (TaggedExpr){ { r, w }, 0, NULL };
         }
@@ -1646,23 +1703,23 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             if (tb.te.ref == EXPR_NULL) return TAGGED_NULL;
             uint16_t w = sa.te.width ? sa.te.width : tb.te.width;
             if (w == 0) return TAGGED_NULL;
-            ExprRef T_ = tb.te.ref;
-            ExprRef r_expr = _signed_divrem_expr(fe->builder, sa.te.ref, T_, w, /*is_rem=*/1);
+            dvs_expr_t T_ = tb.te.ref;
+            dvs_expr_t r_expr = _signed_divrem_expr(fe->builder, sa.te.ref, T_, w, /*is_rem=*/1);
             /* Materialise the remainder into its own var: bvsmod references it
              * three times (sign bit, +t, ==0), and re-embedding the raw ITE tree
              * at each use makes the bitblaster produce inconsistent values for
              * the shared sub-DAG. One aux var = one bit-blasted value, shared. */
             TaggedExpr rt = _flatten_to_var(fe, (TaggedExpr){ { r_expr, w }, 0, NULL });
             if (rt.te.ref == EXPR_NULL) return TAGGED_NULL;
-            ExprRef r = rt.te.ref;
-            ExprRef msb_r = builder_expr_extract(fe->builder, r, w - 1, w - 1);
-            ExprRef msb_t = builder_expr_extract(fe->builder, T_, w - 1, w - 1);
-            ExprRef same_sign = builder_expr_binary(fe->builder, BIN_EQ, msb_r, msb_t);
-            ExprRef r_plus_t = builder_expr_binary(fe->builder, BIN_ADD, r, T_);
-            ExprRef adjusted = builder_expr_ite(fe->builder, same_sign, r, r_plus_t);
-            ExprRef zero = _bv_const(fe, 0, w);
-            ExprRef r_is_zero = builder_expr_binary(fe->builder, BIN_EQ, r, zero);
-            ExprRef result = builder_expr_ite(fe->builder, r_is_zero, r, adjusted);
+            dvs_expr_t r = rt.te.ref;
+            dvs_expr_t msb_r = dvs_builder_expr_extract(fe->builder, r, w - 1, w - 1);
+            dvs_expr_t msb_t = dvs_builder_expr_extract(fe->builder, T_, w - 1, w - 1);
+            dvs_expr_t same_sign = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, msb_r, msb_t);
+            dvs_expr_t r_plus_t = dvs_builder_expr_binary(fe->builder, DVS_BIN_ADD, r, T_);
+            dvs_expr_t adjusted = dvs_builder_expr_ite(fe->builder, same_sign, r, r_plus_t);
+            dvs_expr_t zero = _bv_const(fe, 0, w);
+            dvs_expr_t r_is_zero = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, r, zero);
+            dvs_expr_t result = dvs_builder_expr_ite(fe->builder, r_is_zero, r, adjusted);
             return (TaggedExpr){ { result, w }, 0, NULL };
         }
     }
@@ -1683,7 +1740,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             /* Word-level abstract path: reify onto a boolean var; consistency +
              * extensionality axioms are emitted at solve time. */
             if (fe->array_lazy && a.array->is_abstract && b.array->is_abstract) {
-                ExprRef p = _abs_array_eq(fe, a.array, b.array);
+                dvs_expr_t p = _abs_array_eq(fe, a.array, b.array);
                 if (p == EXPR_NULL) { SMT2_TAINT(fe, "abstract-array equality could not be reified"); return TAGGED_NULL; }
                 return (TaggedExpr){ { p, 1 }, 1, NULL };
             }
@@ -1692,13 +1749,13 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                 fprintf(fe->err, "error: array equality on arrays with different sizes\n");
                 return TAGGED_NULL;
             }
-            ExprRef result = EXPR_NULL;
+            dvs_expr_t result = EXPR_NULL;
             for (uint32_t i = 0; i < a.array->n_elems; i++) {
-                ExprRef eq_i = builder_expr_binary(fe->builder, BIN_EQ,
+                dvs_expr_t eq_i = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ,
                                                    a.array->elems[i],
                                                    b.array->elems[i]);
                 result = (result == EXPR_NULL) ? eq_i
-                       : builder_expr_binary(fe->builder, BIN_AND, result, eq_i);
+                       : dvs_builder_expr_binary(fe->builder, DVS_BIN_AND, result, eq_i);
             }
             return (TaggedExpr){ { result, 1 }, 0, NULL };
         }
@@ -1712,7 +1769,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
         b = _flatten_to_var(fe, b);
         if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
-        ExprRef r = builder_expr_binary(fe->builder, BIN_EQ, a.te.ref, b.te.ref);
+        dvs_expr_t r = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, a.te.ref, b.te.ref);
         return (TaggedExpr){ { r, 1 }, 0, NULL };
     }
 
@@ -1726,13 +1783,13 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             args[i] = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[i + 1]));
             if (args[i].te.ref == EXPR_NULL) { free(args); return TAGGED_NULL; }
         }
-        ExprRef result = EXPR_NULL;
+        dvs_expr_t result = EXPR_NULL;
         for (uint32_t i = 0; i < n; i++) {
             for (uint32_t j = i + 1; j < n; j++) {
-                ExprRef neq = builder_expr_binary(fe->builder, BIN_NEQ,
+                dvs_expr_t neq = dvs_builder_expr_binary(fe->builder, DVS_BIN_NEQ,
                                                   args[i].te.ref, args[j].te.ref);
                 if (result == EXPR_NULL) result = neq;
-                else result = builder_expr_binary(fe->builder, BIN_AND, result, neq);
+                else result = dvs_builder_expr_binary(fe->builder, DVS_BIN_AND, result, neq);
             }
         }
         free(args);
@@ -1744,7 +1801,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (s->list.count != 2) return TAGGED_NULL;
         TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-        ExprRef r = builder_expr_unary(fe->builder, UN_INVERT, a.te.ref);
+        dvs_expr_t r = dvs_builder_expr_unary(fe->builder, DVS_UN_INVERT, a.te.ref);
         _flag_wide_arith(fe, a.te.width);
         return (TaggedExpr){ { r, a.te.width }, 0, NULL };
     }
@@ -1752,15 +1809,15 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (s->list.count != 2) return TAGGED_NULL;
         TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-        /* bvneg x is (bvsub 0 x), modulo 2^w. It must NOT lower to UN_NEG:
-         * the CDCL engine (and the model validator) treat UN_NEG as integer
+        /* bvneg x is (bvsub 0 x), modulo 2^w. It must NOT lower to DVS_UN_NEG:
+         * the CDCL engine (and the model validator) treat DVS_UN_NEG as integer
          * negation with no wrap, so for an unsigned x in [0, 2^w) the result
          * lands in (-2^w, 0] and `(= (bvneg x) K)` was a spurious `unsat` for
          * every constant K. Built exactly as BINOP_CASE builds bvsub. */
         TaggedExpr z = _flatten_to_var(fe, (TaggedExpr){
             { _bv_const(fe, 0, a.te.width), a.te.width }, 2, NULL });
         if (z.te.ref == EXPR_NULL) return TAGGED_NULL;
-        ExprRef r = builder_expr_binary(fe->builder, BIN_SUB, z.te.ref, a.te.ref);
+        dvs_expr_t r = dvs_builder_expr_binary(fe->builder, DVS_BIN_SUB, z.te.ref, a.te.ref);
         _flag_wide_arith(fe, a.te.width);
         return (TaggedExpr){ { r, a.te.width }, 0, NULL };
     }
@@ -1771,12 +1828,12 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         TaggedExpr a = _translate_tagged(fe, s->list.items[1]);
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
         if (a.leaf_kind == 2) {
-            ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, a.te.ref);
+            ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, a.te.ref);
             int64_t neg = (ec->value != 0) ? 0 : 1;
-            ExprRef cr = _bv_const(fe, neg, 1);
+            dvs_expr_t cr = _bv_const(fe, neg, 1);
             return (TaggedExpr){ { cr, 1 }, 2, NULL };
         }
-        ExprRef r = builder_expr_unary(fe->builder, UN_NOT, a.te.ref);
+        dvs_expr_t r = dvs_builder_expr_unary(fe->builder, DVS_UN_NOT, a.te.ref);
         return (TaggedExpr){ { r, 1 }, 0, NULL };
     }
 
@@ -1794,10 +1851,10 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
             if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
             if (b.leaf_kind == 2) {
-                ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, b.te.ref);
+                ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, b.te.ref);
                 if (ec->value == 0) {
                     /* (and ... false ...) -> false */
-                    ExprRef cr = _bv_const(fe, 0, 1);
+                    dvs_expr_t cr = _bv_const(fe, 0, 1);
                     return (TaggedExpr){ { cr, 1 }, 2, NULL };
                 }
                 /* (and ... true ...) -> drop this operand */
@@ -1805,14 +1862,14 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             }
             if (acc.te.ref == EXPR_NULL) { acc = b; acc.te.width = 1; }
             else {
-                acc.te.ref = builder_expr_binary(fe->builder, BIN_AND,
+                acc.te.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_AND,
                                                  acc.te.ref, b.te.ref);
                 acc.leaf_kind = 0;
             }
         }
         if (acc.te.ref == EXPR_NULL) {
             /* All operands were literal true */
-            ExprRef cr = _bv_const(fe, 1, 1);
+            dvs_expr_t cr = _bv_const(fe, 1, 1);
             return (TaggedExpr){ { cr, 1 }, 2, NULL };
         }
         acc.te.width = 1;
@@ -1827,10 +1884,10 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
             if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
             if (b.leaf_kind == 2) {
-                ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, b.te.ref);
+                ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, b.te.ref);
                 if (ec->value != 0) {
                     /* (or ... true ...) -> true */
-                    ExprRef cr = _bv_const(fe, 1, 1);
+                    dvs_expr_t cr = _bv_const(fe, 1, 1);
                     return (TaggedExpr){ { cr, 1 }, 2, NULL };
                 }
                 /* (or ... false ...) -> drop this operand */
@@ -1838,14 +1895,14 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             }
             if (acc.te.ref == EXPR_NULL) { acc = b; acc.te.width = 1; }
             else {
-                acc.te.ref = builder_expr_binary(fe->builder, BIN_OR,
+                acc.te.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_OR,
                                                  acc.te.ref, b.te.ref);
                 acc.leaf_kind = 0;
             }
         }
         if (acc.te.ref == EXPR_NULL) {
             /* All operands were literal false */
-            ExprRef cr = _bv_const(fe, 0, 1);
+            dvs_expr_t cr = _bv_const(fe, 0, 1);
             return (TaggedExpr){ { cr, 1 }, 2, NULL };
         }
         acc.te.width = 1;
@@ -1860,7 +1917,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         for (uint32_t i = 2; i < s->list.count; i++) {
             TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
             if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
-            acc.te.ref = builder_expr_binary(fe->builder, BIN_BXOR,
+            acc.te.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_BXOR,
                                              acc.te.ref, b.te.ref);
             acc.leaf_kind = 0;
         }
@@ -1877,8 +1934,8 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         for (int i = (int)s->list.count - 2; i >= 1; i--) {
             TaggedExpr a = _translate_tagged(fe, s->list.items[i]);
             if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-            ExprRef not_a = builder_expr_unary(fe->builder, UN_NOT, a.te.ref);
-            last.te.ref = builder_expr_binary(fe->builder, BIN_OR, not_a, last.te.ref);
+            dvs_expr_t not_a = dvs_builder_expr_unary(fe->builder, DVS_UN_NOT, a.te.ref);
+            last.te.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_OR, not_a, last.te.ref);
             last.leaf_kind = 0;
         }
         last.te.width = 1;
@@ -1908,7 +1965,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             Smt2ArrayValue *arr = _make_array_value(fe, t.array->sort);
             if (!arr) return TAGGED_NULL;
             for (uint32_t i = 0; i < t.array->n_elems; i++) {
-                arr->elems[i] = builder_expr_ite(fe->builder, c.te.ref,
+                arr->elems[i] = dvs_builder_expr_ite(fe->builder, c.te.ref,
                                                   t.array->elems[i],
                                                   e.array->elems[i]);
             }
@@ -1920,7 +1977,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (t.te.ref == EXPR_NULL) return TAGGED_NULL;
         e = _flatten_to_var(fe, e);
         if (e.te.ref == EXPR_NULL) return TAGGED_NULL;
-        ExprRef r = builder_expr_ite(fe->builder, c.te.ref, t.te.ref, e.te.ref);
+        dvs_expr_t r = dvs_builder_expr_ite(fe->builder, c.te.ref, t.te.ref, e.te.ref);
         _flag_wide_arith(fe, t.te.width);
         return (TaggedExpr){ { r, t.te.width }, 0, NULL };
     }
@@ -1932,13 +1989,13 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (hi.te.ref == EXPR_NULL) return TAGGED_NULL;
         TaggedExpr lo = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
         if (lo.te.ref == EXPR_NULL) return TAGGED_NULL;
-        ExprRef r = builder_expr_concat(fe->builder, hi.te.ref, lo.te.ref,
+        dvs_expr_t r = dvs_builder_expr_concat(fe->builder, hi.te.ref, lo.te.ref,
                                         (uint8_t)lo.te.width);
         return (TaggedExpr){ { r, (uint16_t)(hi.te.width + lo.te.width) }, 0, NULL };
     }
 
     /* ---- bvashr: arithmetic shift right ----
-     * SMT-LIB values are unsigned bit patterns, while BIN_ASHR is arithmetic
+     * SMT-LIB values are unsigned bit patterns, while DVS_BIN_ASHR is arithmetic
      * only for a SIGNED left operand (SystemVerilog `>>>`). So read the
      * pattern as signed at its own width (an explicit cast -- the problem is
      * flagged explicit and never SV-elaborated), shift, and read the result
@@ -1955,10 +2012,10 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             fprintf(fe->err, "error: bvashr operands must share a width\n");
             return TAGGED_NULL;
         }
-        ExprRef as = builder_expr_sv_cast(fe->builder, a.te.ref,
+        dvs_expr_t as = dvs_builder_expr_sv_cast(fe->builder, a.te.ref,
                                           (uint8_t)w, (uint8_t)w, 0, 1);
-        ExprRef sh = builder_expr_binary(fe->builder, BIN_ASHR, as, k.te.ref);
-        ExprRef r  = builder_expr_sv_cast(fe->builder, sh,
+        dvs_expr_t sh = dvs_builder_expr_binary(fe->builder, DVS_BIN_ASHR, as, k.te.ref);
+        dvs_expr_t r  = dvs_builder_expr_sv_cast(fe->builder, sh,
                                           (uint8_t)w, (uint8_t)w, 1, 0);
         _flag_wide_arith(fe, w);
         return (TaggedExpr){ { r, w }, 0, NULL };
@@ -1984,7 +2041,7 @@ static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s) {
     case SEXPR_SYMBOL:
         return _translate_symbol_tagged(fe, s);
     case SEXPR_NUMERAL: {
-        ExprRef r = builder_expr_const(fe->builder, (int64_t)s->numval, 0);
+        dvs_expr_t r = dvs_builder_expr_const(fe->builder, (int64_t)s->numval, 0);
         return (TaggedExpr){ { r, 64 }, 2, NULL };
     }
     case SEXPR_BITVEC: {
@@ -1996,7 +2053,7 @@ static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s) {
             SMT2_TAINT(fe, "bitvector literal wider than 64 bits (value truncated by the lexer)");
             return TAGGED_NULL;
         }
-        ExprRef r = _bv_const(fe, (int64_t)s->bv.value, (uint16_t)s->bv.width);
+        dvs_expr_t r = _bv_const(fe, (int64_t)s->bv.value, (uint16_t)s->bv.width);
         return (TaggedExpr){ { r, (uint16_t)s->bv.width }, 2, NULL };
     }
     case SEXPR_LIST:
@@ -2089,6 +2146,10 @@ static int _cmd_set_option(Smt2Frontend *fe, const Sexpr *cmd) {
     if (sexpr_is_keyword(key, ":seed")) {
         if (val->kind == SEXPR_NUMERAL)
             fe->seed = val->numval;
+        return 0;
+    }
+    if (sexpr_is_keyword(key, ":produce-unsat-cores")) {
+        fe->produce_unsat_cores = sexpr_is_symbol(val, "true");
         return 0;
     }
     return 0;
@@ -2383,7 +2444,7 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
     uint32_t var_id = _next_var_id(fe);
     int64_t max_val = _bv_unsigned_hi(width);
 
-    builder_add_var(fe->builder, var_id, width, 0, 0, max_val);
+    dvs_builder_add_var(fe->builder, var_id, width, 0, 0, max_val);
     if (_add_var(fe, name_s->sym.str, name_s->sym.len, var_id, width) < 0) {
         fprintf(fe->err, "error: out of memory adding variable\n");
         return -1;
@@ -2516,7 +2577,7 @@ static void _builder_touched(Smt2Frontend *fe) {
 static int _is_bit1_literal(Smt2Frontend *fe, const Sexpr *s) {
     TaggedExpr t = _translate_tagged(fe, s);
     if (t.te.ref == EXPR_NULL || t.leaf_kind != 2 || t.te.width != 1) return 0;
-    ExprConst *ec = (ExprConst *)builder_ref_ptr(fe->builder, t.te.ref);
+    ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, t.te.ref);
     return ec && ec->value == 1;
 }
 
@@ -2525,13 +2586,13 @@ static int _is_bit1_literal(Smt2Frontend *fe, const Sexpr *s) {
  *
  * Verilator emits `x inside {a, b, c}` as
  *   (= #b1 (bvand #b1 (bvor (__Vbv (= x a)) (__Vbv (= x b)) ...)))
- * where __Vbv lifts a Bool to (_ BitVec 1). `bvor` maps to BIN_BOR (bitwise),
+ * where __Vbv lifts a Bool to (_ BitVec 1). `bvor` maps to DVS_BIN_BOR (bitwise),
  * whose operands then get flattened to aux vars -- so the disjunctive
  * structure was gone by the time the CDCL compiler ran. It saw a chain of ITE
  * guard propagators carrying no bound information, and `t_constraint_dist`
  * left a 32-bit variable at its full domain for the search to enumerate.
  *
- * Emitting BIN_OR instead keeps the tree intact, so zsp_compile.c's OR-tree
+ * Emitting DVS_BIN_OR instead keeps the tree intact, so dvs_compile.c's OR-tree
  * flattener can reach it, classify the reified `ite(P,1,0)` leaves, and build
  * a DisjClause propagator (which then hulls the domain).
  *
@@ -2542,7 +2603,7 @@ static int _is_bit1_literal(Smt2Frontend *fe, const Sexpr *s) {
  */
 /* DISJUNCTIONS ONLY, deliberately.
  *
- * An early version also rewrote `bvand` trees into BIN_AND. That regressed
+ * An early version also rewrote `bvand` trees into DVS_BIN_AND. That regressed
  * `t_constraint_sysfunc` from sat to unknown: `(= #b1 (bvand (__Vbv A)
  * (__Vbv B)))` already compiled correctly via the existing equality path,
  * whereas the rewritten AND-of-ITE tree did not, so the constraint was left
@@ -2550,17 +2611,17 @@ static int _is_bit1_literal(Smt2Frontend *fe, const Sexpr *s) {
  * case is the one that had no working path, so that is the only case we take
  * over. A `bvand` that is not a plain `#b1` mask makes us decline outright.
  */
-static ExprRef _reified_bool(Smt2Frontend *fe, const Sexpr *s, int depth) {
+static dvs_expr_t _reified_bool(Smt2Frontend *fe, const Sexpr *s, int depth) {
     if (!s || depth > 32) return EXPR_NULL;
 
     if (s->kind == SEXPR_LIST && s->list.count >= 3 &&
         sexpr_is_symbol(s->list.items[0], "bvor")) {
-        ExprRef acc = EXPR_NULL;
+        dvs_expr_t acc = EXPR_NULL;
         for (uint32_t i = 1; i < s->list.count; i++) {
-            ExprRef r = _reified_bool(fe, s->list.items[i], depth + 1);
+            dvs_expr_t r = _reified_bool(fe, s->list.items[i], depth + 1);
             if (r == EXPR_NULL) return EXPR_NULL;
             acc = (acc == EXPR_NULL)
-                ? r : builder_expr_binary(fe->builder, BIN_OR, acc, r);
+                ? r : dvs_builder_expr_binary(fe->builder, DVS_BIN_OR, acc, r);
             if (acc == EXPR_NULL) return EXPR_NULL;
         }
         return acc;
@@ -2587,7 +2648,7 @@ static const Sexpr *_strip_bit1_mask(Smt2Frontend *fe, const Sexpr *body) {
     }
 }
 
-static ExprRef _try_translate_reified_or(Smt2Frontend *fe, const Sexpr *s) {
+static dvs_expr_t _try_translate_reified_or(Smt2Frontend *fe, const Sexpr *s) {
     if (!s || s->kind != SEXPR_LIST || s->list.count != 3) return EXPR_NULL;
     if (!sexpr_is_symbol(s->list.items[0], "=")) return EXPR_NULL;
 
@@ -2652,15 +2713,15 @@ static int _collect_bit1_conjuncts(Smt2Frontend *fe, const Sexpr *s,
 }
 
 /** Add `ref` as a user-level (constraint_id=1) top-level constraint. */
-static void _add_user_constraint(Smt2Frontend *fe, ExprRef ref) {
+static void _add_user_constraint(Smt2Frontend *fe, dvs_expr_t ref) {
     /* Tag user-level asserts with constraint_id=1 so the model-validation
      * pass can distinguish them from internal aux constraints (which are
      * left at id=0). Internal aux constraints can be temporarily out of
      * sync with their associated aux var without affecting the user-
      * visible result; flagging them in the validator produces noise. */
-    ExprRef cref = builder_add_constraint(fe->builder, ref);
+    dvs_expr_t cref = dvs_builder_add_constraint(fe->builder, ref);
     if (cref != EXPR_NULL) {
-        ConstraintSpec *cs = (ConstraintSpec *)builder_ref_ptr(fe->builder, cref);
+        ConstraintSpec *cs = (ConstraintSpec *)dvs_builder_ref_ptr(fe->builder, cref);
         if (cs) cs->constraint_id = 1;
     }
     _builder_touched(fe);
@@ -2670,14 +2731,14 @@ static void _add_user_constraint(Smt2Frontend *fe, ExprRef ref) {
  *  own assert. Returns EXPR_NULL if the conjunct does not translate.
  *
  *  The synthetic `(= #b1 leaf)` node matters: translating `leaf` alone and
- *  wrapping the result in a hand-built BIN_EQ is NOT equivalent. The `=`
+ *  wrapping the result in a hand-built DVS_BIN_EQ is NOT equivalent. The `=`
  *  translation has folding and reification paths of its own -- notably
  *  `(= #b1 (ite b #b1 #b0))` collapsing to `b`, and the B11 signed-compare
  *  flattening -- and bypassing them leaves the constraint uncompiled (measured:
  *  dist and sysfunc both went to uncompiled=2). Reusing the assert's own `=`
  *  and `#b1` nodes reproduces the emitted form exactly.
  */
-static ExprRef _translate_bit1_conjunct(Smt2Frontend *fe, const Sexpr *eq_sym,
+static dvs_expr_t _translate_bit1_conjunct(Smt2Frontend *fe, const Sexpr *eq_sym,
                                         const Sexpr *one_lit, const Sexpr *leaf) {
     const Sexpr *body = _strip_bit1_mask(fe, leaf);
     if (!body) return EXPR_NULL;
@@ -2686,7 +2747,7 @@ static ExprRef _translate_bit1_conjunct(Smt2Frontend *fe, const Sexpr *eq_sym,
      * normalization a whole-assert bvor gets. */
     if (body->kind == SEXPR_LIST && body->list.count >= 3 &&
         sexpr_is_symbol(body->list.items[0], "bvor")) {
-        ExprRef r = _reified_bool(fe, body, 0);
+        dvs_expr_t r = _reified_bool(fe, body, 0);
         if (r != EXPR_NULL) return r;
     }
 
@@ -2728,7 +2789,7 @@ static int _try_split_reified_and(Smt2Frontend *fe, const Sexpr *s) {
     /* All-or-nothing: translate every conjunct before adding any constraint,
      * so a leaf we cannot translate leaves the assert to the ordinary path
      * (which taints properly) rather than half-asserted. */
-    ExprRef refs[SMT2_MAX_CONJUNCTS];
+    dvs_expr_t refs[SMT2_MAX_CONJUNCTS];
     for (uint32_t i = 0; i < n; i++) {
         refs[i] = _translate_bit1_conjunct(fe, s->list.items[0], one_lit, conj[i]);
         if (refs[i] == EXPR_NULL) return 0;
@@ -2776,7 +2837,7 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     if (_try_split_reified_and(fe, cmd->list.items[1])) return 0;
 
     TypedExpr te;
-    ExprRef reified = _try_translate_reified_or(fe, cmd->list.items[1]);
+    dvs_expr_t reified = _try_translate_reified_or(fe, cmd->list.items[1]);
     if (reified != EXPR_NULL) {
         te.ref = reified;
         te.width = 1;
@@ -2803,7 +2864,7 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
  * all linear in the problem, atop the 8192-var incremental_capacity_hint floor.
  * The estimate only needs to be right for the common case: grow-and-retry in
  * _ensure_compiled reallocates a larger buffer if this under-provisions. */
-static size_t _ctx_buf_size_for(const SolveProblem *p) {
+static size_t _ctx_buf_size_for(const dvs_problem_t *p) {
     size_t nv = p ? p->n_vars : 0;
     size_t nc = p ? ((size_t)p->n_constraints + p->n_softs + p->n_dists
                      + p->n_alldiffs) : 0;
@@ -2816,8 +2877,8 @@ static size_t _ctx_buf_size_for(const SolveProblem *p) {
 
 /* Finalize the builder into fe->problem WITHOUT building the CDCL context. The
  * bit-blast engine reads fe->problem directly and never touches fe->ctx, so in
- * Verilator mode (always bit-blast) we skip solver_create + solver_compile here
- * and, symmetrically, the solver_destroy/ctx_buf-free the (reset) would pay --
+ * Verilator mode (always bit-blast) we skip dvs_solver_create + dvs_solver_compile here
+ * and, symmetrically, the dvs_solver_destroy/ctx_buf-free the (reset) would pay --
  * both were pure waste on every randomize(). */
 /* Returns 0 on success, -1 on a hard error, -2 when the problem is stale but
  * cannot be safely rebuilt (caller must answer `unknown`, never a verdict).
@@ -2836,7 +2897,7 @@ static int _ensure_problem(Smt2Frontend *fe) {
         free(fe->problem);
         fe->problem = NULL;
     }
-    fe->problem = _explicit(builder_finalize(fe->builder, &fe->problem_size));
+    fe->problem = _explicit(dvs_builder_finalize(fe->builder, &fe->problem_size));
     if (!fe->problem) return -1;
     fe->builder_retained = 1;
     fe->problem_dirty    = 0;
@@ -2851,14 +2912,19 @@ static int _ensure_compiled(Smt2Frontend *fe) {
     /* A prior bit-blast-routed solve may have finalized one already (possible
      * when needs_bitblast flips mid-session); free it before overwriting. */
     if (fe->problem) { free(fe->problem); fe->problem = NULL; }
-    fe->problem = _explicit(builder_finalize(fe->builder, &fe->problem_size));
+    fe->problem = _explicit(dvs_builder_finalize(fe->builder, &fe->problem_size));
     if (!fe->problem) return -1;
+    /* The builder still holds every assertion; if no context comes of this
+     * (e.g. variables wider than 64 bits), the bitblast path re-finalizes
+     * from it after later asserts or a pop. A successful compile clears it. */
+    fe->builder_retained = 1;
+    fe->problem_dirty    = 0;
 
     /* The static ctx pool is a fixed-capacity, relocatable bump allocator by
      * design (32-bit offsets, snapshot wholesale for push/pop checkpoints), so
      * it cannot grow in place. Rather than always allocate the 64 MB maximum --
      * a large per-solve cost the frontend pays on every Verilator randomize() --
-     * start from a problem-sized estimate and, if solver_compile overflows the
+     * start from a problem-sized estimate and, if dvs_solver_compile overflows the
      * pool, reallocate a larger contiguous buffer and recompile. This gives
      * dynamic sizing with no risk of under-provisioning (capped at the old max). */
     size_t sz = _ctx_buf_size_for(fe->problem);
@@ -2866,32 +2932,46 @@ static int _ensure_compiled(Smt2Frontend *fe) {
         fe->ctx_buf = malloc(sz);
         if (!fe->ctx_buf) return -1;
         fe->ctx_buf_size = sz;
-        fe->block_alloc = zsp_block_alloc_create(NULL, BA_BLOCK_SIZE);
+        fe->block_alloc = dvs_block_alloc_create(NULL, BA_BLOCK_SIZE);
         if (!fe->block_alloc) { free(fe->ctx_buf); fe->ctx_buf = NULL; return -1; }
-        fe->ctx = solver_create(fe->ctx_buf, sz, fe->block_alloc);
+        fe->ctx = dvs_solver_create(fe->ctx_buf, sz, fe->block_alloc);
         if (!fe->ctx) {
-            zsp_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
+            dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
             free(fe->ctx_buf); fe->ctx_buf = NULL;
             return -1;
         }
         /* Vars[] capacity headroom for yosys-smtbmc-style incremental aux vars. */
         fe->ctx->incremental_capacity_hint = 8192;
-        int rc = solver_compile(fe->ctx, fe->problem);
-        if (rc == 0) {
+        int rc = dvs_solver_compile(fe->ctx, fe->problem);
+        if (rc >= 0) {
+            /* rc > 0 (some constraints left uncompiled; validation and
+             * escalation cover them) is a context like any other. Leaving
+             * `compiled` unset made _flush_aux drop every later assertion:
+             * after `(assert (xor true ...))`, `(assert false)` answered sat
+             * (B58). */
             fe->compiled = 1;
             fe->builder_retained = 0;   /* fe->problem can't be rebuilt in place (B14) */
             fe->has_aux = 0;
             _start_cdcl_retention(fe);
-            return 0;
+            return rc;
         }
         /* Grow-and-retry only on a genuine pool overflow (not a compile-time
          * UNSAT, rc == -2, or other error), and only until the cap. */
         if (fe->ctx->pool.overflow && sz < (size_t)CTX_BUF_SIZE) {
-            solver_destroy(fe->ctx); fe->ctx = NULL;
-            zsp_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
+            dvs_solver_destroy(fe->ctx); fe->ctx = NULL;
+            dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
             free(fe->ctx_buf); fe->ctx_buf = NULL;
             sz = (sz * 4 < (size_t)CTX_BUF_SIZE) ? sz * 4 : (size_t)CTX_BUF_SIZE;
             continue;
+        }
+        if (rc != -2) {
+            /* No usable context (e.g. a variable wider than 64 bits): release
+             * it. Leaving it made the next push checkpoint a context that was
+             * never compiled, and the pop then kept the popped assertions in
+             * the builder the bitblast path solves -- a wrong unsat (B63). */
+            dvs_solver_destroy(fe->ctx); fe->ctx = NULL;
+            dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
+            free(fe->ctx_buf); fe->ctx_buf = NULL;
         }
         return rc;
     }
@@ -2902,11 +2982,11 @@ static int _ensure_compiled(Smt2Frontend *fe) {
  * asserts -- unless it is already too big to keep copying on every hand-off. */
 #define SMT2_RETAIN_MAX_BYTES (16u << 20)
 static void _start_cdcl_retention(Smt2Frontend *fe) {
-    if (builder_virtual_used(fe->builder) <= SMT2_RETAIN_MAX_BYTES) {
+    if (dvs_builder_virtual_used(fe->builder) <= SMT2_RETAIN_MAX_BYTES) {
         fe->cdcl_retained = 1;
-        fe->aux_mark = builder_mark(fe->builder);
+        fe->aux_mark = dvs_builder_mark(fe->builder);
     } else {
-        builder_reset(fe->builder);
+        dvs_builder_reset(fe->builder);
         fe->cdcl_retained = 0;
         memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
     }
@@ -2915,10 +2995,10 @@ static void _start_cdcl_retention(Smt2Frontend *fe) {
 /* The builder's items since aux_mark have been handed to CDCL. */
 static void _aux_handed_off(Smt2Frontend *fe) {
     if (fe->cdcl_retained &&
-        builder_virtual_used(fe->builder) <= SMT2_RETAIN_MAX_BYTES) {
-        fe->aux_mark = builder_mark(fe->builder);
+        dvs_builder_virtual_used(fe->builder) <= SMT2_RETAIN_MAX_BYTES) {
+        fe->aux_mark = dvs_builder_mark(fe->builder);
     } else {
-        builder_reset(fe->builder);
+        dvs_builder_reset(fe->builder);
         fe->cdcl_retained = 0;
         memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
     }
@@ -2931,16 +3011,16 @@ static int _flush_aux(Smt2Frontend *fe) {
     size_t aux_sz = 0;
     /* Only the items added since the last hand-off: the builder may also hold
      * everything before it (cdcl_retained), which the ctx already has. */
-    SolveProblem *aux = _explicit(builder_finalize_since(fe->builder, &fe->aux_mark, &aux_sz));
+    dvs_problem_t *aux = _explicit(dvs_builder_finalize_since(fe->builder, &fe->aux_mark, &aux_sz));
     if (!aux) return -1;
-    int rc = solver_add_constraint(fe->ctx, aux);
-    /* Retain the aux SolveProblem (instead of freeing) so the post-solve
+    int rc = dvs_solver_add_constraint(fe->ctx, aux);
+    /* Retain the aux dvs_problem_t (instead of freeing) so the post-solve
      * model-validation pass can re-evaluate the constraints it contributed.
      * Storage is reclaimed in smt2_frontend_destroy. */
     if (fe->n_aux_problems == fe->aux_problems_cap) {
         uint32_t new_cap = fe->aux_problems_cap ? fe->aux_problems_cap * 2 : 8;
-        SolveProblem **grow = (SolveProblem **)realloc(fe->aux_problems,
-                                  new_cap * sizeof(SolveProblem *));
+        dvs_problem_t **grow = (dvs_problem_t **)realloc(fe->aux_problems,
+                                  new_cap * sizeof(dvs_problem_t *));
         if (!grow) {
             /* Out of memory: fall back to the old behaviour (drop the
              * aux). Validation will be incomplete for this run but the
@@ -2957,20 +3037,20 @@ static int _flush_aux(Smt2Frontend *fe) {
     return rc;
 }
 
-/* FNV-1a fingerprint of a finalized SolveProblem. builder_finalize() zeroes the
+/* FNV-1a fingerprint of a finalized dvs_problem_t. dvs_builder_finalize() zeroes the
  * whole buffer then fills it deterministically from the builder's blocks, and
- * every ExprRef is a pool-relative offset, so identical problems produce
+ * every dvs_expr_t is a pool-relative offset, so identical problems produce
  * byte-identical content and thus the same fingerprint. We hash the leading
- * scalar/head fields plus the pool DATA region, skipping the embedded zsp_pool_t
+ * scalar/head fields plus the pool DATA region, skipping the embedded dvs_pool_t
  * header (which may hold non-deterministic bookkeeping). Used only as a cache
  * key in Verilator mode; a collision would at worst reuse a wrong-but-still-
  * sound model, and the space (64-bit) makes that astronomically unlikely. */
-static uint64_t _problem_fingerprint(const SolveProblem *p) {
+static uint64_t _problem_fingerprint(const dvs_problem_t *p) {
     uint64_t h = 1469598103934665603ULL;              /* FNV-1a offset basis */
     const uint8_t *lead = (const uint8_t *)p;
     size_t lead_len = (size_t)((const uint8_t *)&p->pool - (const uint8_t *)p);
     for (size_t i = 0; i < lead_len; i++) { h ^= lead[i]; h *= 1099511628211ULL; }
-    const uint8_t *data = (const uint8_t *)&p->pool + sizeof(zsp_pool_t);
+    const uint8_t *data = (const uint8_t *)&p->pool + sizeof(dvs_pool_t);
     size_t used = p->pool.used;
     for (size_t i = 0; i < used; i++) { h ^= data[i]; h *= 1099511628211ULL; }
     return h ? h : 1;                                  /* never return 0 */
@@ -2991,7 +3071,7 @@ static uint64_t _problem_fingerprint(const SolveProblem *p) {
  * satisfies the array theory. Returns 0, or -1 on OOM. */
 static int _emit_array_axioms(Smt2Frontend *fe) {
     if (!fe->array_lazy || (fe->n_areads == 0 && fe->n_aeqs == 0)) return 0;
-    SolveProblemBuilder *b = fe->builder;
+    dvs_builder_t *b = fe->builder;
 
     /* Seed one extensionality witness read per equality (fresh index, read on
      * both sides). */
@@ -2999,7 +3079,7 @@ static int _emit_array_axioms(Smt2Frontend *fe) {
         Smt2ArrayValue *A = fe->aeqs[e].a, *B = fe->aeqs[e].b;
         uint16_t aw = A->sort.addr_width, dw = A->sort.data_width;
         uint32_t k = _fresh_read_var(fe, aw ? aw : 1);
-        ExprRef kref = builder_expr_var(b, k);
+        dvs_expr_t kref = dvs_builder_expr_var(b, k);
         fe->aeqs[e].wit_idx_ref = kref;
         if (_abs_find_or_create_read(fe, A, kref, k, dw) == UINT32_MAX) return -1;
         if (_abs_find_or_create_read(fe, B, kref, k, dw) == UINT32_MAX) return -1;
@@ -3010,7 +3090,7 @@ static int _emit_array_axioms(Smt2Frontend *fe) {
         uint32_t before = fe->n_areads;
         for (uint32_t i = 0; i < before; i++) {
             Smt2ArrayValue *node = fe->areads[i].node;
-            ExprRef  idx  = fe->areads[i].idx_ref;
+            dvs_expr_t  idx  = fe->areads[i].idx_ref;
             uint32_t idxv = fe->areads[i].idx_varid;
             uint16_t w    = fe->areads[i].width;
             if (node->akind == SMT2_ANODE_STORE) {
@@ -3026,7 +3106,7 @@ static int _emit_array_axioms(Smt2Frontend *fe) {
                 Smt2ArrayValue *node = fe->areads[i].node;
                 if (node != A && node != B) continue;
                 Smt2ArrayValue *other = (node == A) ? B : A;
-                ExprRef  idx  = fe->areads[i].idx_ref;
+                dvs_expr_t  idx  = fe->areads[i].idx_ref;
                 uint32_t idxv = fe->areads[i].idx_varid;
                 uint16_t w    = fe->areads[i].width;
                 if (_abs_find_or_create_read(fe, other, idx, idxv, w) == UINT32_MAX) return -1;
@@ -3039,31 +3119,31 @@ static int _emit_array_axioms(Smt2Frontend *fe) {
      * exist now, so these find (not create) and cannot realloc mid-emit. */
     for (uint32_t i = 0; i < fe->n_areads; i++) {
         Smt2ArrayValue *node = fe->areads[i].node;
-        ExprRef  idx  = fe->areads[i].idx_ref;
+        dvs_expr_t  idx  = fe->areads[i].idx_ref;
         uint32_t idxv = fe->areads[i].idx_varid;
         uint16_t w    = fe->areads[i].width;
-        ExprRef  rref = builder_expr_var(b, fe->areads[i].read_varid);
+        dvs_expr_t  rref = dvs_builder_expr_var(b, fe->areads[i].read_varid);
         switch (node->akind) {
         case SMT2_ANODE_STORE: {
             uint32_t rp = _abs_find_or_create_read(fe, node->parent, idx, idxv, w);
-            ExprRef cond = builder_expr_binary(b, BIN_EQ, idx, node->store_idx_ref);
-            ExprRef sel  = builder_expr_ite(b, cond, node->store_val,
-                                            builder_expr_var(b, rp));
-            builder_add_constraint(b, builder_expr_binary(b, BIN_EQ, rref, sel));
+            dvs_expr_t cond = dvs_builder_expr_binary(b, DVS_BIN_EQ, idx, node->store_idx_ref);
+            dvs_expr_t sel  = dvs_builder_expr_ite(b, cond, node->store_val,
+                                            dvs_builder_expr_var(b, rp));
+            dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ, rref, sel));
             break;
         }
         case SMT2_ANODE_ITE: {
             uint32_t rt = _abs_find_or_create_read(fe, node->parent, idx, idxv, w);
             uint32_t re = _abs_find_or_create_read(fe, node->else_node, idx, idxv, w);
-            ExprRef sel = builder_expr_ite(b, node->cond_ref,
-                                           builder_expr_var(b, rt),
-                                           builder_expr_var(b, re));
-            builder_add_constraint(b, builder_expr_binary(b, BIN_EQ, rref, sel));
+            dvs_expr_t sel = dvs_builder_expr_ite(b, node->cond_ref,
+                                           dvs_builder_expr_var(b, rt),
+                                           dvs_builder_expr_var(b, re));
+            dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ, rref, sel));
             break;
         }
         case SMT2_ANODE_CONST:
-            builder_add_constraint(b,
-                builder_expr_binary(b, BIN_EQ, rref, node->store_val));
+            dvs_builder_add_constraint(b,
+                dvs_builder_expr_binary(b, DVS_BIN_EQ, rref, node->store_val));
             break;
         default: /* SMT2_ANODE_BASE: congruence below */
             break;
@@ -3077,13 +3157,13 @@ static int _emit_array_axioms(Smt2Frontend *fe) {
         if (fe->areads[i].node->akind != SMT2_ANODE_BASE) continue;
         for (uint32_t j = i + 1; j < fe->n_areads; j++) {
             if (fe->areads[j].node != fe->areads[i].node) continue;
-            ExprRef cond = builder_expr_binary(b, BIN_EQ,
+            dvs_expr_t cond = dvs_builder_expr_binary(b, DVS_BIN_EQ,
                               fe->areads[i].idx_ref, fe->areads[j].idx_ref);
-            ExprRef eqv  = builder_expr_binary(b, BIN_EQ,
-                              builder_expr_var(b, fe->areads[i].read_varid),
-                              builder_expr_var(b, fe->areads[j].read_varid));
-            builder_add_constraint(b, builder_expr_binary(b, BIN_OR,
-                              builder_expr_unary(b, UN_NOT, cond), eqv));
+            dvs_expr_t eqv  = dvs_builder_expr_binary(b, DVS_BIN_EQ,
+                              dvs_builder_expr_var(b, fe->areads[i].read_varid),
+                              dvs_builder_expr_var(b, fe->areads[j].read_varid));
+            dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_OR,
+                              dvs_builder_expr_unary(b, DVS_UN_NOT, cond), eqv));
         }
     }
 
@@ -3091,26 +3171,26 @@ static int _emit_array_axioms(Smt2Frontend *fe) {
     for (uint32_t e = 0; e < fe->n_aeqs; e++) {
         Smt2ArrayValue *A = fe->aeqs[e].a, *B = fe->aeqs[e].b;
         uint16_t dw = A->sort.data_width;
-        ExprRef pref  = builder_expr_var(b, fe->aeqs[e].p_varid);
-        ExprRef npref = builder_expr_unary(b, UN_NOT, pref);
+        dvs_expr_t pref  = dvs_builder_expr_var(b, fe->aeqs[e].p_varid);
+        dvs_expr_t npref = dvs_builder_expr_unary(b, DVS_UN_NOT, pref);
         /* Consistency: p -> read(A,i)==read(B,i) for every index read on A
          * (== indices read on B after the coupling fixpoint). */
         for (uint32_t i = 0; i < fe->n_areads; i++) {
             if (fe->areads[i].node != A) continue;
             uint32_t rB = _abs_find_or_create_read(fe, B, fe->areads[i].idx_ref,
                                                    fe->areads[i].idx_varid, dw);
-            ExprRef eqv = builder_expr_binary(b, BIN_EQ,
-                              builder_expr_var(b, fe->areads[i].read_varid),
-                              builder_expr_var(b, rB));
-            builder_add_constraint(b, builder_expr_binary(b, BIN_OR, npref, eqv));
+            dvs_expr_t eqv = dvs_builder_expr_binary(b, DVS_BIN_EQ,
+                              dvs_builder_expr_var(b, fe->areads[i].read_varid),
+                              dvs_builder_expr_var(b, rB));
+            dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_OR, npref, eqv));
         }
         /* Extensionality: ¬p -> read(A,w)!=read(B,w). */
         uint32_t idxv = _idx_varid(fe, fe->aeqs[e].wit_idx_ref);
         uint32_t rAk = _abs_find_or_create_read(fe, A, fe->aeqs[e].wit_idx_ref, idxv, dw);
         uint32_t rBk = _abs_find_or_create_read(fe, B, fe->aeqs[e].wit_idx_ref, idxv, dw);
-        ExprRef neq = builder_expr_binary(b, BIN_NEQ,
-                          builder_expr_var(b, rAk), builder_expr_var(b, rBk));
-        builder_add_constraint(b, builder_expr_binary(b, BIN_OR, pref, neq));
+        dvs_expr_t neq = dvs_builder_expr_binary(b, DVS_BIN_NEQ,
+                          dvs_builder_expr_var(b, rAk), dvs_builder_expr_var(b, rBk));
+        dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_OR, pref, neq));
     }
     return 0;
 }
@@ -3125,14 +3205,14 @@ static int _emit_array_axioms(Smt2Frontend *fe) {
  * reports UNSAT. Every lemma is a valid QF_ABV consequence, so UNSAT is real
  * and a returned SAT model is array-consistent by construction. */
 
-/* Model value of a plain-var / const ExprRef under the current bb_solver model. */
-static int64_t _abs_mval_ref(Smt2Frontend *fe, ExprRef ref) {
+/* Model value of a plain-var / const dvs_expr_t under the current bb_solver model. */
+static int64_t _abs_mval_ref(Smt2Frontend *fe, dvs_expr_t ref) {
     if (ref == EXPR_NULL) return 0;
     ExprKind *k = (ExprKind *)POOL_PTR(fe->problem, ref);
     if (!k) return 0;
     if (*k == EXPR_VAR) {
         int64_t v = 0;
-        zsp_bbsolver_value(fe->bb_solver, ((ExprVar *)k)->var_id, &v);
+        dvs_bbsolver_value(fe->bb_solver, ((ExprVar *)k)->var_id, &v);
         return v;
     }
     if (*k == EXPR_CONST) return ((ExprConst *)k)->value;
@@ -3140,13 +3220,13 @@ static int64_t _abs_mval_ref(Smt2Frontend *fe, ExprRef ref) {
 }
 static int64_t _abs_mval_var(Smt2Frontend *fe, uint32_t varid) {
     int64_t v = 0;
-    zsp_bbsolver_value(fe->bb_solver, varid, &v);
+    dvs_bbsolver_value(fe->bb_solver, varid, &v);
     return v;
 }
 
 /* Pure find (no create) of the read var for (node, idx). UINT32_MAX if absent. */
 static uint32_t _abs_find_read(Smt2Frontend *fe, Smt2ArrayValue *node,
-                               ExprRef idx_ref, uint32_t idx_varid) {
+                               dvs_expr_t idx_ref, uint32_t idx_varid) {
     uint32_t slot = _aread_lookup(fe, node, idx_varid, idx_ref);
     return slot == UINT32_MAX ? UINT32_MAX : fe->areads[slot].read_varid;
 }
@@ -3155,7 +3235,7 @@ static uint32_t _abs_find_read(Smt2Frontend *fe, Smt2ArrayValue *node,
  * finalized-with-headroom pool). Returns the read var_id, or UINT32_MAX on OOM
  * / slack exhaustion. */
 static uint32_t _abs_read_inplace(Smt2Frontend *fe, Smt2ArrayValue *node,
-                                  ExprRef idx_ref, uint32_t idx_varid, uint16_t w) {
+                                  dvs_expr_t idx_ref, uint32_t idx_varid, uint16_t w) {
     uint32_t ex = _abs_find_read(fe, node, idx_ref, idx_varid);
     if (ex != UINT32_MAX) return ex;
     if (fe->n_areads == fe->areads_cap) {
@@ -3180,38 +3260,38 @@ static uint32_t _abs_read_inplace(Smt2Frontend *fe, Smt2ArrayValue *node,
 }
 
 /* Assert an in-place-built predicate into the live incremental solver. */
-static int _abs_assert(Smt2Frontend *fe, ExprRef pred) {
+static int _abs_assert(Smt2Frontend *fe, dvs_expr_t pred) {
     if (pred == EXPR_NULL) return -1;
-    return zsp_bbsolver_assert(fe->bb_solver, pred) == 0 ? 0 : -1;
+    return dvs_bbsolver_assert(fe->bb_solver, pred) == 0 ? 0 : -1;
 }
 
 /* Build read i's one-step defining constraint (STORE/ITE/CONST), minting parent
- * reads in-place as needed. Marks emitted. Returns the lemma ExprRef, or
+ * reads in-place as needed. Marks emitted. Returns the lemma dvs_expr_t, or
  * EXPR_NULL on OOM / slack exhaustion. Does NOT assert (the caller batches
  * asserts after model reads, since asserting invalidates the SAT model). */
-static ExprRef _abs_build_read_def(Smt2Frontend *fe, uint32_t i) {
-    SolveProblem *P = fe->problem;
+static dvs_expr_t _abs_build_read_def(Smt2Frontend *fe, uint32_t i) {
+    dvs_problem_t *P = fe->problem;
     Smt2ArrayValue *node = fe->areads[i].node;
-    ExprRef idx  = fe->areads[i].idx_ref;
+    dvs_expr_t idx  = fe->areads[i].idx_ref;
     uint32_t idxv = fe->areads[i].idx_varid;
     uint32_t r   = fe->areads[i].read_varid;
     uint16_t w   = fe->areads[i].width;
-    ExprRef rref = expr_var(P, r);
-    ExprRef lem = EXPR_NULL;
+    dvs_expr_t rref = expr_var(P, r);
+    dvs_expr_t lem = EXPR_NULL;
     if (node->akind == SMT2_ANODE_STORE) {
         uint32_t rp = _abs_read_inplace(fe, node->parent, idx, idxv, w);
         if (rp == UINT32_MAX) return EXPR_NULL;
-        ExprRef cond = expr_binary(P, BIN_EQ, idx, node->store_idx_ref);
-        ExprRef sel  = expr_ite(P, cond, node->store_val, expr_var(P, rp));
-        lem = expr_binary(P, BIN_EQ, rref, sel);
+        dvs_expr_t cond = expr_binary(P, DVS_BIN_EQ, idx, node->store_idx_ref);
+        dvs_expr_t sel  = expr_ite(P, cond, node->store_val, expr_var(P, rp));
+        lem = expr_binary(P, DVS_BIN_EQ, rref, sel);
     } else if (node->akind == SMT2_ANODE_ITE) {
         uint32_t rt = _abs_read_inplace(fe, node->parent, idx, idxv, w);
         uint32_t re = _abs_read_inplace(fe, node->else_node, idx, idxv, w);
         if (rt == UINT32_MAX || re == UINT32_MAX) return EXPR_NULL;
-        ExprRef sel = expr_ite(P, node->cond_ref, expr_var(P, rt), expr_var(P, re));
-        lem = expr_binary(P, BIN_EQ, rref, sel);
+        dvs_expr_t sel = expr_ite(P, node->cond_ref, expr_var(P, rt), expr_var(P, re));
+        lem = expr_binary(P, DVS_BIN_EQ, rref, sel);
     } else if (node->akind == SMT2_ANODE_CONST) {
-        lem = expr_binary(P, BIN_EQ, rref, node->store_val);
+        lem = expr_binary(P, DVS_BIN_EQ, rref, node->store_val);
     } else {
         return EXPR_NULL;   /* BASE: no defining constraint */
     }
@@ -3230,25 +3310,25 @@ static ExprRef _abs_build_read_def(Smt2Frontend *fe, uint32_t i) {
  * it drops the 32-bit mux + stored value from every miss level, which is where
  * the deep-chain solve cost lives. `emitted` is used as a 2-bit mask (HIT|MISS)
  * so the other half is added if a later model flips the branch. Returns the
- * lemma ExprRef (EXPR_NULL on OOM). */
+ * lemma dvs_expr_t (EXPR_NULL on OOM). */
 #define _AR_HIT  1u
 #define _AR_MISS 2u
-static ExprRef _abs_build_store_half(Smt2Frontend *fe, uint32_t i, uint8_t want) {
-    SolveProblem *P = fe->problem;
+static dvs_expr_t _abs_build_store_half(Smt2Frontend *fe, uint32_t i, uint8_t want) {
+    dvs_problem_t *P = fe->problem;
     Smt2ArrayValue *node = fe->areads[i].node;
-    ExprRef idx  = fe->areads[i].idx_ref;
-    ExprRef rref = expr_var(P, fe->areads[i].read_varid);
-    ExprRef cond = expr_binary(P, BIN_EQ, idx, node->store_idx_ref);
-    ExprRef lem;
+    dvs_expr_t idx  = fe->areads[i].idx_ref;
+    dvs_expr_t rref = expr_var(P, fe->areads[i].read_varid);
+    dvs_expr_t cond = expr_binary(P, DVS_BIN_EQ, idx, node->store_idx_ref);
+    dvs_expr_t lem;
     if (want == _AR_HIT) {
-        ExprRef eqv = expr_binary(P, BIN_EQ, rref, node->store_val);
-        lem = expr_binary(P, BIN_OR, expr_unary(P, UN_NOT, cond), eqv);
+        dvs_expr_t eqv = expr_binary(P, DVS_BIN_EQ, rref, node->store_val);
+        lem = expr_binary(P, DVS_BIN_OR, expr_unary(P, DVS_UN_NOT, cond), eqv);
     } else {
         uint32_t rp = _abs_read_inplace(fe, node->parent, idx,
                                         fe->areads[i].idx_varid, fe->areads[i].width);
         if (rp == UINT32_MAX) return EXPR_NULL;
-        ExprRef eqv = expr_binary(P, BIN_EQ, rref, expr_var(P, rp));
-        lem = expr_binary(P, BIN_OR, cond, eqv);
+        dvs_expr_t eqv = expr_binary(P, DVS_BIN_EQ, rref, expr_var(P, rp));
+        lem = expr_binary(P, DVS_BIN_OR, cond, eqv);
     }
     if (lem != EXPR_NULL) fe->areads[i].emitted |= want;
     return lem;
@@ -3282,7 +3362,7 @@ static int _seed_store_index_reads(Smt2Frontend *fe, Smt2ArrayValue *chain,
  * either chain (equality completeness), and (2) add the extensionality witness
  * (p) | (read(A,w) != read(B,w)) with a fresh witness index w. */
 static int _array_emit_extensionality(Smt2Frontend *fe) {
-    SolveProblem *P = fe->problem;
+    dvs_problem_t *P = fe->problem;
     for (uint32_t e = 0; e < fe->n_aeqs; e++) {
         Smt2ArrayValue *A = fe->aeqs[e].a, *B = fe->aeqs[e].b;
         uint16_t dw = A->sort.data_width;
@@ -3299,13 +3379,13 @@ static int _array_emit_extensionality(Smt2Frontend *fe) {
         if (problem_add_var(P, kid, (uint8_t)aw, 0, 0,
                             _bv_unsigned_hi(aw)) == EXPR_NULL) return -1;
         if (kid + 1 > fe->n_vars) fe->n_vars = kid + 1;
-        ExprRef kref = expr_var(P, kid);
+        dvs_expr_t kref = expr_var(P, kid);
         fe->aeqs[e].wit_idx_ref = kref;
         uint32_t rA = _abs_read_inplace(fe, A, kref, kid, dw);
         uint32_t rB = _abs_read_inplace(fe, B, kref, kid, dw);
         if (rA == UINT32_MAX || rB == UINT32_MAX) return -1;
-        ExprRef neq = expr_binary(P, BIN_NEQ, expr_var(P, rA), expr_var(P, rB));
-        ExprRef lem = expr_binary(P, BIN_OR, expr_var(P, fe->aeqs[e].p_varid), neq);
+        dvs_expr_t neq = expr_binary(P, DVS_BIN_NEQ, expr_var(P, rA), expr_var(P, rB));
+        dvs_expr_t lem = expr_binary(P, DVS_BIN_OR, expr_var(P, fe->aeqs[e].p_varid), neq);
         if (_abs_assert(fe, lem) < 0) return -1;
     }
     return 0;
@@ -3335,15 +3415,15 @@ static int _cong_cmp(const void *pa, const void *pb) {
 }
 
 static int _array_refine(Smt2Frontend *fe) {
-    SolveProblem *P = fe->problem;
-    ExprRef *lems = NULL;
+    dvs_problem_t *P = fe->problem;
+    dvs_expr_t *lems = NULL;
     uint32_t nlem = 0, cap = 0;
     #define _LEM_PUSH(L) do {                                                  \
-        ExprRef _l = (L);                                                      \
+        dvs_expr_t _l = (L);                                                      \
         if (_l == EXPR_NULL) { free(lems); return -1; }                        \
         if (nlem == cap) {                                                     \
             cap = cap ? cap * 2 : 64;                                          \
-            ExprRef *_g = (ExprRef *)realloc(lems, cap * sizeof(ExprRef));     \
+            dvs_expr_t *_g = (dvs_expr_t *)realloc(lems, cap * sizeof(dvs_expr_t));     \
             if (!_g) { free(lems); return -1; }                               \
             lems = _g;                                                         \
         }                                                                      \
@@ -3361,7 +3441,7 @@ static int _array_refine(Smt2Frontend *fe) {
     for (uint32_t i = 0; i < fe->n_areads; i++) {
         Smt2ArrayValue *node = fe->areads[i].node;
         if (node->akind == SMT2_ANODE_BASE) continue;
-        ExprRef  idx  = fe->areads[i].idx_ref;
+        dvs_expr_t  idx  = fe->areads[i].idx_ref;
         uint32_t idxv = fe->areads[i].idx_varid;
 
         if (nonext && node->akind == SMT2_ANODE_STORE) {
@@ -3423,19 +3503,19 @@ static int _array_refine(Smt2Frontend *fe) {
                 for (uint32_t y = x + 1; y < b; y++) {
                     if (ce[x].rval == ce[y].rval) continue;
                     uint32_t si = ce[x].slot, sj = ce[y].slot;
-                    ExprRef cond = expr_binary(P, BIN_EQ,
+                    dvs_expr_t cond = expr_binary(P, DVS_BIN_EQ,
                                       fe->areads[si].idx_ref, fe->areads[sj].idx_ref);
-                    ExprRef eqv  = expr_binary(P, BIN_EQ,
+                    dvs_expr_t eqv  = expr_binary(P, DVS_BIN_EQ,
                                       expr_var(P, fe->areads[si].read_varid),
                                       expr_var(P, fe->areads[sj].read_varid));
-                    ExprRef lem = (cond == EXPR_NULL || eqv == EXPR_NULL)
+                    dvs_expr_t lem = (cond == EXPR_NULL || eqv == EXPR_NULL)
                                   ? EXPR_NULL
-                                  : expr_binary(P, BIN_OR,
-                                        expr_unary(P, UN_NOT, cond), eqv);
+                                  : expr_binary(P, DVS_BIN_OR,
+                                        expr_unary(P, DVS_UN_NOT, cond), eqv);
                     if (lem == EXPR_NULL) { free(ce); free(lems); return -1; }
                     if (nlem == cap) {
                         cap = cap ? cap * 2 : 64;
-                        ExprRef *g = (ExprRef *)realloc(lems, cap * sizeof(ExprRef));
+                        dvs_expr_t *g = (dvs_expr_t *)realloc(lems, cap * sizeof(dvs_expr_t));
                         if (!g) { free(ce); free(lems); return -1; }
                         lems = g;
                     }
@@ -3459,7 +3539,7 @@ static int _array_refine(Smt2Frontend *fe) {
             Smt2ArrayValue *side = fe->areads[i].node;
             if (side != A && side != B) continue;
             Smt2ArrayValue *other = (side == A) ? B : A;
-            ExprRef  bidx = fe->areads[i].idx_ref;
+            dvs_expr_t  bidx = fe->areads[i].idx_ref;
             uint32_t bidxv = fe->areads[i].idx_varid;
             int64_t va = _abs_mval_var(fe, fe->areads[i].read_varid);
             /* Read `other` at the same index. Only read its model if it already
@@ -3470,11 +3550,11 @@ static int _array_refine(Smt2Frontend *fe) {
                 rO = _abs_read_inplace(fe, other, bidx, bidxv, dw);
                 if (rO == UINT32_MAX) { free(lems); return -1; }
             }
-            ExprRef eqv = expr_binary(P, BIN_EQ,
+            dvs_expr_t eqv = expr_binary(P, DVS_BIN_EQ,
                               expr_var(P, fe->areads[i].read_varid),
                               expr_var(P, rO));
-            _LEM_PUSH(expr_binary(P, BIN_OR,
-                          expr_unary(P, UN_NOT, expr_var(P, fe->aeqs[e].p_varid)),
+            _LEM_PUSH(expr_binary(P, DVS_BIN_OR,
+                          expr_unary(P, DVS_UN_NOT, expr_var(P, fe->aeqs[e].p_varid)),
                           eqv));
         }
     }
@@ -3497,83 +3577,83 @@ static int _check_sat_array(Smt2Frontend *fe) {
     if (fe->problem)   { free(fe->problem); fe->problem = NULL; }
 
     /* Finalize the BV skeleton with pool headroom for in-place lemmas + reads. */
-    uint32_t vu = builder_virtual_used(fe->builder);
+    uint32_t vu = dvs_builder_virtual_used(fe->builder);
     uint32_t reserve = vu > (32u << 20) ? vu : (32u << 20);   /* >= 32 MB slack */
-    fe->problem = _explicit(builder_finalize_reserve(fe->builder, &fe->problem_size, reserve));
+    fe->problem = _explicit(dvs_builder_finalize_reserve(fe->builder, &fe->problem_size, reserve));
     if (!fe->problem) { SMT2_EMIT_UNKNOWN(fe); fflush(fe->out); return -1; }
-    builder_reset(fe->builder);
+    dvs_builder_reset(fe->builder);
     fe->builder_retained = 0;
     fe->cdcl_retained = 0;
     memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
     fe->has_aux = 0;
 
     /* Incremental CaDiCaL backend is required for assert + resolve. */
-    fe->bb_solver = zsp_bbsolver_new_backend(NULL, fe->problem, /*cadical=*/1);
-    if (!fe->bb_solver || !zsp_bbsolver_is_incremental(fe->bb_solver)) {
+    fe->bb_solver = dvs_bbsolver_new_backend(NULL, fe->problem, /*cadical=*/1);
+    if (!fe->bb_solver || !dvs_bbsolver_is_incremental(fe->bb_solver)) {
         SMT2_EMIT_UNKNOWN(fe); fflush(fe->out);
         return -1;
     }
 
-    int rc = zsp_bbsolver_prepare(fe->bb_solver, fe->seed);
-    if (rc == ZSP_BB_ENCODE_READY) {
+    int rc = dvs_bbsolver_prepare(fe->bb_solver, fe->seed);
+    if (rc == DVS_BB_ENCODE_READY) {
         /* resolve_raw: refinement must read the TRUE model (diversify randomizes
          * don't-care bits, which include lazily-unconstrained read vars). */
-        if (_array_emit_extensionality(fe) < 0) rc = ZSP_BB_UNKNOWN;
-        else rc = zsp_bbsolver_resolve_raw(fe->bb_solver);
-        while (rc == ZSP_BB_SAT) {
+        if (_array_emit_extensionality(fe) < 0) rc = DVS_BB_UNKNOWN;
+        else rc = dvs_bbsolver_resolve_raw(fe->bb_solver);
+        while (rc == DVS_BB_SAT) {
             int added = _array_refine(fe);
-            if (added < 0) { rc = ZSP_BB_UNKNOWN; break; }
+            if (added < 0) { rc = DVS_BB_UNKNOWN; break; }
             if (added == 0) break;                 /* model satisfies the theory */
-            rc = zsp_bbsolver_resolve_raw(fe->bb_solver);
+            rc = dvs_bbsolver_resolve_raw(fe->bb_solver);
         }
     }
 
-    fe->bb_model_valid = (rc == ZSP_BB_SAT);
-    if (rc == ZSP_BB_SAT) {
+    fe->bb_model_valid = (rc == DVS_BB_SAT);
+    if (rc == DVS_BB_SAT) {
         fprintf(fe->out, "sat\n");
-        fe->last_result = SOLVE_OK; fe->has_result = 1;
-    } else if (rc == ZSP_BB_UNSAT) {
+        fe->last_result = DVS_SOLVE_OK; fe->has_result = 1;
+    } else if (rc == DVS_BB_UNSAT) {
         fprintf(fe->out, "unsat\n");
-        fe->last_result = SOLVE_UNSAT; fe->has_result = 1;
+        fe->last_result = DVS_SOLVE_UNSAT; fe->has_result = 1;
     } else {
         SMT2_EMIT_UNKNOWN(fe);
     }
     fflush(fe->out);
-    return rc == ZSP_BB_ERROR ? -1 : 0;
+    return rc == DVS_BB_ERROR ? -1 : 0;
 }
 
-/* Phase B.0: bit-blast + kissat engine. Bypasses solver_solve() and runs
+/* Phase B.0: bit-blast + kissat engine. Bypasses dvs_solver_solve() and runs
  * directly on fe->problem. Triggered by DV_ENGINE=bitblast (set by the
  * --engine=bitblast CLI flag). The bbsolver is kept alive on fe->bb_solver
  * so that subsequent (get-value) calls can read back model values. */
 /* Free the bit-blast solver and the problem it was built from, if owned. */
 static void _free_bb(Smt2Frontend *fe) {
-    if (fe->bb_solver)  { zsp_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
+    if (fe->bb_solver)  { dvs_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
     if (fe->bb_problem) { free(fe->bb_problem); fe->bb_problem = NULL; }
 }
 
 /* Solve `p` with the bit-blast engine. `owned`, if non-NULL, is `p` handed
  * over by the caller: it becomes fe->bb_problem when a new bb_solver is built
  * from it, and is freed otherwise. */
-static int _check_sat_bitblast_on(Smt2Frontend *fe, SolveProblem *p,
-                                  SolveProblem *owned);
-static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
-                                    SolveProblem **owned_io);
+static int _check_sat_bitblast_on(Smt2Frontend *fe, dvs_problem_t *p,
+                                  dvs_problem_t *owned);
+static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
+                                    dvs_problem_t **owned_io);
 
 static int _check_sat_bitblast(Smt2Frontend *fe) {
     return _check_sat_bitblast_on(fe, fe->problem, NULL);
 }
 
-static int _check_sat_bitblast_on(Smt2Frontend *fe, SolveProblem *p,
-                                  SolveProblem *owned) {
+static int _check_sat_bitblast_on(Smt2Frontend *fe, dvs_problem_t *p,
+                                  dvs_problem_t *owned) {
     int ret = _check_sat_bitblast_body(fe, p, &owned);
     free(owned);                            /* NULL once adopted as bb_problem */
     return ret;
 }
 
-static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
-                                    SolveProblem **owned_io) {
-    SolveProblem *owned = *owned_io;
+static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
+                                    dvs_problem_t **owned_io) {
+    dvs_problem_t *owned = *owned_io;
     if (!p) {
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
@@ -3596,16 +3676,16 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
             if (fe->cached_result == 0) {              /* cached UNSAT */
                 fprintf(fe->out, "unsat\n");
                 fflush(fe->out);
-                fe->last_result = SOLVE_UNSAT;
+                fe->last_result = DVS_SOLVE_UNSAT;
                 fe->has_result = 1;
                 return 0;
             }
             if (fe->bb_solver &&
-                zsp_bbsolver_rediversify(fe->bb_solver, fe->seed) == 0) {
+                dvs_bbsolver_rediversify(fe->bb_solver, fe->seed) == 0) {
                 fe->bb_model_valid = 1;
                 fprintf(fe->out, "sat\n");
                 fflush(fe->out);
-                fe->last_result = SOLVE_OK;
+                fe->last_result = DVS_SOLVE_OK;
                 fe->has_result = 1;
                 return 0;
             }
@@ -3614,7 +3694,7 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
 
     /* Cache miss (or forced re-solve): drop any prior bbsolver and solve fresh. */
     _free_bb(fe);
-    fe->bb_solver  = zsp_bbsolver_new(NULL, p);
+    fe->bb_solver  = dvs_bbsolver_new(NULL, p);
     fe->bb_problem = owned;                 /* lives exactly as long as bb_solver */
     *owned_io = NULL;
     if (!fe->bb_solver) {
@@ -3623,22 +3703,22 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
         fe->cache_valid = 0;
         return -1;
     }
-    int rc = zsp_bbsolver_check(fe->bb_solver, fe->seed);
-    fe->bb_model_valid = (rc == ZSP_BB_SAT);
-    if (fe->verilator_mode && (rc == ZSP_BB_SAT || rc == ZSP_BB_UNSAT)) {
+    int rc = dvs_bbsolver_check(fe->bb_solver, fe->seed);
+    fe->bb_model_valid = (rc == DVS_BB_SAT);
+    if (fe->verilator_mode && (rc == DVS_BB_SAT || rc == DVS_BB_UNSAT)) {
         fe->cached_fp = fp;
         fe->cache_valid = 1;
-        fe->cached_result = (rc == ZSP_BB_SAT) ? 1 : 0;
+        fe->cached_result = (rc == DVS_BB_SAT) ? 1 : 0;
     } else {
         fe->cache_valid = 0;                           /* unknown/error: never reuse */
     }
-    if (rc == ZSP_BB_SAT) {
+    if (rc == DVS_BB_SAT) {
         fprintf(fe->out, "sat\n");
-        fe->last_result = SOLVE_OK;
+        fe->last_result = DVS_SOLVE_OK;
         fe->has_result = 1;
-    } else if (rc == ZSP_BB_UNSAT) {
+    } else if (rc == DVS_BB_UNSAT) {
         fprintf(fe->out, "unsat\n");
-        fe->last_result = SOLVE_UNSAT;
+        fe->last_result = DVS_SOLVE_UNSAT;
         fe->has_result = 1;
     } else {
         SMT2_EMIT_UNKNOWN(fe);
@@ -3646,7 +3726,7 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, SolveProblem *p,
     fflush(fe->out);
     /* The CDCL path returns 0 for both SAT and UNSAT (only protocol errors
      * are negative). Mirror that — UNSAT is a valid result, not an error. */
-    return rc == ZSP_BB_ERROR ? -1 : 0;
+    return rc == DVS_BB_ERROR ? -1 : 0;
 }
 
 /* True when the cube-and-conquer engine is explicitly selected
@@ -3662,7 +3742,7 @@ static int _engine_is_cube(Smt2Frontend *fe) {
  * path it runs directly on fe->problem and keeps fe->bb_solver alive for
  * subsequent (get-value). Bit-blasts once, then partitions the search space
  * into cubes solved over the shared instance. Soundness contract is enforced
- * inside zsp_cube_check (SAT on any cube; UNSAT only on an exhaustive all-UNSAT
+ * inside dvs_cube_check (SAT on any cube; UNSAT only on an exhaustive all-UNSAT
  * partition; otherwise unknown). No Verilator identity cache — cube is for
  * one-shot hard instances, not the re-randomize loop. */
 static int _check_sat_cube(Smt2Frontend *fe) {
@@ -3674,27 +3754,27 @@ static int _check_sat_cube(Smt2Frontend *fe) {
     _free_bb(fe);
     /* Prefer CaDiCaL: cube-and-conquer needs retractable assumptions. Falls
      * back to kissat (→ single-shot solve) when CaDiCaL is not compiled in. */
-    fe->bb_solver = zsp_bbsolver_new_backend(NULL, fe->problem, /*prefer_cadical=*/1);
+    fe->bb_solver = dvs_bbsolver_new_backend(NULL, fe->problem, /*prefer_cadical=*/1);
     if (!fe->bb_solver) {
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
         return -1;
     }
-    int rc = zsp_cube_check(fe->bb_solver, fe->seed);
-    fe->bb_model_valid = (rc == ZSP_BB_SAT);
-    if (rc == ZSP_BB_SAT) {
+    int rc = dvs_cube_check(fe->bb_solver, fe->seed);
+    fe->bb_model_valid = (rc == DVS_BB_SAT);
+    if (rc == DVS_BB_SAT) {
         fprintf(fe->out, "sat\n");
-        fe->last_result = SOLVE_OK;
+        fe->last_result = DVS_SOLVE_OK;
         fe->has_result = 1;
-    } else if (rc == ZSP_BB_UNSAT) {
+    } else if (rc == DVS_BB_UNSAT) {
         fprintf(fe->out, "unsat\n");
-        fe->last_result = SOLVE_UNSAT;
+        fe->last_result = DVS_SOLVE_UNSAT;
         fe->has_result = 1;
     } else {
         SMT2_EMIT_UNKNOWN(fe);
     }
     fflush(fe->out);
-    return rc == ZSP_BB_ERROR ? -1 : 0;
+    return rc == DVS_BB_ERROR ? -1 : 0;
 }
 
 /* Pick the solve engine for the current problem.
@@ -3734,14 +3814,14 @@ static int _engine_is_bitblast(Smt2Frontend *fe) {
 }
 
 /* Route variable value lookup through the bbsolver when it's the active
- * engine; otherwise fall back to the CDCL solver_get_value path. */
+ * engine; otherwise fall back to the CDCL dvs_solver_get_value path. */
 static int64_t _fe_get_var_value(Smt2Frontend *fe, uint32_t var_id) {
     if (fe->bb_solver && fe->bb_model_valid) {
         int64_t v = 0;
-        if (zsp_bbsolver_value(fe->bb_solver, var_id, &v) == 0) return v;
+        if (dvs_bbsolver_value(fe->bb_solver, var_id, &v) == 0) return v;
         /* fall through to CDCL on bbsolver miss */
     }
-    return solver_get_value(fe->ctx, var_id);
+    return dvs_solver_get_value(fe->ctx, var_id);
 }
 
 /* Read back the full (possibly >64-bit) model value of `var_id` into
@@ -3751,7 +3831,7 @@ static int _fe_get_var_value_wide(Smt2Frontend *fe, uint32_t var_id,
                                   uint64_t *limbs, uint32_t n_limbs) {
     for (uint32_t i = 0; i < n_limbs; i++) limbs[i] = 0;
     if (fe->bb_solver && fe->bb_model_valid &&
-        zsp_bbsolver_value_wide(fe->bb_solver, var_id, limbs, n_limbs) == 0)
+        dvs_bbsolver_value_wide(fe->bb_solver, var_id, limbs, n_limbs) == 0)
         return 0;
     /* Fallback: the low 64 bits from the scalar reader (wide vars never reach
      * the CDCL engine, so this is only hit if the bbsolver lookup missed). */
@@ -3775,6 +3855,8 @@ static void _emit_bv_bin_literal_wide(FILE *out, const uint64_t *limbs,
 
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     (void)cmd;
+    fe->core_hist_at_check = fe->n_core_hist;
+    fe->core_replayable    = 1;
     /* A previous answer's bit-blast model is not this answer's (B36). */
     fe->bb_model_valid = 0;
 
@@ -3787,7 +3869,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
                     fe->incomplete_why ? fe->incomplete_why : "reason not recorded");
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
-        fe->last_result = SOLVE_TIMEOUT;
+        fe->last_result = DVS_SOLVE_TIMEOUT;
         fe->has_result = 1;
         return 0;
     }
@@ -3813,7 +3895,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         if (_emit_array_axioms(fe) < 0) {
             SMT2_EMIT_UNKNOWN(fe);
             fflush(fe->out);
-            fe->last_result = SOLVE_TIMEOUT;
+            fe->last_result = DVS_SOLVE_TIMEOUT;
             fe->has_result = 1;
             return 0;
         }
@@ -3868,7 +3950,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
             if (prc == -2) SMT2_TAINT(fe, "stale problem could not be safely rebuilt");
             SMT2_EMIT_UNKNOWN(fe);
             fflush(fe->out);
-            fe->last_result = SOLVE_TIMEOUT;
+            fe->last_result = DVS_SOLVE_TIMEOUT;
             fe->has_result  = 1;
             return prc == -2 ? 0 : -1;
         }
@@ -3883,7 +3965,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
              * retained builder holds every assertion (including any not yet
              * handed to CDCL): solve a full copy of it instead. */
             size_t full_sz = 0;
-            SolveProblem *full = _explicit(builder_finalize(fe->builder, &full_sz));
+            dvs_problem_t *full = _explicit(dvs_builder_finalize(fe->builder, &full_sz));
             if (full) return _check_sat_bitblast_on(fe, full, full);
         }
         if (prc < 0) {
@@ -3892,7 +3974,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
             if (prc == -2) SMT2_TAINT(fe, "stale problem could not be safely rebuilt");
             SMT2_EMIT_UNKNOWN(fe);
             fflush(fe->out);
-            fe->last_result = SOLVE_TIMEOUT;
+            fe->last_result = DVS_SOLVE_TIMEOUT;
             fe->has_result  = 1;
             return prc == -2 ? 0 : -1;
         }
@@ -3904,13 +3986,13 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         /* UNSAT detected at compile time (propagation contradiction). */
         fprintf(fe->out, "unsat\n");
         fflush(fe->out);
-        fe->last_result = SOLVE_UNSAT;
+        fe->last_result = DVS_SOLVE_UNSAT;
         fe->has_result = 1;
         return 0;
     }
     if (crc < 0) {
         if (fe->print_stats || getenv("DV_LOG"))
-            fprintf(fe->err, "cdcl-unknown: solver_compile failed (rc=%d) -- the "
+            fprintf(fe->err, "cdcl-unknown: dvs_solver_compile failed (rc=%d) -- the "
                              "CDCL compile could not build a context for this "
                              "problem\n", crc);
         SMT2_EMIT_UNKNOWN(fe);
@@ -3923,19 +4005,19 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * against the FULL fe->problem (incl. the dropped constraints), downgrading
      * to unknown on any violation. So the only remaining CDCL soundness risk is
      * a wrong `unsat`, which validation cannot catch — those are fixed at the
-     * source (e.g. the sign_extend compile no longer conflicts; see zsp_compile). */
+     * source (e.g. the sign_extend compile no longer conflicts; see dvs_compile). */
 
     if (_engine_is_bitblast(fe) && !route_cdcl) {
         return _check_sat_bitblast(fe);
     }
 
-    if (fe->has_result) solver_reset(fe->ctx);
+    if (fe->has_result) dvs_solver_reset(fe->ctx);
 
     int frc = _flush_aux(fe);
     if (frc == -2) {
         fprintf(fe->out, "unsat\n");
         fflush(fe->out);
-        fe->last_result = SOLVE_UNSAT;
+        fe->last_result = DVS_SOLVE_UNSAT;
         fe->has_result = 1;
         return 0;
     }
@@ -3945,7 +4027,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         return -1;
     }
 
-    SolveOpts opts;
+    dvs_solve_opts_t opts;
     memset(&opts, 0, sizeof(opts));
     opts.seed = fe->seed;
     /* Restart cadence: base unit × Luby(i) conflicts per restart.
@@ -3992,7 +4074,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * tie-break; DV_FAIR_PICK=1 reservoir-samples uniformly among the
      * smallest-domain vars, which stops the same variable from always being
      * decided first and skewing every other variable's marginal (see
-     * _select_unassigned in zsp_search.c). Costs a little speed, so it is
+     * _select_unassigned in dvs_search.c). Costs a little speed, so it is
      * opt-in -- but it is a real sampling-quality lever, so it needs to be
      * reachable to be evaluated (tests/formal/sample_quality.py). */
     {
@@ -4004,7 +4086,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * variable is decided first on every solve, so its marginal is uniform but
      * every other variable is sampled over a conditional (skewed) domain -- e.g.
      * under `a < b`, always deciding `a` first starves `b`'s low values. This is
-     * the mode SolveOpts.fair_pick documents as "the right mode for
+     * the mode dvs_solve_opts_t.fair_pick documents as "the right mode for
      * constrained-random stimulus". */
     if (route_cdcl) opts.fair_pick = 1;
 
@@ -4016,7 +4098,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * captured Verilator transcripts), so the bound costs no coverage. */
     if (cdcl_probing) opts.time_limit_ms = 50;
 
-    fe->last_result = solver_solve(fe->ctx, &opts);
+    fe->last_result = dvs_solver_solve(fe->ctx, &opts);
     fe->has_result = 1;
 
     if (opts.use_lcg && getenv("DV_LCG_STATS") && fe->ctx->lcg) {
@@ -4036,7 +4118,7 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
                 (unsigned long long)lcg_dbg_bail[8]);
     }
 
-    /* Sanity check: if we got SOLVE_OK, re-evaluate every top-level
+    /* Sanity check: if we got DVS_SOLVE_OK, re-evaluate every top-level
      * constraint under the returned assignment. A failure here means a
      * constraint was silently dropped (or wrongly compiled) — we can't
      * trust the "sat" answer, so downgrade to unknown.
@@ -4047,19 +4129,19 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      *               possibly-wrong "sat".
      *   1         — validate and log violations but keep the "sat" answer
      *   0         — skip validation entirely (escape hatch) */
-    if (fe->last_result == SOLVE_OK && fe->problem) {
+    if (fe->last_result == DVS_SOLVE_OK && fe->problem) {
         const char *mode_env = getenv("DV_VALIDATE_MODEL");
         int mode = mode_env ? atoi(mode_env) : 2;
         if (mode > 0) {
-            int viol = solver_validate_model(fe->ctx, fe->problem, fe->err);
+            int viol = dvs_solver_validate_model(fe->ctx, fe->problem, fe->err);
             for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
-                viol += solver_validate_model(fe->ctx, fe->aux_problems[i], fe->err);
+                viol += dvs_solver_validate_model(fe->ctx, fe->aux_problems[i], fe->err);
             }
             if (viol > 0) {
                 fprintf(fe->err,
                     "model-validation: %d top-level constraint(s) violated%s\n",
                     viol, mode >= 2 ? "; downgrading sat -> unknown" : "");
-                if (mode >= 2) fe->last_result = SOLVE_TIMEOUT;
+                if (mode >= 2) fe->last_result = DVS_SOLVE_TIMEOUT;
             }
         }
     }
@@ -4076,13 +4158,13 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * cost a manual delta-debug to learn whether the search ran out of time, ran
      * out of decision depth, or the constraint was never compiled at all. Report
      * it under DV_LOG / --stats. `crc` is the uncompiled-constraint count from
-     * solver_compile (>0 means CDCL dropped constraints and is relying on the
+     * dvs_solver_compile (>0 means CDCL dropped constraints and is relying on the
      * validation net + escalation). */
-    if (fe->last_result == SOLVE_TIMEOUT
+    if (fe->last_result == DVS_SOLVE_TIMEOUT
             && (fe->print_stats || getenv("DV_LOG"))) {
         fprintf(fe->err,
                 "cdcl-unknown: %s; uncompiled-constraints=%d; vars=%u; conflicts=%llu\n",
-                solver_bail_reason_str(fe->ctx), crc,
+                dvs_solver_bail_reason_str(fe->ctx), crc,
                 fe->ctx ? fe->ctx->n_vars : 0u,
                 fe->ctx ? (unsigned long long)fe->ctx->conflict_count : 0ull);
     }
@@ -4091,11 +4173,11 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * CDCL answer means keep sampling with CDCL; anything else means this
      * constraint set belongs to bitblast and we should not probe again. */
     if (cdcl_probing) {
-        fe->cdcl_route = (fe->last_result == SOLVE_OK
-                          || fe->last_result == SOLVE_UNSAT) ? 1 : 2;
+        fe->cdcl_route = (fe->last_result == DVS_SOLVE_OK
+                          || fe->last_result == DVS_SOLVE_UNSAT) ? 1 : 2;
     }
 
-    if (fe->last_result == SOLVE_TIMEOUT
+    if (fe->last_result == DVS_SOLVE_TIMEOUT
         && !getenv("DV_NO_BITBLAST")) {   /* audit mode: keep pure-CDCL unknown */
         if (fe->n_aux_problems == 0)
             return _check_sat_bitblast(fe);
@@ -4105,15 +4187,15 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
          * check-sat: without it every such randomize() answered `unknown`. */
         if (fe->cdcl_retained && !fe->has_aux) {
             size_t full_sz = 0;
-            SolveProblem *full = _explicit(builder_finalize(fe->builder, &full_sz));
+            dvs_problem_t *full = _explicit(dvs_builder_finalize(fe->builder, &full_sz));
             if (full) return _check_sat_bitblast_on(fe, full, full);
         }
     }
 
     switch (fe->last_result) {
-    case SOLVE_OK:      fprintf(fe->out, "sat\n"); break;
-    case SOLVE_UNSAT:   fprintf(fe->out, "unsat\n"); break;
-    case SOLVE_TIMEOUT: SMT2_EMIT_UNKNOWN(fe); break;
+    case DVS_SOLVE_OK:      fprintf(fe->out, "sat\n"); break;
+    case DVS_SOLVE_UNSAT:   fprintf(fe->out, "unsat\n"); break;
+    case DVS_SOLVE_TIMEOUT: SMT2_EMIT_UNKNOWN(fe); break;
     }
     fflush(fe->out);
     return 0;
@@ -4343,7 +4425,7 @@ static void _emit_bv_bin_literal(FILE *out, uint64_t val, unsigned width) {
 }
 
 static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
-    if (!fe->has_result || fe->last_result != SOLVE_OK) {
+    if (!fe->has_result || fe->last_result != DVS_SOLVE_OK) {
         fprintf(fe->err, "error: get-value requires a prior sat result\n");
         return 0;
     }
@@ -4423,7 +4505,7 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
                     }
                 } else if (k < av->value->n_elems) {
                     /* Look the element var up by name ("arr[k]") rather than via
-                     * value->elems[k]: that ExprRef points into the builder
+                     * value->elems[k]: that dvs_expr_t points into the builder
                      * arena, which is reset after compilation, so it is stale
                      * here (dereferencing it segfaults). */
                     char en[SMT2_MAX_NAME + 16];
@@ -4491,7 +4573,7 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
 
 static int _cmd_get_model(Smt2Frontend *fe, const Sexpr *cmd) {
     (void)cmd;
-    if (!fe->has_result || fe->last_result != SOLVE_OK) {
+    if (!fe->has_result || fe->last_result != DVS_SOLVE_OK) {
         fprintf(fe->err, "error: get-model requires a prior sat result\n");
         return 0;
     }
@@ -4568,7 +4650,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
     int crc = _ensure_compiled(fe);
     if (crc == -2) {
         /* Compile-time UNSAT: simulate a dead push so pop can restore state. */
-        fe->last_result = SOLVE_UNSAT;
+        fe->last_result = DVS_SOLVE_UNSAT;
         fe->has_result = 1;
         if (fe->push_depth < SMT2_MAX_PUSH) {
             fe->push_stack[fe->push_depth] = (uint32_t)-1;
@@ -4576,21 +4658,41 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->push_n_array_vars[fe->push_depth] = fe->n_array_vars;
             fe->push_n_aux_problems[fe->push_depth] = fe->n_aux_problems;
             fe->push_n_named[fe->push_depth] = fe->n_named;
+            fe->push_n_core_hist[fe->push_depth] = fe->n_core_hist;
             fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
+            fe->push_bmark[fe->push_depth] = dvs_builder_mark(fe->builder);
             fe->push_depth++;
         }
         return 0;
     }
     if (crc < 0) {
-        fprintf(fe->err, "error: push: compile failed\n");
-        return -1;
+        /* No CDCL context (e.g. variables wider than 64 bits: bitblast only).
+         * The scope still has to exist: record a frame whose pop rewinds the
+         * builder. Failing the push instead left everything asserted after it
+         * in force forever -- a popped `false` answered unsat (B63). */
+        if (fe->push_depth + n > SMT2_MAX_PUSH) {
+            fprintf(fe->err, "error: push: max push depth exceeded\n");
+            return -1;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            fe->push_stack[fe->push_depth] = (uint32_t)-1;
+            fe->push_n_vars[fe->push_depth] = fe->n_vars;
+            fe->push_n_array_vars[fe->push_depth] = fe->n_array_vars;
+            fe->push_n_aux_problems[fe->push_depth] = fe->n_aux_problems;
+            fe->push_n_named[fe->push_depth] = fe->n_named;
+            fe->push_n_core_hist[fe->push_depth] = fe->n_core_hist;
+            fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
+            fe->push_bmark[fe->push_depth] = dvs_builder_mark(fe->builder);
+            fe->push_depth++;
+        }
+        return 0;
     }
     if (_flush_aux(fe) < 0) return -1;
-    if (fe->has_result) solver_reset(fe->ctx);
+    if (fe->has_result) dvs_solver_reset(fe->ctx);
     fe->has_result = 0;
 
     for (uint32_t i = 0; i < n; i++) {
-        int cp = solver_checkpoint(fe->ctx);
+        int cp = dvs_solver_checkpoint(fe->ctx);
         if (cp < 0) {
             fprintf(fe->err, "error: push: too many checkpoints\n");
             return -1;
@@ -4604,7 +4706,9 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->push_n_array_vars[fe->push_depth - 1] = fe->n_array_vars;
         fe->push_n_aux_problems[fe->push_depth - 1] = fe->n_aux_problems;
         fe->push_n_named[fe->push_depth - 1] = fe->n_named;
+        fe->push_n_core_hist[fe->push_depth - 1] = fe->n_core_hist;
         fe->push_incomplete[fe->push_depth - 1] = (uint8_t)fe->incomplete;
+        fe->push_bmark[fe->push_depth - 1] = dvs_builder_mark(fe->builder);
     }
     return 0;
 }
@@ -4615,15 +4719,35 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
      * reach the ctx at the next flush -- a retracted assertion still enforced,
      * i.e. a wrong `unsat` (B37). This also ends CDCL retention: the builder
      * can no longer stand in for the full, current assertion set. */
-    if (fe->compiled) {
-        builder_reset(fe->builder);
-        fe->cdcl_retained = 0;
-        memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
-        fe->has_aux = 0;
-    }
     uint32_t n = 1;
     if (cmd->list.count == 2 && cmd->list.items[1]->kind == SEXPR_NUMERAL) {
         n = (uint32_t)cmd->list.items[1]->numval;
+    }
+    if (fe->compiled) {
+        if (fe->cdcl_retained && n <= fe->push_depth &&
+            dvs_builder_rewind(fe->builder, &fe->push_bmark[fe->push_depth - n]) == 0) {
+            /* Rewind to the outermost popped push instead: the builder then
+             * holds exactly the assertions still in scope, so retention (and
+             * the bitblast route, which finalizes from it) stays valid. A push
+             * flushes first, so everything up to its mark reached the ctx.
+             * Resetting the builder here left a bitblast-routed check after
+             * the pop solving a stale problem -- a wrong unsat (B63). */
+            fe->aux_mark = fe->push_bmark[fe->push_depth - n];
+        } else {
+            dvs_builder_reset(fe->builder);
+            fe->cdcl_retained = 0;
+            memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
+        }
+        fe->has_aux = 0;
+        if (fe->problem) fe->problem_dirty = 1;
+    } else if (n <= fe->push_depth) {
+        /* No compiled context: the scopes live only in the builder, which
+         * the bitblast path finalizes from. Rewind it to the outermost
+         * popped push, and make the next check-sat re-finalize (B63). */
+        if (dvs_builder_rewind(fe->builder, &fe->push_bmark[fe->push_depth - n]) != 0)
+            SMT2_TAINT(fe, "pop could not rewind the assertion set");
+        if (fe->problem) fe->problem_dirty = 1;
+        fe->has_result = 0;
     }
     for (uint32_t i = 0; i < n; i++) {
         if (fe->push_depth == 0) {
@@ -4634,17 +4758,17 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
         /* Un-taint if the untranslatable assert lived in the popped scope. */
         fe->incomplete = fe->push_incomplete[fe->push_depth];
         if (fe->ctx && fe->push_stack[fe->push_depth] != (uint32_t)-1) {
-            /* solver_restore handles trail backtrack itself; calling
-             * solver_reset first would zero ctx->trail_top while leaving
+            /* dvs_solver_restore handles trail backtrack itself; calling
+             * dvs_solver_reset first would zero ctx->trail_top while leaving
              * checkpoint marks pointing at stale TrailEntry addresses,
              * leading to a NULL-deref inside trail_backtrack. */
             fe->has_result = 0;
-            solver_restore(fe->ctx, fe->push_stack[fe->push_depth]);
+            dvs_solver_restore(fe->ctx, fe->push_stack[fe->push_depth]);
         }
         fe->n_vars = fe->push_n_vars[fe->push_depth];
 
         /* Free arrays declared inside the popped scope. The solver-side BV
-         * vars are already unwound by solver_restore via the n_vars rewind;
+         * vars are already unwound by dvs_solver_restore via the n_vars rewind;
          * here we drop the frontend-side tracking and malloc'd element list. */
         uint32_t target_n_arr = fe->push_n_array_vars[fe->push_depth];
         for (uint32_t i = target_n_arr; i < fe->n_array_vars; i++) {
@@ -4664,7 +4788,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
 
         /* Drop aux problems added between push and pop. The solver-side
          * propagators those aux problems compiled were already marked
-         * ENTAILED by solver_restore, but their SolveProblem buffers
+         * ENTAILED by dvs_solver_restore, but their dvs_problem_t buffers
          * remained in fe->aux_problems[], which the model-validation
          * pass would still re-evaluate -- producing spurious violations
          * (and downgrading sat -> unknown) for assertions the user
@@ -4676,27 +4800,106 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
         }
         fe->n_aux_problems = target_n_aux;
         _truncate_named(fe, fe->push_n_named[fe->push_depth]);
+        if (fe->n_core_hist > fe->push_n_core_hist[fe->push_depth])
+            fe->n_core_hist = fe->push_n_core_hist[fe->push_depth];
     }
     return 0;
 }
 
-/* (get-unsat-core): after `unsat`, report the :named assertions in scope.
- * The whole set of assertions is unsatisfiable, so all of its names form a
- * valid -- if not minimal -- unsat core. There is ALWAYS a reply on stdout:
- * drivers (Verilator's randomize() on an unsat constraint set) block reading
- * one, and a missing reply hangs them. */
+/* Wall-clock budget for minimising one unsat core. A core cut short is still
+ * a valid core, only a larger one. */
+#define SMT2_CORE_BUDGET_MS 10000
+
+/* Replay the recorded commands up to the last check-sat in a scratch frontend,
+ * leaving out the named assertions marked in `drop`, and solve. Returns 1 only
+ * for a definite `unsat`; sat, unknown and any error return 0, which keeps the
+ * assertion in the core. */
+static int _core_replay_unsat(const Smt2Frontend *fe, const uint8_t *drop,
+                              FILE *sink) {
+    Smt2Frontend *sub = (Smt2Frontend *)malloc(sizeof(*sub));
+    if (!sub) return 0;
+    smt2_frontend_init(sub, sink, sink);
+    int ok = 1;
+    for (uint32_t i = 0; i < fe->core_hist_at_check && ok; i++) {
+        const Smt2CoreCmd *c = &fe->core_hist[i];
+        if (c->named >= 0 && drop[c->named]) continue;
+        ok = (smt2_frontend_dispatch(sub, c->cmd) == 0);
+    }
+    if (ok) _cmd_check_sat(sub, NULL);
+    int unsat = ok && !sub->incomplete && sub->has_result
+             && sub->last_result == DVS_SOLVE_UNSAT;
+    smt2_frontend_destroy(sub);
+    free(sub);
+    return unsat;
+}
+
+static uint64_t _core_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* Mark in `drop` the named assertions the contradiction does not need
+ * (deletion-based: try each one out, keep it out while the rest stay unsat).
+ * Every step keeps the invariant that the replayed set without the dropped
+ * names is unsat, so whatever is left -- even when the budget runs out -- is
+ * a valid core. */
+static void _core_minimise(const Smt2Frontend *fe, uint8_t *drop) {
+    if (!fe->produce_unsat_cores || !fe->core_replayable) return;
+    uint8_t *recorded = (uint8_t *)calloc(fe->n_named ? fe->n_named : 1, 1);
+    FILE *sink = fopen("/dev/null", "w");
+    if (!recorded || !sink) goto done;
+    uint32_t n_recorded = 0;
+    for (uint32_t i = 0; i < fe->core_hist_at_check; i++) {
+        int32_t k = fe->core_hist[i].named;
+        if (k >= 0 && (uint32_t)k < fe->n_named && !recorded[k]) {
+            recorded[k] = 1;
+            n_recorded++;
+        }
+    }
+    if (n_recorded == 0) goto done;
+    uint64_t t0 = _core_now_ms();
+    /* The replay must reproduce the unsat before it can be trusted to shrink
+     * it (a command recorded before :produce-unsat-cores was set is missing). */
+    if (!_core_replay_unsat(fe, drop, sink)) goto done;
+    for (uint32_t k = 0; k < fe->n_named; k++) {
+        if (!recorded[k]) continue;
+        if (_core_now_ms() - t0 > SMT2_CORE_BUDGET_MS) break;
+        drop[k] = 1;
+        if (!_core_replay_unsat(fe, drop, sink)) drop[k] = 0;
+    }
+done:
+    if (sink) fclose(sink);
+    free(recorded);
+}
+
+/* (get-unsat-core): after `unsat`, report :named assertions that are
+ * unsatisfiable together with the unnamed ones. With :produce-unsat-cores set
+ * the set is minimised: dropping any one reported name leaves a satisfiable
+ * set (unless the time budget ran out). Otherwise every name in scope is
+ * reported -- the whole assertion set is unsatisfiable, so that is a valid, if
+ * not minimal, core. There is ALWAYS a reply on stdout: drivers (Verilator's
+ * randomize() on an unsat constraint set) block reading one, and a missing
+ * reply hangs them. */
 static int _cmd_get_unsat_core(Smt2Frontend *fe, const Sexpr *cmd) {
     (void)cmd;
-    if (!fe->has_result || fe->last_result != SOLVE_UNSAT) {
+    if (!fe->has_result || fe->last_result != DVS_SOLVE_UNSAT) {
         fprintf(fe->out, "(error \"get-unsat-core requires a prior unsat result\")\n");
         fflush(fe->out);
         return 0;
     }
+    uint8_t *drop = (uint8_t *)calloc(fe->n_named ? fe->n_named : 1, 1);
+    if (drop) _core_minimise(fe, drop);
     fputc('(', fe->out);
-    for (uint32_t i = 0; i < fe->n_named; i++)
-        fprintf(fe->out, i ? " %s" : "%s", fe->named[i]);
+    int first = 1;
+    for (uint32_t i = 0; i < fe->n_named; i++) {
+        if (drop && drop[i]) continue;
+        fprintf(fe->out, first ? "%s" : " %s", fe->named[i]);
+        first = 0;
+    }
     fputs(")\n", fe->out);
     fflush(fe->out);
+    free(drop);
     return 0;
 }
 
@@ -4706,11 +4909,13 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
         return -1;
     }
 
+    fe->core_replayable = 0;   /* the core would have to cover the assumptions */
+
     /* Tainted context -> honest `unknown` (see _cmd_check_sat). */
     if (fe->incomplete) {
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
-        fe->last_result = SOLVE_TIMEOUT;
+        fe->last_result = DVS_SOLVE_TIMEOUT;
         fe->has_result = 1;
         return 0;
     }
@@ -4739,8 +4944,8 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
          * arriving without a preceding check-sat). */
         if (fe->has_result) {
             switch (fe->last_result) {
-            case SOLVE_OK:      fprintf(fe->out, "sat\n");     break;
-            case SOLVE_UNSAT:   fprintf(fe->out, "unsat\n");   break;
+            case DVS_SOLVE_OK:      fprintf(fe->out, "sat\n");     break;
+            case DVS_SOLVE_UNSAT:   fprintf(fe->out, "unsat\n");   break;
             default:            SMT2_EMIT_UNKNOWN(fe); break;
             }
             fflush(fe->out);
@@ -4758,14 +4963,14 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
         fflush(fe->out);
         return -1;
     }
-    if (fe->has_result) solver_reset(fe->ctx);
+    if (fe->has_result) dvs_solver_reset(fe->ctx);
     fe->has_result = 0;
     if (_flush_aux(fe) < 0) {
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
         return -1;
     }
-    int cp = solver_checkpoint(fe->ctx);
+    int cp = dvs_solver_checkpoint(fe->ctx);
     if (cp < 0) {
         fprintf(fe->err, "error: check-sat-assuming: no checkpoint slot\n");
         return -1;
@@ -4789,13 +4994,13 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
             positive = 0;
         } else {
             fprintf(fe->err, "error: malformed assumption literal\n");
-            solver_restore(fe->ctx, (uint32_t)cp);
+            dvs_solver_restore(fe->ctx, (uint32_t)cp);
             return -1;
         }
         Smt2Var *v = _find_var(fe, name, nlen);
         if (!v) {
             fprintf(fe->err, "error: unknown assumption var '%.*s'\n", (int)nlen, name);
-            solver_restore(fe->ctx, (uint32_t)cp);
+            dvs_solver_restore(fe->ctx, (uint32_t)cp);
             return -1;
         }
         /* Record the literal so (get-unsat-assumptions) can answer. */
@@ -4806,25 +5011,25 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->last_assump_names[k][cpy] = '\0';
             fe->last_assump_positive[k] = (uint8_t)positive;
         }
-        int rc = solver_pin_var(fe->ctx, v->var_id, positive ? 1 : 0);
+        int rc = dvs_solver_pin_var(fe->ctx, v->var_id, positive ? 1 : 0);
         if (rc != 0) { forced_unsat = 1; break; }
     }
 
     if (forced_unsat) {
         fprintf(fe->out, "unsat\n");
-        fe->last_result = SOLVE_UNSAT;
+        fe->last_result = DVS_SOLVE_UNSAT;
     } else {
-        SolveOpts opts;
+        dvs_solve_opts_t opts;
         memset(&opts, 0, sizeof(opts));
         opts.seed = fe->seed;
-        fe->last_result = solver_solve(fe->ctx, &opts);
+        fe->last_result = dvs_solver_solve(fe->ctx, &opts);
         switch (fe->last_result) {
-        case SOLVE_OK:      fprintf(fe->out, "sat\n"); break;
-        case SOLVE_UNSAT:   fprintf(fe->out, "unsat\n"); break;
-        case SOLVE_TIMEOUT: SMT2_EMIT_UNKNOWN(fe); break;
+        case DVS_SOLVE_OK:      fprintf(fe->out, "sat\n"); break;
+        case DVS_SOLVE_UNSAT:   fprintf(fe->out, "unsat\n"); break;
+        case DVS_SOLVE_TIMEOUT: SMT2_EMIT_UNKNOWN(fe); break;
         }
     }
-    fe->last_assump_unsat = (fe->last_result == SOLVE_UNSAT);
+    fe->last_assump_unsat = (fe->last_result == DVS_SOLVE_UNSAT);
     fe->has_result = 1;
     fflush(fe->out);
     (void)cp;
@@ -4861,7 +5066,7 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
     memset(fe, 0, sizeof(*fe));
     fe->out = out;
     fe->err = err;
-    fe->builder = builder_create(0, NULL);
+    fe->builder = dvs_builder_create(0, NULL);
     sexpr_arena_init(&fe->persistent_arena, 16384);
     /* Verilator-mode cache reseed cadence: force a full re-solve every Nth
      * randomize so coupled fields periodically get a fresh base model.
@@ -4888,15 +5093,16 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
 void smt2_frontend_destroy(Smt2Frontend *fe) {
     _truncate_named(fe, 0);
     free(fe->named);
+    free(fe->core_hist);   /* the copies themselves live in persistent_arena */
     _free_bb(fe);
     if (fe->problem)     free(fe->problem);
     for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
         free(fe->aux_problems[i]);
     }
     free(fe->aux_problems);
-    if (fe->builder)     builder_destroy(fe->builder);
-    if (fe->ctx)         solver_destroy(fe->ctx);
-    if (fe->block_alloc) zsp_block_alloc_destroy(fe->block_alloc);
+    if (fe->builder)     dvs_builder_destroy(fe->builder);
+    if (fe->ctx)         dvs_solver_destroy(fe->ctx);
+    if (fe->block_alloc) dvs_block_alloc_destroy(fe->block_alloc);
     free(fe->ctx_buf);
     free(fe->vars);
     free(fe->funs);
@@ -4939,23 +5145,23 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     int      array_lazy = fe->array_lazy, array_eager = fe->array_eager;
     uint64_t div_counter = fe->div_counter;
     uint32_t reseed_period = fe->reseed_period;
-    zsp_bbsolver_t *bb = fe->bb_solver;
-    SolveProblem   *bb_problem = fe->bb_problem;   /* backs bb; carried with it */
+    dvs_bbsolver_t *bb = fe->bb_solver;
+    dvs_problem_t   *bb_problem = fe->bb_problem;   /* backs bb; carried with it */
     uint64_t cached_fp = fe->cached_fp;
     int      cache_valid = fe->cache_valid, cached_result = fe->cached_result;
     int      verilator_cdcl = fe->verilator_cdcl;
     uint64_t cdcl_probe_fp = fe->cdcl_probe_fp;
     uint8_t  cdcl_route = fe->cdcl_route;
     /* Reused allocations (reset in place below rather than freed). */
-    SolveProblemBuilder *builder = fe->builder;
+    dvs_builder_t *builder = fe->builder;
     SexprArena           parena  = fe->persistent_arena;
 
     /* Free exactly what destroy() frees, EXCEPT builder + persistent_arena. */
     if (fe->problem) free(fe->problem);
     for (uint32_t i = 0; i < fe->n_aux_problems; i++) free(fe->aux_problems[i]);
     free(fe->aux_problems);
-    if (fe->ctx)         solver_destroy(fe->ctx);
-    if (fe->block_alloc) zsp_block_alloc_destroy(fe->block_alloc);
+    if (fe->ctx)         dvs_solver_destroy(fe->ctx);
+    if (fe->block_alloc) dvs_block_alloc_destroy(fe->block_alloc);
     free(fe->ctx_buf);
     free(fe->vars);
     free(fe->funs);          /* re-zeroed by the memset below; realloc'd on next define-fun */
@@ -4977,9 +5183,10 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
 
     _truncate_named(fe, 0);
     free(fe->named);
+    free(fe->core_hist);   /* the copies live in persistent_arena, reset below */
 
     /* Reset the reused allocations to empty (equivalent to a fresh create). */
-    builder_reset(builder);
+    dvs_builder_reset(builder);
     sexpr_arena_reset(&parena);
 
     /* Re-zero all state (mirrors init's memset), then restore carried fields. */
@@ -5004,7 +5211,49 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->persistent_arena = parena;
 }
 
+static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd);
+
+/* Commands that shape the assertion set, and so are replayed to minimise an
+ * unsat core. Options, info and queries are not: none can change a verdict. */
+static int _core_shapes_assertions(const Sexpr *head) {
+    static const char *const kinds[] = {
+        "set-logic", "declare-sort", "declare-const", "declare-fun",
+        "define-fun", "declare-datatypes", "assert",
+    };
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
+        if (sexpr_is_symbol(head, kinds[i])) return 1;
+    return 0;
+}
+
+/* Record a command for get-unsat-core replay. Best effort: a command that
+ * cannot be recorded stops recording for this assertion set, so the replay
+ * fails to reproduce the unsat and the core is reported unminimised. */
+static void _core_record(Smt2Frontend *fe, const Sexpr *cmd, int32_t named) {
+    if (fe->n_core_hist == fe->core_hist_cap) {
+        uint32_t cap = fe->core_hist_cap ? fe->core_hist_cap * 2 : 64;
+        Smt2CoreCmd *g = (Smt2CoreCmd *)realloc(fe->core_hist, cap * sizeof(*g));
+        if (!g) { fe->produce_unsat_cores = 0; return; }
+        fe->core_hist = g;
+        fe->core_hist_cap = cap;
+    }
+    const Sexpr *copy = _sexpr_deep_copy(&fe->persistent_arena, cmd);
+    if (!copy) { fe->produce_unsat_cores = 0; return; }
+    fe->core_hist[fe->n_core_hist].cmd   = copy;
+    fe->core_hist[fe->n_core_hist].named = named;
+    fe->n_core_hist++;
+}
+
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
+    int record = fe->produce_unsat_cores && cmd && cmd->kind == SEXPR_LIST
+              && cmd->list.count > 0 && _core_shapes_assertions(cmd->list.items[0]);
+    uint32_t n_named = fe->n_named;
+    int rc = _dispatch(fe, cmd);
+    if (record && rc == 0)
+        _core_record(fe, cmd, fe->n_named > n_named ? (int32_t)fe->n_named - 1 : -1);
+    return rc;
+}
+
+static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     /* Reset per-command transient allocations from prior command */
     _cmd_alloc_reset(fe);
 
@@ -5067,9 +5316,9 @@ int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
          * this is typically issued at session boundaries where the next
          * (check-sat) re-asserts everything anyway, so a silent no-op is
          * sound for those use cases. If a (check-sat) follows and the
-         * cached result is stale, _cmd_check_sat resets via solver_reset. */
+         * cached result is stale, _cmd_check_sat resets via dvs_solver_reset. */
         if (fe->has_result) {
-            solver_reset(fe->ctx);
+            dvs_solver_reset(fe->ctx);
             fe->has_result = 0;
         }
         fe->incomplete = 0;

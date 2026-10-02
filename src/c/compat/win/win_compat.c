@@ -13,9 +13,9 @@
 #include <unistd.h>
 
 /* 100-ns ticks since 1601-01-01 -> microseconds since 1970-01-01. */
-#define ZSP_EPOCH_DELTA_US 11644473600000000ULL
+#define DVS_EPOCH_DELTA_US 11644473600000000ULL
 
-static void zsp__filetime_to_tv(FILETIME ft, struct timeval *tv) {
+static void dvs__filetime_to_tv(FILETIME ft, struct timeval *tv) {
     ULARGE_INTEGER li;
     li.LowPart = ft.dwLowDateTime;
     li.HighPart = ft.dwHighDateTime;
@@ -31,7 +31,7 @@ int gettimeofday(struct timeval *tp, void *tzp) {
     GetSystemTimePreciseAsFileTime(&ft);
     li.LowPart = ft.dwLowDateTime;
     li.HighPart = ft.dwHighDateTime;
-    unsigned __int64 us = li.QuadPart / 10ULL - ZSP_EPOCH_DELTA_US;
+    unsigned __int64 us = li.QuadPart / 10ULL - DVS_EPOCH_DELTA_US;
     tp->tv_sec = (long)(us / 1000000ULL);
     tp->tv_usec = (long)(us % 1000000ULL);
     return 0;
@@ -42,8 +42,8 @@ int getrusage(int who, struct rusage *usage) {
     FILETIME creation, exit, kernel, user;
     if (!GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user))
         return -1;
-    zsp__filetime_to_tv(user, &usage->ru_utime);
-    zsp__filetime_to_tv(kernel, &usage->ru_stime);
+    dvs__filetime_to_tv(user, &usage->ru_utime);
+    dvs__filetime_to_tv(kernel, &usage->ru_stime);
 
     PROCESS_MEMORY_COUNTERS pmc;
     if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))

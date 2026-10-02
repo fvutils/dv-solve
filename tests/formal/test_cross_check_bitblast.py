@@ -2,7 +2,7 @@
 
 Companion to test_cross_check.py. Identical pass rules, but the
 dv-solve solver runs with ``DV_ENGINE=bitblast`` (routing the SMT
-problem through zsp_bbsolver / AIG / Tseitin / kissat instead of the
+problem through dvs_bbsolver / AIG / Tseitin / kissat instead of the
 CDCL theory propagators).
 
 Why this exists separately: the bitblast engine has very different

@@ -30,11 +30,11 @@ export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator"
 ```
 
 ```text
-addr=000003dc len=14 kind=14
-addr=000002a8 len=15 kind=11
-addr=000002dc len=3 kind=5
-addr=00000a44 len=15 kind=5
-addr=00000fa8 len=11 kind=3
+addr=00000a1c len=5 kind=14
+addr=000000e0 len=10 kind=9
+addr=00000a44 len=3 kind=4
+addr=00000cb4 len=1 kind=5
+addr=00000b14 len=16 kind=5
 ```
 
 Both options matter: `--interactive` answers each command as Verilator sends

@@ -28,10 +28,10 @@ not enforced.
 | id | sev | gap | resolution |
 |---|---|---|---|
 | **G1** | B | width-64 `ADD`/`SUB` reported unsat on a satisfiable problem | fixed — overflow-safe interval arithmetic |
-| **G2** | B | any variable wider than 64 bits made the whole problem unsat | fixed — compile declines loudly (`ZSP_COMPILE_UNSUPPORTED_WIDTH`) |
+| **G2** | B | any variable wider than 64 bits made the whole problem unsat | fixed — compile declines loudly (`DVS_COMPILE_UNSUPPORTED_WIDTH`) |
 | **G3** | B | `solve_n` could not relax a soft constraint | fixed — it called the core, bypassing the relaxation wrapper |
 | **G4** | A | the bit-blast engine silently ignored `dist` | fixed — `dist` encoded; `AllDifferent` encoded too |
-| **G5** | A | `zsp_dpi.c` ignored a positive `solver_compile` return | fixed — count exposed, model validated before reporting OK |
+| **G5** | A | `dvs_dpi.c` ignored a positive `dvs_solver_compile` return | fixed — count exposed, model validated before reporting OK |
 | **G6** | C | arithmetic outside the special-cased `==` shapes | fixed — R1 |
 | **G7** | C | a var-var inequality could not be reified | fixed — R2 |
 | **G8** | C | `in_range`/`in_set` not usable as a reifiable leaf | fixed — R2 |
@@ -118,7 +118,7 @@ and `x < 19 + 1` compile via R1's aux-var materialisation. A recursive constant
 evaluator would avoid an aux var per constant subtree; that is a performance
 improvement, not a correctness gap, and was not done.
 
-**R4 was a dead block that read as coverage.** `zsp_compile.c` pattern-matched
+**R4 was a dead block that read as coverage.** `dvs_compile.c` pattern-matched
 `BinOp(var, var) op const`, computed the effective operator, and ended at
 
     /* For now, use the IR translator to handle this by
@@ -165,7 +165,7 @@ unsat. Two independent halves were broken, and they fail in opposite directions:
 
 Fixing only the reads would have traded a false UNSAT for something worse:
 constraints on a wide variable would compile, appear to propagate, and be quietly
-unenforced — severity B becoming severity A. So `solver_compile` declines the
+unenforced — severity B becoming severity A. So `dvs_solver_compile` declines the
 problem instead, with a distinct code. `SolveCtx` raises
 `CompileUnsupportedError`, a subclass of `CompileIncompleteError` so a caller
 that already escalates on an incomplete compile keeps working unchanged — and the
@@ -180,9 +180,9 @@ applied to a live function rather than a dead one.
 ### G3 — `solve_n` and soft constraints
 
 A hard `x > 200` with a soft `x < 10` returned 0 solutions via `solve_n` and 228
-via `solve`, on the same problem. `solver_solve_n` called `_solver_solve_core`
+via `solve`, on the same problem. `dvs_solver_solve_n` called `_solver_solve_core`
 directly, and the MaxSAT relaxation loop that makes a soft constraint soft lives
-in the `solver_solve` wrapper, not the core. `solve_n` is the batch API a
+in the `dvs_solver_solve` wrapper, not the core. `solve_n` is the batch API a
 stimulus generator reaches for, so it was the path most likely to hit this.
 
 ### G4 — `dist` and `AllDifferent` in the bit-blaster
@@ -206,13 +206,13 @@ from either. That combination is now answerable from both sides.
 
 ### G5/G10 — the silent path and the unreachable net
 
-`solver_compile` returns the *count* of constraints it could not compile. What
+`dvs_solver_compile` returns the *count* of constraints it could not compile. What
 happened next depended entirely on the caller:
 
 | caller | handling of `rc > 0` | consequence |
 |---|---|---|
 | `dv_solve.ctx.SolveCtx` | raises `CompileIncompleteError` | loud — this is what pssc sees |
-| `zsp_dpi.c` | tested `rc < 0` only | **silent** — the SV/DPI consumer solved with those constraints dropped |
+| `dvs_dpi.c` | tested `rc < 0` only | **silent** — the SV/DPI consumer solved with those constraints dropped |
 | `smt2_frontend.c` | returns `rc`, does not set `compiled` | loud, plus a bit-blast route |
 
 The formal path had both a fallback engine and a post-solve validator; the
@@ -221,10 +221,10 @@ return code. A dropped constraint there is an under-constrained stimulus that
 looks like a successful solve — worse than the error message, because nothing
 reports it.
 
-The DPI handle now remembers the count (`zsp_dpi_n_uncompiled_h`), and when it is
+The DPI handle now remembers the count (`dvs_dpi_n_uncompiled_h`), and when it is
 non-zero a successful search is re-checked against the *original* problem before
 being reported as OK; a model that violates a dropped constraint returns 3.
-`solver_validate_model` — which re-evaluates every constraint against the
+`dvs_solver_validate_model` — which re-evaluates every constraint against the
 assignment, and was called only from the SMT2 frontend — is exposed as
 `SolveCtx.validate_model()`.
 
@@ -239,13 +239,13 @@ both build through `SolveProblem`. They were the known unknown.
 
 `aggregate_coverage_probe.py` measures them: **cdcl handles all four correctly**,
 including under a pinned result (`countones(x) == 3`, `arr[i] == 20` solving the
-index backwards), with `solver_validate_model` confirming each model.
+index backwards), with `dvs_solver_validate_model` confirming each model.
 
 The bit-blaster does not bit-blast them, which is fine — but it used to route
-them through `err_bv`, so `check()` returned `ZSP_BB_ERROR`. A caller reads that
+them through `err_bv`, so `check()` returned `DVS_BB_ERROR`. A caller reads that
 as "something went wrong" rather than "ask the other engine", and the other
 engine is precisely the one that can answer. They now set `had_unsupported` and
-return `ZSP_BB_UNKNOWN`, which is the pattern this file already uses for signed
+return `DVS_BB_UNKNOWN`, which is the pattern this file already uses for signed
 div/mod. `err_bv` is for *malformed* input — a bad `ExprRef`, an unknown
 `BinOp` — and these four nodes are well-formed, just not supported.
 
@@ -306,9 +306,9 @@ its own file.
 
 ## Still open
 
-**G9 — no unsigned or wide value readback on the cdcl path.** `solver_get_value`
+**G9 — no unsigned or wide value readback on the cdcl path.** `dvs_solver_get_value`
 returns `int64`, so a `bit[64]` value above 2^63 arrives negative, and there is no
-`value_wide` equivalent (bb has `zsp_bbsolver_value_wide`). `add_var`'s `lo`/`hi`
+`value_wide` equivalent (bb has `dvs_bbsolver_value_wide`). `add_var`'s `lo`/`hi`
 are `int64` too, so a >64-bit domain cannot be expressed at all.
 
 This is severity D — the values are correct, they are just returned in a type

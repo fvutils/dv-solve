@@ -20,10 +20,10 @@ _CTX_BUF_SIZE = 1048576
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -41,24 +41,24 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_get_var.restype  = ctypes.c_void_p
-    lib.solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_get_var.restype  = ctypes.c_void_p
+    lib.dvs_solver_get_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
     lib.ctx_tighten_lb64.restype  = ctypes.c_int
     lib.ctx_tighten_lb64.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
@@ -75,14 +75,15 @@ def _setup(lib: ctypes.CDLL):
             ("use_phase_save", ctypes.c_uint8),
             ("_pad",           ctypes.c_uint8 * 3),
             ("max_shave_iters", ctypes.c_uint32),
+            ("time_limit_ms",   ctypes.c_uint32),
         ]
     lib._SolveOpts = SolveOpts
 
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 # BinOp enum values
@@ -112,16 +113,16 @@ def _make_ctx(lib, var_specs):
 
 
 def _compile_and_solve(lib, sp_buf, ctx_buf, sp, seed=0x1234):
-    ba  = lib.zsp_block_alloc_create(None, 0)
+    ba  = lib.dvs_block_alloc_create(None, 0)
     assert ba
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
 
-    rc = lib.solver_compile(ctx, sp)
-    assert rc >= 0, f"solver_compile returned {rc}"
+    rc = lib.dvs_solver_compile(ctx, sp)
+    assert rc >= 0, f"dvs_solver_compile returned {rc}"
 
     opts = lib._SolveOpts(seed=seed)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     return ba, ctx, result
 
 
@@ -129,10 +130,10 @@ def _compile_and_solve(lib, sp_buf, ctx_buf, sp, seed=0x1234):
 # Tests                                                                #
 # ------------------------------------------------------------------ #
 
-def test_unsigned_32_full_range(libzsp):
+def test_unsigned_32_full_range(libdvs):
     """Unsigned 32-bit var with full [0, 0xFFFFFFFF] domain.
     Constraint: x > 0x80000000. Solution must be > 2^31."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, sp = _make_ctx(lib, [
@@ -148,17 +149,17 @@ def test_unsigned_32_full_range(libzsp):
     ba, ctx, result = _compile_and_solve(lib, sp_buf, ctx_buf, sp)
     assert result == SOLVE_OK
 
-    val = lib.solver_get_value(ctx, 0)
+    val = lib.dvs_solver_get_value(ctx, 0)
     assert val > 0x80000000, f"Expected > 0x80000000, got {val:#x}"
     assert val <= 0xFFFFFFFF, f"Expected <= 0xFFFFFFFF, got {val:#x}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_unsigned_32_comparison(libzsp):
+def test_unsigned_32_comparison(libdvs):
     """Two unsigned 32-bit vars: x < y, both spanning the full range.
     Verify the solution satisfies x < y using unsigned comparison."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, sp = _make_ctx(lib, [
@@ -175,16 +176,16 @@ def test_unsigned_32_comparison(libzsp):
     ba, ctx, result = _compile_and_solve(lib, sp_buf, ctx_buf, sp)
     assert result == SOLVE_OK
 
-    x = lib.solver_get_value(ctx, 0)
-    y = lib.solver_get_value(ctx, 1)
+    x = lib.dvs_solver_get_value(ctx, 0)
+    y = lib.dvs_solver_get_value(ctx, 1)
     assert x < y, f"Expected x < y, got x={x:#x}, y={y:#x}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_unsigned_32_eq_high_value(libzsp):
+def test_unsigned_32_eq_high_value(libdvs):
     """Unsigned 32-bit var, constrained x == 0xDEADBEEF."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, sp = _make_ctx(lib, [
@@ -199,15 +200,15 @@ def test_unsigned_32_eq_high_value(libzsp):
     ba, ctx, result = _compile_and_solve(lib, sp_buf, ctx_buf, sp)
     assert result == SOLVE_OK
 
-    val = lib.solver_get_value(ctx, 0)
+    val = lib.dvs_solver_get_value(ctx, 0)
     assert val == 0xDEADBEEF, f"Expected 0xDEADBEEF, got {val:#x}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_unsigned_32_bounds_read(libzsp):
-    """Verify zsp_var_lo64/hi64 read correct bounds for unsigned 32-bit."""
-    lib = libzsp
+def test_unsigned_32_bounds_read(libdvs):
+    """Verify dvs_var_lo64/hi64 read correct bounds for unsigned 32-bit."""
+    lib = libdvs
     _setup(lib)
 
     sp_buf  = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -216,22 +217,22 @@ def test_unsigned_32_bounds_read(libzsp):
     assert sp
     lib.problem_add_var(sp, 0, 32, 0, 0, 0xFFFFFFFF)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    assert lib.solver_compile(ctx, sp) >= 0
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    assert lib.dvs_solver_compile(ctx, sp) >= 0
 
-    lo = lib.zsp_var_lo64(ctx, 0)
-    hi = lib.zsp_var_hi64(ctx, 0)
+    lo = lib.dvs_var_lo64(ctx, 0)
+    hi = lib.dvs_var_hi64(ctx, 0)
     assert lo == 0, f"Expected lo=0, got {lo}"
     assert hi == 0xFFFFFFFF, f"Expected hi=0xFFFFFFFF, got {hi:#x}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_signed_32_unchanged(libzsp):
+def test_signed_32_unchanged(libdvs):
     """Signed 32-bit variables should still use tier-0 and work correctly.
     Regression guard for the unsigned promotion change."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf  = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -240,31 +241,31 @@ def test_signed_32_unchanged(libzsp):
     assert sp
     lib.problem_add_var(sp, 0, 32, 1, -100, 100)  # signed 32-bit
 
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
-    lo = lib.zsp_var_lo64(ctx, 0)
-    hi = lib.zsp_var_hi64(ctx, 0)
+    lo = lib.dvs_var_lo64(ctx, 0)
+    hi = lib.dvs_var_hi64(ctx, 0)
     assert lo == -100
     assert hi == 100
 
     # Verify variable is still tier-0 by checking that the Variable struct
     # has lo/hi set directly (tier-0 characteristic)
-    var_ptr = lib.solver_get_var(ctx, 0)
+    var_ptr = lib.dvs_solver_get_var(ctx, 0)
     # Variable struct: lo(4) hi(4) holes_offset(4) width(2) flags(1) _pad(1)
     lo32 = ctypes.c_int32.from_address(var_ptr).value
     hi32 = ctypes.c_int32.from_address(var_ptr + 4).value
     assert lo32 == -100, f"Tier-0 lo should be -100, got {lo32}"
     assert hi32 == 100, f"Tier-0 hi should be 100, got {hi32}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_unsigned_32_domain_tighten(libzsp):
+def test_unsigned_32_domain_tighten(libdvs):
     """Tightening unsigned 32-bit domain with 64-bit functions works."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf  = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -273,16 +274,16 @@ def test_unsigned_32_domain_tighten(libzsp):
     assert sp
     lib.problem_add_var(sp, 0, 32, 0, 0, 0xFFFFFFFF)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    assert lib.solver_compile(ctx, sp) >= 0
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    assert lib.dvs_solver_compile(ctx, sp) >= 0
 
     # Tighten to [0x80000000, 0xFFFFFFFF]
     rc = lib.ctx_tighten_lb64(ctx, 0, 0x80000000)
     assert rc == PROP_OK
 
-    lo = lib.zsp_var_lo64(ctx, 0)
-    hi = lib.zsp_var_hi64(ctx, 0)
+    lo = lib.dvs_var_lo64(ctx, 0)
+    hi = lib.dvs_var_hi64(ctx, 0)
     assert lo == 0x80000000
     assert hi == 0xFFFFFFFF
 
@@ -292,9 +293,9 @@ def test_unsigned_32_domain_tighten(libzsp):
     rc = lib.ctx_tighten_ub64(ctx, 0, 0xC0000000)
     assert rc == PROP_OK
 
-    lo = lib.zsp_var_lo64(ctx, 0)
-    hi = lib.zsp_var_hi64(ctx, 0)
+    lo = lib.dvs_var_lo64(ctx, 0)
+    hi = lib.dvs_var_hi64(ctx, 0)
     assert lo == 0xA0000000
     assert hi == 0xC0000000
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

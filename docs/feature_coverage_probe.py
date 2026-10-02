@@ -207,7 +207,7 @@ case("R4", "NOT in_range", 1, 8, False,
 
 # --- G: aggregates (SUM/COUNTONES/CLOG2/ARRAY_SELECT) reach the solver only
 #        through the growable builder API, not SolveProblem, so they are not
-#        probed here. bb rejects all four outright (`zsp_bbsolver.c:904`); the
+#        probed here. bb rejects all four outright (`dvs_bbsolver.c:904`); the
 #        cdcl side is unmeasured.
 
 # --- B: bitwise / shift / divide ------------------------------------------

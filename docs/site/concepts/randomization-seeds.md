@@ -33,10 +33,11 @@ variable, not just the first one decided, are spread evenly.
 default, SystemVerilog `:=`) every value in the range gets the weight; with it
 false (`:/`) the weight is divided across the range.
 
-```python
-# kind is 0 about three times as often as 1
-b.add_dist(KIND, [{"lo": 0, "hi": 0, "weight": 3},
-                  {"lo": 1, "hi": 1, "weight": 1}])
+```{literalinclude} ../../examples/concepts.py
+:language: python
+:start-after: "# [dist]"
+:end-before: "# [/dist]"
+:dedent: 4
 ```
 
 Weights shape the result over many solves with different seeds; any single

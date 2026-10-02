@@ -1,4 +1,4 @@
-"""Unit tests for solver_pin_var (Sprint 5.2).
+"""Unit tests for dvs_solver_pin_var (Sprint 5.2).
 
 Tests:
 - Pin a variable and verify dependent constraints are satisfied
@@ -18,10 +18,10 @@ _CTX_BUF_SIZE = 1048576
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -39,18 +39,18 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
     class SolveOpts(ctypes.Structure):
         _fields_ = [
@@ -60,22 +60,23 @@ def _setup(lib: ctypes.CDLL):
             ("use_phase_save", ctypes.c_uint8),
             ("_pad",           ctypes.c_uint8 * 3),
             ("max_shave_iters", ctypes.c_uint32),
+            ("time_limit_ms",   ctypes.c_uint32),
         ]
     lib._SolveOpts = SolveOpts
 
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.solver_pin_var.restype  = ctypes.c_int
-    lib.solver_pin_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_pin_var.restype  = ctypes.c_int
+    lib.dvs_solver_pin_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                    ctypes.c_int64]
-    lib.solver_reset.restype  = None
-    lib.solver_reset.argtypes = [ctypes.c_void_p]
-    lib.solver_checkpoint.restype  = ctypes.c_int
-    lib.solver_checkpoint.argtypes = [ctypes.c_void_p]
-    lib.solver_restore.restype  = None
-    lib.solver_restore.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_reset.restype  = None
+    lib.dvs_solver_reset.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_checkpoint.restype  = ctypes.c_int
+    lib.dvs_solver_checkpoint.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_restore.restype  = None
+    lib.dvs_solver_restore.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
 
 BIN_LT  = 12
@@ -84,9 +85,9 @@ BIN_GT  = 14
 BIN_EQ  = 10
 
 
-def test_pin_var_basic(libzsp):
+def test_pin_var_basic(libdvs):
     """Pin x=5, constraint y > x. Verify y > 5."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -103,30 +104,30 @@ def test_pin_var_basic(libzsp):
     gt_e = lib.expr_binary(sp, BIN_GT, v_y, v_x)
     lib.problem_add_constraint(sp, gt_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     # Pin x = 5
-    rc = lib.solver_pin_var(ctx, 0, 5)
+    rc = lib.dvs_solver_pin_var(ctx, 0, 5)
     assert rc == 0
 
     opts = lib._SolveOpts(seed=0x1234)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
 
-    x = lib.solver_get_value(ctx, 0)
-    y = lib.solver_get_value(ctx, 1)
+    x = lib.dvs_solver_get_value(ctx, 0)
+    y = lib.dvs_solver_get_value(ctx, 1)
     assert x == 5
     assert y > 5, f"Expected y > 5, got {y}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_pin_var_conflict(libzsp):
+def test_pin_var_conflict(libdvs):
     """Pin x=5, then pin x=3 via constraint: conflict."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -142,21 +143,21 @@ def test_pin_var_conflict(libzsp):
     lt_e = lib.expr_binary(sp, BIN_LT, v_x, c_3)
     lib.problem_add_constraint(sp, lt_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     # Pin x = 5, but x < 3 => conflict
-    rc = lib.solver_pin_var(ctx, 0, 5)
+    rc = lib.dvs_solver_pin_var(ctx, 0, 5)
     assert rc == -1, "Expected conflict from pin_var"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_pin_var_with_checkpoint(libzsp):
+def test_pin_var_with_checkpoint(libdvs):
     """Checkpoint, pin, solve, restore, pin different, solve again."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -173,31 +174,31 @@ def test_pin_var_with_checkpoint(libzsp):
     eq_e = lib.expr_binary(sp, BIN_EQ, v_x, v_y)
     lib.problem_add_constraint(sp, eq_e)
 
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     # Checkpoint
-    cp = lib.solver_checkpoint(ctx)
+    cp = lib.dvs_solver_checkpoint(ctx)
     assert cp >= 0
 
     # Pin x=10, solve
-    rc = lib.solver_pin_var(ctx, 0, 10)
+    rc = lib.dvs_solver_pin_var(ctx, 0, 10)
     assert rc == 0
     opts = lib._SolveOpts(seed=0x1111)
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
-    assert lib.solver_get_value(ctx, 1) == 10  # y == x == 10
+    assert lib.dvs_solver_get_value(ctx, 1) == 10  # y == x == 10
 
     # Restore
-    lib.solver_restore(ctx, cp)
+    lib.dvs_solver_restore(ctx, cp)
 
     # Pin x=42, solve
-    rc = lib.solver_pin_var(ctx, 0, 42)
+    rc = lib.dvs_solver_pin_var(ctx, 0, 42)
     assert rc == 0
-    result = lib.solver_solve(ctx, ctypes.byref(opts))
+    result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert result == SOLVE_OK
-    assert lib.solver_get_value(ctx, 1) == 42  # y == x == 42
+    assert lib.dvs_solver_get_value(ctx, 1) == 42  # y == x == 42
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

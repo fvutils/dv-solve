@@ -1,13 +1,13 @@
 # Contradiction Analysis -- User Guide
 
 **Module: zuspec-solver-lcg contradiction analysis**
-**Build flag: `ZSP_CONTRADICTION_ANALYSIS`**
+**Build flag: `DVS_CONTRADICTION_ANALYSIS`**
 
 ---
 
 ## 1. Overview
 
-When `solver_solve()` returns `SOLVE_UNSAT`, the contradiction analysis
+When `dvs_solver_solve()` returns `SOLVE_UNSAT`, the contradiction analysis
 module identifies *why* the problem is infeasible:
 
 - **Minimal Unsatisfiable Subset (MUS)**: the smallest set of constraints
@@ -25,7 +25,7 @@ relaxed soft was dropped and which hard constraints forced the relaxation.
 ### Build flag
 
 ```cmake
-cmake -DZSP_CONTRADICTION_ANALYSIS=ON ..
+cmake -DDVS_CONTRADICTION_ANALYSIS=ON ..
 ```
 
 When OFF (default), no contradiction code is compiled. Zero code-size
@@ -40,7 +40,7 @@ enabled, suitable for development and testing.
 
 ### `contra_analyze_unsat()`
 
-Analyze why a problem is unsatisfiable. Call after `solver_solve()`
+Analyze why a problem is unsatisfiable. Call after `dvs_solver_solve()`
 returns `SOLVE_UNSAT`.
 
 ```c
@@ -58,7 +58,7 @@ int contra_analyze_unsat(SolveCtx *ctx, SolveProblem *sp,
 
 **Example:**
 ```c
-SolveResult res = solver_solve(ctx, &opts);
+SolveResult res = dvs_solver_solve(ctx, &opts);
 if (res == SOLVE_UNSAT) {
     ContraResult result;
     contra_analyze_unsat(ctx, sp, NULL, &result);
@@ -82,7 +82,7 @@ int contra_quick_core(SolveCtx *ctx, SolveProblem *sp,
 
 ### `contra_explain_soft()`
 
-Diagnose why soft constraints were relaxed. Call after `solver_solve()`
+Diagnose why soft constraints were relaxed. Call after `dvs_solver_solve()`
 returns `SOLVE_OK` with relaxed assumptions.
 
 ```c
@@ -190,7 +190,7 @@ When the solver relaxes soft constraints to find a solution,
 `contra_explain_soft()` explains why each was dropped:
 
 ```c
-SolveResult res = solver_solve(ctx, &opts);
+SolveResult res = dvs_solver_solve(ctx, &opts);
 if (res == SOLVE_OK) {
     ContraSoftDiagResult diag;
     contra_explain_soft(ctx, sp, NULL, &diag);
@@ -211,7 +211,7 @@ if (res == SOLVE_OK) {
   where R is the constant range.
 - **Budget control**: Set `opts.max_solver_calls` to limit total solver
   invocations. Partial results are returned on budget exhaustion.
-- **Zero overhead**: When compiled out (`ZSP_CONTRADICTION_ANALYSIS=OFF`),
+- **Zero overhead**: When compiled out (`DVS_CONTRADICTION_ANALYSIS=OFF`),
   no code is added to the core solver.
 
 ## 9. Limitations

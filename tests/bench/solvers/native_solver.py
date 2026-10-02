@@ -1,6 +1,6 @@
 """Native C-solver back-end for benchmarks.
 
-Identical measurement loop to PythonSolver but with ZSP_SOLVER_BACKEND=native.
+Identical measurement loop to PythonSolver but with DVS_SOLVER_BACKEND=native.
 Skips automatically when the native shared library is not built yet.
 """
 from __future__ import annotations

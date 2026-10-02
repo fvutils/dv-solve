@@ -42,7 +42,7 @@ for the optional CaDiCaL SAT back end (see below).
 ```bash
 git clone https://github.com/fvutils/dv-solve.git
 cd dv-solve
-cmake -S . -B build -DZSP_WITH_CADICAL=OFF
+cmake -S . -B build -DDVS_WITH_CADICAL=OFF
 cmake --build build
 ```
 

@@ -27,16 +27,16 @@ def _alarm_handler(signum, frame):
 
 @contextmanager
 def _solver_env(backend_name: str):
-    """Temporarily set ZSP_SOLVER_BACKEND to *backend_name*."""
-    old = os.environ.get("ZSP_SOLVER_BACKEND")
-    os.environ["ZSP_SOLVER_BACKEND"] = backend_name
+    """Temporarily set DVS_SOLVER_BACKEND to *backend_name*."""
+    old = os.environ.get("DVS_SOLVER_BACKEND")
+    os.environ["DVS_SOLVER_BACKEND"] = backend_name
     try:
         yield
     finally:
         if old is None:
-            os.environ.pop("ZSP_SOLVER_BACKEND", None)
+            os.environ.pop("DVS_SOLVER_BACKEND", None)
         else:
-            os.environ["ZSP_SOLVER_BACKEND"] = old
+            os.environ["DVS_SOLVER_BACKEND"] = old
 
 
 def _zdc_bench(

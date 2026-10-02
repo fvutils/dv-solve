@@ -12,7 +12,7 @@ the scipy-backed sampling harness (:mod:`tests.unit.dist_harness`):
   * a zero-weight range is fully excluded, remaining mass stays uniform;
   * an all-zero-weight dist degrades gracefully to a uniform draw over the
     full variable domain (dv-solve's documented fallback — see
-    ``_pick_value_dist`` in zsp_search.c).
+    ``_pick_value_dist`` in dvs_search.c).
 
 Gap 5 (``solve … before`` distribution effect) is intentionally NOT here:
 solve-order is a frontend/scheduler concern (``test_scheduling_graph`` /
@@ -38,13 +38,13 @@ from .dist_harness import (
 N = 8000
 
 
-def test_free_var_uniform(libzsp):
+def test_free_var_uniform(libdvs):
     """An unconstrained 4-bit rand var must be ~uniform over 0..15.
 
     This is the base randomizer underneath every dist — if it were biased,
     every downstream distribution would inherit the skew.
     """
-    dp = DistProblem(libzsp)
+    dp = DistProblem(libdvs)
     dp.add_var(0, width=4, lo=0, hi=15)
     try:
         hist = dp.sample(0, N)
@@ -54,14 +54,14 @@ def test_free_var_uniform(libzsp):
         dp.close()
 
 
-def test_range_divided_intra_uniform(libzsp):
+def test_range_divided_intra_uniform(libdvs):
     """``{[0:9] :/ 1, [10:19] :/ 3}``: right aggregate AND uniform within each block.
 
     test_dist only checks the 25/75 split; the *quality* claim is that ``:/``
     spreads its mass uniformly across the range, so all ten values in each
     block are equally likely.
     """
-    dp = DistProblem(libzsp)
+    dp = DistProblem(libdvs)
     dp.add_var(0, width=8, lo=0, hi=19)
     dp.add_dist(0, [(0, 9, 1, False), (10, 19, 3, False)])
     try:
@@ -81,9 +81,9 @@ def test_range_divided_intra_uniform(libzsp):
         dp.close()
 
 
-def test_per_value_weight_uniform(libzsp):
+def test_per_value_weight_uniform(libdvs):
     """``[0:9] := 3``: per-value weight — every value equally likely (uniform)."""
-    dp = DistProblem(libzsp)
+    dp = DistProblem(libdvs)
     dp.add_var(0, width=8, lo=0, hi=9)
     dp.add_dist(0, [(0, 9, 3, True)])
     try:
@@ -93,7 +93,7 @@ def test_per_value_weight_uniform(libzsp):
         dp.close()
 
 
-def test_per_value_vs_range_divided_marginals(libzsp):
+def test_per_value_vs_range_divided_marginals(libdvs):
     """``:=`` and ``:/`` give the different marginals the LRM requires.
 
     With a range and a single point:
@@ -103,7 +103,7 @@ def test_per_value_vs_range_divided_marginals(libzsp):
     on the point. This is exactly the semantic test_dist doesn't isolate.
     """
     # Per-value :=  -> P(10) = 1/11
-    dp1 = DistProblem(libzsp)
+    dp1 = DistProblem(libdvs)
     dp1.add_var(0, width=8, lo=0, hi=10)
     dp1.add_dist(0, [(0, 9, 1, True), (10, 10, 1, True)])
     try:
@@ -114,7 +114,7 @@ def test_per_value_vs_range_divided_marginals(libzsp):
         dp1.close()
 
     # Range-divided :/ -> P(10) = 1/2
-    dp2 = DistProblem(libzsp)
+    dp2 = DistProblem(libdvs)
     dp2.add_var(0, width=8, lo=0, hi=10)
     dp2.add_dist(0, [(0, 9, 1, False), (10, 10, 1, False)])
     try:
@@ -128,9 +128,9 @@ def test_per_value_vs_range_divided_marginals(libzsp):
         dp2.close()
 
 
-def test_zero_weight_range_excluded_rest_uniform(libzsp):
+def test_zero_weight_range_excluded_rest_uniform(libdvs):
     """``{[0:9] := 0, [10:19] := 1}``: low block never appears, high stays uniform."""
-    dp = DistProblem(libzsp)
+    dp = DistProblem(libdvs)
     dp.add_var(0, width=8, lo=0, hi=19)
     dp.add_dist(0, [(0, 9, 0, True), (10, 19, 1, True)])
     try:
@@ -141,16 +141,16 @@ def test_zero_weight_range_excluded_rest_uniform(libzsp):
         dp.close()
 
 
-def test_all_zero_weight_uniform_fallback(libzsp):
+def test_all_zero_weight_uniform_fallback(libdvs):
     """All-zero dist degrades to a uniform draw over the *full* variable domain.
 
     dv-solve treats a dist whose total effective weight is 0 as "no usable
     weighting" and falls back to ``_rand_range64(lo, hi)`` over the whole
-    declared domain (zsp_search.c:_pick_value_dist). This pins that
+    declared domain (dvs_search.c:_pick_value_dist). This pins that
     documented behavior: solves still succeed and the result is uniform over
     [0,19] — including values outside the (all-zero) dist ranges.
     """
-    dp = DistProblem(libzsp)
+    dp = DistProblem(libdvs)
     dp.add_var(0, width=8, lo=0, hi=19)
     dp.add_dist(0, [(0, 5, 0, True), (10, 15, 0, False)])
     try:
@@ -168,13 +168,13 @@ def test_all_zero_weight_uniform_fallback(libzsp):
 # Harness extensions: hard-constraint interaction + joint independence #
 # ------------------------------------------------------------------ #
 
-def test_two_free_vars_independent(libzsp):
+def test_two_free_vars_independent(libdvs):
     """Two constraint-independent 3-bit rand vars: jointly uniform AND independent.
 
     Both are assigned from the same solve; the randomizer must not couple
     them (equal marginals aren't enough — the *joint* must factor).
     """
-    dp = DistProblem(libzsp)
+    dp = DistProblem(libdvs)
     dp.add_var(0, width=3, lo=0, hi=7)
     dp.add_var(1, width=3, lo=0, hi=7)
     try:
@@ -190,16 +190,16 @@ def test_two_free_vars_independent(libzsp):
         dp.close()
 
 
-def test_dist_renormalizes_under_hard_constraint(libzsp):
+def test_dist_renormalizes_under_hard_constraint(libdvs):
     """A hard bound clips the feasible domain; ``:/`` re-normalizes over it.
 
     ``{[0:9] :/ 1, [10:19] :/ 3}`` with hard ``x >= 5``: values < 5 must
     vanish, the low block shrinks to {5..9} but still carries its 25% share
     (``:/`` weight is per-range, independent of how many values survive), and
     both surviving blocks stay uniform. This drives the feasible-domain
-    intersection in ``_pick_value_dist`` (zsp_search.c).
+    intersection in ``_pick_value_dist`` (dvs_search.c).
     """
-    dp = DistProblem(libzsp)
+    dp = DistProblem(libdvs)
     dp.add_var(0, width=8, lo=0, hi=19)
     dp.add_dist(0, [(0, 9, 1, False), (10, 19, 3, False)])
     dp.constrain(0, BIN_GTE, 5)      # x >= 5
@@ -219,14 +219,14 @@ def test_dist_renormalizes_under_hard_constraint(libzsp):
         dp.close()
 
 
-def test_dist_range_clamped_to_domain(libzsp):
+def test_dist_range_clamped_to_domain(libdvs):
     """A dist range wider than the variable domain is clamped, not overrun.
 
     ``[10:30] :/ 1`` on an 8-bit var declared ``[0:19]``: the effective range
     is the intersection [10:19]; no value outside the domain appears and the
     surviving range is uniform.
     """
-    dp = DistProblem(libzsp)
+    dp = DistProblem(libdvs)
     dp.add_var(0, width=8, lo=0, hi=19)
     dp.add_dist(0, [(10, 30, 1, False)])
     try:

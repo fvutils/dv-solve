@@ -33,14 +33,15 @@ class SolveOpts(ctypes.Structure):
         ("use_phase_save",  ctypes.c_uint8),
         ("_pad",            ctypes.c_uint8 * 3),
         ("max_shave_iters", ctypes.c_uint32),
+        ("time_limit_ms",   ctypes.c_uint32),
     ]
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -62,21 +63,21 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_reset.restype  = None
-    lib.solver_reset.argtypes = [ctypes.c_void_p]
-    lib.solver_set_seed.restype  = None
-    lib.solver_set_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+    lib.dvs_solver_reset.restype  = None
+    lib.dvs_solver_reset.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_set_seed.restype  = None
+    lib.dvs_solver_set_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
 
 
 def _make_dist_entries(*specs):
@@ -93,10 +94,10 @@ def _make_dist_entries(*specs):
 def _create_solver(lib, sp):
     """Create a solver context, compile the problem, return (ctx, ba)."""
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    rc = lib.solver_compile(ctx, sp)
-    assert rc >= 0, f"solver_compile failed: {rc}"
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    rc = lib.dvs_solver_compile(ctx, sp)
+    assert rc >= 0, f"dvs_solver_compile failed: {rc}"
     return ctx, ba, ctx_buf
 
 
@@ -104,9 +105,9 @@ def _create_solver(lib, sp):
 # Tests                                                                #
 # ------------------------------------------------------------------ #
 
-def test_dist_domain_restriction(libzsp):
+def test_dist_domain_restriction(libdvs):
     """dist {[1:3], [5:6]}. Verify solutions only in those ranges."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -128,20 +129,20 @@ def test_dist_domain_restriction(libzsp):
 
     allowed = set(range(1, 4)) | set(range(5, 7))  # {1,2,3,5,6}
     for i in range(200):
-        lib.solver_reset(ctx)
-        lib.solver_set_seed(ctx, 1000 + i)
+        lib.dvs_solver_reset(ctx)
+        lib.dvs_solver_set_seed(ctx, 1000 + i)
         opts = SolveOpts(seed=1000 + i)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
-        x = lib.solver_get_value(ctx, 0)
+        x = lib.dvs_solver_get_value(ctx, 0)
         assert x in allowed, f"iteration {i}: x={x}, not in {allowed}"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_dist_zero_weight_excluded(libzsp):
+def test_dist_zero_weight_excluded(libdvs):
     """dist {0 := 0, 1 := 1}. Verify 0 never appears."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -161,20 +162,20 @@ def test_dist_zero_weight_excluded(libzsp):
     ctx, ba, _ = _create_solver(lib, sp)
 
     for i in range(100):
-        lib.solver_reset(ctx)
-        lib.solver_set_seed(ctx, 2000 + i)
+        lib.dvs_solver_reset(ctx)
+        lib.dvs_solver_set_seed(ctx, 2000 + i)
         opts = SolveOpts(seed=2000 + i)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
-        x = lib.solver_get_value(ctx, 0)
+        x = lib.dvs_solver_get_value(ctx, 0)
         assert x == 1, f"iteration {i}: x={x}, expected 1 (0 should be excluded)"
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_dist_weighted_bias(libzsp):
+def test_dist_weighted_bias(libdvs):
     """dist {0 := 1, 255 := 3}. Over 1000 solves, verify ~75% hit 255."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -197,12 +198,12 @@ def test_dist_weighted_bias(libzsp):
     count_255 = 0
     n_trials = 1000
     for i in range(n_trials):
-        lib.solver_reset(ctx)
-        lib.solver_set_seed(ctx, 3000 + i)
+        lib.dvs_solver_reset(ctx)
+        lib.dvs_solver_set_seed(ctx, 3000 + i)
         opts = SolveOpts(seed=3000 + i)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
-        x = lib.solver_get_value(ctx, 0)
+        x = lib.dvs_solver_get_value(ctx, 0)
         assert x in (0, 255), f"iteration {i}: x={x}, expected 0 or 255"
         if x == 255:
             count_255 += 1
@@ -214,12 +215,12 @@ def test_dist_weighted_bias(libzsp):
         f"({count_255}/{n_trials})"
     )
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_dist_range_divided(libzsp):
+def test_dist_range_divided(libdvs):
     """dist {[0:9] :/ 1, [10:19] :/ 3}. Over 1000 solves, verify ~75% in [10:19]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
@@ -244,12 +245,12 @@ def test_dist_range_divided(libzsp):
     count_high = 0
     n_trials = 1000
     for i in range(n_trials):
-        lib.solver_reset(ctx)
-        lib.solver_set_seed(ctx, 4000 + i)
+        lib.dvs_solver_reset(ctx)
+        lib.dvs_solver_set_seed(ctx, 4000 + i)
         opts = SolveOpts(seed=4000 + i)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
-        x = lib.solver_get_value(ctx, 0)
+        x = lib.dvs_solver_get_value(ctx, 0)
         assert 0 <= x <= 19, f"iteration {i}: x={x}, out of range"
         if x >= 10:
             count_high += 1
@@ -261,4 +262,4 @@ def test_dist_range_divided(libzsp):
         f"({count_high}/{n_trials})"
     )
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

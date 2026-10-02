@@ -10,7 +10,7 @@ into a simulator, should ask the package rather than hard-code paths.
 | `dv_solve.get_libs()` | library names to link, for example `["dv_solve"]` (`-ldv_solve`) |
 | `dv_solve.get_libdirs()` | directories holding the shared libraries (`-L`) |
 | `dv_solve.get_incdirs()` | C include directories (`-I`) |
-| `dv_solve.get_svdirs()` | directories holding the SystemVerilog packages `zsp_dpi_pkg.sv` and `zsp_randomizer_pkg.sv` |
+| `dv_solve.get_svdirs()` | directories holding the SystemVerilog packages `dvs_dpi_pkg.sv` and `dvs_randomizer_pkg.sv` |
 | `dv_solve.get_dpi_lib()` | full path of the DPI shared library, for a simulator's `-sv_lib` option |
 | `dv_solve.resolve_report()` | a dictionary describing what was found and where it looked, for diagnosing a failed lookup |
 

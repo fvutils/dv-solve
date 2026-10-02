@@ -126,7 +126,7 @@ class BenchResult:
 
 ### `PythonSolver` / `NativeSolver`
 
-Both wrap `zdc.randomize()`.  The only difference is the `ZSP_SOLVER_BACKEND`
+Both wrap `zdc.randomize()`.  The only difference is the `DVS_SOLVER_BACKEND`
 environment variable.
 
 ```python
@@ -165,7 +165,7 @@ class PythonSolver:
 ```
 
 `NativeSolver` is identical except `_backend_name = "native"` and it sets
-`ZSP_SOLVER_BACKEND=native` (via `monkeypatch` or `os.environ`) before the
+`DVS_SOLVER_BACKEND=native` (via `monkeypatch` or `os.environ`) before the
 loop, and calls `pytest.skip()` if `zuspec.solver` is not importable or the
 shared library is not present.
 
@@ -311,8 +311,8 @@ tests/bench/
 ├── solvers/
 │   ├── __init__.py
 │   ├── base.py                  # Solver Protocol + BenchResult
-│   ├── python_solver.py         # ZSP_SOLVER_BACKEND=python
-│   ├── native_solver.py         # ZSP_SOLVER_BACKEND=native
+│   ├── python_solver.py         # DVS_SOLVER_BACKEND=python
+│   ├── native_solver.py         # DVS_SOLVER_BACKEND=native
 │   ├── sim_solver.py            # DV Flow + SolvePerfHarnessGenerator
 │   └── bitwuzla_solver.py       # subprocess bitwuzla + RandSMT2Emitter
 ├── results/                     # JSON output: {scenario}_{solver}.json

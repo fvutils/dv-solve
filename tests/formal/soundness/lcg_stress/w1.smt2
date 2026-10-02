@@ -1,0 +1,6 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 4))
+(declare-const z (_ BitVec 4))
+(assert (distinct (bvsub z x) z))
+(assert (bvugt (bvsub z x) (_ bv14 4)))
+(check-sat)

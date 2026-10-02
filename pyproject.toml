@@ -17,7 +17,7 @@ name = "dv-solve"
 # in the same shape pssparser uses. See setup.py for why it is not a
 # [tool.setuptools.dynamic] attr: entry.
 dynamic = ["version"]
-description = "Domain-agnostic CLP(FD) constraint solver"
+description = "Constraint solver for design verification: constrained-random stimulus and SMT-LIB2"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}

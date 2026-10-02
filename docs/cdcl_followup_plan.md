@@ -4,7 +4,7 @@ Status: 2026-05-24. Soundness holds (0 disagreements across 118
 cross-check fixtures). Cross-check now **108/10/0** after Phase 9's
 yosys-sby integration shook out 14 incremental-mode bugs; three
 tier1 "honest unknown" fixtures recovered as a side effect of the
-`solver_restore` queue-clear fix. Open work is Phase 10 (sby
+`dvs_solver_restore` queue-clear fix. Open work is Phase 10 (sby
 end-to-end edges: d≥30 ASAN SEGV, cv14 cover false-UNSAT,
 wider_counter extend gap) plus the latent Phase 2 trail-reason
 unsoundness still on the books.
@@ -31,7 +31,7 @@ literals per analysis on the regressed fixtures and is what brought
 back fsm_onehot_d32.
 **Estimated size:** ~half-session.
 **Risk:** low. Local refactor of one function (`_explain_binary_bitwise`),
-plus per-op variants in `zsp_explain.c`.
+plus per-op variants in `dvs_explain.c`.
 
 ### Problem
 
@@ -65,7 +65,7 @@ plan body of the prior doc (`docs/cdcl_explain_soundness_plan.md`).
 ### Exit criteria
 
 - [x] `bvand`, `bvor`, `bvxor` explain are split into per-op functions
-      in `zsp_explain.c`, each citing 2 or 4 literals (not 6).
+      in `dvs_explain.c`, each citing 2 or 4 literals (not 6).
 - [x] `tests/formal/test_cross_check_tier1.py` and
       `tests/formal/test_cross_check.py` both pass with 0 failures
       (118 total: 104 passed, 14 skipped — was 103/15).
@@ -152,7 +152,7 @@ the unit literal).
 
 **Status:** landed 2026-05-24. Audit doc:
 `docs/cdcl_explain_audit.md`. 33 callbacks documented (28 in
-`zsp_explain.c` + 5 `_64` variants in `zsp_prop_templates.c`). No
+`dvs_explain.c` + 5 `_64` variants in `dvs_prop_templates.c`). No
 soundness fix-needed verdicts; the latent bug from `/tmp/bor.smt2`
 was about the **analyzer** (Phase 2), not the explain callbacks.
 **Estimated size:** ~half-session.
@@ -160,7 +160,7 @@ was about the **analyzer** (Phase 2), not the explain callbacks.
 
 ### Problem
 
-The 26 explain callbacks in `zsp_explain.c` were written
+The 26 explain callbacks in `dvs_explain.c` were written
 incrementally; only those exercised by tier2/3 have been
 stress-tested. Now that phase 1 has touched the most-used ones, walk
 the rest against:
@@ -173,7 +173,7 @@ the rest against:
 
 ### Approach
 
-Walk `zsp_explain.c` top to bottom. For each callback, write a one-
+Walk `dvs_explain.c` top to bottom. For each callback, write a one-
 line entry in `docs/cdcl_explain_audit.md` with verdict and notes.
 Patch the ones flagged.
 
@@ -198,7 +198,7 @@ Cross-check unchanged at 98/20/0; wall time within noise (223s vs
 Truncation across all 33 explain callbacks removed — the bounds
 flagged in the Phase 3 audit no longer collapse to 32-bit.
 **Estimated size:** ~one session.
-**Risk:** medium. Touches `zsp_lcg.h`, every explain.c callback,
+**Risk:** medium. Touches `dvs_lcg.h`, every explain.c callback,
 clause storage. Possible ABI implication for the DPI shim.
 
 User asked to design for both 32- and 64-bit bounds flexibly. Two
@@ -215,8 +215,8 @@ variant (B) isn't needed.
 ### Exit criteria
 
 - [x] `Literal.bound` is `int64_t` (struct size 12 → 16 bytes).
-- [x] All `(int32_t)bound` casts in `zsp_lcg.c`,
-      `zsp_explain.c`, and `zsp_prop_templates.c`'s explain
+- [x] All `(int32_t)bound` casts in `dvs_lcg.c`,
+      `dvs_explain.c`, and `dvs_prop_templates.c`'s explain
       callbacks are removed. Trace `printf` widened to `%lld`.
 - [x] Cross-check unchanged at 98 passed / 20 skipped / 0
       disagreements. Wall time within noise of the Phase 2
@@ -297,9 +297,9 @@ cheap coalescing step in ADD_EXPL_LIT.
 ### What was actually built (slightly different shape from the original)
 
 - `TrailEntry._te_pad` repurposed as `flags`; `TRAIL_FLAG_SINGLETON`
-  defined in `zsp_trail.h`.
+  defined in `dvs_trail.h`.
 - **Auto-detection** at tighten time: `_mark_singleton_pair` in
-  `zsp_propagate.c` watches every `ctx_tighten_lb/ub` and, when the
+  `dvs_propagate.c` watches every `ctx_tighten_lb/ub` and, when the
   variable becomes singleton (`lo == hi`), scans back to find the
   companion bound entry at the same level from the same propagator
   (or same decision) and flags both. Covers decisions, eq, ITE,
@@ -511,12 +511,12 @@ separate ASAN SEGV — see Phase 10).
 3. `_bool_to_var` learned EXTRACT shapes — fixes the
    OR-of-extract-equalities blocker that was open at session start
    (`6a5c61b`).
-4. LIFO var-init two-pass in `solver_add_constraint` (`6a5c61b`).
+4. LIFO var-init two-pass in `dvs_solver_add_constraint` (`6a5c61b`).
 5. `_fresh_aux` / `_next_var_id` sync against backend aux allocations
    (`6a5c61b`).
-6. `solver_restore` NULLs post-cp `prop_refs` so `solver_reset`
+6. `dvs_solver_restore` NULLs post-cp `prop_refs` so `dvs_solver_reset`
    doesn't re-activate stale inside-push propagators (`6a5c61b`).
-7. `solver_restore` rolls back learnt-clause count via new
+7. `dvs_solver_restore` rolls back learnt-clause count via new
    `CheckpointMark.n_clauses_at_cp` (`6a5c61b`).
 8. `(concat const var)` materialises both sides via `_value_to_var`
    (`89e8df4`).
@@ -527,10 +527,10 @@ separate ASAN SEGV — see Phase 10).
     `_next_var_id` (`89e8df4`).
 11. `SMT2_MAX_FUNS` 64 → 8192 (`89e8df4`).
 12. `incremental_capacity_hint` (8192) on the SMT2 frontend so
-    `solver_add_constraint` doesn't fail when post-init aux growth
+    `dvs_solver_add_constraint` doesn't fail when post-init aux growth
     blows the `VAR_SLACK_FACTOR=32` × `n_initial` capacity (`2b40758`).
 13. `r = extend(a)` materialises `a` via `_value_to_var` (`2b40758`).
-14. `solver_restore` clears + re-primes the propagator queue so
+14. `dvs_solver_restore` clears + re-primes the propagator queue so
     stale `queue_next` chains from inside-push propagators can't be
     dequeued post-pop. Side wins: `memmaptight32`, `arrayordering`,
     `muldivscenario` flipped skip → pass; cross-check 105/13/0 →
@@ -554,7 +554,7 @@ section "Remaining edges".
 
 1. ~~**counter_assert d ≥ 30 ASAN SEGV**~~ **fixed 2026-05-24.**
    Root cause: `incremental_capacity_hint` sized the var array but
-   NOT the `prop_refs` side table. `solver_restore` iterates
+   NOT the `prop_refs` side table. `dvs_solver_restore` iterates
    `prop_refs[0..n_props_at_cp)`; once `n_props_at_cp` exceeded
    `n_prop_refs_capacity` (352 vs 727 on the d30 trace), the loop
    read past the end of `prop_refs` into adjacent
@@ -563,10 +563,10 @@ section "Remaining edges".
    slipped past the `!= EXPR_NULL` check; the bogus `prop_ref=0`
    then made `p = pool_base+0` (the pool header), so the fire
    dispatch read a garbage function pointer and SEGV'd. Fix in
-   `zsp_compile.c`: apply `incremental_capacity_hint` to `pr_cap`
+   `dvs_compile.c`: apply `incremental_capacity_hint` to `pr_cap`
    (covers `prop_refs`, `prop_guard_vars`, `prop_constraint_id` since
    they all share the same capacity). Defense-in-depth in
-   `zsp_checkpoint.c`: `solver_restore` clamps its loop bound to
+   `dvs_checkpoint.c`: `dvs_solver_restore` clamps its loop bound to
    `n_prop_refs_capacity`. Regression fixture:
    `tests/formal/regression_prop_refs_capacity.smt2` (captured d30
    trace). Verified: `sby -f counter_assert_d100.sby bmc` PASS.
@@ -574,18 +574,18 @@ section "Remaining edges".
 2. ~~**Cover-mode false-UNSAT**~~ **fixed 2026-05-24.** Two
    interacting bugs in the push/pop state-restore path:
 
-   (a) `solver_solve` at `zsp_search.c:341` overwrites
+   (a) `dvs_solver_solve` at `dvs_search.c:341` overwrites
    `level_marks[0]` to seal "level-0 baseline" for its restarts
    and `bounds_shave` probing. Inside a push scope, this leaves
    `level_marks[m->decision_level]` pointing at a *post-push* trail
-   state — so `solver_restore`'s `trail_backtrack` stops there
+   state — so `dvs_solver_restore`'s `trail_backtrack` stops there
    instead of walking back to `m->trail_top`. Pre-push trail
    entries (compile-time aux tightenings from inside the push)
    survive the pop, leaving the solver with phantom bounds.
 
    (b) `trail_backtrack` walks all watcher chains to clear
    `PROP_FLAG_ENTAILED` so post-backtrack propagation can re-fire
-   the cleared props. But `solver_restore` only NULLs the
+   the cleared props. But `dvs_solver_restore` only NULLs the
    `prop_refs[]` slots of post-cp propagators; they stay linked
    into watcher chains. After (a) and a subsequent `(declare-fun)`
    that reuses a rolled-back var id, the stale post-cp prop's
@@ -595,7 +595,7 @@ section "Remaining edges".
    producing spurious unsat.
 
    Fixes in this commit:
-   - `solver_restore` restores
+   - `dvs_solver_restore` restores
      `level_marks[m->decision_level].trail_top`/`.trail_count` from
      the saved `m->trail_top`/`m->trail_count` before
      `trail_backtrack`, so the backtrack stops at the right point.
@@ -678,7 +678,7 @@ section "Remaining edges".
    unknown names, which crashed smtio's response parser. Fix:
    `_cmd_get_value` falls back to `_eval_sexpr` — a small recursive
    evaluator that expands `define-fun` bodies, looks up declared
-   vars via `solver_get_value`, and computes BV/Bool ops (`and`,
+   vars via `dvs_solver_get_value`, and computes BV/Bool ops (`and`,
    `or`, `not`, `=`, `distinct`, `ite`, `bvnot`/`bvand`/`bvor`/
    `bvxor`/`bvadd`/`bvsub`/`bvmul`, `bvult`/`bvule`/`bvugt`/`bvuge`,
    `extract`, `concat`). For unsupported shapes the handler now
@@ -693,9 +693,9 @@ section "Remaining edges".
 - [x] d ≥ 30 ASAN SEGV root-caused and fixed; counter_assert
       verifies through depth ≥ 100 (`sby -f counter_assert_d100.sby
       bmc` PASS).
-- [x] cv14 push/pop false-UNSAT fixed (root-cause was solver_solve
+- [x] cv14 push/pop false-UNSAT fixed (root-cause was dvs_solver_solve
       + trail_backtrack ENTAILED-clearing interaction with
-      solver_restore, not the AND-compile path). Regression
+      dvs_solver_restore, not the AND-compile path). Regression
       fixture added: `tests/formal/regression_push_unsat_state.smt2`.
 - [ ] wider_counter passes both safety and cover at step 1 — **not
       achieved.** Root cause diagnosed (modular bvadd/bvsub propagator

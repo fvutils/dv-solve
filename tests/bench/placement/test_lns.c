@@ -7,16 +7,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "zsp_problem.h"
-#include "zsp_ctx.h"
-#include "zsp_search.h"
-#include "zsp_placement.h"
-#include "zsp_costguided.h"
+#include "dvs_problem.h"
+#include "dvs_ctx.h"
+#include "dvs_search.h"
+#include "dvs_placement.h"
+#include "dvs_costguided.h"
 
 static void test_lns(int n, int canvas, int n_nets, double time_lim) {
     size_t sp_sz = 65536;
     void *sp_buf = calloc(1, sp_sz);
-    SolveProblem *sp = solve_problem_init(sp_buf, sp_sz);
+    dvs_problem_t *sp = solve_problem_init(sp_buf, sp_sz);
 
     int widths[256], heights[256];
     srand(42);
@@ -32,9 +32,9 @@ static void test_lns(int n, int canvas, int n_nets, double time_lim) {
 
     size_t ctx_sz = 1 << 24;
     void *ctx_buf = calloc(1, ctx_sz);
-    zsp_block_alloc_t *ba = zsp_block_alloc_create(NULL, ctx_sz);
-    SolveCtx *ctx = solver_create(ctx_buf, ctx_sz, ba);
-    solver_compile(ctx, sp);
+    dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, ctx_sz);
+    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, ctx_sz, ba);
+    dvs_solver_compile(ctx, sp);
 
     /* Add NoOverlap2D */
     RectSpec rects[256];
@@ -120,7 +120,7 @@ static void test_lns(int n, int canvas, int n_nets, double time_lim) {
     lopts.subproblem_conflicts = 500;
     lopts.seed = 42;
 
-    int rc = solver_lns_optimize(ctx, &hctx, &lopts, positions, &lr);
+    int rc = dvs_solver_lns_optimize(ctx, &hctx, &lopts, positions, &lr);
 
     if (rc == 0) {
         printf("N=%-3d canvas=%-4d nets=%-4d | greedy=%ld  best=%ld  impr=%.1f%%"
@@ -137,7 +137,7 @@ static void test_lns(int n, int canvas, int n_nets, double time_lim) {
     free(positions); free(macro_ws); free(macro_hs);
     hpwl_cost_ctx_destroy(&hctx);
     free(all_pins); free(nets); free(macros);
-    zsp_block_alloc_destroy(ba);
+    dvs_block_alloc_destroy(ba);
     free(ctx_buf); free(sp_buf);
 }
 

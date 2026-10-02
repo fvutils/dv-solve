@@ -1,7 +1,7 @@
-"""solver_reset must fully restore variable domains for ALL width tiers.
+"""dvs_solver_reset must fully restore variable domains for ALL width tiers.
 
 Regression test for a tier-1 (width >= 32) reset bug: compile saved a separate
-pristine copy of each tier-1 var's WideBounds64, but solver_reset memcpy'd the
+pristine copy of each tier-1 var's WideBounds64, but dvs_solver_reset memcpy'd the
 whole Variable array — repointing the var at the saved copy, making the restore
 a self-copy no-op and letting the next solve corrupt the saved copy. Result:
 tier-1 vars stayed pinned to their first solved value across resets.
@@ -45,7 +45,7 @@ def _distinct_after_reset(result_width, n=8):
 
 
 @pytest.mark.parametrize("width", [8, 16, 31, 32, 40, 48, 63])
-def test_reset_restores_all_tiers(libzsp, width):
+def test_reset_restores_all_tiers(libdvs, width):
     # A working reset must produce several distinct values across seeds; a
     # broken reset pins the variable and yields exactly one.
     seen = _distinct_after_reset(width)

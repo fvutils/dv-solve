@@ -11,12 +11,12 @@ core solver stays lightweight enough for embedded targets.
 ## 0. TL;DR
 
 dv-solve already ships a solid first-generation debug capability
-(`ZSP_CONTRADICTION_ANALYSIS`: QuickXplain MUS, var-const relaxations,
+(`DVS_CONTRADICTION_ANALYSIS`: QuickXplain MUS, var-const relaxations,
 soft-constraint diagnostics, text/JSON output, build-flag gating — see
 `docs/contradiction_analysis.md`). It also has the harder-to-build
 asset that most explanation tools lack: a **lazy-clause-generation
 (LCG) layer with per-propagator `explain()` callbacks**
-(`zsp_explain.c`, `zsp_lcg.c`). That is a working *white-box proof
+(`dvs_explain.c`, `dvs_lcg.c`). That is a working *white-box proof
 engine* sitting unused by the debug layer.
 
 The research below converges on a clear path forward. The recommended
@@ -40,7 +40,7 @@ host workstation needs lives in layers 2–4.
 
 ## 1. Problem framing
 
-When `solver_solve()` does not return a usable result, the user faces
+When `dvs_solver_solve()` does not return a usable result, the user faces
 one of four situations, and each needs a *different* explanation:
 
 | Outcome | User's real question | Primary technique |
@@ -144,7 +144,7 @@ CP" — and dv-solve *is* an LCG/CP solver.
 Beyond "which constraints," users (and downstream tools) often want
 *why*: a derivation showing how the contradiction follows. dv-solve's
 LCG layer already records, per propagation, *which literals implied a
-bound change* via `explain_*` callbacks (`zsp_explain.h`). Conflict
+bound change* via `explain_*` callbacks (`dvs_explain.h`). Conflict
 analysis resolves these into a learnt clause. That same machinery can
 emit a **proof/derivation DAG** — the module's stated "future sprint."
 Caveat from `docs/cdcl_explain_soundness_plan.md`: the explain callbacks
@@ -220,7 +220,7 @@ line 42."
    compiled out.
 3. **Embedded-first separation.** The core solver exposes a tiny stable
    primitive API; *all* debug logic is additive and compiled out by
-   default (the existing `ZSP_CONTRADICTION_ANALYSIS` pattern, extended).
+   default (the existing `DVS_CONTRADICTION_ANALYSIS` pattern, extended).
 4. **Heavy logic in Python, not C.** Orchestration, taxonomy, NL
    reports, and fix advice live in `dv_solve/*` where binary size is a
    non-issue. C provides primitives; Python provides intelligence.
@@ -241,16 +241,16 @@ line 42."
                  └───────────────┬─────────────────────────────┘
                                  │ ctypes (stable primitive API)
    C add-on (compiled out by default)                            
-   libdv_solve_debug.so   [ZSP_CONTRADICTION_ANALYSIS]           
+   libdv_solve_debug.so   [DVS_CONTRADICTION_ANALYSIS]           
      Layer 2 (black-box):  QuickXplain MUS, quick core,          
                            relaxation search, soft diagnosis     
      Layer 3 (white-box):  proof/derivation DAG builder          
-                           [needs ZSP_LCG; #ifdef-guarded]       
+                           [needs DVS_LCG; #ifdef-guarded]       
                  └───────────────┬─────────────────────────────┘
                                  │ Layer 1 primitive hooks
    C core (always present, ~zero cost when debug off)            
    libdv_solve.so                                                
-     • solver_solve(ctx, opts)        incremental                
+     • dvs_solver_solve(ctx, opts)        incremental                
      • assumption push/pin (already used by soft)                
      • get_unsat_core()  ← thin: report assumptions in conflict  
      • LCG explain() callbacks (already exist)                   
@@ -373,8 +373,8 @@ int contra_difficulty(SolveCtx*, SolveProblem*,
                       ContraDifficulty *out /* per-constraint score */);
 ```
 
-All gated by `ZSP_CONTRADICTION_ANALYSIS`; the proof functions
-additionally `#ifdef ZSP_LCG`.
+All gated by `DVS_CONTRADICTION_ANALYSIS`; the proof functions
+additionally `#ifdef DVS_LCG`.
 
 ---
 
@@ -461,6 +461,6 @@ changes).**
 - `docs/soft_constraints.md` — soft-constraint relaxation model
 - `docs/cdcl_explain_soundness_plan.md` — LCG explain soundness (prereq
   for the proof-DAG work)
-- `src/c/zsp_contradiction.h`, `src/c/zsp_explain.h` — current API
+- `src/c/dvs_contradiction.h`, `src/c/dvs_explain.h` — current API
 </content>
 </invoke>

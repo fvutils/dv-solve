@@ -18,10 +18,10 @@ _CTX_BUF_SIZE = 524288
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -30,21 +30,21 @@ def _setup(lib: ctypes.CDLL):
                                     ctypes.c_uint8, ctypes.c_uint8,
                                     ctypes.c_int64, ctypes.c_int64]
 
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
-    lib.zsp_var_lo64.restype  = ctypes.c_int64
-    lib.zsp_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_var_hi64.restype  = ctypes.c_int64
-    lib.zsp_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_lo64.restype  = ctypes.c_int64
+    lib.dvs_var_lo64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_var_hi64.restype  = ctypes.c_int64
+    lib.dvs_var_hi64.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
-    lib.solver_propagate.restype  = ctypes.c_int
-    lib.solver_propagate.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_propagate.restype  = ctypes.c_int
+    lib.dvs_solver_propagate.argtypes = [ctypes.c_void_p]
 
     lib.ctx_tighten_lb64.restype  = ctypes.c_int
     lib.ctx_tighten_lb64.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
@@ -88,23 +88,23 @@ def _make_ctx_64(lib, var_specs):
         ref = lib.problem_add_var(sp, i, width, is_signed, lo, hi)
         assert ref != EXPR_NULL
 
-    ba  = lib.zsp_block_alloc_create(None, 0)
+    ba  = lib.dvs_block_alloc_create(None, 0)
     assert ba
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
     assert ctx
 
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     assert rc >= 0
 
     return sp_buf, ctx_buf, ba, sp, ctx
 
 
 def _lo(lib, ctx, var_id):
-    return lib.zsp_var_lo64(ctx, var_id)
+    return lib.dvs_var_lo64(ctx, var_id)
 
 
 def _hi(lib, ctx, var_id):
-    return lib.zsp_var_hi64(ctx, var_id)
+    return lib.dvs_var_hi64(ctx, var_id)
 
 
 def _fix64(lib, ctx, var_id, val):
@@ -117,9 +117,9 @@ def _fix64(lib, ctx, var_id, val):
 # Mul_64 tests                                                        #
 # ------------------------------------------------------------------ #
 
-def test_mul_64_basic(libzsp):
+def test_mul_64_basic(libdvs):
     """r = a * b; fix a=3, b=4; propagate -> r=[12,12]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     # Use width=33 to force tier-1
@@ -133,18 +133,18 @@ def test_mul_64_basic(libzsp):
     _fix64(lib, ctx, 1, 3)
     _fix64(lib, ctx, 2, 4)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 12
     assert _hi(lib, ctx, 0) == 12
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_mul_64_range(libzsp):
+def test_mul_64_range(libdvs):
     """r = a * b; a=[2,4], b=[3,5]; propagate -> r in [6,20]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx_64(lib, [
@@ -155,7 +155,7 @@ def test_mul_64_range(libzsp):
 
     lib.prop_add_bounds_mul_64(ctx, 0, 1, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     # With singleton specialization only, the mul propagator won't tighten
@@ -164,12 +164,12 @@ def test_mul_64_range(libzsp):
     assert _lo(lib, ctx, 0) <= 6
     assert _hi(lib, ctx, 0) >= 20
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_mul_64_backward(libzsp):
+def test_mul_64_backward(libdvs):
     """r = a * b; fix a=5, fix r=[15,15]; propagate -> b=[3,3]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx_64(lib, [
@@ -182,18 +182,18 @@ def test_mul_64_backward(libzsp):
     _fix64(lib, ctx, 1, 5)    # a = 5
     _fix64(lib, ctx, 0, 15)   # r = 15
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 2) == 3
     assert _hi(lib, ctx, 2) == 3
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_mul_64_zero(libzsp):
+def test_mul_64_zero(libdvs):
     """r = a * b; fix a=0; propagate -> r=0."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx_64(lib, [
@@ -205,22 +205,22 @@ def test_mul_64_zero(libzsp):
     lib.prop_add_bounds_mul_64(ctx, 0, 1, 2, 0)
     _fix64(lib, ctx, 1, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 0
     assert _hi(lib, ctx, 0) == 0
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 # ------------------------------------------------------------------ #
 # Div_64 tests                                                        #
 # ------------------------------------------------------------------ #
 
-def test_div_64_basic(libzsp):
+def test_div_64_basic(libdvs):
     """r = a / b; fix a=12, b=3; propagate -> r=[4,4]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx_64(lib, [
@@ -233,18 +233,18 @@ def test_div_64_basic(libzsp):
     _fix64(lib, ctx, 1, 12)
     _fix64(lib, ctx, 2, 3)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) == 4
     assert _hi(lib, ctx, 0) == 4
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_div_64_range(libzsp):
+def test_div_64_range(libdvs):
     """r = a / b; a=[10,20], b=5; propagate -> r in [2,4]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx_64(lib, [
@@ -256,18 +256,18 @@ def test_div_64_range(libzsp):
     lib.prop_add_bounds_div_64(ctx, 0, 1, 2, 0)
     _fix64(lib, ctx, 2, 5)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) >= 2
     assert _hi(lib, ctx, 0) <= 4
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_div_64_positive_range_divisor(libzsp):
+def test_div_64_positive_range_divisor(libdvs):
     """r = a / b; a=[100,200], b=[5,10]; propagate -> r in [10,40]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx_64(lib, [
@@ -278,22 +278,22 @@ def test_div_64_positive_range_divisor(libzsp):
 
     lib.prop_add_bounds_div_64(ctx, 0, 1, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) >= 10   # 100/10
     assert _hi(lib, ctx, 0) <= 40   # 200/5
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
 # ------------------------------------------------------------------ #
 # Mod_64 tests                                                        #
 # ------------------------------------------------------------------ #
 
-def test_mod_64_basic(libzsp):
+def test_mod_64_basic(libdvs):
     """r = a % b; fix a=17, b=5; propagate -> r in [0,4]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx_64(lib, [
@@ -305,18 +305,18 @@ def test_mod_64_basic(libzsp):
     lib.prop_add_bounds_mod_64(ctx, 0, 1, 2, 0)
     _fix64(lib, ctx, 2, 5)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) >= 0
     assert _hi(lib, ctx, 0) <= 4
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
 
-def test_mod_64_range_divisor(libzsp):
+def test_mod_64_range_divisor(libdvs):
     """r = a % b; b=[3,7]; propagate -> r in [0,6]."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
 
     sp_buf, ctx_buf, ba, sp, ctx = _make_ctx_64(lib, [
@@ -327,10 +327,10 @@ def test_mod_64_range_divisor(libzsp):
 
     lib.prop_add_bounds_mod_64(ctx, 0, 1, 2, 0)
 
-    rc = lib.solver_propagate(ctx)
+    rc = lib.dvs_solver_propagate(ctx)
     assert rc == PROP_OK
 
     assert _lo(lib, ctx, 0) >= 0
     assert _hi(lib, ctx, 0) <= 6
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)

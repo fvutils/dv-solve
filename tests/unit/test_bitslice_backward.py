@@ -8,7 +8,7 @@ consistent propagator breaks the search's domain-bisection completeness.
 This test brute-forces every (operand_width, hi, lo, [alo,ahi], field_value) for
 small widths and asserts the solver's SAT/UNSAT verdict and (on SAT) the model
 exactly match a Python oracle. It is the guardrail cited in
-zsp_prop_templates.c (_slice_min_ge / _slice_max_le).
+dvs_prop_templates.c (_slice_min_ge / _slice_max_le).
 """
 from __future__ import annotations
 

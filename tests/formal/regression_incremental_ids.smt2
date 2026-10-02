@@ -5,7 +5,7 @@
 ;    (or (= ((_ extract H L) v) k) ...) constraint compiled to
 ;    nothing and search returned wrong unsat.
 ;
-; 2. solver_add_constraint walked the builder's LIFO vars_head
+; 2. dvs_solver_add_constraint walked the builder's LIFO vars_head
 ;    and gated initialisation on `id >= ctx->n_vars`. With LIFO
 ;    order, the highest new id bumps n_vars first and the lower
 ;    new ids fall below the threshold — skipped, never inited,

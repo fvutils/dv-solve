@@ -80,6 +80,33 @@ def test_push_pop_with_unsat():
     assert _results(out) == ["sat", "unsat", "sat"]
 
 
+@pytest.mark.parametrize("first", ["(xor true (= x (_ bv0 4)))",
+                                   "(ite true true (bvugt x (_ bv3 4)))"])
+def test_asserts_after_a_partly_compiled_check_are_enforced(first):
+    # B58: when compile left part of the first problem uncompiled (validation
+    # and escalation cover that), the frontend never marked the context
+    # compiled, so every later assertion was silently dropped: `false`
+    # answered sat. Found by the soundness campaign's incremental door.
+    cmds = f"""
+(set-logic QF_BV)
+(declare-const x (_ BitVec 4))
+(assert {first})
+(check-sat)
+(push 1)
+(assert (= x (_ bv1 4)))
+(assert (= x (_ bv2 4)))
+(check-sat)
+(pop 1)
+(push 1)
+(assert false)
+(check-sat)
+(pop 1)
+(exit)
+"""
+    out, _, _ = _run_interactive(cmds)
+    assert _results(out) == ["sat", "unsat", "unsat"]
+
+
 def test_check_sat_assuming():
     cmds = """
 (set-logic QF_BV)
@@ -215,3 +242,25 @@ def test_b14_blocking_clause_enumeration_yields_distinct_models() -> None:
     # The blocking clauses remove one candidate each; after all 5 the domain of
     # `a` under `a < 5` is exhausted.
     assert res == ["sat"] * 5 + ["unsat"], res
+
+
+@pytest.mark.parametrize("width", [8, 65])
+@pytest.mark.parametrize("cmds,expect", [
+    ("(assert true)(check-sat)(push 1)(assert false)(check-sat)(pop 1)(check-sat)",
+     ["sat", "unsat", "sat"]),
+    ("(push 1)(assert (= x (_ bv1 {w})))(push 1)(assert (= x (_ bv2 {w})))(pop 1)(check-sat)",
+     ["sat"]),
+    ("(push 1)(assert (= x (_ bv1 {w})))(check-sat)(push 1)(assert (= x (_ bv2 {w})))"
+     "(check-sat)(pop 1)(check-sat)(pop 1)(assert (= x (_ bv2 {w})))(check-sat)",
+     ["sat", "unsat", "sat", "sat"]),
+    ("(push 2)(assert (= x (_ bv3 {w})))(pop 2)(assert (= x (_ bv4 {w})))(check-sat)", ["sat"]),
+])
+def test_push_pop_with_wide_variables(width, cmds, expect):
+    # B63: with a variable wider than 64 bits there is no CDCL context (bitblast
+    # only). push failed and recorded no scope, or checkpointed a context that
+    # was never compiled, and pop left the popped assertions in the builder the
+    # bitblast path solves: a popped `false` answered unsat. Width 8 is the
+    # CDCL-context control. Found by the nightly campaign's wide mode.
+    out, _, _ = _run_interactive(
+        f"(set-logic QF_BV)(declare-const x (_ BitVec {width})){cmds.format(w=width)}(exit)")
+    assert _results(out) == expect

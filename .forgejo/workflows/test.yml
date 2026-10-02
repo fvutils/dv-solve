@@ -1,0 +1,33 @@
+# Tests for fvutils/dv-solve on Forgejo Actions, on every push and pull request.
+#
+# Builds the library and CLI, runs ctest (including the exhaustive propagator
+# harness), the unit and formal suites (including the soundness campaign's
+# fixed-seed smoke test and recorded regressions), and the clause-learning
+# stress problems on a -DDVS_STEP_CHECK=ON build. All of it is in
+# tests/ci/run_tests.sh, which runs the same way locally:
+#
+#   docker run --rm -v "$PWD:/w" -w /w catthehacker/ubuntu:act-22.04 tests/ci/run_tests.sh
+#
+# Test-only: this workflow holds no credentials and publishes nothing. The
+# nightly soundness campaign is nightly.yml. See docs/soundness_coverage_plan.md.
+#
+# Runner constraints (ubuntu-latest = catthehacker/ubuntu:act-22.04): no
+# third-party actions, `python3` not `python`, no cmake in the image (the
+# script installs it with pip).
+
+name: Test
+
+on:
+  - push
+  - pull_request
+  - workflow_dispatch
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test
+        run: JOBS=8 tests/ci/run_tests.sh

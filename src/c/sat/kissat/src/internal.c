@@ -27,12 +27,12 @@ void kissat_reset_last_learned (kissat *solver) {
  * struct itself is allocated via that allocator, the solver->alloc field
  * is set, and all subsequent internal allocations are routed through it.
  * When NULL, this matches upstream behavior exactly (libc throughout). */
-#include "zsp_alloc.h"
+#include "dvs_alloc.h"
 
-static kissat *kissat_init_internal (zsp_alloc_t *alloc) {
+static kissat *kissat_init_internal (dvs_alloc_t *alloc) {
   kissat *solver;
   if (alloc) {
-    solver = (kissat *) ZSP_ALLOC (alloc, sizeof *solver);
+    solver = (kissat *) DVS_ALLOC (alloc, sizeof *solver);
     if (!solver)
       kissat_fatal ("out-of-memory allocating kissat struct (%zu bytes)",
                     sizeof *solver);
@@ -68,9 +68,9 @@ static kissat *kissat_init_internal (zsp_alloc_t *alloc) {
 
 kissat *kissat_init (void) { return kissat_init_internal (0); }
 
-/* dv-solve fork: init variant that takes a zsp_alloc_t for all
+/* dv-solve fork: init variant that takes a dvs_alloc_t for all
  * internal allocations. Pass NULL for upstream behavior. */
-kissat *kissat_init_with_alloc (zsp_alloc_t *alloc) {
+kissat *kissat_init_with_alloc (dvs_alloc_t *alloc) {
   return kissat_init_internal (alloc);
 }
 
@@ -188,9 +188,9 @@ void kissat_release (kissat *solver) {
 
   /* dv-solve fork: free the struct via the same allocator that allocated
    * it. Capture alloc before freeing to avoid using freed memory. */
-  zsp_alloc_t *alloc = solver->alloc;
+  dvs_alloc_t *alloc = solver->alloc;
   if (alloc) {
-    ZSP_RELEASE (alloc, solver, sizeof *solver);
+    DVS_RELEASE (alloc, solver, sizeof *solver);
   } else {
     kissat_free (0, solver, sizeof *solver);
   }

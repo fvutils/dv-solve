@@ -21,7 +21,7 @@ EXPR_NULL  = 0xFFFFFFFF
 SOLVE_OK   = 0
 SOLVE_UNSAT = 1
 
-# BinOp codes (from zsp_problem.h)
+# BinOp codes (from dvs_problem.h)
 BIN_ADD = 0
 BIN_EQ  = 10
 BIN_LTE = 13
@@ -35,10 +35,10 @@ def _setup(lib):
     """Wire argtypes/restypes on the library handle."""
     c = ctypes
 
-    lib.zsp_block_alloc_create.restype  = c.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [c.c_void_p]
+    lib.dvs_block_alloc_create.restype  = c.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [c.c_void_p]
 
     lib.solve_problem_init.restype  = c.c_void_p
     lib.solve_problem_init.argtypes = [c.c_void_p, c.c_size_t]
@@ -57,18 +57,18 @@ def _setup(lib):
     lib.expr_binary.restype  = c.c_uint32
     lib.expr_binary.argtypes = [c.c_void_p, c.c_int32, c.c_uint32, c.c_uint32]
 
-    lib.solver_create.restype  = c.c_void_p
-    lib.solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
-    lib.solver_compile.restype  = c.c_int
-    lib.solver_compile.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_solve.restype  = c.c_int
-    lib.solver_solve.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_get_value.restype  = c.c_int64
-    lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_solver_create.restype  = c.c_void_p
+    lib.dvs_solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
+    lib.dvs_solver_compile.restype  = c.c_int
+    lib.dvs_solver_compile.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_solve.restype  = c.c_int
+    lib.dvs_solver_solve.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_get_value.restype  = c.c_int64
+    lib.dvs_solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
 
 
 # ------------------------------------------------------------------ #
-# SolveOpts (must match zsp_search.h)                                  #
+# SolveOpts (must match dvs_search.h)                                  #
 # ------------------------------------------------------------------ #
 
 class SolveOpts(ctypes.Structure):
@@ -79,6 +79,7 @@ class SolveOpts(ctypes.Structure):
         ("use_phase_save",  ctypes.c_uint8),
         ("_pad",            ctypes.c_uint8 * 3),
         ("max_shave_iters", ctypes.c_uint32),
+        ("time_limit_ms",   ctypes.c_uint32),
     ]
 
 
@@ -122,12 +123,12 @@ def _add_constraint(lib, sp, root):
 
 
 def _make_ctx(lib, sp, buf_size=1 << 20):
-    ba = lib.zsp_block_alloc_create(None, buf_size)
+    ba = lib.dvs_block_alloc_create(None, buf_size)
     assert ba is not None
     ctx_buf = (ctypes.c_uint8 * buf_size)()
-    ctx = lib.solver_create(ctx_buf, buf_size, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, buf_size, ba)
     assert ctx is not None
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     return ctx_buf, ba, ctx, rc
 
 
@@ -169,9 +170,9 @@ def _build_reproducer(lib):
 class TestBacktrackFix:
 
     @pytest.fixture(autouse=True)
-    def setup_lib(self, libzsp):
-        _setup(libzsp)
-        self.lib = libzsp
+    def setup_lib(self, libdvs):
+        _setup(libdvs)
+        self.lib = libdvs
 
     def test_reproducer_le_add_const(self):
         """Minimal reproducer: p0<=p1, p0+p1==100.
@@ -184,12 +185,12 @@ class TestBacktrackFix:
             assert rc == 0, f"seed={seed}: {rc} constraints uncompiled"
 
             opts = SolveOpts(seed=seed)
-            result = lib.solver_solve(ctx, ctypes.byref(opts))
+            result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
             assert result == SOLVE_OK, f"seed={seed}: solve returned {result}"
 
-            p0 = lib.solver_get_value(ctx, 0)
-            p1 = lib.solver_get_value(ctx, 1)
-            s01 = lib.solver_get_value(ctx, 2)
+            p0 = lib.dvs_solver_get_value(ctx, 0)
+            p1 = lib.dvs_solver_get_value(ctx, 1)
+            s01 = lib.dvs_solver_get_value(ctx, 2)
 
             assert p0 <= p1, f"seed={seed}: p0={p0} > p1={p1}"
             assert p0 + p1 == 100, f"seed={seed}: p0+p1={p0+p1} != 100"
@@ -197,7 +198,7 @@ class TestBacktrackFix:
             assert 10 <= p0 <= 80, f"seed={seed}: p0={p0} out of range"
             assert 10 <= p1 <= 80, f"seed={seed}: p1={p1} out of range"
 
-            lib.zsp_block_alloc_destroy(ba)
+            lib.dvs_block_alloc_destroy(ba)
 
     def test_middle_value_lower_half(self):
         """Valid values all in lower half -- bidirectional backtrack
@@ -222,15 +223,15 @@ class TestBacktrackFix:
         for seed in [42, 1, 999, 0xBEEF]:
             ctx_buf, ba, ctx, rc = _make_ctx(lib, sp)
             opts = SolveOpts(seed=seed)
-            result = lib.solver_solve(ctx, ctypes.byref(opts))
+            result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
             assert result == SOLVE_OK, f"seed={seed}: {result}"
 
-            x = lib.solver_get_value(ctx, 0)
-            y = lib.solver_get_value(ctx, 1)
+            x = lib.dvs_solver_get_value(ctx, 0)
+            y = lib.dvs_solver_get_value(ctx, 1)
             assert y == 20, f"seed={seed}: y={y}"
             assert x <= 20, f"seed={seed}: x={x} > 20"
 
-            lib.zsp_block_alloc_destroy(ba)
+            lib.dvs_block_alloc_destroy(ba)
 
     def test_middle_value_upper_half(self):
         """Valid values all in upper half -- bidirectional backtrack
@@ -255,15 +256,15 @@ class TestBacktrackFix:
         for seed in [42, 1, 999]:
             ctx_buf, ba, ctx, rc = _make_ctx(lib, sp)
             opts = SolveOpts(seed=seed)
-            result = lib.solver_solve(ctx, ctypes.byref(opts))
+            result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
             assert result == SOLVE_OK, f"seed={seed}: {result}"
 
-            x = lib.solver_get_value(ctx, 0)
-            y = lib.solver_get_value(ctx, 1)
+            x = lib.dvs_solver_get_value(ctx, 0)
+            y = lib.dvs_solver_get_value(ctx, 1)
             assert y == 80, f"seed={seed}: y={y}"
             assert x >= 80, f"seed={seed}: x={x} < 80"
 
-            lib.zsp_block_alloc_destroy(ba)
+            lib.dvs_block_alloc_destroy(ba)
 
     def test_shaving_tightens_bounds(self):
         """After solving with shaving, p0 must be <= 50."""
@@ -274,16 +275,16 @@ class TestBacktrackFix:
         assert rc == 0
 
         opts = SolveOpts(seed=42, max_shave_iters=1000)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
 
-        p0 = lib.solver_get_value(ctx, 0)
-        p1 = lib.solver_get_value(ctx, 1)
+        p0 = lib.dvs_solver_get_value(ctx, 0)
+        p1 = lib.dvs_solver_get_value(ctx, 1)
         assert p0 <= p1
         assert p0 + p1 == 100
         assert p0 <= 50, f"p0={p0} should be <= 50 after shaving"
 
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
     def test_restart_finds_solution(self):
         """With aggressive restarts (max_conflicts=1), the solver should
@@ -293,15 +294,15 @@ class TestBacktrackFix:
 
         ctx_buf, ba, ctx, rc = _make_ctx(lib, sp)
         opts = SolveOpts(seed=42, max_conflicts=1, max_restarts=1000)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
 
-        p0 = lib.solver_get_value(ctx, 0)
-        p1 = lib.solver_get_value(ctx, 1)
+        p0 = lib.dvs_solver_get_value(ctx, 0)
+        p1 = lib.dvs_solver_get_value(ctx, 1)
         assert p0 <= p1, f"p0={p0} > p1={p1}"
         assert p0 + p1 == 100, f"p0+p1={p0+p1} != 100"
 
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
     def test_simple_no_regression(self):
         """Simple unconstrained problem still solves instantly."""
@@ -313,15 +314,15 @@ class TestBacktrackFix:
 
         ctx_buf, ba, ctx, rc = _make_ctx(lib, sp)
         opts = SolveOpts(seed=42)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_OK
 
-        a = lib.solver_get_value(ctx, 0)
-        b = lib.solver_get_value(ctx, 1)
+        a = lib.dvs_solver_get_value(ctx, 0)
+        b = lib.dvs_solver_get_value(ctx, 1)
         assert 0 <= a <= 255
         assert 0 <= b <= 255
 
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)
 
     def test_unsat_detected(self):
         """Unsatisfiable problem: x in [0,10], x == 20."""
@@ -334,17 +335,17 @@ class TestBacktrackFix:
                          _expr_var(lib, sp, 0),
                          _expr_const(lib, sp, 20)))
 
-        ba = lib.zsp_block_alloc_create(None, 1 << 20)
+        ba = lib.dvs_block_alloc_create(None, 1 << 20)
         ctx_buf = (ctypes.c_uint8 * (1 << 20))()
-        ctx = lib.solver_create(ctx_buf, 1 << 20, ba)
-        rc = lib.solver_compile(ctx, sp)
+        ctx = lib.dvs_solver_create(ctx_buf, 1 << 20, ba)
+        rc = lib.dvs_solver_compile(ctx, sp)
 
         if rc == -2:
             # Caught at compile time -- correct
-            lib.zsp_block_alloc_destroy(ba)
+            lib.dvs_block_alloc_destroy(ba)
             return
 
         opts = SolveOpts(seed=42)
-        result = lib.solver_solve(ctx, ctypes.byref(opts))
+        result = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert result == SOLVE_UNSAT, f"Expected UNSAT, got {result}"
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_block_alloc_destroy(ba)

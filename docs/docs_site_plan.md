@@ -1,6 +1,8 @@
 # dv-solve Documentation Site Plan
 
-Status: D0, D1, D2 DONE and live (2026-09-30); D3 (Python) next. Comes before `ci_benchmark_publishing_plan.md`:
+Status: D0–D3 DONE and live (2026-09-30); D4 (C + SV) and D5 (hardening)
+DONE 2026-10-01. Still deferred from D3: `guides/zuspec` and
+`concepts/diagnosing-unsat`. Comes before `ci_benchmark_publishing_plan.md`:
 the benchmark pages become a "Results" section of this site later.
 
 Goal: a user-facing doc set, published at `dvkit.org/fvutils/dv-solve/`, that
@@ -85,7 +87,7 @@ guides/
   verilator                external-solver setup, --mode=verilator, what it changes,
                            known gaps
   yosys-sby                smtbmc backend (from sby_integration.md)
-  systemverilog-dpi        zsp_dpi_pkg / zsp_randomizer_pkg flow (from dpi_integration.md)
+  systemverilog-dpi        dvs_dpi_pkg / dvs_randomizer_pkg flow (from dpi_integration.md)
   zuspec                   entry-point integration
   packaging                get_libdirs / get_incdirs / get_svdirs / get_dpi_lib /
                            resolve_report, for tools that link or load dv-solve
@@ -166,8 +168,8 @@ workflow is ignored silently.
 | **D1 — SMT-LIB2 front door** | `quickstart-smt2`, `guides/smt2-solver`, `reference/cli`, `reference/environment`, `concepts/soundness`, `concepts/engines`, `concepts/randomization-seeds`. `guides/yosys-sby` is deferred: yosys-smtbmc only drives solvers from a fixed list, so today it needs `tests/formal/sby/smtio_dvsolve.patch` applied to yosys — not publishable as a user guide | these are independent of the naming decision, and SMT2 is the most-used surface today |
 | **D2 — Verilator** | `quickstart-verilator`, `guides/verilator`, `concepts/randomization`; resolve §1.4 against stock Verilator 5.046 | guide's example runs with bundled Verilator |
 | **D3 — Python** | `concepts/problem-model`, `soft-constraints`, `diagnosing-unsat`, `reference/python` (autodoc), `reference/status-codes`, `guides/packaging`, `guides/zuspec` | public-module decision made; docstrings on public classes filled in |
-| **D4 — C + SV** | `reference/c-api`, `reference/sv-api`, `guides/systemverilog-dpi` | after the naming decision and the public-header list |
-| **D5 — hardening** | `docs/examples/` + test module; `internals/`; README links to the site | every code block on the site is executed by the test suite |
+| **D4 — C + SV** | `reference/c-api`, `reference/sv-api`, `guides/systemverilog-dpi` | after the naming decision and the public-header list. *Done 2026-10-01:* hand-written with Sphinx's C domain (no Doxygen/Breathe) and plain SV signatures (no sphinx-systemverilog dependency); C and DPI examples in `docs/examples/c`, `docs/examples/sv-dpi`, executed by `test_doc_examples.py` |
+| **D5 — hardening** | `docs/examples/` + test module; `internals/`; README links to the site | every code block on the site is executed by the test suite. *Done 2026-10-01:* `tests/unit/test_doc_pages.py` classifies every fenced block (included example, C/SV declaration checked against the header/packages, command run as written, sample output checked, or listed as not runnable with a reason) and fails on an unclassified one; `internals/architecture`, `internals/propagators` (rewritten from the code; `docs/propagators.md` had several rules wrong); README rewritten around the front doors. Writing `internals/` surfaced wrong-answer bugs B43–B49, fixed in the same change |
 
 D0 is deliberately small: it proves the runner, the artifact and the
 publishing path end to end before any real writing, the same way the
@@ -179,10 +181,20 @@ benchmark plan's P0 did.
 
 1. **`zsp_` → `dvs_` rename happens before D4.** D0–D3 don't expose C/SV
    symbol names, so they proceed now; the C/SV reference waits for the rename
-   so we never publish names that are about to change.
+   so we never publish names that are about to change. *Done 2026-10-01:*
+   internals, files, CMake options and SV packages are `dvs_`; the public
+   API is namespaced too (`dvs_builder_*`, `dvs_solver_*`, `dvs_ctx_t`,
+   `dvs_expr_t`, `DVS_BIN_*`, `DVS_SOLVE_*`). The override variable is
+   `DVS_SOLVER_PATH`, with `ZSP_SOLVER_PATH` still honoured.
 2. **Public C API = one umbrella header**, `dv_solve/dv_solve.h`, declaring
    exactly the documented surface (builder + solver runtime). Other headers
-   keep installing for now but are internal.
+   keep installing for now but are internal. *Done 2026-10-01:* the header
+   mirrors the public Python surface; `soft_active` is left out (its index
+   runs in reverse add order), as are `add_source`, `expr_array_select`,
+   `solve_n` and the fixed-buffer `solve_problem_*` / `expr_*` API.
+   `tests/c/test_public_api.c` exercises it through that header alone.
+   Follow-up: the library still exports every internal symbol; building
+   with `-fvisibility=hidden` needs the ctypes tests moved off internals.
 3. **Environment variables: expose as few as possible.** Most `DV_*`
    variables are internal diagnostics and stay undocumented. The reference
    page lists only variables a user needs to control behaviour, starting from

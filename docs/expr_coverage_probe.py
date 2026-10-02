@@ -5,7 +5,7 @@ Python builder, so nothing about pssc, ast2ir or be-bc is in the picture.
 
   cdcl  -- SolveCtx: the bounds/propagator engine, the one the SolveProblem and
            DPI paths use, and therefore the one pssc reaches through be-bc.
-  bb    -- BVSatCtx: the bit-blasting completeness engine (zsp_bbsolver),
+  bb    -- BVSatCtx: the bit-blasting completeness engine (dvs_bbsolver),
            reachable from Python today, not reachable from the cdcl path.
 
 Arithmetic is checked modulo 2**8, which is what an 8-bit bit-vector means.

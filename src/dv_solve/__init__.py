@@ -38,7 +38,7 @@ def _lib_search_dirs():
 
     Now just the shared contract in :mod:`dv_solve._resolve`. This list used to
     be maintained here independently of the ctypes loader's, and the two had
-    drifted: the loader also honoured ``ZSP_SOLVER_PATH``, the package's
+    drifted: the loader also honoured ``DVS_SOLVER_PATH``, the package's
     ``lib/`` subdirectory and three alternate build-directory names, none of
     which this function knew about. On a host using any of them the solver ran
     out of one installation and generated C linked against another.
@@ -70,7 +70,7 @@ def get_libdirs():
     different installation's library, so the Python API ran one solver build
     while generated C linked another.
 
-    Raises ``RuntimeError`` likewise when ``ZSP_SOLVER_PATH`` is set but holds
+    Raises ``RuntimeError`` likewise when ``DVS_SOLVER_PATH`` is set but holds
     no library: an explicit override is never silently replaced.
     """
     if _resolve.select_installation() is not None:
@@ -94,7 +94,7 @@ def get_incdirs():
     holds headers:
 
       * source tree -- headers sit FLAT in ``src/c``, so ``#include
-        "zsp_ctx.h"`` resolves;
+        "dvs_ctx.h"`` resolves;
       * installed wheel -- CMake puts them in ``include/dv_solve``
         (CMakeLists.txt: ``DESTINATION include/dv_solve``), so that same
         unqualified include does NOT resolve against the base directory, and
@@ -104,19 +104,17 @@ def get_incdirs():
     have. A consumer following this API could compile against a checkout and
     then fail against the released wheel with
 
-        fatal error: zsp_block_alloc.h: No such file or directory
+        fatal error: dvs_block_alloc.h: No such file or directory
 
     which is exactly how pssc's generated ``pssc_solve.c`` fails, since it emits
     unqualified includes.
 
-    NOTE ON THE COLLISION: dv-solve and zuspec-be-sw both ship a ``zsp_alloc.h``
-    and they define ``struct zsp_alloc_s`` incompatibly. That is why these
-    headers are namespaced under ``dv_solve/`` in the install tree, and why a
-    consumer must compile the SOLVER translation unit with these directories and
-    the runtime/component translation units with be-sw's -- not merge both into
-    one ``-I`` set. Adding the nested directory here does not weaken that: it is
-    the per-TU segregation, not the absence of this path, that keeps the two
-    ``zsp_alloc.h`` files apart.
+    NOTE ON NAMESPACING: these headers are installed under ``dv_solve/`` so
+    they cannot shadow another project's headers of the same name. Before the
+    ``dvs_`` prefix, dv-solve and zuspec-be-sw both shipped a ``zsp_alloc.h``
+    defining ``struct zsp_alloc_s`` incompatibly; the prefix removes that clash,
+    and the install layout keeps internal header names out of a consumer's
+    include path.
 
     Probes for an actual header rather than testing ``isdir``. A staging bug
     that creates ``share/include`` but populates nothing under it used to pass
@@ -137,7 +135,7 @@ def get_incdirs():
 
 
 def get_svdirs():
-    """SystemVerilog package search dir (zsp_dpi_pkg.sv, zsp_randomizer_pkg.sv).
+    """SystemVerilog package search dir (dvs_dpi_pkg.sv, dvs_randomizer_pkg.sv).
 
     From the selected installation, like :func:`get_incdirs`; raises
     ``RuntimeError`` if that installation has none.
@@ -192,7 +190,7 @@ def resolve_report():
     link = _resolve.find_library("dv_solve", linkable=True)
     return {
         "package_dir": _pkg_dir(),
-        "override": os.environ.get("ZSP_SOLVER_PATH"),
+        "override": _resolve.override_root(),
         "search_dirs": list(_lib_search_dirs()),
         "installation": ({"kind": inst.kind, "root": inst.root}
                          if inst is not None else None),

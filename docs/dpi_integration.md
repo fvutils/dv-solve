@@ -45,13 +45,13 @@ with open("harness.sv", "w") as f:
 
 ```bash
 # Questa
-vlog -sv src/sv/zsp_dpi_pkg.sv src/sv/zsp_randomizer_pkg.sv harness.sv src/c/*.c
+vlog -sv src/sv/dvs_dpi_pkg.sv src/sv/dvs_randomizer_pkg.sv harness.sv src/c/*.c
 vopt -o simv_opt MemTransaction_harness
 vsim -batch -do "run -a; quit -f" simv_opt +n_solutions=100
 
 # Verilator (link pre-built .so)
 verilator --cc --exe --main -o simv -Wno-fatal --timing \
-    src/sv/zsp_dpi_pkg.sv src/sv/zsp_randomizer_pkg.sv harness.sv \
+    src/sv/dvs_dpi_pkg.sv src/sv/dvs_randomizer_pkg.sv harness.sv \
     --top-module MemTransaction_harness
 make -C obj_dir -f VMemTransaction_harness.mk \
     VM_USER_LDLIBS="-Lbuild -Wl,-rpath,build -ldv_solve_dpi"
@@ -60,25 +60,25 @@ obj_dir/simv +n_solutions=100
 
 ## API Reference
 
-### SV DPI Package (`zsp_dpi_pkg`)
+### SV DPI Package (`dvs_dpi_pkg`)
 
 ```systemverilog
 // Compile from base64-encoded problem buffer. Returns chandle.
-function chandle zsp_dpi_compile_b64(input string b64_data);
+function chandle dvs_dpi_compile_b64(input string b64_data);
 
 // Solve using compiled handle. Returns 0=OK, 1=UNSAT, -1=ERROR.
-function int zsp_dpi_solve_h(input chandle ctx, input longint seed);
+function int dvs_dpi_solve_h(input chandle ctx, input longint seed);
 
 // Retrieve one variable's value after solve.
-function longint zsp_dpi_get_value_h(input chandle ctx, input int var_id);
+function longint dvs_dpi_get_value_h(input chandle ctx, input int var_id);
 
 // Release compiled handle.
-function void zsp_dpi_release_h(input chandle ctx);
+function void dvs_dpi_release_h(input chandle ctx);
 ```
 
-### SV Randomizer Base Class (`zsp_randomizer_pkg`)
+### SV Randomizer Base Class (`dvs_randomizer_pkg`)
 
-The `zsp_randomizer #(type T)` virtual class handles the DPI plumbing.
+The `dvs_randomizer #(type T)` virtual class handles the DPI plumbing.
 Generated subclasses override:
 
 - `get_problem_b64()` -- returns the base64 problem string
@@ -128,8 +128,8 @@ build of the solver library.
 
 ## Incremental Solving: Pin, Checkpoint, Restore
 
-The three functions `zsp_dpi_pin_var_h`, `zsp_dpi_checkpoint_h`, and
-`zsp_dpi_restore_h` enable **incremental solving** over a single compiled
+The three functions `dvs_dpi_pin_var_h`, `dvs_dpi_checkpoint_h`, and
+`dvs_dpi_restore_h` enable **incremental solving** over a single compiled
 handle.  This is used when the same constraint problem must be solved
 multiple times with different input values pinned -- for example, when
 re-solving with different seeds from a common pinned state, or chaining
@@ -151,7 +151,7 @@ operations act directly on this context:
 ### Example: Pin → Solve → Restore → Re-solve
 
 ```systemverilog
-import zsp_dpi_pkg::*;
+import dvs_dpi_pkg::*;
 
 module example;
   initial begin
@@ -160,23 +160,23 @@ module example;
     longint x, y;
 
     // Compile: x in [0,10], y in [0,10], x+y==10
-    h = zsp_dpi_compile_b64(MY_PROBLEM_B64);
+    h = dvs_dpi_compile_b64(MY_PROBLEM_B64);
 
     // Take a clean checkpoint before any pins
-    cp = zsp_dpi_checkpoint_h(h);
+    cp = dvs_dpi_checkpoint_h(h);
 
     // First solve: pin x=3, solve, read y (must be 7)
-    rc = zsp_dpi_pin_var_h(h, 0, 3);    // pin x=3
-    rc = zsp_dpi_solve_h(h, $urandom());
-    y  = zsp_dpi_get_value_h(h, 1);    // y==7
+    rc = dvs_dpi_pin_var_h(h, 0, 3);    // pin x=3
+    rc = dvs_dpi_solve_h(h, $urandom());
+    y  = dvs_dpi_get_value_h(h, 1);    // y==7
 
     // Restore to clean checkpoint, then pin x=5
-    zsp_dpi_restore_h(h, cp);
-    rc = zsp_dpi_pin_var_h(h, 0, 5);   // pin x=5
-    rc = zsp_dpi_solve_h(h, $urandom());
-    y  = zsp_dpi_get_value_h(h, 1);    // y==5
+    dvs_dpi_restore_h(h, cp);
+    rc = dvs_dpi_pin_var_h(h, 0, 5);   // pin x=5
+    rc = dvs_dpi_solve_h(h, $urandom());
+    y  = dvs_dpi_get_value_h(h, 1);    // y==5
 
-    zsp_dpi_release_h(h);
+    dvs_dpi_release_h(h);
     $finish;
   end
 endmodule

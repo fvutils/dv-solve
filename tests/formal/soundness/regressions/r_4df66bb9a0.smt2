@@ -1,0 +1,7 @@
+; B60: builder with clause learning returned a wrong model (ite_value entailment; seed=22 i=1482 door=builder[lcg=1] expect=unsat got=timeout)
+(set-logic QF_BV)
+(declare-const a (_ BitVec 1))
+(declare-const x (_ BitVec 5))
+(declare-const y (_ BitVec 5))
+(assert (bvult (bvmul (ite (bvule (_ bv1 1) a) y x) x) (bvmul (ite (bvule (_ bv1 1) a) y x) x)))
+(check-sat)

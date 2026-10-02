@@ -73,7 +73,7 @@ _CDCL_MUST_DECLINE = {"W8", "W9"}
 )
 def test_expr_shape_validates(cid, desc, fn, check):
     """The independent post-solve check: re-evaluate every constraint in the
-    problem against the assignment via solver_validate_model.
+    problem against the assignment via dvs_solver_validate_model.
 
     This is a different question from the one above. There, the probe's own
     Python evaluation says the answer is right. Here the C evaluator walks the
@@ -128,7 +128,7 @@ def test_aggregate_construct(case):
     support was never measured. It is measured now, and all four work.
 
     The bit-blaster must DEFER (UNKNOWN) rather than error. It used to route
-    these through err_bv, so check() returned ZSP_BB_ERROR -- which a caller
+    these through err_bv, so check() returned DVS_BB_ERROR -- which a caller
     reads as "something went wrong" rather than "ask the other engine", and
     the other engine is precisely the one that can answer.
     """

@@ -12,7 +12,7 @@ side effects of the checkpoint-restore fixes).
                           definitive  skip  disagreements
 start of session             105       13         0
 after caps + extend fix      109        9         0
-after solver_restore cleanup 108       10         0  (one slow fixture
+after dvs_solver_restore cleanup 108       10         0  (one slow fixture
                                                        flipped to skip,
                                                        three recovered)
 ```
@@ -51,7 +51,7 @@ synthetic corpus.
    by `(1<<width)-1` so the complement stays in the variable's
    unsigned domain.
 2. SMT2 frontend push/pop didn't release aux SolveProblems pushed
-   between them. `solver_restore` correctly entailed the propagators,
+   between them. `dvs_solver_restore` correctly entailed the propagators,
    but the SolveProblem buffers stayed in the validation list — so
    the post-solve validator re-evaluated popped assertions and
    silently downgraded `sat` → `unknown`. Track
@@ -62,25 +62,25 @@ synthetic corpus.
    comparison, so an incrementally-added `(or (= ((_ extract H L) v)
    k) ...)` compiled to nothing → spurious unsat. Materialise via
    `_value_to_var`.
-4. `solver_add_constraint` gated var init on `id >= ctx->n_vars` but
+4. `dvs_solver_add_constraint` gated var init on `id >= ctx->n_vars` but
    the builder's `vars_head` is LIFO — the highest new id bumped
    `n_vars` first, lower new ids fell below the threshold and were
    never initialised (width stayed 0, lo=hi=0, disj_clause saw aux
    as definitely-false). Two-pass: pre-compute max new id, then init
    each var whose id >= the saved pre-call n_vars.
 5. `_fresh_aux` used `fe->n_vars` as the next ID, but
-   `solver_compile` allocates extra internal aux vars (constant aux,
+   `dvs_solver_compile` allocates extra internal aux vars (constant aux,
    ITE result aux) that the frontend never sees. Fresh frontend IDs
    collided with existing backend slots. `_next_var_id` now returns
    `max(fe->n_vars, ctx->n_vars)`, and `_fresh_aux` syncs `fe->n_vars`
    after the alloc.
-6. `solver_restore` marked post-checkpoint propagators ENTAILED, but
-   the next `solver_reset` cleared the bit on every slot in
+6. `dvs_solver_restore` marked post-checkpoint propagators ENTAILED, but
+   the next `dvs_solver_reset` cleared the bit on every slot in
    `prop_refs[]`, silently re-activating them. Stale inside-push
    propagators then fired against the new aux vars at the reused IDs.
    Fix: NULL out post-cp `prop_refs[i]` and roll `n_props` back.
 7. Learnt CDCL clauses inside a push reference var IDs that get
-   reused for new aux vars post-pop. `solver_restore` now NULLs
+   reused for new aux vars post-pop. `dvs_solver_restore` now NULLs
    `db->clauses[i]` for i >= n_clauses_at_cp and rolls back
    `db->n_clauses`. CheckpointMark gained `n_clauses_at_cp`.
 
@@ -100,7 +100,7 @@ synthetic corpus.
 ### `dc5c4c6` — first end-to-end SBY PASS benchmark report
 
 ### `2b40758` — incremental_capacity_hint
-12. `solver_add_constraint` returned -1 when `id >=
+12. `dvs_solver_add_constraint` returned -1 when `id >=
     ctx->n_vars_capacity`. With `VAR_SLACK_FACTOR=32` and `n_initial=15`
     the capacity was 480, blown through in ~7 BMC steps (~48 aux/step).
     Add `ctx->incremental_capacity_hint`. SMT2 frontend sets it to
@@ -111,24 +111,24 @@ synthetic corpus.
     Without this, `(= aux ((_ zero_extend N) something))` silently
     dropped, model validator flagged zext mismatches.
 
-### `3e91fbb` — solver_restore: clear and re-prime queue
-14. `solver_restore` was leaving the propagator queue in an
+### `3e91fbb` — dvs_solver_restore: clear and re-prime queue
+14. `dvs_solver_restore` was leaving the propagator queue in an
     inconsistent state. Stale prop_refs from inside-push propagators
     (NULL'd in `prop_refs[]` but still chained via `queue_next`)
-    could be dequeued in a subsequent `solver_propagate`; their pool
+    could be dequeued in a subsequent `dvs_solver_propagate`; their pool
     memory was still resident but state was unreliable. SEGVs in
     `p->fire()` were the observed symptom.
     Fix: clear queue.heads/tails/non_empty_mask at end of
-    `solver_restore` and re-enqueue all pre-checkpoint props.
-    Mirrors the explicit re-prime that `solver_reset` already does.
+    `dvs_solver_restore` and re-enqueue all pre-checkpoint props.
+    Mirrors the explicit re-prime that `dvs_solver_reset` already does.
     **Side wins:** memmaptight32, arrayordering, muldivscenario all
     pass (was honest-unknown skip); cross-check 105/13/0 → 108/10/0.
 
 ### `5d59ed3` — benchmark update (PASS through depth 25)
 
-### `e66cbe0` — solver_restore: dedup redundant queue re-enqueue
+### `e66cbe0` — dvs_solver_restore: dedup redundant queue re-enqueue
 After `3e91fbb` the pre-cp prop re-enqueue ran twice (the first add
-and the original code at the bottom of `solver_restore`). Drop the
+and the original code at the bottom of `dvs_solver_restore`). Drop the
 first pass.
 
 ### `5338af2` — benchmark report cross-out
@@ -136,7 +136,7 @@ first pass.
 ## Remaining edges (all reproduce locally)
 
 1. **counter_assert d ≥ 30 ASAN SEGV** at step 25 in
-   `solver_propagate`'s `p->fire` dereference. The propagator queue
+   `dvs_solver_propagate`'s `p->fire` dereference. The propagator queue
    clear and `prop_refs` NULL'ing covered the obvious cases. Likely
    another stale pool offset somewhere — watcher chain, queue_next
    tail, or `_register_watcher`'s linkage. Deterministic, reproduces
@@ -170,18 +170,18 @@ first pass.
 
 ## Files touched this session
 
-- `src/c/zsp_prop_templates.c` — bvnot width mask
+- `src/c/dvs_prop_templates.c` — bvnot width mask
 - `src/c/smt2/smt2_frontend.c` — push/pop aux cleanup,
   `_next_var_id` sync, `_fresh_aux` post-sync, `_add_var` grow,
   capacity hint, `_bool_to_var` EXTRACT fallback
 - `src/c/smt2/smt2_frontend.h` — `push_n_aux_problems`, bumped
   `SMT2_MAX_FUNS`
 - `src/c/smt2/smt2_main.c` — stderr divert when stdout is a pipe
-- `src/c/zsp_compile.c` — LIFO var init two-pass, concat & extend
+- `src/c/dvs_compile.c` — LIFO var init two-pass, concat & extend
   `_value_to_var` materialisation, `incremental_capacity_hint`
-- `src/c/zsp_ctx.h`, `zsp_ctx.c` — `incremental_capacity_hint`,
+- `src/c/dvs_ctx.h`, `dvs_ctx.c` — `incremental_capacity_hint`,
   `CheckpointMark.n_clauses_at_cp`
-- `src/c/zsp_checkpoint.c` — full pop cleanup (NULL post-cp
+- `src/c/dvs_checkpoint.c` — full pop cleanup (NULL post-cp
   prop_refs, roll back `n_props`, clear queue, re-enqueue pre-cp
   props, drop post-cp learnt clauses)
 
@@ -200,8 +200,8 @@ Highest-leverage next steps, in priority order:
 
 1. **Chase the d ≥ 30 ASAN SEGV.** Reproduces with
    `cd /tmp/sby_test && rm -rf counter_d_bmc && ASAN_OPTIONS=log_path=/tmp/asan.log:abort_on_error=0 sby -f counter_d30.sby bmc`.
-   Stack always lands at `solver_propagate:265` `p->fire(p, ctx)`.
-   Theory: stale entry in a watcher chain that survives `solver_restore`'s
+   Stack always lands at `dvs_solver_propagate:265` `p->fire(p, ctx)`.
+   Theory: stale entry in a watcher chain that survives `dvs_solver_restore`'s
    queue clear; when a new tightening fires `_wake_var`, the iteration
    trips on the stale next pointer. Test by adding `p->prop_id`
    validation at line 264 (compare against `ctx->n_props` and

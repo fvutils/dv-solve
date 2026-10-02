@@ -73,18 +73,18 @@ typedef STACK (watch *) patches;
 
 struct kitten;
 
-/* dv-solve fork: optional zsp_alloc_t routing for all internal allocations.
+/* dv-solve fork: optional dvs_alloc_t routing for all internal allocations.
  * Forward-declared so internal.h doesn't pull in dv-solve headers; the
- * actual definition lives in src/c/zsp_alloc.h. NULL means "use libc"
+ * actual definition lives in src/c/dvs_alloc.h. NULL means "use libc"
  * (the upstream behavior). */
-struct zsp_alloc_s;
-typedef struct zsp_alloc_s zsp_alloc_t;
+struct dvs_alloc_s;
+typedef struct dvs_alloc_s dvs_alloc_t;
 
 struct kissat {
   /* dv-solve fork: optional allocator routing. Set by kissat_init_with_alloc.
    * When non-NULL, every internal malloc/calloc/realloc/free is routed
    * through this allocator instead of libc. */
-  zsp_alloc_t *alloc;
+  dvs_alloc_t *alloc;
 
 
 #if !defined(NDEBUG) || defined(METRICS)

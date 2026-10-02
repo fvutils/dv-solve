@@ -1,34 +1,34 @@
 # Solver Runtime C API Reference
 
 Complete reference for the zuspec-solver C runtime API.
-Header: `zsp_search.h`, `zsp_ctx.h`.
+Header: `dvs_search.h`, `dvs_ctx.h`.
 
 ## Lifecycle
 
 ```c
 // Create a solver context in a caller-supplied buffer.
-SolveCtx *solver_create(void *static_buf, size_t static_size,
-                         zsp_block_alloc_t *block_alloc);
+SolveCtx *dvs_solver_create(void *static_buf, size_t static_size,
+                         dvs_block_alloc_t *block_alloc);
 
 // Compile a SolveProblem into the context.
 // Returns 0 on success, -1 on pool overflow, -2 on compile-time UNSAT.
-int solver_compile(SolveCtx *ctx, SolveProblem *sp);
+int dvs_solver_compile(SolveCtx *ctx, SolveProblem *sp);
 
 // Destroy the context (does not free the static buffer).
-void solver_destroy(SolveCtx *ctx);
+void dvs_solver_destroy(SolveCtx *ctx);
 ```
 
 ## Solving
 
 ```c
 // Run search. Returns SOLVE_OK, SOLVE_UNSAT, or SOLVE_TIMEOUT.
-SolveResult solver_solve(SolveCtx *ctx, const SolveOpts *opts);
+SolveResult dvs_solver_solve(SolveCtx *ctx, const SolveOpts *opts);
 
 // Read the value of a variable after a successful solve.
-int64_t solver_get_value(const SolveCtx *ctx, uint32_t var_id);
+int64_t dvs_solver_get_value(const SolveCtx *ctx, uint32_t var_id);
 
 // Read multiple variable values in one call.
-void solver_get_values(const SolveCtx *ctx, uint32_t n,
+void dvs_solver_get_values(const SolveCtx *ctx, uint32_t n,
                        const uint32_t *var_ids, int64_t *out);
 ```
 
@@ -37,11 +37,11 @@ void solver_get_values(const SolveCtx *ctx, uint32_t n,
 ```c
 // Reset to post-compile state. Restores all variable domains,
 // clears trail and decisions, re-enqueues propagators.
-// Hole lists (from solver_exclude_value) persist across resets.
-void solver_reset(SolveCtx *ctx);
+// Hole lists (from dvs_solver_exclude_value) persist across resets.
+void dvs_solver_reset(SolveCtx *ctx);
 
 // Set the RNG seed for the next solve.
-void solver_set_seed(SolveCtx *ctx, uint64_t seed);
+void dvs_solver_set_seed(SolveCtx *ctx, uint64_t seed);
 ```
 
 ## Variable Pinning
@@ -49,7 +49,7 @@ void solver_set_seed(SolveCtx *ctx, uint64_t seed);
 ```c
 // Pin a variable to a specific value. Tightens lb and ub, propagates.
 // Returns 0 on success, -1 on conflict.
-int solver_pin_var(SolveCtx *ctx, uint32_t var_id, int64_t value);
+int dvs_solver_pin_var(SolveCtx *ctx, uint32_t var_id, int64_t value);
 ```
 
 Use cases:
@@ -62,11 +62,11 @@ Use cases:
 ```c
 // Save a checkpoint of the current state.
 // Returns checkpoint index (0-based), or -1 if MAX_CHECKPOINTS exceeded.
-int solver_checkpoint(SolveCtx *ctx);
+int dvs_solver_checkpoint(SolveCtx *ctx);
 
 // Restore to a previously saved checkpoint.
 // Undoes domain changes and deactivates propagators added after checkpoint.
-void solver_restore(SolveCtx *ctx, uint32_t cp);
+void dvs_solver_restore(SolveCtx *ctx, uint32_t cp);
 ```
 
 ## Incremental Constraints
@@ -74,30 +74,30 @@ void solver_restore(SolveCtx *ctx, uint32_t cp);
 ```c
 // Add constraints from an auxiliary SolveProblem to a compiled context.
 // Returns 0 on success, -1 on capacity error, -2 on UNSAT.
-int solver_add_constraint(SolveCtx *ctx, SolveProblem *aux_sp);
+int dvs_solver_add_constraint(SolveCtx *ctx, SolveProblem *aux_sp);
 ```
 
 ## Value Exclusion (randc)
 
 ```c
 // Exclude a value from a variable's domain.
-// Persists across solver_reset() for cyclic-random semantics.
+// Persists across dvs_solver_reset() for cyclic-random semantics.
 // Returns 0 on success, -1 if exclusion would empty the domain.
-int solver_exclude_value(SolveCtx *ctx, uint32_t var_id, int64_t value);
+int dvs_solver_exclude_value(SolveCtx *ctx, uint32_t var_id, int64_t value);
 ```
 
 Typical randc cycle:
-1. `solver_solve()` -- obtain value `v`
-2. `solver_exclude_value(ctx, var_id, v)` -- exclude it
-3. `solver_reset()` -- restore domains (holes persist)
-4. Repeat until domain exhausted (`solver_exclude_value` returns -1)
+1. `dvs_solver_solve()` -- obtain value `v`
+2. `dvs_solver_exclude_value(ctx, var_id, v)` -- exclude it
+3. `dvs_solver_reset()` -- restore domains (holes persist)
+4. Repeat until domain exhausted (`dvs_solver_exclude_value` returns -1)
 
 ## Soft Constraints
 
 ```c
 // Query whether a soft constraint assumption is still active after solve.
 // Returns 1 (active), 0 (relaxed), or -1 (invalid index).
-int solver_soft_active(const SolveCtx *ctx, uint32_t assumption_idx);
+int dvs_solver_soft_active(const SolveCtx *ctx, uint32_t assumption_idx);
 ```
 
 Soft constraints are added via `problem_add_soft_constraint()` at problem

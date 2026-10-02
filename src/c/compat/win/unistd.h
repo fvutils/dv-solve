@@ -2,8 +2,8 @@
  * kissat sources use (file.c, colors.c, kitten.c) onto their MSVC equivalents.
  * On this include path only for MSVC builds (see cmake/kissat.cmake).
  */
-#ifndef ZSP_WIN_UNISTD_H
-#define ZSP_WIN_UNISTD_H
+#ifndef DVS_WIN_UNISTD_H
+#define DVS_WIN_UNISTD_H
 #ifdef _MSC_VER
 
 #include <io.h>
@@ -36,4 +36,4 @@ typedef long long ssize_t;   /* matches SSIZE_T on x64 */
 long sysconf(int name);
 
 #endif /* _MSC_VER */
-#endif /* ZSP_WIN_UNISTD_H */
+#endif /* DVS_WIN_UNISTD_H */

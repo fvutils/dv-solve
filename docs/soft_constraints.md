@@ -14,7 +14,7 @@ ExprRef problem_add_soft_constraint(SolveProblem *sp, ExprRef root,
                                     uint32_t priority);
 
 // Builder equivalent:
-ExprRef builder_add_soft_constraint(SolveProblemBuilder *b, ExprRef root,
+ExprRef dvs_builder_add_soft_constraint(SolveProblemBuilder *b, ExprRef root,
                                     uint32_t priority);
 ```
 
@@ -22,7 +22,7 @@ ExprRef builder_add_soft_constraint(SolveProblemBuilder *b, ExprRef root,
 
 ```c
 // Returns 1 if the soft constraint was satisfied, 0 if relaxed, -1 on error.
-int solver_soft_active(const SolveCtx *ctx, uint32_t assumption_idx);
+int dvs_solver_soft_active(const SolveCtx *ctx, uint32_t assumption_idx);
 ```
 
 Note: assumption indices correspond to the order soft constraints appear
@@ -55,18 +55,18 @@ in the linked list (reverse of addition order due to prepend semantics).
 problem_add_soft_constraint(sp, eq_x_5, 0);
 problem_add_soft_constraint(sp, eq_y_7, 1);
 
-solver_solve(ctx, NULL);
-// solver_soft_active(ctx, 0) == 0  (x==5 relaxed)
-// solver_soft_active(ctx, 1) == 1  (y==7 kept)
+dvs_solver_solve(ctx, NULL);
+// dvs_solver_soft_active(ctx, 0) == 0  (x==5 relaxed)
+// dvs_solver_soft_active(ctx, 1) == 1  (y==7 kept)
 ```
 
 ## Re-solve / reuse contract
 
-`solver_solve` re-activates **all** soft assumptions at entry, so re-solving a
-reused `SolveCtx` (the common pattern: `solver_reset(ctx)` then `solver_solve(ctx, ...)`
+`dvs_solver_solve` re-activates **all** soft assumptions at entry, so re-solving a
+reused `SolveCtx` (the common pattern: `dvs_solver_reset(ctx)` then `dvs_solver_solve(ctx, ...)`
 on each randomization) always starts from the full soft set and recomputes the kept
-set from scratch. `solver_reset` restores the assumption variables to `[1,1]` but does
-**not** itself reset `assumption_active_mask`; `solver_solve` owns that. Without this
+set from scratch. `dvs_solver_reset` restores the assumption variables to `[1,1]` but does
+**not** itself reset `assumption_active_mask`; `dvs_solver_solve` owns that. Without this
 re-activation a second solve would inherit the first solve's relaxations and then drop
 the remaining kept soft on the next conflict — i.e. silently lose the whole soft set
 from the second solve onward. Locked by `tests/unit/test_soft.py::
@@ -75,7 +75,7 @@ test_soft_resolve_reuse_keeps_set`.
 ## Serve-path (BV-SAT) equivalence
 
 The bit-blast / SAT serve path honors softs with the **same** priority-respecting
-greedy relaxation via `zsp_bbsolver_check_maxsat` (`zsp_bbsolver.c`): start with all
+greedy relaxation via `dvs_bbsolver_check_maxsat` (`dvs_bbsolver.c`): start with all
 softs kept; on UNSAT drop the lowest-preference (highest priority value, last on ties)
 and re-solve, until SAT. The kept set is exported as a `soft_keep[]` mask (in
 `softs_head` walk order) and enforced as hard on every sampler draw, so the served

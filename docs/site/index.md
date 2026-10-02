@@ -18,8 +18,8 @@ rather than guessing.
 | Building constraint problems from Python | the Python API (`dv_solve`) | {doc}`getting-started/quickstart-python` |
 | Running SMT-LIB2 files, or plugging a solver into a tool that speaks SMT-LIB2 | the `dv-solve-smt2` executable | {doc}`getting-started/quickstart-smt2` |
 | Randomizing SystemVerilog classes in Verilator | `dv-solve-smt2` as Verilator's constraint solver | {doc}`getting-started/quickstart-verilator` |
-| Randomizing from SystemVerilog through DPI | the `zsp_dpi_pkg` SystemVerilog package and `libdv_solve_dpi` | {doc}`getting-started/install` |
-| Embedding the solver in a C or C++ program | the C library, `libdv_solve` | {doc}`getting-started/install` |
+| Randomizing from SystemVerilog through DPI, on any simulator | the `dvs_dpi_pkg` SystemVerilog package and `libdv_solve_dpi` | {doc}`guides/systemverilog-dpi` |
+| Embedding the solver in a C or C++ program | the C library, `libdv_solve` | {doc}`reference/c-api` |
 
 ```{toctree}
 :maxdepth: 2
@@ -39,6 +39,7 @@ concepts/problem-model
 concepts/soft-constraints
 concepts/randomization-seeds
 concepts/soundness
+concepts/diagnosing-unsat
 concepts/engines
 ```
 
@@ -48,6 +49,7 @@ concepts/engines
 
 guides/smt2-solver
 guides/verilator
+guides/systemverilog-dpi
 guides/packaging
 ```
 
@@ -56,6 +58,16 @@ guides/packaging
 :caption: Reference
 
 reference/python
+reference/c-api
+reference/sv-api
 reference/cli
 reference/environment
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Internals
+
+internals/architecture
+internals/propagators
 ```

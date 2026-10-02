@@ -1,6 +1,6 @@
-"""Benchmark: solver_reset + re-solve throughput.
+"""Benchmark: dvs_solver_reset + re-solve throughput.
 
-Measures the speedup of using solver_reset() + re-solve versus
+Measures the speedup of using dvs_solver_reset() + re-solve versus
 full recompilation. The compile-once + reset pattern is the primary
 use case for Verilator integration.
 
@@ -19,10 +19,10 @@ _CTX_BUF_SIZE = 1048576
 
 
 def _setup(lib):
-    lib.zsp_block_alloc_create.restype  = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype  = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype  = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype  = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
     lib.solve_problem_init.restype  = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
     lib.problem_add_var.restype  = ctypes.c_uint32
@@ -38,11 +38,11 @@ def _setup(lib):
     lib.expr_binary.restype  = ctypes.c_uint32
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
-    lib.solver_create.restype  = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype  = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype  = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_compile.restype  = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 
     class SolveOpts(ctypes.Structure):
         _fields_ = [
@@ -52,16 +52,17 @@ def _setup(lib):
             ("use_phase_save", ctypes.c_uint8),
             ("_pad",           ctypes.c_uint8 * 3),
             ("max_shave_iters", ctypes.c_uint32),
+            ("time_limit_ms",   ctypes.c_uint32),
         ]
     lib._SolveOpts = SolveOpts
-    lib.solver_solve.restype  = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_get_value.restype  = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.solver_reset.restype  = None
-    lib.solver_reset.argtypes = [ctypes.c_void_p]
-    lib.solver_destroy.restype  = None
-    lib.solver_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_solve.restype  = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_get_value.restype  = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_reset.restype  = None
+    lib.dvs_solver_reset.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_destroy.restype  = None
+    lib.dvs_solver_destroy.argtypes = [ctypes.c_void_p]
 
 
 BIN_ADD = 0
@@ -71,7 +72,7 @@ BIN_LTE = 13
 
 @pytest.mark.bench
 def test_reset_reuse(tmp_path):
-    """Benchmark: solver_reset + re-solve vs full recompile."""
+    """Benchmark: dvs_solver_reset + re-solve vs full recompile."""
     import shutil, subprocess
     from pathlib import Path
     PKG = Path(__file__).parent.parent.parent
@@ -109,22 +110,22 @@ def test_reset_reuse(tmp_path):
 
     # --- Method 1: compile once + reset + re-solve ---
     ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-    ba = lib.zsp_block_alloc_create(None, 0)
-    ctx = lib.solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
-    lib.solver_compile(ctx, sp)
+    ba = lib.dvs_block_alloc_create(None, 0)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX_BUF_SIZE, ba)
+    lib.dvs_solver_compile(ctx, sp)
 
     t0 = time.perf_counter_ns()
     for i in range(N_ITERS):
         opts = lib._SolveOpts(seed=(i + 1) * 0x9E3779B97F4A7C15)
-        rc = lib.solver_solve(ctx, ctypes.byref(opts))
+        rc = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert rc == SOLVE_OK
-        x = lib.solver_get_value(ctx, 0)
-        y = lib.solver_get_value(ctx, 1)
+        x = lib.dvs_solver_get_value(ctx, 0)
+        y = lib.dvs_solver_get_value(ctx, 1)
         assert x + y <= 50
-        lib.solver_reset(ctx)
+        lib.dvs_solver_reset(ctx)
     reset_ns = time.perf_counter_ns() - t0
 
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_block_alloc_destroy(ba)
 
     reset_per = reset_ns / N_ITERS
     print(f"\n  reset+solve: {N_ITERS} iters, "

@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Threading backend for the parallel cube engine (src/c/zsp_thread.c). Uses
+# Threading backend for the parallel cube engine (src/c/dvs_thread.c). Uses
 # pthreads on POSIX; on Windows the Win32 threading APIs need no extra link
 # library, so Threads::Threads is a no-op there.
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -57,49 +57,49 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/kissat.cmake)
 # ------------------------------------------------------------------ #
 # CaDiCaL is C++ and adds a libstdc++ dependency. It is the incremental
 # backend for the bit-blast / formal path; kissat stays the one-shot and
-# the lightweight-embeddable backend. -DZSP_WITH_CADICAL=OFF yields a
+# the lightweight-embeddable backend. -DDVS_WITH_CADICAL=OFF yields a
 # pure-C, kissat-only build with no C++ runtime (see
 # docs/cadical_integration_plan.md).
-option(ZSP_WITH_CADICAL "Build the incremental CaDiCaL SAT backend (adds a C++/libstdc++ dependency)" ON)
+option(DVS_WITH_CADICAL "Build the incremental CaDiCaL SAT backend (adds a C++/libstdc++ dependency)" ON)
 if(MSVC)
     # CaDiCaL is not wired for MSVC here; keep Windows builds pure-C/kissat.
-    set(ZSP_WITH_CADICAL OFF)
+    set(DVS_WITH_CADICAL OFF)
 endif()
-if(ZSP_WITH_CADICAL)
+if(DVS_WITH_CADICAL)
     enable_language(CXX)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cadical.cmake)
 endif()
 
 # Apply the CaDiCaL backend wiring to a dv-solve library target: link the
-# static archive, define ZSP_WITH_CADICAL for the zsp_sat dispatcher, and
+# static archive, define DVS_WITH_CADICAL for the dvs_sat dispatcher, and
 # force C++ linking so libstdc++ is pulled in (a C target won't auto-detect
 # the C++ runtime from a static archive).
-function(zsp_apply_cadical tgt)
-    if(ZSP_WITH_CADICAL)
+function(dvs_apply_cadical tgt)
+    if(DVS_WITH_CADICAL)
         target_link_libraries(${tgt} PRIVATE cadical)
-        target_compile_definitions(${tgt} PRIVATE ZSP_WITH_CADICAL=1)
+        target_compile_definitions(${tgt} PRIVATE DVS_WITH_CADICAL=1)
         set_target_properties(${tgt} PROPERTIES LINKER_LANGUAGE CXX)
     endif()
 endfunction()
 
 # MSVC portability for the dv-solve C sources (applies to every target defined
-# below — libraries, the CLI and the C tests). ZSP_WIN_COMPAT is set in
+# below — libraries, the CLI and the C tests). DVS_WIN_COMPAT is set in
 # kissat.cmake. Force-includes the builtins/stat shim and puts the POSIX shim
 # headers on the include path; kissat handles its own flags above.
 if(MSVC)
-    add_compile_options(/FI${ZSP_WIN_COMPAT}/msvc_compat.h /wd4244 /wd4267 /wd4146)
+    add_compile_options(/FI${DVS_WIN_COMPAT}/msvc_compat.h /wd4244 /wd4267 /wd4146)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS WIN32_LEAN_AND_MEAN)
-    include_directories(${ZSP_WIN_COMPAT})
+    include_directories(${DVS_WIN_COMPAT})
 endif()
 
 # The CLI (dv-solve-smt2) and the C unit-test executables are developer tools,
 # not part of any wheel. They also pull in POSIX-only APIs (setenv) and internal
 # data symbols that aren't exported from the DLLs, so skip them on MSVC.
 # Force the portable (no __int128, no GCC overflow builtins) arithmetic path of
-# src/c/zsp_i128.h -- what MSVC builds use -- so it can be tested on Linux.
-option(ZSP_NO_INT128 "Use the portable 64-bit code instead of __int128" OFF)
-if(ZSP_NO_INT128)
-    add_compile_definitions(ZSP_NO_INT128=1)
+# src/c/dvs_i128.h -- what MSVC builds use -- so it can be tested on Linux.
+option(DVS_NO_INT128 "Use the portable 64-bit code instead of __int128" OFF)
+if(DVS_NO_INT128)
+    add_compile_definitions(DVS_NO_INT128=1)
 endif()
 
 option(DV_SOLVE_BUILD_TOOLS "Build the dv-solve CLI and C test executables" ON)
@@ -118,71 +118,80 @@ endif()
 # Contradiction analysis (optional module)                            #
 # ------------------------------------------------------------------ #
 
-option(ZSP_CONTRADICTION_ANALYSIS "Build contradiction analysis module" OFF)
+option(DVS_CONTRADICTION_ANALYSIS "Build contradiction analysis module" OFF)
 
-set(ZSP_CONTRA_SOURCES
-    src/c/zsp_contradiction.c
+# Soundness step checker (tests only; never in a release). Every learnt clause
+# is checked, in a forked child, against the problem with learning off: a
+# solution that violates the clause aborts the run. See
+# docs/soundness_coverage_plan.md, P1.
+option(DVS_STEP_CHECK "Check every learnt clause against the problem (slow; tests only)" OFF)
+if(DVS_STEP_CHECK)
+    add_compile_definitions(DVS_STEP_CHECK=1)
+endif()
+
+set(DVS_CONTRA_SOURCES
+    src/c/dvs_contradiction.c
 )
 
 # ------------------------------------------------------------------ #
 # Source list                                                          #
 # ------------------------------------------------------------------ #
 
-set(ZSP_SOURCES
-    src/c/zsp_block_alloc.c
-    src/c/zsp_builder.c
-    src/c/zsp_compile.c
-    src/c/zsp_conflict.c
-    src/c/zsp_ctx.c
-    src/c/zsp_nogood.c
-    src/c/zsp_pool.c
-    src/c/zsp_problem.c
-    src/c/zsp_propagate.c
-    src/c/zsp_prop_templates.c
-    src/c/zsp_search.c
-    src/c/zsp_shave.c
-    src/c/zsp_stack.c
-    src/c/zsp_checkpoint.c
-    src/c/zsp_trail.c
-    src/c/zsp_validate.c
-    src/c/zsp_sv.c
-    src/c/zsp_placement.c
-    src/c/zsp_wiremask.c
-    src/c/zsp_costguided.c
-    src/c/zsp_lcg.c
-    src/c/zsp_explain.c
-    src/c/zsp_diffcycle.c
-    src/c/zsp_clause_prop.c
-    src/c/zsp_sat.c
-    src/c/zsp_sat_kissat.c
-    src/c/zsp_aig.c
-    src/c/zsp_aig_cnf.c
-    src/c/zsp_bitblast.c
-    src/c/zsp_bbsolver.c
-    src/c/zsp_cube.c
-    src/c/zsp_thread.c
-    src/c/zsp_arena.c
-    src/c/zsp_bvdom.c
-    src/c/zsp_bvbounds.c
+set(DVS_SOURCES
+    src/c/dvs_block_alloc.c
+    src/c/dvs_builder.c
+    src/c/dvs_compile.c
+    src/c/dvs_conflict.c
+    src/c/dvs_ctx.c
+    src/c/dvs_nogood.c
+    src/c/dvs_pool.c
+    src/c/dvs_problem.c
+    src/c/dvs_propagate.c
+    src/c/dvs_prop_templates.c
+    src/c/dvs_search.c
+    src/c/dvs_shave.c
+    src/c/dvs_stack.c
+    src/c/dvs_checkpoint.c
+    src/c/dvs_trail.c
+    src/c/dvs_validate.c
+    src/c/dvs_sv.c
+    src/c/dvs_placement.c
+    src/c/dvs_wiremask.c
+    src/c/dvs_costguided.c
+    src/c/dvs_lcg.c
+    src/c/dvs_explain.c
+    src/c/dvs_diffcycle.c
+    src/c/dvs_clause_prop.c
+    src/c/dvs_sat.c
+    src/c/dvs_sat_kissat.c
+    src/c/dvs_aig.c
+    src/c/dvs_aig_cnf.c
+    src/c/dvs_bitblast.c
+    src/c/dvs_bbsolver.c
+    src/c/dvs_cube.c
+    src/c/dvs_thread.c
+    src/c/dvs_arena.c
+    src/c/dvs_bvdom.c
+    src/c/dvs_bvbounds.c
 )
 
 # The CaDiCaL backend translation unit (pure C over the ccadical.h C API) is
 # compiled into every dv-solve library only when the backend is enabled.
-if(ZSP_WITH_CADICAL)
-    list(APPEND ZSP_SOURCES src/c/zsp_sat_cadical.c)
+if(DVS_WITH_CADICAL)
+    list(APPEND DVS_SOURCES src/c/dvs_sat_cadical.c)
 endif()
 
 # ------------------------------------------------------------------ #
 # Shared library target                                                #
 # ------------------------------------------------------------------ #
 
-add_library(dv_solve SHARED ${ZSP_SOURCES})
+add_library(dv_solve SHARED ${DVS_SOURCES})
 target_link_libraries(dv_solve PRIVATE kissat Threads::Threads)
-zsp_apply_cadical(dv_solve)
+dvs_apply_cadical(dv_solve)
 
-if(ZSP_CONTRADICTION_ANALYSIS)
-    target_sources(dv_solve PRIVATE ${ZSP_CONTRA_SOURCES})
-    target_compile_definitions(dv_solve PRIVATE ZSP_CONTRADICTION_ANALYSIS=1)
+if(DVS_CONTRADICTION_ANALYSIS)
+    target_sources(dv_solve PRIVATE ${DVS_CONTRA_SOURCES})
+    target_compile_definitions(dv_solve PRIVATE DVS_CONTRADICTION_ANALYSIS=1)
 endif()
 
 target_include_directories(dv_solve PUBLIC
@@ -218,11 +227,11 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/c/
 # Debug library (always includes contradiction analysis)              #
 # ------------------------------------------------------------------ #
 
-add_library(dv_solve_debug SHARED ${ZSP_SOURCES} ${ZSP_CONTRA_SOURCES})
+add_library(dv_solve_debug SHARED ${DVS_SOURCES} ${DVS_CONTRA_SOURCES})
 target_link_libraries(dv_solve_debug PRIVATE kissat Threads::Threads)
-zsp_apply_cadical(dv_solve_debug)
+dvs_apply_cadical(dv_solve_debug)
 
-target_compile_definitions(dv_solve_debug PRIVATE ZSP_CONTRADICTION_ANALYSIS=1)
+target_compile_definitions(dv_solve_debug PRIVATE DVS_CONTRADICTION_ANALYSIS=1)
 
 target_include_directories(dv_solve_debug PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
@@ -244,11 +253,11 @@ install(TARGETS dv_solve_debug
 # ------------------------------------------------------------------ #
 
 add_library(dv_solve_dpi SHARED
-    src/c/zsp_dpi.c
-    ${ZSP_SOURCES}
+    src/c/dvs_dpi.c
+    ${DVS_SOURCES}
 )
 target_link_libraries(dv_solve_dpi PRIVATE kissat Threads::Threads)
-zsp_apply_cadical(dv_solve_dpi)
+dvs_apply_cadical(dv_solve_dpi)
 
 target_include_directories(dv_solve_dpi PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
@@ -280,77 +289,87 @@ target_include_directories(test_smt2_lexer PRIVATE
 add_test(NAME test_smt2_lexer COMMAND test_smt2_lexer)
 add_test(NAME test_kissat_smoke COMMAND test_kissat_smoke)
 
-add_executable(test_zsp_sat tests/c/test_zsp_sat.c)
-target_link_libraries(test_zsp_sat PRIVATE dv_solve kissat)
-target_include_directories(test_zsp_sat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_sat COMMAND test_zsp_sat)
+add_executable(test_dvs_sat tests/c/test_dvs_sat.c)
+target_link_libraries(test_dvs_sat PRIVATE dv_solve kissat)
+target_include_directories(test_dvs_sat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_sat COMMAND test_dvs_sat)
 
-add_executable(test_kissat_zsp_alloc tests/c/test_kissat_zsp_alloc.c)
-target_link_libraries(test_kissat_zsp_alloc PRIVATE dv_solve kissat)
-target_include_directories(test_kissat_zsp_alloc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_kissat_zsp_alloc COMMAND test_kissat_zsp_alloc)
+add_executable(test_kissat_dvs_alloc tests/c/test_kissat_dvs_alloc.c)
+target_link_libraries(test_kissat_dvs_alloc PRIVATE dv_solve kissat)
+target_include_directories(test_kissat_dvs_alloc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_kissat_dvs_alloc COMMAND test_kissat_dvs_alloc)
 
-add_executable(test_zsp_sat_incremental tests/c/test_zsp_sat_incremental.c)
-target_link_libraries(test_zsp_sat_incremental PRIVATE dv_solve kissat)
-target_include_directories(test_zsp_sat_incremental PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_sat_incremental COMMAND test_zsp_sat_incremental)
+add_executable(test_dvs_sat_incremental tests/c/test_dvs_sat_incremental.c)
+target_link_libraries(test_dvs_sat_incremental PRIVATE dv_solve kissat)
+target_include_directories(test_dvs_sat_incremental PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_sat_incremental COMMAND test_dvs_sat_incremental)
 
 # CaDiCaL backend tests: exercise real incremental behavior. Skips itself at
-# runtime when built with -DZSP_WITH_CADICAL=OFF, so it is always safe to run.
-add_executable(test_zsp_sat_cadical tests/c/test_zsp_sat_cadical.c)
-target_link_libraries(test_zsp_sat_cadical PRIVATE dv_solve)
-target_include_directories(test_zsp_sat_cadical PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_sat_cadical COMMAND test_zsp_sat_cadical)
+# runtime when built with -DDVS_WITH_CADICAL=OFF, so it is always safe to run.
+add_executable(test_dvs_sat_cadical tests/c/test_dvs_sat_cadical.c)
+target_link_libraries(test_dvs_sat_cadical PRIVATE dv_solve)
+target_include_directories(test_dvs_sat_cadical PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_sat_cadical COMMAND test_dvs_sat_cadical)
 
-add_executable(test_zsp_aig tests/c/test_zsp_aig.c)
-target_link_libraries(test_zsp_aig PRIVATE dv_solve)
-target_include_directories(test_zsp_aig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_aig COMMAND test_zsp_aig)
+add_executable(test_dvs_aig tests/c/test_dvs_aig.c)
+target_link_libraries(test_dvs_aig PRIVATE dv_solve)
+target_include_directories(test_dvs_aig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_aig COMMAND test_dvs_aig)
 
-add_executable(test_zsp_aig_cnf tests/c/test_zsp_aig_cnf.c)
-target_link_libraries(test_zsp_aig_cnf PRIVATE dv_solve kissat)
-target_include_directories(test_zsp_aig_cnf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_aig_cnf COMMAND test_zsp_aig_cnf)
+add_executable(test_dvs_aig_cnf tests/c/test_dvs_aig_cnf.c)
+target_link_libraries(test_dvs_aig_cnf PRIVATE dv_solve kissat)
+target_include_directories(test_dvs_aig_cnf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_aig_cnf COMMAND test_dvs_aig_cnf)
 
-add_executable(test_zsp_bitblast tests/c/test_zsp_bitblast.c)
-target_link_libraries(test_zsp_bitblast PRIVATE dv_solve kissat)
-target_include_directories(test_zsp_bitblast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_bitblast COMMAND test_zsp_bitblast)
+add_executable(test_dvs_bitblast tests/c/test_dvs_bitblast.c)
+target_link_libraries(test_dvs_bitblast PRIVATE dv_solve kissat)
+target_include_directories(test_dvs_bitblast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_bitblast COMMAND test_dvs_bitblast)
 
-add_executable(test_zsp_bbsolver tests/c/test_zsp_bbsolver.c)
-target_link_libraries(test_zsp_bbsolver PRIVATE dv_solve kissat)
-target_include_directories(test_zsp_bbsolver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_bbsolver COMMAND test_zsp_bbsolver)
+add_executable(test_dvs_bbsolver tests/c/test_dvs_bbsolver.c)
+target_link_libraries(test_dvs_bbsolver PRIVATE dv_solve kissat)
+target_include_directories(test_dvs_bbsolver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_bbsolver COMMAND test_dvs_bbsolver)
 
-add_executable(test_zsp_bbsolver_incremental tests/c/test_zsp_bbsolver_incremental.c)
-target_link_libraries(test_zsp_bbsolver_incremental PRIVATE dv_solve kissat)
-target_include_directories(test_zsp_bbsolver_incremental PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_bbsolver_incremental COMMAND test_zsp_bbsolver_incremental)
+add_executable(test_dvs_bbsolver_incremental tests/c/test_dvs_bbsolver_incremental.c)
+target_link_libraries(test_dvs_bbsolver_incremental PRIVATE dv_solve kissat)
+target_include_directories(test_dvs_bbsolver_incremental PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_bbsolver_incremental COMMAND test_dvs_bbsolver_incremental)
 
-add_executable(test_zsp_block_alloc_cache tests/c/test_zsp_block_alloc_cache.c)
-target_link_libraries(test_zsp_block_alloc_cache PRIVATE dv_solve)
-target_include_directories(test_zsp_block_alloc_cache PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_block_alloc_cache COMMAND test_zsp_block_alloc_cache)
+add_executable(test_dvs_block_alloc_cache tests/c/test_dvs_block_alloc_cache.c)
+target_link_libraries(test_dvs_block_alloc_cache PRIVATE dv_solve)
+target_include_directories(test_dvs_block_alloc_cache PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_block_alloc_cache COMMAND test_dvs_block_alloc_cache)
 
-add_executable(test_zsp_arena tests/c/test_zsp_arena.c)
-target_link_libraries(test_zsp_arena PRIVATE dv_solve)
-target_include_directories(test_zsp_arena PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_arena COMMAND test_zsp_arena)
+# The public API through dv_solve.h alone; the test includes no other header.
+add_executable(test_public_api tests/c/test_public_api.c)
+target_link_libraries(test_public_api PRIVATE dv_solve)
+add_test(NAME test_public_api COMMAND test_public_api)
 
-add_executable(test_zsp_bvdom tests/c/test_zsp_bvdom.c)
-target_link_libraries(test_zsp_bvdom PRIVATE dv_solve)
-target_include_directories(test_zsp_bvdom PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_bvdom COMMAND test_zsp_bvdom)
+add_executable(test_dvs_arena tests/c/test_dvs_arena.c)
+target_link_libraries(test_dvs_arena PRIVATE dv_solve)
+target_include_directories(test_dvs_arena PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_arena COMMAND test_dvs_arena)
 
-add_executable(test_zsp_bvbounds tests/c/test_zsp_bvbounds.c)
-target_link_libraries(test_zsp_bvbounds PRIVATE dv_solve)
-target_include_directories(test_zsp_bvbounds PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_bvbounds COMMAND test_zsp_bvbounds)
+add_executable(test_dvs_bvdom tests/c/test_dvs_bvdom.c)
+target_link_libraries(test_dvs_bvdom PRIVATE dv_solve)
+target_include_directories(test_dvs_bvdom PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_bvdom COMMAND test_dvs_bvdom)
 
-add_executable(test_zsp_wide_arith tests/c/test_zsp_wide_arith.c)
-target_link_libraries(test_zsp_wide_arith PRIVATE dv_solve)
-target_include_directories(test_zsp_wide_arith PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-add_test(NAME test_zsp_wide_arith COMMAND test_zsp_wide_arith)
+add_executable(test_prop_exhaustive tests/c/test_prop_exhaustive.c)
+target_link_libraries(test_prop_exhaustive PRIVATE dv_solve)
+target_include_directories(test_prop_exhaustive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_prop_exhaustive COMMAND test_prop_exhaustive)
+
+add_executable(test_dvs_bvbounds tests/c/test_dvs_bvbounds.c)
+target_link_libraries(test_dvs_bvbounds PRIVATE dv_solve)
+target_include_directories(test_dvs_bvbounds PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_bvbounds COMMAND test_dvs_bvbounds)
+
+add_executable(test_dvs_wide_arith tests/c/test_dvs_wide_arith.c)
+target_link_libraries(test_dvs_wide_arith PRIVATE dv_solve)
+target_include_directories(test_dvs_wide_arith PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_wide_arith COMMAND test_dvs_wide_arith)
 
 # ------------------------------------------------------------------ #
 # SMT-LIB2 parser test                                                 #

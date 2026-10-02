@@ -11,7 +11,7 @@ Snapshot of cross-solver performance after Phase B.0 + A.1/A.2 + bit-fix.
 - Solvers:
   - `dv-solve-smt2 --engine=bitblast` — current HEAD, built with kissat
     as the SAT backend, bit-fix from variable bounds, bit-blast through
-    `zsp_bbsolver`.
+    `dvs_bbsolver`.
   - `z3` — system binary.
   - `bitwuzla` — bundled 0.8.2 from `packages/verilator-bin/bin/bitwuzla`.
 

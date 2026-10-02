@@ -17,7 +17,7 @@ from typing import Optional
 from .lib import _load_lib, _library_not_found_error
 
 # ------------------------------------------------------------------ #
-# SolveResult constants (must match zsp_search.h)                     #
+# dvs_result_t constants (must match dv_solve.h)                      #
 # ------------------------------------------------------------------ #
 SOLVE_OK      = 0
 SOLVE_UNSAT   = 1
@@ -28,14 +28,10 @@ _CTX_BUF_SIZE = 1 << 20  # 1 MiB — headroom for propagators + decisions
 
 
 # ------------------------------------------------------------------ #
-# SolveOpts ctypes struct                                              #
-# Layout (must match SolveOpts in zsp_search.h exactly):               #
-#   seed(uint64=8) + max_conflicts(uint32=4) + max_restarts(uint32=4)  #
-#   + use_phase_save, use_lcg, fair_pick (uint8 each) + _pad[1]        #
-#   + max_shave_iters(uint32=4) + time_limit_ms(uint32=4)              #
-#   → total 32 bytes (28 + tail padding to the uint64's alignment)     #
-# The C side reads every field, so a short struct here is a read past  #
-# the end of the caller's buffer (test_solve_opts_layout.py).          #
+# SolveOpts ctypes struct. Must match dvs_solve_opts_t in dv_solve.h   #
+# field for field (tests/unit/test_wide_watch.py checks it): the C     #
+# side reads the whole struct, so a missing field is read from          #
+# whatever memory follows.                                             #
 # ------------------------------------------------------------------ #
 class _SolveOpts(ctypes.Structure):
     _fields_ = [
@@ -51,8 +47,9 @@ class _SolveOpts(ctypes.Structure):
     ]
 
 
-# Mirrors ZSP_COMPILE_UNSUPPORTED_WIDTH in zsp_ctx.h.
+# Mirror DVS_COMPILE_UNSUPPORTED_WIDTH and DVS_COMPILE_BAD_VAR in dv_solve.h.
 _COMPILE_UNSUPPORTED_WIDTH = -3
+_COMPILE_BAD_VAR = -4
 
 
 class CompileUnsatError(Exception):
@@ -75,9 +72,11 @@ class CompileIncompleteError(Exception):
 
 
 class CompileUnsupportedError(CompileIncompleteError):
-    """The problem declares a variable wider than 64 bits.
+    """The problem is larger than the API supports.
 
-    The Python API supports variables up to 64 bits wide. Wider bit-vectors
+    The Python API supports variables up to 64 bits wide, expressions up to
+    255 bits wide, expressions nested up to 20000 deep, and all-different
+    constraints over up to 16 variables of up to 32 bits. Wider bit-vectors
     are supported through the SMT-LIB2 front end (``dv-solve-smt2``).
     """
 
@@ -98,7 +97,7 @@ class SolveCtx:
     Raises:
         CompileUnsatError: The constraints are provably unsatisfiable.
         CompileIncompleteError: A constraint could not be compiled.
-        CompileUnsupportedError: A variable is wider than 64 bits.
+        CompileUnsupportedError: The problem goes beyond a supported limit.
     """
 
     def __init__(self, problem: "SolveProblem", ctx_buf_size: int = _CTX_BUF_SIZE) -> None:  # noqa: F821
@@ -108,24 +107,24 @@ class SolveCtx:
         self._lib = lib
 
         # Keep the SolveProblem buffer alive for the lifetime of this context.
-        # solver_compile does not fully copy it, so the compiled context (and
+        # dvs_solver_compile does not fully copy it, so the compiled context (and
         # any later reset()+solve()) reads from this buffer. A cached/reused ctx
         # outlives the call that built it, so without this reference the buffer
         # would be collected and the ctx would read freed memory.
         self._problem = problem
 
         # Block allocator owns all dynamic memory used by the context.
-        self._ba = lib.zsp_block_alloc_create(None, ctx_buf_size)
+        self._ba = lib.dvs_block_alloc_create(None, ctx_buf_size)
         if self._ba is None:
-            raise RuntimeError("zsp_block_alloc_create failed")
+            raise RuntimeError("dvs_block_alloc_create failed")
 
         # Context lives inside a caller-managed buffer.
         self._ctx_buf = (ctypes.c_uint8 * ctx_buf_size)()
-        ctx = lib.solver_create(self._ctx_buf, ctx_buf_size, self._ba)
+        ctx = lib.dvs_solver_create(self._ctx_buf, ctx_buf_size, self._ba)
         if ctx is None:
-            lib.zsp_block_alloc_destroy(self._ba)
+            lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
-            raise RuntimeError("solver_create failed")
+            raise RuntimeError("dvs_solver_create failed")
         self._ctx = ctx  # c_void_p value
 
         # Compile constraints from the problem into this context.
@@ -134,29 +133,37 @@ class SolveCtx:
         if sp_ptr is None:
             # Raw ctypes buffer -- cast to void pointer
             sp_ptr = ctypes.cast(problem, ctypes.c_void_p).value
-        rc = lib.solver_compile(self._ctx, sp_ptr)
+        rc = lib.dvs_solver_compile(self._ctx, sp_ptr)
         # On every error path below, NULL out self._ba after releasing it: the
         # half-constructed SolveCtx still exists (the exception unwinds out of
         # __init__) and will be garbage-collected, at which point __del__ ->
         # destroy() must NOT free the already-freed block allocator again.
         if rc == -2:
-            lib.zsp_block_alloc_destroy(self._ba)
+            lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             raise CompileUnsatError("Domain became empty during compile-time bound tightening")
         if rc == _COMPILE_UNSUPPORTED_WIDTH:
-            lib.zsp_block_alloc_destroy(self._ba)
+            lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             raise CompileUnsupportedError(
-                "problem declares a variable wider than 64 bits, which the "
-                "propagator engine cannot search; use the bit-blasting engine "
-                "(dv_solve.bvsat.BVSatCtx) for this problem"
+                "problem goes beyond a supported limit: a variable wider than "
+                "64 bits, an expression wider than 255 bits or nested more "
+                "than 20000 deep, or an all-different over more than 16 "
+                "variables or one wider than 32 bits"
+            )
+        if rc == _COMPILE_BAD_VAR:
+            lib.dvs_block_alloc_destroy(self._ba)
+            self._ba = None
+            raise ValueError(
+                "variable ids must be 0..n-1, each declared once with add_var, "
+                "and every variable an expression names must be declared"
             )
         if rc < 0:
-            lib.zsp_block_alloc_destroy(self._ba)
+            lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
-            raise RuntimeError(f"solver_compile failed (rc={rc})")
+            raise RuntimeError(f"dvs_solver_compile failed (rc={rc})")
         if rc > 0:
-            lib.zsp_block_alloc_destroy(self._ba)
+            lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             raise CompileIncompleteError(
                 f"{rc} constraint(s) could not be compiled natively"
@@ -184,7 +191,7 @@ class SolveCtx:
     def destroy(self) -> None:
         """Release the native memory. Also called when the context is garbage-collected."""
         if self._ba is not None:
-            self._lib.zsp_block_alloc_destroy(self._ba)
+            self._lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
 
     # ------------------------------------------------------------------ #
@@ -249,11 +256,11 @@ class SolveCtx:
             time_limit_ms=time_limit_ms,
             use_lcg=1 if use_lcg else 0,
         )
-        return self._lib.solver_solve(self._ctx, ctypes.byref(opts))
+        return self._lib.dvs_solver_solve(self._ctx, ctypes.byref(opts))
 
     def reset(self) -> None:
         """Clear the previous solution so :meth:`solve` can run again."""
-        self._lib.solver_reset(self._ctx)
+        self._lib.dvs_solver_reset(self._ctx)
 
     def solve_n(
         self,
@@ -273,7 +280,7 @@ class SolveCtx:
         the SolveProblem and SolveCtx on each iteration.
         """
         out = (ctypes.c_int64 * (n * n_vars))()
-        n_ok = self._lib.solver_solve_n(
+        n_ok = self._lib.dvs_solver_solve_n(
             self._ctx, n, n_vars, var_ids, out,
             base_seed, max_shave_iters,
         )
@@ -286,12 +293,14 @@ class SolveCtx:
     def add_constraint(self, aux_problem) -> int:
         """Add constraints from an auxiliary SolveProblem to this context.
 
-        Returns 0 on success, -1 if capacity exceeded, -2 if UNSAT.
+        Returns 0 on success, -1 if capacity exceeded, -2 if UNSAT, -3 for
+        an unsupported width, -4 for an undeclared variable, or a positive
+        count of constraints that could not be compiled.
         """
         sp_ptr = getattr(aux_problem, "_sp", None)
         if sp_ptr is None:
             sp_ptr = ctypes.cast(aux_problem, ctypes.c_void_p).value
-        return self._lib.solver_add_constraint(self._ctx, sp_ptr)
+        return self._lib.dvs_solver_add_constraint(self._ctx, sp_ptr)
 
     def pin(self, var_id: int, value: int) -> bool:
         """Fix *var_id* to *value* for the next solve, and propagate.
@@ -302,15 +311,15 @@ class SolveCtx:
         :meth:`reset`; :meth:`solve` does not clear it. The incremental
         pattern: ``cp = checkpoint(); pin(...); solve(); ...; restore(cp)``.
         """
-        return self._lib.solver_pin_var(self._ctx, var_id, value) == 0
+        return self._lib.dvs_solver_pin_var(self._ctx, var_id, value) == 0
 
     def checkpoint(self) -> int:
         """Save solver state; returns checkpoint index."""
-        return self._lib.solver_checkpoint(self._ctx)
+        return self._lib.dvs_solver_checkpoint(self._ctx)
 
     def restore(self, cp: int) -> None:
         """Restore solver state to checkpoint *cp*."""
-        self._lib.solver_restore(self._ctx, ctypes.c_uint32(cp))
+        self._lib.dvs_solver_restore(self._ctx, ctypes.c_uint32(cp))
 
     def propagate_only(self) -> int:
         """Run propagation to fixpoint without search.
@@ -318,7 +327,7 @@ class SolveCtx:
         Returns PROP_OK (0) on fixpoint, PROP_CONFLICT (1) if UNSAT.
         Useful for fast feasibility checks without full solve.
         """
-        return self._lib.solver_propagate_only(self._ctx)
+        return self._lib.dvs_solver_propagate_only(self._ctx)
 
     def check_unsat(self) -> bool:
         """Return True iff the current constraint set has no satisfying assignment.
@@ -334,13 +343,13 @@ class SolveCtx:
         region without any CDCL overhead for the common (propagation-decisive)
         case.
         """
-        result = self._lib.solver_propagate_only(self._ctx)
+        result = self._lib.dvs_solver_propagate_only(self._ctx)
         if result == 1:   # PROP_CONFLICT
             return True
         if result == 0:   # PROP_OK / all domains fixed → check if SAT
-            return self._lib.solver_solve(self._ctx, ctypes.byref(_SolveOpts())) == SOLVE_UNSAT
+            return self._lib.dvs_solver_solve(self._ctx, ctypes.byref(_SolveOpts())) == SOLVE_UNSAT
         # Unexpected return code — fall back to solve()
-        return self._lib.solver_solve(self._ctx, ctypes.byref(_SolveOpts())) == SOLVE_UNSAT
+        return self._lib.dvs_solver_solve(self._ctx, ctypes.byref(_SolveOpts())) == SOLVE_UNSAT
 
     def optimize(
         self,
@@ -362,7 +371,7 @@ class SolveCtx:
         """
         # Quick feasibility check first.
         cp = self.checkpoint()
-        test_result = self._lib.solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
+        test_result = self._lib.dvs_solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
         self.restore(cp)
         if test_result == SOLVE_UNSAT:
             return None
@@ -385,7 +394,7 @@ class SolveCtx:
                     self.restore(cp2)
                     lo_cur = mid + 1
                 else:
-                    r = self._lib.solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
+                    r = self._lib.dvs_solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
                     if r == SOLVE_OK:
                         best = self.get_value(obj_var)
                         self.restore(cp2)
@@ -411,7 +420,7 @@ class SolveCtx:
                     self.restore(cp2)
                     hi_cur = mid - 1
                 else:
-                    r = self._lib.solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
+                    r = self._lib.dvs_solver_solve(self._ctx, ctypes.byref(_SolveOpts()))
                     if r == SOLVE_OK:
                         best = self.get_value(obj_var)
                         self.restore(cp2)
@@ -428,7 +437,7 @@ class SolveCtx:
         # No ctypes.c_uint32(var_id) here: argtypes already declares c_uint32, so
         # ctypes converts a plain Python int itself. Constructing the wrapper was
         # ~18% of the cost of this call, which runs once per field per solve.
-        return self._lib.solver_get_value(self._ctx, var_id)
+        return self._lib.dvs_solver_get_value(self._ctx, var_id)
 
     def get_values(self, ids_arr, out_arr, n: int) -> None:
         """Bulk readback: write the solved values of ``ids_arr[0:n]`` into
@@ -444,7 +453,7 @@ class SolveCtx:
         only for variables that fit in an int64 — a >64-bit variable must use the
         wide reader instead.
         """
-        self._lib.solver_get_values(self._ctx, n, ids_arr, out_arr)
+        self._lib.dvs_solver_get_values(self._ctx, n, ids_arr, out_arr)
 
     def validate_model(self) -> int:
         """Re-evaluate every constraint in the problem against the current
@@ -467,4 +476,4 @@ class SolveCtx:
         sp_ptr = getattr(self._problem, "_sp", None)
         if sp_ptr is None:
             sp_ptr = ctypes.cast(self._problem, ctypes.c_void_p).value
-        return self._lib.solver_validate_model(self._ctx, sp_ptr, None)
+        return self._lib.dvs_solver_validate_model(self._ctx, sp_ptr, None)

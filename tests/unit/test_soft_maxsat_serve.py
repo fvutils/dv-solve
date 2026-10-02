@@ -1,19 +1,19 @@
-"""DSE-2: soft-aware MaxSAT on the BV-SAT serve path (zsp_bbsolver_check_maxsat).
+"""DSE-2: soft-aware MaxSAT on the BV-SAT serve path (dvs_bbsolver_check_maxsat).
 
 The primary engine honors softs; the BV-SAT serve path historically did not
-(bit-blast ignored softs_head). zsp_bbsolver_check_maxsat keeps the maximal
-priority-respecting soft set on the serve path, mirroring solver_solve's
+(bit-blast ignored softs_head). dvs_bbsolver_check_maxsat keeps the maximal
+priority-respecting soft set on the serve path, mirroring dvs_solver_solve's
 relaxation policy. These tests drive the C API directly.
 
-Op codes (zsp_problem.h): BIN_EQ=10 BIN_GT=14 BIN_GTE=15.
+Op codes (dvs_problem.h): BIN_EQ=10 BIN_GT=14 BIN_GTE=15.
 """
 from __future__ import annotations
 
 import ctypes
 import pytest
 
-ZSP_BB_SAT = 10
-ZSP_BB_UNSAT = 20
+DVS_BB_SAT = 10
+DVS_BB_UNSAT = 20
 
 _SP_BUF_SIZE = 65536
 
@@ -23,10 +23,10 @@ BIN_GTE = 15
 
 
 def _setup(lib: ctypes.CDLL):
-    lib.zsp_block_alloc_create.restype = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -47,33 +47,33 @@ def _setup(lib: ctypes.CDLL):
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.zsp_bbsolver_check_maxsat.restype = ctypes.c_int
-    lib.zsp_bbsolver_check_maxsat.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+    lib.dvs_bbsolver_check_maxsat.restype = ctypes.c_int
+    lib.dvs_bbsolver_check_maxsat.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
                                               ctypes.c_uint64,
                                               ctypes.POINTER(ctypes.c_void_p),
                                               ctypes.c_void_p, ctypes.c_uint32]
-    lib.zsp_bbsolver_value.restype = ctypes.c_int
-    lib.zsp_bbsolver_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+    lib.dvs_bbsolver_value.restype = ctypes.c_int
+    lib.dvs_bbsolver_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                        ctypes.POINTER(ctypes.c_int64)]
-    lib.zsp_bbsolver_free.restype = None
-    lib.zsp_bbsolver_free.argtypes = [ctypes.c_void_p]
+    lib.dvs_bbsolver_free.restype = None
+    lib.dvs_bbsolver_free.argtypes = [ctypes.c_void_p]
 
 
 def _maxsat(lib, sp, seed=0x1234):
     out = ctypes.c_void_p()
-    rc = lib.zsp_bbsolver_check_maxsat(None, sp, seed, ctypes.byref(out), None, 0)
+    rc = lib.dvs_bbsolver_check_maxsat(None, sp, seed, ctypes.byref(out), None, 0)
     return rc, out
 
 
 def _val(lib, bb, vid):
     v = ctypes.c_int64()
-    assert lib.zsp_bbsolver_value(bb, vid, ctypes.byref(v)) == 0
+    assert lib.dvs_bbsolver_value(bb, vid, ctypes.byref(v)) == 0
     return v.value
 
 
-def test_serve_soft_satisfiable_honored(libzsp):
+def test_serve_soft_satisfiable_honored(libdvs):
     """Hard a>10; soft d==40 (no conflict). MaxSAT keeps it → d==40."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
     sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
@@ -87,15 +87,15 @@ def test_serve_soft_satisfiable_honored(libzsp):
     lib.problem_add_soft_constraint(sp, soft, 0)
 
     rc, bb = _maxsat(lib, sp)
-    assert rc == ZSP_BB_SAT
+    assert rc == DVS_BB_SAT
     assert _val(lib, bb, 0) > 10
     assert _val(lib, bb, 1) == 40, "serve-path soft d==40 not honored"
-    lib.zsp_bbsolver_free(bb)
+    lib.dvs_bbsolver_free(bb)
 
 
-def test_serve_soft_conflicting_relaxed(libzsp):
+def test_serve_soft_conflicting_relaxed(libdvs):
     """Hard a>10 AND a==5-soft conflicts; the soft must be relaxed, model valid."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
     sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
@@ -108,16 +108,16 @@ def test_serve_soft_conflicting_relaxed(libzsp):
     lib.problem_add_soft_constraint(sp, soft, 0)
 
     rc, bb = _maxsat(lib, sp)
-    assert rc == ZSP_BB_SAT
+    assert rc == DVS_BB_SAT
     assert _val(lib, bb, 0) > 10, "hard must hold; conflicting soft relaxed"
-    lib.zsp_bbsolver_free(bb)
+    lib.dvs_bbsolver_free(bb)
 
 
-def test_serve_soft_priority_order(libzsp):
+def test_serve_soft_priority_order(libdvs):
     """Two mutually-exclusive softs at distinct priorities + a hard that forces
     dropping at least one. Lower preference (higher priority value) is dropped
     first → the higher-preference soft (priority 0) is kept."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
     sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
@@ -133,14 +133,14 @@ def test_serve_soft_priority_order(libzsp):
     lib.problem_add_soft_constraint(sp, b, 10)
 
     rc, bb = _maxsat(lib, sp)
-    assert rc == ZSP_BB_SAT
+    assert rc == DVS_BB_SAT
     assert _val(lib, bb, 0) == 20, "higher-preference soft (x==20) must be kept"
-    lib.zsp_bbsolver_free(bb)
+    lib.dvs_bbsolver_free(bb)
 
 
-def test_serve_hard_unsat(libzsp):
+def test_serve_hard_unsat(libdvs):
     """Hard core UNSAT (x in [0,5] but x>10) → UNSAT even after dropping softs."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
     sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
@@ -153,18 +153,18 @@ def test_serve_hard_unsat(libzsp):
     lib.problem_add_soft_constraint(sp, soft, 0)
 
     out = ctypes.c_void_p()
-    rc = lib.zsp_bbsolver_check_maxsat(None, sp, 0x99, ctypes.byref(out), None, 0)
-    assert rc == ZSP_BB_UNSAT
+    rc = lib.dvs_bbsolver_check_maxsat(None, sp, 0x99, ctypes.byref(out), None, 0)
+    assert rc == DVS_BB_UNSAT
     assert not out  # NULL out_bb on UNSAT
 
 
-def test_serve_soft_no_collateral_drop(libzsp):
+def test_serve_soft_no_collateral_drop(libdvs):
     """Serve-path twin of `test_soft.test_soft_no_collateral_drop_primary`. The
     additive-greedy MaxSAT must keep the satisfiable softs (a==11, d==40, e==50)
     and drop only the conflicting x!=20, y!=30 — NOT shed satisfiable softs as
     collateral. The subtractive greedy this replaced dropped d==40 here (the
     test_soft_nested failure). Same kept set as the primary => primary == serve."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
     sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
@@ -182,20 +182,20 @@ def test_serve_soft_no_collateral_drop(libzsp):
         lib.problem_add_soft_constraint(sp, e, pri)
 
     rc, bb = _maxsat(lib, sp)
-    assert rc == ZSP_BB_SAT
+    assert rc == DVS_BB_SAT
     assert _val(lib, bb, 0) == 11, "a==11 dropped as collateral"
     assert _val(lib, bb, 2) == 40, "d==40 dropped as collateral (the test_soft_nested bug)"
     assert _val(lib, bb, 4) == 50, "e==50 dropped as collateral"
     assert _val(lib, bb, 1) == 20 and _val(lib, bb, 3) == 30, "hard must hold"
-    lib.zsp_bbsolver_free(bb)
+    lib.dvs_bbsolver_free(bb)
 
 
-def test_serve_soft_priority_ladder_three(libzsp):
+def test_serve_soft_priority_ladder_three(libdvs):
     """DSE-3 ladder (serve path) — the matched twin of
     `test_soft.test_soft_priority_ladder_three_primary`. Identical problem: three
     mutually-exclusive softs at priorities 0/5/10. The serve-path MaxSAT must keep
     the SAME soft the primary keeps (x==10 @ pri0) → primary order == serve order."""
-    lib = libzsp
+    lib = libdvs
     _setup(lib)
     sp_buf = (ctypes.c_uint8 * _SP_BUF_SIZE)()
     sp = lib.solve_problem_init(sp_buf, _SP_BUF_SIZE)
@@ -208,6 +208,6 @@ def test_serve_soft_priority_ladder_three(libzsp):
     lib.problem_add_soft_constraint(sp, s2, 10)  # relax-first
 
     rc, bb = _maxsat(lib, sp)
-    assert rc == ZSP_BB_SAT
+    assert rc == DVS_BB_SAT
     assert _val(lib, bb, 0) == 10, "serve path must keep the same soft as primary (x==10)"
-    lib.zsp_bbsolver_free(bb)
+    lib.dvs_bbsolver_free(bb)

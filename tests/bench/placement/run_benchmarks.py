@@ -41,7 +41,7 @@ def main():
     # Set up library path
     build_dir = _ROOT / "build"
     if build_dir.exists():
-        os.environ["ZSP_SOLVER_PATH"] = str(build_dir)
+        os.environ["DVS_SOLVER_PATH"] = str(build_dir)
 
     # Generate benchmarks if needed
     if args.bench_dir is None:

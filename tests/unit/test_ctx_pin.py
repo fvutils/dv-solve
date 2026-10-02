@@ -1,4 +1,4 @@
-"""``SolveCtx.pin``: the Python face of ``solver_pin_var``.
+"""``SolveCtx.pin``: the Python face of ``dvs_solver_pin_var``.
 
 bc's scope solve (pssc P1) pins every value an earlier traversal committed and
 solves the rest with lookahead; this is the call it makes. The C function has

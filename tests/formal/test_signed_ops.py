@@ -74,3 +74,24 @@ def test_signed_divrem_matches_z3(op):
         f"{op}: {len(mism)} mismatches vs z3 (first 8: {mism[:8]}). "
         "Either the lowering broke or signed div/rem stopped routing to bitblast."
     )
+
+
+@pytest.mark.parametrize("op", ["bvudiv", "bvurem", "bvsdiv", "bvsrem", "bvsmod"])
+def test_divrem_of_variables_matches_z3(op):
+    # Constant operands can be folded before any engine sees them; variables
+    # pinned by assertions reach the engines' own division. Unsigned division
+    # by zero went through CDCL unconstrained (B52): (bvudiv a 0) and
+    # (bvurem a 0) took any value, and unsat problems came back sat.
+    w = 3
+    mism = []
+    for a in range(1 << w):
+        for b in range(1 << w):
+            smt = (f"(set-logic QF_BV)(declare-fun a () (_ BitVec {w}))"
+                   f"(declare-fun b () (_ BitVec {w}))(declare-fun r () (_ BitVec {w}))"
+                   f"(assert (= a (_ bv{a} {w})))(assert (= b (_ bv{b} {w})))"
+                   f"(assert (= r ({op} a b)))(check-sat)(get-value (r))")
+            zv = _val(_solve([str(_Z3), "-smt2", "-in"], smt))
+            dv = _val(_solve([str(_DVSOLVE), "/dev/stdin"], smt))
+            if dv != zv:
+                mism.append((a, b, zv, dv))
+    assert not mism, f"{op}: {len(mism)} mismatches vs z3 (first 8: {mism[:8]})"

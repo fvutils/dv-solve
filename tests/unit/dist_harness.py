@@ -18,7 +18,7 @@ Typical use::
 
     from .dist_harness import DistProblem, assert_uniform, assert_gof
 
-    dp = DistProblem(libzsp)
+    dp = DistProblem(libdvs)
     dp.add_var(0, width=4, lo=0, hi=15)
     hist = dp.sample(var_id=0, n=8000)
     assert_uniform(hist, range(16))          # free var ~ uniform
@@ -41,7 +41,7 @@ SOLVE_OK = 0
 _SP_BUF_SIZE = 65536
 _CTX_BUF_SIZE = 524288
 
-# BinOp codes — mirror the C enum in src/c/zsp_problem.h.
+# BinOp codes — mirror the C enum in src/c/dvs_problem.h.
 BIN_ADD, BIN_SUB, BIN_MUL, BIN_DIV, BIN_MOD = range(5)
 BIN_BAND, BIN_BOR, BIN_BXOR, BIN_LSHIFT, BIN_RSHIFT = range(5, 10)
 BIN_EQ, BIN_NEQ, BIN_LT, BIN_LTE, BIN_GT, BIN_GTE = range(10, 16)
@@ -68,6 +68,7 @@ class SolveOpts(ctypes.Structure):
         ("use_phase_save", ctypes.c_uint8),
         ("_pad", ctypes.c_uint8 * 3),
         ("max_shave_iters", ctypes.c_uint32),
+        ("time_limit_ms",   ctypes.c_uint32),
     ]
 
 
@@ -80,10 +81,10 @@ def bind(lib: ctypes.CDLL) -> None:
     """Attach restype / argtypes to the C entry points this harness uses."""
     if id(lib) in _bound:
         return
-    lib.zsp_block_alloc_create.restype = ctypes.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.zsp_block_alloc_destroy.restype = None
-    lib.zsp_block_alloc_destroy.argtypes = [ctypes.c_void_p]
+    lib.dvs_block_alloc_create.restype = ctypes.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.dvs_block_alloc_destroy.restype = None
+    lib.dvs_block_alloc_destroy.argtypes = [ctypes.c_void_p]
 
     lib.solve_problem_init.restype = ctypes.c_void_p
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
@@ -105,19 +106,19 @@ def bind(lib: ctypes.CDLL) -> None:
     lib.expr_binary.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                 ctypes.c_uint32, ctypes.c_uint32]
 
-    lib.solver_create.restype = ctypes.c_void_p
-    lib.solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+    lib.dvs_solver_create.restype = ctypes.c_void_p
+    lib.dvs_solver_create.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                   ctypes.c_void_p]
-    lib.solver_compile.restype = ctypes.c_int
-    lib.solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_solve.restype = ctypes.c_int
-    lib.solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.solver_get_value.restype = ctypes.c_int64
-    lib.solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.solver_reset.restype = None
-    lib.solver_reset.argtypes = [ctypes.c_void_p]
-    lib.solver_set_seed.restype = None
-    lib.solver_set_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+    lib.dvs_solver_compile.restype = ctypes.c_int
+    lib.dvs_solver_compile.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_solve.restype = ctypes.c_int
+    lib.dvs_solver_solve.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dvs_solver_get_value.restype = ctypes.c_int64
+    lib.dvs_solver_get_value.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.dvs_solver_reset.restype = None
+    lib.dvs_solver_reset.argtypes = [ctypes.c_void_p]
+    lib.dvs_solver_set_seed.restype = None
+    lib.dvs_solver_set_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
     _bound.add(id(lib))
 
 
@@ -204,10 +205,10 @@ class DistProblem:
         if self._ctx is not None:
             return
         self._ctx_buf = (ctypes.c_uint8 * _CTX_BUF_SIZE)()
-        self._ba = self.lib.zsp_block_alloc_create(None, 0)
-        self._ctx = self.lib.solver_create(self._ctx_buf, _CTX_BUF_SIZE, self._ba)
-        rc = self.lib.solver_compile(self._ctx, self.sp)
-        assert rc >= 0, f"solver_compile failed: {rc}"
+        self._ba = self.lib.dvs_block_alloc_create(None, 0)
+        self._ctx = self.lib.dvs_solver_create(self._ctx_buf, _CTX_BUF_SIZE, self._ba)
+        rc = self.lib.dvs_solver_compile(self._ctx, self.sp)
+        assert rc >= 0, f"dvs_solver_compile failed: {rc}"
 
     # -- sampling ---------------------------------------------------- #
     def sample(self, var_id: int, n: int, seed_base: int = 0x1234_5678,
@@ -222,16 +223,16 @@ class DistProblem:
         hist: Counter = Counter()
         for i in range(n):
             seed = _seed_at(seed_base, i)
-            lib.solver_reset(ctx)
-            lib.solver_set_seed(ctx, seed)
+            lib.dvs_solver_reset(ctx)
+            lib.dvs_solver_set_seed(ctx, seed)
             opts = SolveOpts(seed=seed)
-            rc = lib.solver_solve(ctx, ctypes.byref(opts))
+            rc = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
             if rc != SOLVE_OK:
                 if allow_fail:
                     hist["<fail>"] += 1
                     continue
                 raise AssertionError(f"solve failed at i={i} seed={seed}: rc={rc}")
-            hist[lib.solver_get_value(ctx, var_id)] += 1
+            hist[lib.dvs_solver_get_value(ctx, var_id)] += 1
         return hist
 
     def sample_joint(self, var_ids: Sequence[int], n: int,
@@ -242,17 +243,17 @@ class DistProblem:
         hist: Counter = Counter()
         for i in range(n):
             seed = _seed_at(seed_base, i)
-            lib.solver_reset(ctx)
-            lib.solver_set_seed(ctx, seed)
+            lib.dvs_solver_reset(ctx)
+            lib.dvs_solver_set_seed(ctx, seed)
             opts = SolveOpts(seed=seed)
-            rc = lib.solver_solve(ctx, ctypes.byref(opts))
+            rc = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
             assert rc == SOLVE_OK, f"solve failed at i={i}: rc={rc}"
-            hist[tuple(lib.solver_get_value(ctx, v) for v in var_ids)] += 1
+            hist[tuple(lib.dvs_solver_get_value(ctx, v) for v in var_ids)] += 1
         return hist
 
     def close(self):
         if self._ba is not None:
-            self.lib.zsp_block_alloc_destroy(self._ba)
+            self.lib.dvs_block_alloc_destroy(self._ba)
             self._ba = None
             self._ctx = None
 

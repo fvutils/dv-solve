@@ -1,8 +1,8 @@
-"""Unit tests for the SumEq propagator and solver_add_array_vars.
+"""Unit tests for the SumEq propagator and dvs_solver_add_array_vars.
 
 Tests:
 - SumEq: result == sum of N summands, forward + backward propagation.
-- solver_add_array_vars: bulk element variable creation.
+- dvs_solver_add_array_vars: bulk element variable creation.
 """
 from __future__ import annotations
 
@@ -26,15 +26,16 @@ class SolveOpts(ctypes.Structure):
         ("use_phase_save", ctypes.c_uint8),
         ("_pad", ctypes.c_uint8 * 3),
         ("max_shave_iters", ctypes.c_uint32),
+        ("time_limit_ms",   ctypes.c_uint32),
     ]
 
 
 def _wire(lib):
     c = ctypes
-    lib.zsp_block_alloc_create.restype = c.c_void_p
-    lib.zsp_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
-    lib.zsp_block_alloc_destroy.restype = None
-    lib.zsp_block_alloc_destroy.argtypes = [c.c_void_p]
+    lib.dvs_block_alloc_create.restype = c.c_void_p
+    lib.dvs_block_alloc_create.argtypes = [c.c_void_p, c.c_size_t]
+    lib.dvs_block_alloc_destroy.restype = None
+    lib.dvs_block_alloc_destroy.argtypes = [c.c_void_p]
     lib.solve_problem_init.restype = c.c_void_p
     lib.solve_problem_init.argtypes = [c.c_void_p, c.c_size_t]
     lib.problem_add_var.restype = c.c_uint32
@@ -54,24 +55,24 @@ def _wire(lib):
     lib.expr_countones.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32]
     lib.expr_clog2.restype = c.c_uint32
     lib.expr_clog2.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32]
-    lib.solver_create.restype = c.c_void_p
-    lib.solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
-    lib.solver_destroy.restype = None
-    lib.solver_destroy.argtypes = [c.c_void_p]
-    lib.solver_compile.restype = c.c_int
-    lib.solver_compile.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_solve.restype = c.c_int
-    lib.solver_solve.argtypes = [c.c_void_p, c.c_void_p]
-    lib.solver_get_value.restype = c.c_int64
-    lib.solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
-    lib.solver_reset.restype = None
-    lib.solver_reset.argtypes = [c.c_void_p]
-    lib.solver_add_array_vars.restype = c.c_int
-    lib.solver_add_array_vars.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32,
+    lib.dvs_solver_create.restype = c.c_void_p
+    lib.dvs_solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
+    lib.dvs_solver_destroy.restype = None
+    lib.dvs_solver_destroy.argtypes = [c.c_void_p]
+    lib.dvs_solver_compile.restype = c.c_int
+    lib.dvs_solver_compile.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_solve.restype = c.c_int
+    lib.dvs_solver_solve.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_get_value.restype = c.c_int64
+    lib.dvs_solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_solver_reset.restype = None
+    lib.dvs_solver_reset.argtypes = [c.c_void_p]
+    lib.dvs_solver_add_array_vars.restype = c.c_int
+    lib.dvs_solver_add_array_vars.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32,
                                           c.c_uint8, c.c_uint8,
                                           c.c_int64, c.c_int64]
-    lib.solver_add_constraint.restype = c.c_int
-    lib.solver_add_constraint.argtypes = [c.c_void_p, c.c_void_p]
+    lib.dvs_solver_add_constraint.restype = c.c_int
+    lib.dvs_solver_add_constraint.argtypes = [c.c_void_p, c.c_void_p]
 
 
 def _build_and_solve(lib, sp_setup, n_vars, seed=42):
@@ -83,20 +84,20 @@ def _build_and_solve(lib, sp_setup, n_vars, seed=42):
     sp_setup(lib, sp)
 
     ctx_buf = (ctypes.c_uint8 * _CTX)()
-    ba = lib.zsp_block_alloc_create(None, _CTX)
-    ctx = lib.solver_create(ctx_buf, _CTX, ba)
+    ba = lib.dvs_block_alloc_create(None, _CTX)
+    ctx = lib.dvs_solver_create(ctx_buf, _CTX, ba)
     assert ctx
 
-    crc = lib.solver_compile(ctx, sp)
-    assert crc == 0, f"solver_compile returned {crc}"
+    crc = lib.dvs_solver_compile(ctx, sp)
+    assert crc == 0, f"dvs_solver_compile returned {crc}"
 
     opts = SolveOpts(seed=seed)
-    rc = lib.solver_solve(ctx, ctypes.byref(opts))
-    assert rc == SOLVE_OK, f"solver_solve returned {rc}"
+    rc = lib.dvs_solver_solve(ctx, ctypes.byref(opts))
+    assert rc == SOLVE_OK, f"dvs_solver_solve returned {rc}"
 
-    values = [lib.solver_get_value(ctx, i) for i in range(n_vars)]
-    lib.solver_destroy(ctx)
-    lib.zsp_block_alloc_destroy(ba)
+    values = [lib.dvs_solver_get_value(ctx, i) for i in range(n_vars)]
+    lib.dvs_solver_destroy(ctx)
+    lib.dvs_block_alloc_destroy(ba)
     return values
 
 
@@ -104,9 +105,9 @@ def _build_and_solve(lib, sp_setup, n_vars, seed=42):
 # SumEq tests                                                         #
 # ------------------------------------------------------------------ #
 
-def test_sum_4_vars_exact(libzsp):
+def test_sum_4_vars_exact(libdvs):
     """4 summands each in [0,100], sum == 100. Verify sum is correct."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     def setup(lib, sp):
         # var 0: result [0, 400]
@@ -127,16 +128,16 @@ def test_sum_4_vars_exact(libzsp):
                             ctypes.cast(arr, ctypes.c_void_p))
         lib.problem_add_constraint(sp, esum)
 
-    values = _build_and_solve(libzsp, setup, 5)
+    values = _build_and_solve(libdvs, setup, 5)
     assert values[0] == 100
     assert sum(values[1:5]) == 100
     for v in values[1:5]:
         assert 0 <= v <= 100
 
 
-def test_sum_backward_tighten(libzsp):
+def test_sum_backward_tighten(libdvs):
     """Sum == 10, 4 vars each [0, 10]. Backward propagation tightens each var."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     def setup(lib, sp):
         lib.problem_add_var(sp, 0, 32, 1, 10, 10)  # result pinned to 10
@@ -149,33 +150,33 @@ def test_sum_backward_tighten(libzsp):
                             ctypes.cast(arr, ctypes.c_void_p))
         lib.problem_add_constraint(sp, esum)
 
-    values = _build_and_solve(libzsp, setup, 5)
+    values = _build_and_solve(libdvs, setup, 5)
     assert values[0] == 10
     assert sum(values[1:5]) == 10
 
 
-def test_sum_conflict(libzsp):
+def test_sum_conflict(libdvs):
     """Sum == 100, 4 vars [0, 10]. Max sum = 40. Should be UNSAT."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     sp_buf = (ctypes.c_uint8 * _SP)()
-    sp = libzsp.solve_problem_init(sp_buf, _SP)
+    sp = libdvs.solve_problem_init(sp_buf, _SP)
 
-    libzsp.problem_add_var(sp, 0, 32, 1, 100, 100)
+    libdvs.problem_add_var(sp, 0, 32, 1, 100, 100)
     for i in range(1, 5):
-        libzsp.problem_add_var(sp, i, 32, 1, 0, 10)
+        libdvs.problem_add_var(sp, i, 32, 1, 0, 10)
 
-    refs = [libzsp.expr_var(sp, i) for i in range(1, 5)]
+    refs = [libdvs.expr_var(sp, i) for i in range(1, 5)]
     arr = (ctypes.c_uint32 * 4)(*refs)
-    esum = libzsp.expr_sum(sp, libzsp.expr_var(sp, 0), 4,
+    esum = libdvs.expr_sum(sp, libdvs.expr_var(sp, 0), 4,
                            ctypes.cast(arr, ctypes.c_void_p))
-    libzsp.problem_add_constraint(sp, esum)
+    libdvs.problem_add_constraint(sp, esum)
 
     ctx_buf = (ctypes.c_uint8 * _CTX)()
-    ba = libzsp.zsp_block_alloc_create(None, _CTX)
-    ctx = libzsp.solver_create(ctx_buf, _CTX, ba)
+    ba = libdvs.dvs_block_alloc_create(None, _CTX)
+    ctx = libdvs.dvs_solver_create(ctx_buf, _CTX, ba)
 
-    crc = libzsp.solver_compile(ctx, sp)
+    crc = libdvs.dvs_solver_compile(ctx, sp)
     if crc == -2:
         # Detected at compile time -- acceptable
         pass
@@ -183,16 +184,16 @@ def test_sum_conflict(libzsp):
         assert crc == 0
         # Should detect UNSAT at solve time
         opts = SolveOpts(seed=42)
-        rc = libzsp.solver_solve(ctx, ctypes.byref(opts))
+        rc = libdvs.dvs_solver_solve(ctx, ctypes.byref(opts))
         assert rc == SOLVE_UNSAT, f"Expected UNSAT, got {rc}"
 
-    libzsp.solver_destroy(ctx)
-    libzsp.zsp_block_alloc_destroy(ba)
+    libdvs.dvs_solver_destroy(ctx)
+    libdvs.dvs_block_alloc_destroy(ba)
 
 
-def test_sum_boolean_counting(libzsp):
+def test_sum_boolean_counting(libdvs):
     """8 boolean [0,1] vars, sum == 3. Exactly 3 must be 1."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     def setup(lib, sp):
         lib.problem_add_var(sp, 0, 32, 1, 3, 3)  # result pinned to 3
@@ -205,16 +206,16 @@ def test_sum_boolean_counting(libzsp):
                             ctypes.cast(arr, ctypes.c_void_p))
         lib.problem_add_constraint(sp, esum)
 
-    values = _build_and_solve(libzsp, setup, 9)
+    values = _build_and_solve(libdvs, setup, 9)
     assert values[0] == 3
     assert sum(values[1:9]) == 3
     for v in values[1:9]:
         assert v in (0, 1)
 
 
-def test_sum_large_n(libzsp):
+def test_sum_large_n(libdvs):
     """20 summands, each [0, 5], sum == 50. Verify."""
-    _wire(libzsp)
+    _wire(libdvs)
     N = 20
 
     def setup(lib, sp):
@@ -228,7 +229,7 @@ def test_sum_large_n(libzsp):
                             ctypes.cast(arr, ctypes.c_void_p))
         lib.problem_add_constraint(sp, esum)
 
-    values = _build_and_solve(libzsp, setup, N + 1)
+    values = _build_and_solve(libdvs, setup, N + 1)
     assert values[0] == 50
     assert sum(values[1:N + 1]) == 50
 
@@ -237,9 +238,9 @@ def test_sum_large_n(libzsp):
 # Countones tests                                                     #
 # ------------------------------------------------------------------ #
 
-def test_countones_exact_1(libzsp):
+def test_countones_exact_1(libdvs):
     """8-bit var, countones == 1. Result must be a power of 2."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     def setup(lib, sp):
         lib.problem_add_var(sp, 0, 32, 1, 1, 1)     # result pinned to 1
@@ -249,14 +250,14 @@ def test_countones_exact_1(libzsp):
         lib.problem_add_constraint(sp, ecnt)
 
     for seed in range(1, 11):
-        values = _build_and_solve(libzsp, setup, 2, seed=seed)
+        values = _build_and_solve(libdvs, setup, 2, seed=seed)
         x = values[1]
         assert x > 0 and (x & (x - 1)) == 0, f"x={x} is not a power of 2"
 
 
-def test_countones_exact_3(libzsp):
+def test_countones_exact_3(libdvs):
     """8-bit var, countones == 3. Verify popcount."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     def setup(lib, sp):
         lib.problem_add_var(sp, 0, 32, 1, 3, 3)
@@ -266,14 +267,14 @@ def test_countones_exact_3(libzsp):
         lib.problem_add_constraint(sp, ecnt)
 
     for seed in range(1, 11):
-        values = _build_and_solve(libzsp, setup, 2, seed=seed)
+        values = _build_and_solve(libdvs, setup, 2, seed=seed)
         x = values[1]
         assert bin(x).count('1') == 3, f"x={x} (0b{x:08b}) has {bin(x).count('1')} ones, expected 3"
 
 
-def test_countones_zero(libzsp):
+def test_countones_zero(libdvs):
     """countones == 0 -> x must be 0."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     def setup(lib, sp):
         lib.problem_add_var(sp, 0, 32, 1, 0, 0)  # result = 0
@@ -282,13 +283,13 @@ def test_countones_zero(libzsp):
         ecnt = lib.expr_countones(sp, lib.expr_var(sp, 0), lib.expr_var(sp, 1))
         lib.problem_add_constraint(sp, ecnt)
 
-    values = _build_and_solve(libzsp, setup, 2)
+    values = _build_and_solve(libdvs, setup, 2)
     assert values[1] == 0
 
 
-def test_countones_max(libzsp):
+def test_countones_max(libdvs):
     """countones == 8 -> x must be 0xFF."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     def setup(lib, sp):
         lib.problem_add_var(sp, 0, 32, 1, 8, 8)
@@ -297,7 +298,7 @@ def test_countones_max(libzsp):
         ecnt = lib.expr_countones(sp, lib.expr_var(sp, 0), lib.expr_var(sp, 1))
         lib.problem_add_constraint(sp, ecnt)
 
-    values = _build_and_solve(libzsp, setup, 2)
+    values = _build_and_solve(libdvs, setup, 2)
     assert values[1] == 255
 
 
@@ -305,9 +306,9 @@ def test_countones_max(libzsp):
 # Clog2 tests                                                         #
 # ------------------------------------------------------------------ #
 
-def test_clog2_singleton(libzsp):
+def test_clog2_singleton(libdvs):
     """clog2(x) == 3 -> x in [5, 8]."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     def setup(lib, sp):
         lib.problem_add_var(sp, 0, 32, 1, 3, 3)      # result = 3
@@ -318,15 +319,15 @@ def test_clog2_singleton(libzsp):
 
     import math
     for seed in range(1, 11):
-        values = _build_and_solve(libzsp, setup, 2, seed=seed)
+        values = _build_and_solve(libdvs, setup, 2, seed=seed)
         x = values[1]
         assert 5 <= x <= 8, f"x={x}, expected in [5, 8]"
         assert math.ceil(math.log2(x)) == 3 if x > 1 else 0 == 3
 
 
-def test_clog2_one(libzsp):
+def test_clog2_one(libdvs):
     """clog2(1) == 0."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     def setup(lib, sp):
         lib.problem_add_var(sp, 0, 32, 1, 0, 0)  # result = 0
@@ -335,13 +336,13 @@ def test_clog2_one(libzsp):
         eclog = lib.expr_clog2(sp, lib.expr_var(sp, 0), lib.expr_var(sp, 1))
         lib.problem_add_constraint(sp, eclog)
 
-    values = _build_and_solve(libzsp, setup, 2)
+    values = _build_and_solve(libdvs, setup, 2)
     assert values[1] == 1
 
 
-def test_clog2_with_equality(libzsp):
+def test_clog2_with_equality(libdvs):
     """r == clog2(x), x in [1, 255]. Solve and verify."""
-    _wire(libzsp)
+    _wire(libdvs)
     import math
 
     def setup(lib, sp):
@@ -352,101 +353,101 @@ def test_clog2_with_equality(libzsp):
         lib.problem_add_constraint(sp, eclog)
 
     for seed in range(1, 11):
-        values = _build_and_solve(libzsp, setup, 2, seed=seed)
+        values = _build_and_solve(libdvs, setup, 2, seed=seed)
         r, x = values[0], values[1]
         expected = math.ceil(math.log2(x)) if x > 1 else 0
         assert r == expected, f"r={r}, x={x}, expected clog2={expected}"
 
 
 # ------------------------------------------------------------------ #
-# solver_add_array_vars tests                                         #
+# dvs_solver_add_array_vars tests                                         #
 # ------------------------------------------------------------------ #
 
-def test_add_array_vars_basic(libzsp):
+def test_add_array_vars_basic(libdvs):
     """Add 8 element variables and verify they exist after solve."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     sp_buf = (ctypes.c_uint8 * _SP)()
-    sp = libzsp.solve_problem_init(sp_buf, _SP)
+    sp = libdvs.solve_problem_init(sp_buf, _SP)
     # One scalar var
-    libzsp.problem_add_var(sp, 0, 32, 1, 0, 100)
+    libdvs.problem_add_var(sp, 0, 32, 1, 0, 100)
 
     ctx_buf = (ctypes.c_uint8 * _CTX)()
-    ba = libzsp.zsp_block_alloc_create(None, _CTX)
-    ctx = libzsp.solver_create(ctx_buf, _CTX, ba)
+    ba = libdvs.dvs_block_alloc_create(None, _CTX)
+    ctx = libdvs.dvs_solver_create(ctx_buf, _CTX, ba)
 
-    crc = libzsp.solver_compile(ctx, sp)
+    crc = libdvs.dvs_solver_compile(ctx, sp)
     assert crc == 0
 
     # Add 8 element vars (IDs 1..8) with domain [10, 50]
-    rc = libzsp.solver_add_array_vars(ctx, 1, 8, 8, 0, 10, 50)
+    rc = libdvs.dvs_solver_add_array_vars(ctx, 1, 8, 8, 0, 10, 50)
     assert rc == 0
 
     # Solve
     opts = SolveOpts(seed=42)
-    rc = libzsp.solver_solve(ctx, ctypes.byref(opts))
+    rc = libdvs.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert rc == SOLVE_OK
 
     # Read values
     for i in range(1, 9):
-        v = libzsp.solver_get_value(ctx, i)
+        v = libdvs.dvs_solver_get_value(ctx, i)
         assert 10 <= v <= 50, f"var[{i}]={v} out of [10, 50]"
 
-    libzsp.solver_destroy(ctx)
-    libzsp.zsp_block_alloc_destroy(ba)
+    libdvs.dvs_solver_destroy(ctx)
+    libdvs.dvs_block_alloc_destroy(ba)
 
 
-def test_add_array_vars_with_sum_constraint(libzsp):
+def test_add_array_vars_with_sum_constraint(libdvs):
     """Add array vars, then add sum constraint via aux problem, solve."""
-    _wire(libzsp)
+    _wire(libdvs)
 
     # Phase 1: scalar problem with a size variable
     sp_buf = (ctypes.c_uint8 * _SP)()
-    sp = libzsp.solve_problem_init(sp_buf, _SP)
-    libzsp.problem_add_var(sp, 0, 32, 1, 0, 400)  # sum result
+    sp = libdvs.solve_problem_init(sp_buf, _SP)
+    libdvs.problem_add_var(sp, 0, 32, 1, 0, 400)  # sum result
 
     ctx_buf = (ctypes.c_uint8 * _CTX)()
-    ba = libzsp.zsp_block_alloc_create(None, _CTX)
-    ctx = libzsp.solver_create(ctx_buf, _CTX, ba)
+    ba = libdvs.dvs_block_alloc_create(None, _CTX)
+    ctx = libdvs.dvs_solver_create(ctx_buf, _CTX, ba)
 
-    crc = libzsp.solver_compile(ctx, sp)
+    crc = libdvs.dvs_solver_compile(ctx, sp)
     assert crc == 0
 
     # Phase 2: add element vars and sum constraint
     N = 4
-    rc = libzsp.solver_add_array_vars(ctx, 1, N, 32, 1, 0, 100)
+    rc = libdvs.dvs_solver_add_array_vars(ctx, 1, N, 32, 1, 0, 100)
     assert rc == 0
 
     # Build aux problem with sum constraint
     aux_buf = (ctypes.c_uint8 * _SP)()
-    aux = libzsp.solve_problem_init(aux_buf, _SP)
+    aux = libdvs.solve_problem_init(aux_buf, _SP)
     # Re-declare all vars in aux (existing vars are skipped)
-    libzsp.problem_add_var(aux, 0, 32, 1, 0, 400)
+    libdvs.problem_add_var(aux, 0, 32, 1, 0, 400)
     for i in range(1, N + 1):
-        libzsp.problem_add_var(aux, i, 32, 1, 0, 100)
+        libdvs.problem_add_var(aux, i, 32, 1, 0, 100)
 
     # sum constraint: var0 == var1 + var2 + var3 + var4
-    refs = [libzsp.expr_var(aux, i) for i in range(1, N + 1)]
+    refs = [libdvs.expr_var(aux, i) for i in range(1, N + 1)]
     arr = (ctypes.c_uint32 * N)(*refs)
-    esum = libzsp.expr_sum(aux, libzsp.expr_var(aux, 0), N,
+    esum = libdvs.expr_sum(aux, libdvs.expr_var(aux, 0), N,
                            ctypes.cast(arr, ctypes.c_void_p))
-    libzsp.problem_add_constraint(aux, esum)
+    libdvs.problem_add_constraint(aux, esum)
 
     # Pin result to 200
-    er = libzsp.expr_var(aux, 0)
-    ec = libzsp.expr_const(aux, 200, 0)
-    libzsp.problem_add_constraint(aux, libzsp.expr_binary(aux, BIN_EQ, er, ec))
+    er = libdvs.expr_var(aux, 0)
+    ec = libdvs.expr_const(aux, 200, 0)
+    libdvs.problem_add_constraint(aux, libdvs.expr_binary(aux, BIN_EQ, er, ec))
 
-    arc = libzsp.solver_add_constraint(ctx, aux)
-    assert arc >= 0, f"solver_add_constraint returned {arc}"
+    arc = libdvs.dvs_solver_add_constraint(ctx, aux)
+    assert arc >= 0, f"dvs_solver_add_constraint returned {arc}"
 
     opts = SolveOpts(seed=42)
-    rc = libzsp.solver_solve(ctx, ctypes.byref(opts))
+    rc = libdvs.dvs_solver_solve(ctx, ctypes.byref(opts))
     assert rc == SOLVE_OK
 
-    values = [libzsp.solver_get_value(ctx, i) for i in range(N + 1)]
+    values = [libdvs.dvs_solver_get_value(ctx, i) for i in range(N + 1)]
     assert values[0] == 200
     assert sum(values[1:N + 1]) == 200
 
-    libzsp.solver_destroy(ctx)
-    libzsp.zsp_block_alloc_destroy(ba)
+    libdvs.dvs_solver_destroy(ctx)
+    libdvs.dvs_block_alloc_destroy(ba)

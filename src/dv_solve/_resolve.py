@@ -12,7 +12,7 @@ consulted ``LD_LIBRARY_PATH``, the package's ``lib/`` subdirectory, three
 alternate build-directory names and a ``/tmp`` pytest glob that the public
 helpers knew nothing about. A host with any of those set could therefore run
 the solver out of one installation while linking generated C against another,
-and the ABI mismatch surfaces as a crash inside ``solver_compile``, nowhere
+and the ABI mismatch surfaces as a crash inside ``dvs_solver_compile``, nowhere
 near its cause. Hence one resolver, used by both.
 
 THE CONTRACT
@@ -22,7 +22,8 @@ The unit of discovery is an INSTALLATION, not an artifact. An installation is
 one root together with the places its libraries, headers and SV sources live.
 Candidates, best first:
 
-  1. ``ZSP_SOLVER_PATH`` -- the explicit override. When set it is the ONLY
+  1. ``DVS_SOLVER_PATH`` (or the legacy ``ZSP_SOLVER_PATH``) -- the explicit
+     override. When set it is the ONLY
      candidate: it is selected whether or not it is usable, and anything it
      lacks is reported as missing from it rather than supplied by a later
      candidate. Accepts a directory holding the artifacts or an install
@@ -61,7 +62,7 @@ helpers, which never consulted it at all, kept reporting the package. That is
 precisely the loader/linker split this module exists to prevent. ``LD_LIBRARY_
 PATH`` still resolves the *dependencies* of whatever library is chosen; it
 chooses only when nothing else can. Callers who genuinely want to select an
-out-of-tree build have ``ZSP_SOLVER_PATH``, which is unambiguous about intent.
+out-of-tree build have ``DVS_SOLVER_PATH``, which is unambiguous about intent.
 
 Everything here probes for the ARTIFACT, never for the directory, and an
 artifact must be a real file: a directory named ``libdv_solve.so`` or a
@@ -91,10 +92,10 @@ _LIB_SUBDIRS = ("lib", "lib64", "")
 
 #: A header that exists in every dv-solve include tree, used to tell a real
 #: include directory from a directory that merely exists.
-_SENTINEL_HEADER = "zsp_problem.h"
+_SENTINEL_HEADER = "dv_solve.h"
 
 #: Likewise for the SystemVerilog resource directory.
-_SENTINEL_SV = "zsp_dpi_pkg.sv"
+_SENTINEL_SV = "dvs_dpi_pkg.sv"
 
 
 def _pkg_dir() -> str:
@@ -150,21 +151,36 @@ class Installation(NamedTuple):
 
     def describe(self) -> str:
         if self.kind == "override":
-            return "ZSP_SOLVER_PATH=%s" % self.root
+            return "%s=%s" % (_override_var(), self.root)
         if self.kind == "ld_library_path":
             return "LD_LIBRARY_PATH entry %s" % self.root
         return "%s installation at %s" % (self.kind, self.root)
 
 
+def override_root() -> Optional[str]:
+    """The ``DVS_SOLVER_PATH`` value, or the legacy ``ZSP_SOLVER_PATH`` when
+    only that is set (zuspec-be-sw still sets the old name). ``None`` when
+    neither is set."""
+    return (os.environ.get("DVS_SOLVER_PATH")
+            or os.environ.get("ZSP_SOLVER_PATH") or None)
+
+
+def _override_var() -> str:
+    """The name of the override variable in effect, for messages."""
+    if os.environ.get("DVS_SOLVER_PATH") or not os.environ.get("ZSP_SOLVER_PATH"):
+        return "DVS_SOLVER_PATH"
+    return "ZSP_SOLVER_PATH"
+
+
 def _override() -> Optional[Installation]:
-    """The ``ZSP_SOLVER_PATH`` installation, or ``None`` when unset.
+    """The ``DVS_SOLVER_PATH`` installation, or ``None`` when unset.
 
     The variable has historically pointed straight at a directory containing
     the library, so that stays first. A prefix-style value (one with ``lib/``,
     ``include/`` or ``share/`` underneath) also works, because a user who
     points at a CMake install prefix reasonably expects that to be understood.
     """
-    root = os.environ.get("ZSP_SOLVER_PATH")
+    root = override_root()
     if not root:
         return None
     j = os.path.join
@@ -341,26 +357,23 @@ def find_incdirs() -> Optional[List[str]]:
     two entries: headers are staged under ``share/include/dv_solve/``
     (CMake's ``DESTINATION include/dv_solve``), while dv-solve's own sources
     and pssc's generated ``pssc_solve.c`` both use UNQUALIFIED includes
-    (``#include "zsp_ctx.h"``), which only resolve against the nested
+    (``#include "dvs_ctx.h"``), which only resolve against the nested
     directory. The base is kept alongside it for any consumer that writes
-    ``dv_solve/zsp_ctx.h``.
+    ``dv_solve/dvs_ctx.h``.
 
     Validated by probing for a real header: an unbuilt checkout and a wheel
     whose data files failed to stage both leave a plausible-looking directory
     behind, and handing that to ``gcc -I`` defers the failure to a confusing
-    ``zsp_block_alloc.h: No such file or directory`` in generated code.
+    ``dvs_block_alloc.h: No such file or directory`` in generated code.
 
     Taken from the selected installation only. With nothing selected (no
     library anywhere) the first candidate holding headers answers, for
     compile-only consumers.
 
-    NOTE ON THE COLLISION: dv-solve and zuspec-be-sw both ship a
-    ``zsp_alloc.h`` and define ``struct zsp_alloc_s`` incompatibly. These
-    directories are the include set for the SOLVER translation unit ONLY, and
-    must never be merged into one ``-I`` list with the backend's. Namespacing
-    the install under ``dv_solve/`` does not by itself protect against this,
-    because the nested directory has to be on the include path for unqualified
-    includes to work -- it is the per-TU segregation that keeps them apart.
+    The public API is ``dv_solve/dv_solve.h`` (or ``dv_solve.h`` through the
+    nested directory); the other headers are internal. They are prefixed
+    ``dvs_``, but are still kept out of the backend's include set: these
+    directories are for the SOLVER translation unit only.
     """
     inst = select_installation()
     if inst is not None:
@@ -403,16 +416,16 @@ def missing_artifact_error(what: str, detail: str = "") -> RuntimeError:
         "  - Build from source (needs CMake + a C compiler):\n"
         "        cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=build\n"
         "        ninja -C build install\n"
-        "  - Or point ZSP_SOLVER_PATH at the install prefix / directory."
+        "  - Or point DVS_SOLVER_PATH at the install prefix / directory."
         % (what, (" " + detail) if detail else "", describe_search()))
 
 
 def _incomplete_error(inst: Installation, what: str, why: str) -> RuntimeError:
     """The selected installation lacks *what*. Never resolved by looking
     elsewhere -- that would pair artifacts from two solver builds."""
-    fix = ("  - Complete that installation, or point ZSP_SOLVER_PATH at a "
+    fix = ("  - Complete that installation, or point DVS_SOLVER_PATH at a "
            "complete one." if inst.kind == "override" else
-           "  - Complete or remove that installation, or set ZSP_SOLVER_PATH "
+           "  - Complete or remove that installation, or set DVS_SOLVER_PATH "
            "to select a complete one.")
     return RuntimeError(
         "dv-solve: the selected installation (%s) has no %s.%s\n"

@@ -2,7 +2,7 @@
 # backend (see docs/cadical_integration_plan.md).
 #
 # CaDiCaL is C++ and pulls a libstdc++ dependency into any target that links it
-# — which is why it is gated behind ZSP_WITH_CADICAL and excluded from the
+# — which is why it is gated behind DVS_WITH_CADICAL and excluded from the
 # lightweight, pure-C embeddable build. kissat stays the one-shot / embeddable
 # backend.
 #
@@ -35,12 +35,12 @@ if(NOT EXISTS ${CADICAL_SRC}/ccadical.cpp)
         "CaDiCaL sources not found at ${CADICAL_SRC}. "
         "Run `ivpm update` to fetch them, or set -DCADICAL_SRC_ROOT=<path> "
         "(or -DPACKAGES_DIR=<ivpm packages dir>), "
-        "or configure with -DZSP_WITH_CADICAL=OFF for the pure-C build.")
+        "or configure with -DDVS_WITH_CADICAL=OFF for the pure-C build.")
 endif()
 
 if(MSVC)
     message(FATAL_ERROR "cadical.cmake: MSVC path not implemented "
-        "(ZSP_WITH_CADICAL should be OFF on MSVC).")
+        "(DVS_WITH_CADICAL should be OFF on MSVC).")
 endif()
 
 # Library sources: every src/*.cpp plus src/*.c (kitten.c = embedded

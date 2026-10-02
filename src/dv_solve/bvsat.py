@@ -1,4 +1,4 @@
-"""Python wrapper for the dv-solve BV-SAT completeness engine (``zsp_bbsolver``).
+"""Python wrapper for the dv-solve BV-SAT completeness engine (``dvs_bbsolver``).
 
 This is dv-solve's *internal completeness fallback*: a bit-blasting BV→SAT
 solver (kissat) that is **authoritative for both SAT and UNSAT**. The primary
@@ -42,7 +42,7 @@ from typing import Optional
 from .lib import _load_lib, _library_not_found_error
 
 # ------------------------------------------------------------------ #
-# Result codes (must match zsp_bbsolver.h)                            #
+# Result codes (must match dvs_bbsolver.h)                            #
 # ------------------------------------------------------------------ #
 BVSAT_SAT     = 10
 BVSAT_UNSAT   = 20
@@ -51,7 +51,7 @@ BVSAT_ERROR   = -1
 
 
 class BVSatCtx:
-    """Thin ctypes wrapper around a single ``zsp_bbsolver_t`` check.
+    """Thin ctypes wrapper around a single ``dvs_bbsolver_t`` check.
 
     Accepts either a :class:`~dv_solve.problem.SolveProblem` (with a ``_sp``
     pointer) or a finalized raw ctypes buffer from
@@ -66,7 +66,7 @@ class BVSatCtx:
         self._lib = lib
 
         # Keep the SolveProblem buffer alive for the lifetime of this context:
-        # zsp_bbsolver_new only records the pointer; check() reads the problem
+        # dvs_bbsolver_new only records the pointer; check() reads the problem
         # during bit-blasting and value() reads it during readback.
         self._problem = problem
         sp_ptr = getattr(problem, "_sp", None)
@@ -75,11 +75,11 @@ class BVSatCtx:
             sp_ptr = ctypes.cast(problem, ctypes.c_void_p).value
 
         # alloc may be NULL: the bbsolver owns its transient AIG/CNF/SAT memory
-        # and releases it in zsp_bbsolver_free.
-        self._bb = lib.zsp_bbsolver_new(None, sp_ptr)
+        # and releases it in dvs_bbsolver_free.
+        self._bb = lib.dvs_bbsolver_new(None, sp_ptr)
         if not self._bb:
             self._bb = None
-            raise RuntimeError("zsp_bbsolver_new failed")
+            raise RuntimeError("dvs_bbsolver_new failed")
 
         self._checked = False
 
@@ -102,7 +102,7 @@ class BVSatCtx:
     def destroy(self) -> None:
         """Release the bbsolver and all transient resources."""
         if self._bb is not None:
-            self._lib.zsp_bbsolver_free(self._bb)
+            self._lib.dvs_bbsolver_free(self._bb)
             self._bb = None
 
     # ------------------------------------------------------------------ #
@@ -126,9 +126,9 @@ class BVSatCtx:
         if self._bb is None:
             raise RuntimeError("BVSatCtx used after destroy()")
         if soft_keep is not None:
-            self._lib.zsp_bbsolver_set_soft_keep(
+            self._lib.dvs_bbsolver_set_soft_keep(
                 self._bb, soft_keep, ctypes.c_uint32(len(soft_keep)))
-        rc = self._lib.zsp_bbsolver_check(self._bb, ctypes.c_uint64(seed & ((1 << 64) - 1)))
+        rc = self._lib.dvs_bbsolver_check(self._bb, ctypes.c_uint64(seed & ((1 << 64) - 1)))
         self._checked = (rc == BVSAT_SAT)
         return rc
 
@@ -143,11 +143,11 @@ class BVSatCtx:
         if not self._checked:
             raise RuntimeError("BVSatCtx.value() requires a prior SAT check()")
         out = ctypes.c_int64(0)
-        rc = self._lib.zsp_bbsolver_value(
+        rc = self._lib.dvs_bbsolver_value(
             self._bb, ctypes.c_uint32(var_id), ctypes.byref(out))
         if rc != 0:
             raise RuntimeError(
-                "zsp_bbsolver_value failed for var %d (rc=%d)" % (var_id, rc))
+                "dvs_bbsolver_value failed for var %d (rc=%d)" % (var_id, rc))
         return out.value
 
     def value_wide(self, var_id: int, width: int, is_signed: bool = False) -> int:
@@ -164,11 +164,11 @@ class BVSatCtx:
             raise RuntimeError("BVSatCtx.value_wide() requires a prior SAT check()")
         n_limbs = (width + 63) // 64 if width > 0 else 1
         buf = (ctypes.c_uint64 * n_limbs)()
-        rc = self._lib.zsp_bbsolver_value_wide(
+        rc = self._lib.dvs_bbsolver_value_wide(
             self._bb, ctypes.c_uint32(var_id), buf, ctypes.c_uint32(n_limbs))
         if rc != 0:
             raise RuntimeError(
-                "zsp_bbsolver_value_wide failed for var %d (rc=%d)" % (var_id, rc))
+                "dvs_bbsolver_value_wide failed for var %d (rc=%d)" % (var_id, rc))
         val = 0
         for i in range(n_limbs):
             val |= int(buf[i]) << (64 * i)
@@ -195,9 +195,9 @@ class BVSatCtx:
         if self._bb is None:
             raise RuntimeError("BVSatCtx used after destroy()")
         return {
-            "aig_ands":   self._lib.zsp_bbsolver_num_aig_ands(self._bb),
-            "sat_clauses": self._lib.zsp_bbsolver_num_sat_clauses(self._bb),
-            "sat_vars":   self._lib.zsp_bbsolver_num_sat_vars(self._bb),
+            "aig_ands":   self._lib.dvs_bbsolver_num_aig_ands(self._bb),
+            "sat_clauses": self._lib.dvs_bbsolver_num_sat_clauses(self._bb),
+            "sat_vars":   self._lib.dvs_bbsolver_num_sat_vars(self._bb),
         }
 
 
@@ -225,11 +225,11 @@ def maxsat_keepset(problem, seed: int, n_softs: int):
 
     keep = (ctypes.c_uint8 * max(1, n_softs))()
     out_bb = ctypes.c_void_p()
-    rc = lib.zsp_bbsolver_check_maxsat(
+    rc = lib.dvs_bbsolver_check_maxsat(
         None, sp_ptr, ctypes.c_uint64(seed & ((1 << 64) - 1)),
         ctypes.byref(out_bb), keep, ctypes.c_uint32(n_softs))
     if out_bb:
-        lib.zsp_bbsolver_free(out_bb)
+        lib.dvs_bbsolver_free(out_bb)
     if rc != BVSAT_SAT:
         return rc, None
     return rc, keep

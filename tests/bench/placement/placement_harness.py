@@ -101,9 +101,9 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
     # Build solver problem using the C builder API
     # Use larger builder pool for problems with many constraints
     builder_size = 65536 if len(bench.get('spacing_rules', [])) > 0 else 0
-    builder = lib.builder_create(builder_size, None)
+    builder = lib.dvs_builder_create(builder_size, None)
     if not builder:
-        raise RuntimeError("builder_create failed")
+        raise RuntimeError("dvs_builder_create failed")
 
     n = len(macros)
     cw, ch = canvas["width"], canvas["height"]
@@ -120,10 +120,10 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
         else:
             x_lo, x_hi = 0, max(0, cw - w)
             y_lo, y_hi = 0, max(0, ch - h)
-        lib.builder_add_var(builder, ctypes.c_uint32(i),
+        lib.dvs_builder_add_var(builder, ctypes.c_uint32(i),
                             ctypes.c_uint8(32), ctypes.c_uint8(0),
                             ctypes.c_int64(x_lo), ctypes.c_int64(x_hi))
-        lib.builder_add_var(builder, ctypes.c_uint32(n + i),
+        lib.dvs_builder_add_var(builder, ctypes.c_uint32(n + i),
                             ctypes.c_uint8(32), ctypes.c_uint8(0),
                             ctypes.c_int64(y_lo), ctypes.c_int64(y_hi))
 
@@ -149,10 +149,10 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
     for fi, fr in enumerate(forbidden):
         fx, fy, fw, fh = fr["x"], fr["y"], fr["width"], fr["height"]
         # Fixed-position variables (lo == hi)
-        lib.builder_add_var(builder, ctypes.c_uint32(fr_base_x + fi),
+        lib.dvs_builder_add_var(builder, ctypes.c_uint32(fr_base_x + fi),
                             ctypes.c_uint8(32), ctypes.c_uint8(0),
                             ctypes.c_int64(fx), ctypes.c_int64(fx))
-        lib.builder_add_var(builder, ctypes.c_uint32(fr_base_y + fi),
+        lib.dvs_builder_add_var(builder, ctypes.c_uint32(fr_base_y + fi),
                             ctypes.c_uint8(32), ctypes.c_uint8(0),
                             ctypes.c_int64(fy), ctypes.c_int64(fy))
 
@@ -177,11 +177,11 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
         members.sort()
         for k in range(len(members) - 1):
             mi, mj = members[k], members[k + 1]
-            e_xi = lib.builder_expr_var(builder, ctypes.c_uint32(mi))
-            e_xj = lib.builder_expr_var(builder, ctypes.c_uint32(mj))
-            e_le = lib.builder_expr_binary(builder, ctypes.c_uint32(13),
+            e_xi = lib.dvs_builder_expr_var(builder, ctypes.c_uint32(mi))
+            e_xj = lib.dvs_builder_expr_var(builder, ctypes.c_uint32(mj))
+            e_le = lib.dvs_builder_expr_binary(builder, ctypes.c_uint32(13),
                                             e_xi, e_xj)
-            lib.builder_add_constraint(builder, e_le)
+            lib.dvs_builder_add_constraint(builder, e_le)
 
     # Spacing rules are enforced post-compile as per-rule NoOverlap2D
     # propagators (see below).
@@ -189,26 +189,26 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
     # Source group: all position variables
     all_var_ids = list(range(2 * n + 2 * n_forbidden))
     arr = (ctypes.c_uint32 * len(all_var_ids))(*all_var_ids)
-    lib.builder_add_source(builder, ctypes.c_uint32(len(all_var_ids)), arr)
+    lib.dvs_builder_add_source(builder, ctypes.c_uint32(len(all_var_ids)), arr)
 
     # Finalize the builder
     sp_size = ctypes.c_size_t(0)
-    sp = lib.builder_finalize(builder, ctypes.byref(sp_size))
+    sp = lib.dvs_builder_finalize(builder, ctypes.byref(sp_size))
     if not sp:
-        lib.builder_destroy(builder)
-        raise RuntimeError("builder_finalize failed")
+        lib.dvs_builder_destroy(builder)
+        raise RuntimeError("dvs_builder_finalize failed")
 
     # Create solver context
     ctx_buf_size = 1 << 24 if n > 64 else 1 << 22  # 16 MiB for large N
-    ba = lib.zsp_block_alloc_create(None, ctx_buf_size)
+    ba = lib.dvs_block_alloc_create(None, ctx_buf_size)
     ctx_buf = (ctypes.c_uint8 * ctx_buf_size)()
-    ctx = lib.solver_create(ctx_buf, ctx_buf_size, ba)
+    ctx = lib.dvs_solver_create(ctx_buf, ctx_buf_size, ba)
 
-    rc = lib.solver_compile(ctx, sp)
+    rc = lib.dvs_solver_compile(ctx, sp)
     if rc < 0:  # negative = error, positive = uncompiled constraints (OK)
-        lib.builder_free_problem(builder, sp, sp_size.value)
-        lib.builder_destroy(builder)
-        lib.zsp_block_alloc_destroy(ba)
+        lib.dvs_builder_free_problem(builder, sp, sp_size.value)
+        lib.dvs_builder_destroy(builder)
+        lib.dvs_block_alloc_destroy(ba)
         result.solver_result = rc
         return result
 
@@ -413,7 +413,7 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
                       subproblem_conflicts=1000, seed=42)
 
         t0 = time.monotonic()
-        lrc = lib.solver_lns_optimize(ctx, ctypes.byref(hpwl_ctx),
+        lrc = lib.dvs_solver_lns_optimize(ctx, ctypes.byref(hpwl_ctx),
                                        ctypes.byref(lo), out_pos,
                                        ctypes.byref(lr))
         t1 = time.monotonic()
@@ -443,12 +443,13 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
                 ("use_phase_save", ctypes.c_uint8),
                 ("_pad", ctypes.c_uint8 * 3),
                 ("max_shave_iters", ctypes.c_uint32),
+                ("time_limit_ms",   ctypes.c_uint32),
             ]
 
         t0 = time.monotonic()
         sopts = CSolveOpts(seed=42, max_conflicts=5000, max_restarts=500,
                             use_phase_save=0, max_shave_iters=0)
-        sr = lib.solver_solve(ctx, ctypes.byref(sopts))
+        sr = lib.dvs_solver_solve(ctx, ctypes.byref(sopts))
         t1 = time.monotonic()
         result.solver_result = sr
         result.t_first_sec = t1 - t0
@@ -458,8 +459,8 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
             result.feasible = True
             positions = []
             for i in range(n):
-                x = lib.solver_get_value(ctx, ctypes.c_uint32(i))
-                y = lib.solver_get_value(ctx, ctypes.c_uint32(n + i))
+                x = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(i))
+                y = lib.dvs_solver_get_value(ctx, ctypes.c_uint32(n + i))
                 positions.append({"x": x, "y": y})
             result.positions = positions
             result.hpwl = _compute_hpwl(bench, positions)
@@ -473,9 +474,9 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
     # Cleanup
     if hpwl_cleanup:
         lib.hpwl_cost_ctx_destroy(ctypes.byref(hpwl_cleanup[0]))
-    lib.builder_free_problem(builder, sp, sp_size.value)
-    lib.builder_destroy(builder)
-    lib.zsp_block_alloc_destroy(ba)
+    lib.dvs_builder_free_problem(builder, sp, sp_size.value)
+    lib.dvs_builder_destroy(builder)
+    lib.dvs_block_alloc_destroy(ba)
 
     return result
 

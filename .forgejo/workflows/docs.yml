@@ -90,10 +90,10 @@ jobs:
             || { echo "::error::no index.html in the build output"; exit 1; }
           n=$(find "$out" -name '*.html' | wc -l)
           echo "generated pages: $n"
-          # A local build produced 14 pages on 2026-09-30 (D2). The floor is
+          # A local build produced 23 pages on 2026-10-01 (D5). The floor is
           # set well BELOW that: it catches a COLLAPSED build, not a deleted
           # page. Raise it as the site grows.
-          [ "$n" -ge 10 ] || { echo "::error::only $n pages built; refusing to call this a doc set."; exit 1; }
+          [ "$n" -ge 16 ] || { echo "::error::only $n pages built; refusing to call this a doc set."; exit 1; }
           # The generated site is public too: make sure no internal identifier
           # reached it through generated content.
           pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'

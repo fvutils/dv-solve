@@ -2,7 +2,7 @@
 Verilator (t_constraint_struct*, t_randomize_struct_sel, t_randomize_union).
 
 A packed struct is a single bit-vector whose fields are bit-slices. The two
-native IR forms (see zsp_compile.c) are:
+native IR forms (see dvs_compile.c) are:
 
   * `packed == concat(hi, lo)`  -- relate a packed var to its field vars
     (bidirectional: pin fields -> packed, or pin packed -> fields). This is the

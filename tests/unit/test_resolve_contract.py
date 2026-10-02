@@ -8,7 +8,7 @@ The invariant these exist to protect: the ctypes loader and the public
 link/compile helpers must always name the SAME installation. When they drift,
 the Python API runs one build of the solver while generated C is linked
 against another, and the ABI mismatch surfaces as a crash inside
-``solver_compile`` with nothing pointing back at the cause.
+``dvs_solver_compile`` with nothing pointing back at the cause.
 """
 import os
 
@@ -20,6 +20,7 @@ from dv_solve import _resolve
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     """Discovery must be decided by the test, not by the developer's shell."""
+    monkeypatch.delenv("DVS_SOLVER_PATH", raising=False)
     monkeypatch.delenv("ZSP_SOLVER_PATH", raising=False)
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
 
@@ -123,7 +124,7 @@ def test_explicit_override_beats_package(tmp_path, monkeypatch):
     _install(monkeypatch, pkg, root)
     _lib(str(pkg))
     other = _lib(str(tmp_path / "elsewhere"))
-    monkeypatch.setenv("ZSP_SOLVER_PATH", other)
+    monkeypatch.setenv("DVS_SOLVER_PATH", other)
     assert os.path.dirname(_resolve.find_library("dv_solve")) == other
 
 
@@ -135,7 +136,7 @@ def test_override_accepts_install_prefix(tmp_path, monkeypatch):
     prefix = tmp_path / "prefix"
     _lib(str(prefix / "lib"))
     _headers(str(prefix / "include"))
-    monkeypatch.setenv("ZSP_SOLVER_PATH", str(prefix))
+    monkeypatch.setenv("DVS_SOLVER_PATH", str(prefix))
     assert os.path.dirname(_resolve.find_library("dv_solve")) == str(
         prefix / "lib")
     assert _resolve.find_incdirs() == [str(prefix / "include")]
@@ -186,7 +187,7 @@ def test_existing_but_empty_include_dir_is_not_accepted(tmp_path, monkeypatch):
 
 
 def test_installed_include_set_has_nested_dir(tmp_path, monkeypatch):
-    """Unqualified includes (``#include "zsp_ctx.h"``) only resolve against the
+    """Unqualified includes (``#include "dvs_ctx.h"``) only resolve against the
     nested ``dv_solve/`` directory; the base holds no headers at all. pssc's
     generated ``pssc_solve.c`` emits exactly those unqualified includes."""
     pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
@@ -252,7 +253,7 @@ def test_core_and_dpi_resolve_independently(tmp_path, monkeypatch):
 
 
 def test_tmp_pytest_builds_are_not_searched(tmp_path, monkeypatch):
-    """The loader used to glob ``/tmp/pytest-*/zsp_build*``, letting an
+    """The loader used to glob ``/tmp/pytest-*/dvs_build*``, letting an
     unrelated and possibly half-built test tree supply the solver to
     production code on any box that had ever run the suite."""
     pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
@@ -262,7 +263,7 @@ def test_tmp_pytest_builds_are_not_searched(tmp_path, monkeypatch):
     # (Asserting on the search-dir strings would not work: pytest's own
     # tmp_path lives under /tmp/pytest-*, so the synthetic package dir matches
     # that pattern too. What matters is that the glob no longer runs.)
-    _lib(str(tmp_path.parent / "zsp_build"))
+    _lib(str(tmp_path.parent / "dvs_build"))
     assert _resolve.find_library("dv_solve") is None
 
 
@@ -311,14 +312,14 @@ def test_override_versioned_only_is_not_linked_from_the_package(
     override = tmp_path / "override"
     loaded = _versioned(str(override))
     _headers(str(override))
-    monkeypatch.setenv("ZSP_SOLVER_PATH", str(override))
+    monkeypatch.setenv("DVS_SOLVER_PATH", str(override))
 
     assert _resolve.find_library("dv_solve") == loaded
     assert _resolve.find_library("dv_solve", linkable=True) is None
     with pytest.raises(RuntimeError) as ei:
         dv_solve.get_libdirs()
     msg = str(ei.value)
-    assert "ZSP_SOLVER_PATH=%s" % override in msg
+    assert "DVS_SOLVER_PATH=%s" % override in msg
     assert "libdv_solve.so.1" in msg and "ln -s" in msg
     assert str(pkg) not in msg.split("Fixes:")[0]
 
@@ -351,7 +352,7 @@ def test_loader_prefers_the_linkable_file_within_an_installation(
     prefix = tmp_path / "prefix"
     _versioned(str(prefix))
     _lib(str(prefix / "lib"))
-    monkeypatch.setenv("ZSP_SOLVER_PATH", str(prefix))
+    monkeypatch.setenv("DVS_SOLVER_PATH", str(prefix))
     want = str(prefix / "lib" / _resolve.lib_filename("dv_solve"))
     assert _resolve.find_library("dv_solve") == want
     assert _resolve.find_library("dv_solve", linkable=True) == want
@@ -367,12 +368,12 @@ def test_empty_override_is_terminal(tmp_path, monkeypatch):
     _headers(str(pkg / "share" / "include" / "dv_solve"))
     empty = tmp_path / "empty"
     empty.mkdir()
-    monkeypatch.setenv("ZSP_SOLVER_PATH", str(empty))
+    monkeypatch.setenv("DVS_SOLVER_PATH", str(empty))
     assert _resolve.find_library("dv_solve") is None
     assert _resolve.find_incdirs() is None
     for helper in (dv_solve.get_libdirs, dv_solve.get_incdirs,
                    dv_solve.get_dpi_lib, dv_solve.get_svdirs):
-        with pytest.raises(RuntimeError, match="ZSP_SOLVER_PATH"):
+        with pytest.raises(RuntimeError, match="DVS_SOLVER_PATH"):
             helper()
 
 
@@ -383,7 +384,7 @@ def test_headers_are_not_borrowed_from_another_installation(
     _install(monkeypatch, pkg, root)
     _headers(str(pkg / "share" / "include" / "dv_solve"))
     override = _lib(str(tmp_path / "override"))
-    monkeypatch.setenv("ZSP_SOLVER_PATH", override)
+    monkeypatch.setenv("DVS_SOLVER_PATH", override)
     assert _resolve.find_incdirs() is None
     with pytest.raises(RuntimeError, match="C headers"):
         dv_solve.get_incdirs()
@@ -480,8 +481,19 @@ def test_resolve_report_never_raises_and_names_the_problem(
     _lib(str(pkg))
     override = tmp_path / "override"
     _versioned(str(override))
-    monkeypatch.setenv("ZSP_SOLVER_PATH", str(override))
+    monkeypatch.setenv("DVS_SOLVER_PATH", str(override))
     rep = dv_solve.resolve_report()
     assert rep["installation"] == {"kind": "override", "root": str(override)}
     assert rep["link_dirs"] is None
     assert "link_dirs" in rep["errors"]
+
+
+def test_legacy_override_name_is_honoured(monkeypatch, tmp_path):
+    """zuspec-be-sw still sets ``ZSP_SOLVER_PATH``; it selects the override
+    installation when ``DVS_SOLVER_PATH`` is unset, and loses to it when both
+    are set."""
+    monkeypatch.delenv("DVS_SOLVER_PATH", raising=False)
+    monkeypatch.setenv("ZSP_SOLVER_PATH", str(tmp_path / "legacy"))
+    assert _resolve.override_root() == str(tmp_path / "legacy")
+    monkeypatch.setenv("DVS_SOLVER_PATH", str(tmp_path / "new"))
+    assert _resolve.override_root() == str(tmp_path / "new")

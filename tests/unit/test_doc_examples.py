@@ -77,32 +77,5 @@ def test_doc_smt2_example_output(example: Path, smt2_exe: str) -> None:
     assert proc.stdout == example.with_suffix(".expected").read_text()
 
 
-# ------------------------------------------------------------------ #
-# Verilator example: build docs/examples/verilator/packet.sv with the  #
-# bundled (or PATH) Verilator, run it with dv-solve as the solver, and #
-# check every printed packet against the class's constraints.          #
-# ------------------------------------------------------------------ #
-
-def test_doc_verilator_packet(smt2_exe: str, tmp_path: Path) -> None:
-    import re
-    import shutil
-    vlt = _REPO / "packages" / "verilator-bin" / "bin" / "verilator"
-    vlt = str(vlt) if vlt.is_file() else shutil.which("verilator")
-    if vlt is None:
-        pytest.skip("verilator not available")
-    src = _REPO / "docs" / "examples" / "verilator" / "packet.sv"
-    b = subprocess.run([vlt, "--binary", "-Wno-fatal", "--Mdir", str(tmp_path / "obj"),
-                        "-o", "sim", str(src)], capture_output=True, text=True, timeout=900)
-    assert b.returncode == 0, b.stdout[-2000:] + b.stderr[-2000:]
-    env = dict(os.environ, VERILATOR_SOLVER=f"{smt2_exe} --interactive --mode=verilator")
-    r = subprocess.run([str(tmp_path / "obj" / "sim")], capture_output=True, text=True,
-                       env=env, timeout=120)
-    out = r.stdout + r.stderr
-    assert r.returncode == 0, out
-    assert "Warning" not in out, out            # no solver errors, no unknowns
-    pkts = re.findall(r"addr=([0-9a-f]+) len=(\d+) kind=(\d+)", out)
-    assert len(pkts) == 5, out
-    for a, n, k in pkts:
-        addr, ln, kind = int(a, 16), int(n), int(k)
-        assert addr % 4 == 0 and 1 <= ln <= 16 and addr + ln < 0x1000
-        assert kind != 0 and (kind != 7 or ln > 8)
+# The Verilator, DPI and C examples are built and run by test_doc_pages.py,
+# using the commands their pages show.

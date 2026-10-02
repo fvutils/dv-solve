@@ -15,7 +15,7 @@ core.
 Source trees reviewed:
 - `resources/kissat/` (Kissat, C)
 - `resources/cadical/` (CaDiCaL, C++)
-- `src/c/zsp_alloc.h`, `zsp_block_alloc`, `zsp_pool`, `zsp_stack`, `zsp_trail`
+- `src/c/dvs_alloc.h`, `dvs_block_alloc`, `dvs_pool`, `dvs_stack`, `dvs_trail`
 
 ## Headline comparison
 
@@ -26,22 +26,22 @@ Source trees reviewed:
 | Variable / literal layout   | Pure SoA                        | Mostly SoA + small `Var` struct | Rich per-var structs; linked-list trail |
 | Reallocation                | Move arena, fixup only watches when non-compact | Forwarding pointers via union in clause | Nothing moves |
 | Reduction / GC              | Slide-compact arena + 3-tier glue policy | Two-space copying GC + glue tiers | None — learnt clauses live forever |
-| Stack / vector primitive    | `STACK(T)` macros w/ shrink hook | `std::vector` (mostly)        | `zsp_stack` *with checkpoint marks*  |
-| Allocator indirection       | Hard-wired libc                 | Hard-wired `new`/`delete[]`   | **Pluggable vtable** (`zsp_alloc_t`) |
+| Stack / vector primitive    | `STACK(T)` macros w/ shrink hook | `std::vector` (mostly)        | `dvs_stack` *with checkpoint marks*  |
+| Allocator indirection       | Hard-wired libc                 | Hard-wired `new`/`delete[]`   | **Pluggable vtable** (`dvs_alloc_t`) |
 | Trail records               | literal + reason                | literal + reason ptr          | literal + reason + prop_ref + bound delta + provenance flags + checkpoint marks |
 
 ## Where dv-solve is already ahead
 
 These are real, observable advantages in the existing code — keep them.
 
-1. **Pluggable allocator vtable** (`src/c/zsp_alloc.h:13-18`). Neither kissat
+1. **Pluggable allocator vtable** (`src/c/dvs_alloc.h:13-18`). Neither kissat
    (libc-hardwired) nor cadical (`new`/`delete[]`-hardwired) lets you
    redirect allocations. dv-solve can already host a SAT backend under its
    own arena, point everything at hugepages, or use NUMA-pinned allocators
    per worker. Phase B should *not* leak the backend's hardcoded
    `malloc`/`new` into dv-solve — wrap their entry points.
-2. **Checkpoint-aware stack and trail** (`src/c/zsp_trail.h:79-83`
-   `LevelMark`, `zsp_stack_mark_t`). The pattern "remember the stack top at
+2. **Checkpoint-aware stack and trail** (`src/c/dvs_trail.h:79-83`
+   `LevelMark`, `dvs_stack_mark_t`). The pattern "remember the stack top at
    level N, pop everything above it in O(1)" is generalized across trail,
    dynamic stack, and variable count. Kissat truncates the trail by index
    but does not generalize. *Extending the checkpoint pattern to the clause
@@ -50,11 +50,11 @@ These are real, observable advantages in the existing code — keep them.
    backend does this, and it is the natural dv-solve idiom.
 3. **Trail records carry rich semantics**
    (`TRAIL_FLAG_SINGLETON`, `TRAIL_FLAG_FROM_CLAUSE`, `prop_ref`,
-   `old_value` 32/64 — `src/c/zsp_trail.h:64-74`). Kissat's trail is
+   `old_value` 32/64 — `src/c/dvs_trail.h:64-74`). Kissat's trail is
    literal+reason; cadical's is literal+Var ptr. dv-solve's trail already
    encodes bound deltas and clause-vs-propagator provenance — a SAT layer
    bolted on top can *reuse this trail* instead of duplicating its own.
-4. **Pool-with-offset model** (`src/c/zsp_pool.{c,h}`). Conceptually
+4. **Pool-with-offset model** (`src/c/dvs_pool.{c,h}`). Conceptually
    identical to kissat's arena+reference scheme, but currently used only
    for IR / propagator graph. Extending it to clauses unlocks kissat-grade
    compactness while preserving the pluggable allocator.
@@ -70,7 +70,7 @@ strengths above — they are additive.
 - Clause "pointer" becomes a 32-bit offset (`cref_t`) into the arena.
 - Watches, reasons, learned-clause queues all hold `cref_t`, never raw
   pointers.
-- The arena is just a `zsp_stack`/`zsp_pool` instance — we already have it.
+- The arena is just a `dvs_stack`/`dvs_pool` instance — we already have it.
 
 Win: 4-byte handles, cache-friendly propagation walks, compaction is legal
 (arena can grow / move with no fixup), trivially survives `realloc`.
@@ -112,9 +112,9 @@ RSS blows up. We have no story for this today.
 ### 5. `STACK(T)` shrink hook (cheap one-liner)
 
 Kissat's `SHRINK_STACK` rounds *down* to a power of two when utilization
-drops; neither cadical nor dv-solve's `zsp_stack` does this. For long
+drops; neither cadical nor dv-solve's `dvs_stack` does this. For long
 sessions with many push/pop cycles (e.g. CRT randomization in a loop) this
-keeps RSS bounded. ~10 lines of code in `zsp_stack`.
+keeps RSS bounded. ~10 lines of code in `dvs_stack`.
 
 ## Crossover techniques (dv-solve-specific)
 
@@ -144,7 +144,7 @@ loop, single explanation engine.
 
 ### C. Allocator-routed clause arena
 
-Because `zsp_alloc_t` is a vtable, the clause arena's backing buffer can
+Because `dvs_alloc_t` is a vtable, the clause arena's backing buffer can
 be:
 - a regular libc allocation (default),
 - a hugepage-backed mapping (for very large BMC),
@@ -168,20 +168,20 @@ they don't have provenance.
 
 1. **Pre-Phase-B prep** (does not require SAT yet):
    - **[DONE 2026-05-25]** Add `cref_t` arena layer on top of
-     `zsp_pool`/`zsp_stack`. Landed as `src/c/zsp_arena.{c,h}` —
-     resizable bump allocator returning 32-bit offsets (`zsp_aref_t`),
-     grow-by-doubling, mark/release matching `zsp_stack_push/pop`,
+     `dvs_pool`/`dvs_stack`. Landed as `src/c/dvs_arena.{c,h}` —
+     resizable bump allocator returning 32-bit offsets (`dvs_aref_t`),
+     grow-by-doubling, mark/release matching `dvs_stack_push/pop`,
      `shrink_to_fit` for kissat-style cache compaction. Tested via
-     `test_zsp_arena`.
+     `test_dvs_arena`.
    - **[DONE 2026-05-25]** Add shrink hook on the **block allocator**
-     (the `zsp_stack` block-based design doesn't grow a contiguous
+     (the `dvs_stack` block-based design doesn't grow a contiguous
      buffer; the corresponding place to cap RSS is the free-list cache
-     on `zsp_block_alloc`). Added `zsp_block_alloc_set_max_cached()`,
-     `zsp_block_alloc_trim()`, `zsp_block_alloc_cached_count()`. Default
-     unlimited (backward-compatible). Tested via `test_zsp_block_alloc_cache`.
+     on `dvs_block_alloc`). Added `dvs_block_alloc_set_max_cached()`,
+     `dvs_block_alloc_trim()`, `dvs_block_alloc_cached_count()`. Default
+     unlimited (backward-compatible). Tested via `test_dvs_block_alloc_cache`.
    - **[TODO]** Extend `LevelMark` with arena top — even before we have
      a clause arena, this is correctness-free since the field is unused.
-     Deferred: `zsp_trail.h` has interleaved in-flight work.
+     Deferred: `dvs_trail.h` has interleaved in-flight work.
 2. **Phase B clause DB**: migrate existing `db->clauses[]` to the arena;
    watches still index by clause-id but the underlying storage is now
    compactable.
@@ -200,21 +200,21 @@ they don't have provenance.
 
 - CaDiCaL's two-space copying GC — kissat's slide-compact is simpler and
   doesn't require ~50% headroom during GC.
-- CaDiCaL's `std::vector` everywhere — fine for them, but C and `zsp_stack`
+- CaDiCaL's `std::vector` everywhere — fine for them, but C and `dvs_stack`
   is the established dv-solve idiom.
 - Hard-wired `malloc`/`new` paths from either solver — route through
-  `zsp_alloc_t`.
+  `dvs_alloc_t`.
 
 ## Key file references (for implementers)
 
 dv-solve infrastructure to extend:
-- Allocator vtable: `src/c/zsp_alloc.h:13-18`
-- Block allocator (equal-size): `src/c/zsp_block_alloc.{c,h}`
-- Bump pool with 32-bit offsets: `src/c/zsp_pool.{c,h}`
-- Stack with checkpoint marks: `src/c/zsp_stack.c`, mark type in
-  `src/c/zsp_trail.h:7`
-- Trail with rich entries: `src/c/zsp_trail.h:64-83`
-- Current clause DB usage: `src/c/zsp_clause_prop.c:11-130`
+- Allocator vtable: `src/c/dvs_alloc.h:13-18`
+- Block allocator (equal-size): `src/c/dvs_block_alloc.{c,h}`
+- Bump pool with 32-bit offsets: `src/c/dvs_pool.{c,h}`
+- Stack with checkpoint marks: `src/c/dvs_stack.c`, mark type in
+  `src/c/dvs_trail.h:7`
+- Trail with rich entries: `src/c/dvs_trail.h:64-83`
+- Current clause DB usage: `src/c/dvs_clause_prop.c:11-130`
 
 Kissat reference points:
 - Arena + references: `resources/kissat/src/arena.{h,c}`, `reference.h`,
