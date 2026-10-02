@@ -1,5 +1,6 @@
 package:
   name: dv-solve
+  default-dep-set: dev
 
   dep-sets:
   - name: use
