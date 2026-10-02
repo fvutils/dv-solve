@@ -66,6 +66,13 @@ reference/environment
 
 ```{toctree}
 :maxdepth: 2
+:caption: Results
+
+results/index
+```
+
+```{toctree}
+:maxdepth: 2
 :caption: Internals
 
 internals/architecture

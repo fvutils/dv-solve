@@ -327,6 +327,17 @@ typedef struct {
     int                  verilator_mode;
     uint64_t             div_counter;   /* seeds successive diversity solves */
 
+    /* --verilator-hash=ignore (verilator mode only). Verilator 5.x follows
+     * every satisfiable randomize() query with up to four random parity
+     * ("hash") asserts, purely to coax variety out of a deterministic
+     * solver. With this set, an assert of exactly that shape arriving after a
+     * `sat` is recorded but not added, and the check-sat after it answers
+     * `sat` with the model already found: the user's constraints still hold,
+     * Verilator's variety request is not honoured. Off by default; the
+     * results pages measure both settings. */
+    int                  vlt_hash_ignore;
+    int                  vlt_hash_pending;  /* a hash was skipped since the last check-sat */
+
     /* Verilator-mode identity cache. Verilator re-sends an identical problem
      * after every (reset), so a matching fingerprint lets us skip the bit-blast
      * + SAT re-solve and just re-diversify the cached bb_solver with the fresh
@@ -381,6 +392,11 @@ typedef struct {
     /* Result of last check-sat */
     dvs_result_t          last_result;
     int                  has_result;   /* 1 after check-sat */
+    /* Checkpoint a successful default-mode check-sat-assuming left open, plus
+     * one (0: none). It holds the assumption pins while get-value and
+     * get-unsat-assumptions read the answer; _end_assumptions restores it
+     * before the next command that changes the solver state. */
+    uint32_t             assump_cp1;
 
     /* Bit-blast solver kept alive across check-sat and get-value when
      * DV_ENGINE=bitblast. NULL when the CDCL engine is in use. Freed in

@@ -1,6 +1,6 @@
 """Soundness campaign: generate, run every front door, judge, shrink, record.
 
-    python -m tests.formal.soundness.campaign --seed 1 --n 2000 [--doors smt2,incr,builder]
+    python -m tests.formal.soundness.campaign --seed 1 --n 2000 [--doors smt2,incr,steps,builder]
         [--exe build/dv-solve-smt2] [--out DIR]
 
 Every problem is small enough to enumerate, so each answer and model is
@@ -40,6 +40,8 @@ def run_doors(p: Problem, which, exe: str) -> list:
         out += doors.smt2_batch(p, exe)
     if "incr" in which:
         out += doors.smt2_incremental(p, exe)
+    if "steps" in which:
+        out += doors.smt2_steps(p, exe)
     if "builder" in which and doors.builder_safe(p):
         out += doors.builder(p, BUILDER_LIMIT_MS)
     return out
@@ -117,7 +119,8 @@ def campaign(seed: int, n: int, which, exe: str, out_dir: Path | None, log=print
             # The same door must fail the same way, or shrinking can wander
             # off to a different bug.
             door = want[0].split("[")[0]
-            sel = {"smt2": ["smt2"], "smt2-incr": ["incr"], "builder": ["builder"]}[door]
+            sel = {"smt2": ["smt2"], "smt2-incr": ["incr"], "smt2-steps": ["steps"],
+                   "builder": ["builder"]}[door]
             return any(sig(o) == want for o in failing(run_doors(q, sel, exe)))
         small = shrink(p, still_fails)
         log("     shrunk: " + small.smt2(get_model=False).replace("\n", " "))
@@ -132,7 +135,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--n", type=int, default=1000)
-    ap.add_argument("--doors", default="smt2,incr,builder")
+    ap.add_argument("--doors", default="smt2,incr,steps,builder")
     ap.add_argument("--exe", default=str(DEFAULT_EXE))
     ap.add_argument("--out", default=str(HERE / "regressions"))
     ap.add_argument("--minutes", type=float, default=0.0,

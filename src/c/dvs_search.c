@@ -1352,7 +1352,8 @@ void dvs_solver_reset(dvs_ctx_t *ctx) {
         return;
     }
 
-    uint32_t n = ctx->initial_n_vars;
+    /* A pop can leave fewer variables than the snapshot holds. */
+    uint32_t n = ctx->initial_n_vars < ctx->n_vars ? ctx->initial_n_vars : ctx->n_vars;
 
     /* Restore variable domains.
      *

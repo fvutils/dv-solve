@@ -1,0 +1,119 @@
+# Performance and distribution runs for fvutils/dv-solve.
+# Design: docs/results_publishing_design.md.
+#
+# The job MEASURES and UPLOADS ONE ARTIFACT, perf-<kind>-<utc>-<sha>, holding
+# one gzipped run record. It never writes to git and holds no write
+# credential: tests/perf/consolidate.py turns artifacts into committed history
+# (by hand, at each release and at least monthly), and docs.yml renders from
+# that history plus the artifacts newer than it. Artifacts expire after 90
+# days on this instance, which is the consolidation deadline.
+#
+# Forgejo-only, like test.yml and nightly.yml: it publishes nothing, so it has
+# no GitHub twin and needs no release-authority gate.
+#
+# Nightly at 05:00 UTC, after the soundness campaign (02:30, about 2 h 15 min)
+# has released the machine: measured alongside it, timings are 15-30% off
+# (docs/results_publishing_design.md §10). A nightly is skipped when main's
+# HEAD already has a valid nightly record under 7 days old. The tag trigger
+# and the ladder arrive with R5.
+
+name: Perf
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "Run kind recorded in the record"
+        default: manual
+        type: choice
+        options: [manual, nightly, ladder, release]
+
+concurrency:
+  group: perf          # one perf job at a time: two would measure each other
+  cancel-in-progress: false
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      KIND: ${{ inputs.kind || 'nightly' }}
+      FORGEJO_API_URL: ${{ github.server_url }}/api/v1
+      FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Already measured?
+        id: seen
+        if: env.KIND == 'nightly'
+        run: python3 -m tests.perf.history measured --commit "$GITHUB_SHA" --kind nightly --max-age-days 7
+
+      - name: Install pinned tools
+        if: steps.seen.outputs.measured != 'true'
+        run: |
+          pip_install() {
+            python3 -m pip install -q "$@" && return 0
+            python3 -m pip install -q --break-system-packages "$@"
+          }
+          pip_install cmake ninja scipy -r tests/perf/solvers.lock
+          python3 -m tests.perf.tools fetch --dest perf-tools
+
+      - name: Build dv-solve-smt2 and the library
+        if: steps.seen.outputs.measured != 'true'
+        run: |
+          [ -d packages/cadical ] || git clone -q --depth 1 -b rel-3.0.0 \
+              https://github.com/arminbiere/cadical.git packages/cadical
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j8 --target dv-solve-smt2 dv_solve
+
+      - name: Swizzle fidelity
+        # The Verilator rows of the randomization page mean something only if
+        # tests/perf/vlt_protocol.py says what Verilator 5.046 says: compare it
+        # with a real simulation (pinned Verilator, z3), command by command
+        # and in distribution.
+        if: steps.seen.outputs.measured != 'true'
+        run: |
+          python3 -m pip install -q pytest 2>/dev/null || python3 -m pip install -q --break-system-packages pytest
+          DVS_PERF_TOOLS=perf-tools DVS_REQUIRE_FIDELITY=1 \
+            python3 -m pytest -q -p no:cacheprovider tests/unit/test_vlt_protocol.py
+
+      - name: Collect
+        id: collect
+        if: steps.seen.outputs.measured != 'true'
+        # Exit 1 means the record is INVALID (a wrong answer). It is still
+        # written; the failure is deferred until after the upload so it can be
+        # diagnosed.
+        run: |
+          set +e
+          DVS_PERF_TOOLS=perf-tools python3 -m tests.perf.collect --kind "$KIND" \
+            --suites calib,sat-core,rand-core --out perf-out --github-output
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check the record for internal identifiers
+        # The record is public once uploaded and once consolidated.
+        if: steps.seen.outputs.measured != 'true'
+        run: |
+          pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          if zcat perf-out/*.json.gz | grep -nE "$pattern" ; then
+            echo "::error::internal identifier in the run record"
+            exit 1
+          fi
+
+      - name: Upload the run record
+        if: steps.seen.outputs.measured != 'true'
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: ${{ steps.collect.outputs.name }}
+          path: perf-out/*.json.gz
+          if-no-files-found: error
+
+      - name: Unconsolidated runs
+        run: python3 -m tests.perf.history status --warn-after 60 --fail-after 80
+
+      - name: Fail on an invalid record
+        if: steps.seen.outputs.measured != 'true' && steps.collect.outputs.rc != '0'
+        run: |
+          echo "::error::the run record is invalid (collect exited ${{ steps.collect.outputs.rc }})"
+          exit 1

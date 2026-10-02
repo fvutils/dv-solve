@@ -29,12 +29,32 @@ model can run with dv-solve or with z3.
    and asks for a solution.
 2. It then adds a few random parity constraints over the variables' bits and
    asks again, keeping the last solution that satisfied them. This is
-   Verilator's own mechanism for varying the results; dv-solve simply solves
-   what it is given.
+   Verilator's own mechanism for varying the results; by default dv-solve
+   solves what it is given (see below).
 3. Verilator reads the values back and assigns them.
 
 Results follow Verilator's seed (`+verilator+seed+N`): the same seed repeats a
 run exactly, and different seeds give different values.
+
+## Verilator's parity constraints
+
+Verilator adds up to four parity constraints to every `randomize()` call
+because most solvers return the same solution to the same question. dv-solve
+already picks a random solution each time, so for dv-solve the parity
+constraints mostly add cost: they take most of the time of a call.
+
+`--verilator-hash=ignore` skips them: dv-solve answers each of those queries
+with the solution it already found, which satisfies every constraint of the
+class. Only Verilator's request for variety is not honoured.
+
+```bash
+export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator --verilator-hash=ignore"
+```
+
+Calls get much cheaper. Whether the values spread as well depends on the
+constraints: the parity constraints also even out what dv-solve's own choice
+leaves uneven. The {doc}`../results/randomization` page measures both settings
+on every benchmark, so you can see where each one stands.
 
 ## When the constraints can't be met
 

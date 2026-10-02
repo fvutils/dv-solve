@@ -114,6 +114,10 @@ _COVERED = {
      'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator"'):
         "test_verilator_guide_setup",
     ("guides/verilator.md",
+     'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator '
+     '--verilator-hash=ignore"'):
+        "test_verilator_guide_hash_ignore",
+    ("guides/verilator.md",
      "%Warning-UNSATCONSTR: bad.sv:3: Unsatisfied constraint: 'constraint c1 { x > 10; }'"):
         "test_verilator_guide_unsat",
     ("guides/verilator.md",
@@ -138,10 +142,14 @@ _NOT_RUN = {
     ("getting-started/install.md", "ivpm update -d use        # fetches CaDiCaL into ./packages"):
         "fetches packages from the network",
     ("internals/architecture.md", " Python / C builder ─┐"): "a diagram, not code",
+    ("results/methodology.md", "python3 -m tests.perf.tools fetch --dest perf-tools"):
+        "downloads the pinned solvers and times the whole suite; perf.yml runs these "
+        "steps every night, and test_perf_render.py checks the rendering",
 }
 
 # Sphinx directives the docs build checks (sphinx -W fails on a bad one).
-_SPHINX_CHECKED = {"{toctree}", "{autoclass}", "{autoexception}", "{automodule}", "{autofunction}"}
+_SPHINX_CHECKED = {"{toctree}", "{autoclass}", "{autoexception}", "{automodule}", "{autofunction}",
+                   "{list-table}"}
 
 
 def test_every_block_is_covered() -> None:
@@ -336,6 +344,24 @@ def test_verilator_guide_setup() -> None:
                    'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 '
                    '--interactive --mode=verilator"').body[0]
     assert guide.strip() == quick, "the guide and the quick start set VERILATOR_SOLVER differently"
+
+
+def test_verilator_guide_hash_ignore() -> None:
+    """The documented VERILATOR_SOLVER line, given a parity query that
+    contradicts the one before it, keeps answering sat (the parity constraint
+    is skipped), where the default answers unsat."""
+    exe = _need(_smt2_exe(), "dv-solve-smt2")
+    line = _block("guides/verilator.md", 'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 '
+                                         '--interactive --mode=verilator '
+                                         '--verilator-hash=ignore"').body[0]
+    args = line.split('"')[1].split()[1:]
+    script = ("(set-logic QF_ABV)(declare-fun x () (_ BitVec 8))"
+              "(assert (= #b1 (ite (bvult x #x10) #b1 #b0)))(check-sat)"
+              "(assert (= #b1 ((_ extract 0 0) x)))(check-sat)"
+              "(assert (= #b0 ((_ extract 0 0) x)))(check-sat)")
+    for a, want in ((args, "sat"), ([x for x in args if "hash" not in x], "unsat")):
+        r = subprocess.run([exe, *a], input=script, capture_output=True, text=True, timeout=30)
+        assert r.stdout.split()[-1] == want, (a, r.stdout)
 
 
 _VLT_RUN = 'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator"\n'

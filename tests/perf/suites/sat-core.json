@@ -1,0 +1,52 @@
+{
+ "suite": "sat-core",
+ "kind": "sat",
+ "budget_s": 10,
+ "reps": 5,
+ "reps_slow": 3,
+ "slow_ms": 1000,
+ "categories": [
+  {
+   "name": "tier1",
+   "weight": 1.0,
+   "glob": "tests/formal/smt2/tier1/*.smt2",
+   "about": "small QF_BV constraint problems in the style of randomization"
+  },
+  {
+   "name": "tier2",
+   "weight": 1.0,
+   "glob": "tests/formal/smt2/tier2/*.smt2",
+   "about": "bounded model checking from yosys-smtbmc (QF_UFBV)"
+  },
+  {
+   "name": "tier3",
+   "weight": 1.0,
+   "glob": "tests/formal/smt2/tier3/*.smt2",
+   "about": "bounded model checking with arrays (QF_AUFBV)"
+  },
+  {
+   "name": "tier4",
+   "weight": 1.0,
+   "glob": "tests/formal/smt2/tier4/*.smt2",
+   "about": "large memories: arrays with a wide address read at symbolic addresses, which dv-solve does not support yet"
+  },
+  {
+   "name": "gaps",
+   "weight": 1.0,
+   "glob": "tests/formal/smt2/gaps/*.smt2",
+   "about": "constructs dv-solve once lacked, kept as regressions"
+  },
+  {
+   "name": "wide",
+   "weight": 1.0,
+   "glob": "tests/formal/smt2/wide/*.smt2",
+   "about": "bit-vectors wider than 64 bits"
+  },
+  {
+   "name": "verilator",
+   "weight": 2.0,
+   "glob": "tests/formal/smt2/verilator/*.smt2",
+   "about": "what Verilator sends when it randomizes SystemVerilog classes"
+  }
+ ]
+}

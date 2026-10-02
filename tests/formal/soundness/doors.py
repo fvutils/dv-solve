@@ -97,6 +97,50 @@ def smt2_incremental(p: Problem, exe: str, timeout: float = 60.0) -> list:
     return res
 
 
+def smt2_steps(p: Problem, exe: str, timeout: float = 60.0) -> list:
+    """Assert one constraint at a time, checking (and reading the model) after
+    each: Verilator's XOR-hash loop, and any incremental session. Unlike
+    smt2_incremental this adds constraints after a `sat`, with no push, more
+    than once, which is what exposed B67 (a reset that left the auxiliaries of
+    an earlier incremental assert pinned to the last model)."""
+    names = " ".join(p.widths)
+    decl = "(set-logic QF_BV)\n" + "".join(
+        f"(declare-const {n} (_ BitVec {w}))\n" for n, w in p.widths.items())
+    exps, script = [], decl + "(check-sat)\n"
+    try:
+        for k in range(1, len(p.cons) + 1):
+            e = "unsat" if exps and exps[-1] == "unsat" else (
+                "sat" if satisfiable(p.widths, p.cons[:k]) else "unsat")
+            exps.append(e)
+            script += f"(assert {smt(p.cons[k - 1])})\n(check-sat)\n"
+            if e == "sat":
+                script += f"(get-value ({names}))\n"
+    except OracleUndecided:
+        return []
+    try:
+        r = subprocess.run([exe, "--interactive"], input=script, capture_output=True,
+                           text=True, timeout=timeout)
+        out, err = r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        return [Outcome("smt2-steps", exps[-1], "timeout")]
+    # Verdict lines, each followed by its get-value response (if any).
+    steps, cur = [], None
+    for line in out.splitlines():
+        w = line.strip()
+        if w in ("sat", "unsat", "unknown"):
+            cur = [w, ""]
+            steps.append(cur)
+        elif cur is not None:
+            cur[1] += line
+    steps = steps[1:]                       # the empty problem's check-sat
+    res = []
+    for k, exp in enumerate(exps):
+        got, vals = steps[k] if k < len(steps) else ("error", "")
+        ok = got != "sat" or _check_model(p, p.cons[:k + 1], _model(vals))
+        res.append(Outcome(f"smt2-steps[{k}]", exp, got, ok, _detail(err)))
+    return res
+
+
 # ---- Python builder (SystemVerilog semantics; builder-safe problems only) ----
 
 _UNSAFE = {"bvudiv", "bvurem", "bvsdiv", "bvsrem", "bvsmod", "bvashr",

@@ -1,0 +1,14 @@
+{
+ "_comment": "Pinned solver tarballs for perf runs (docs/results_publishing_design.md §5.3). Changing anything here changes the lock hash every run record carries. pip-installed tools are pinned in solvers.lock.",
+ "verilator-bin": {
+  "url": "https://github.com/edapack/verilator-bin/releases/download/v5.046/verilator-manylinux_2_28_x86_64-5.046.tar.gz",
+  "sha256": "32b47111dce323613abd2c6668b44f2af93b3c4dab0541e9140be28473362086",
+  "provides": {"bitwuzla": ["verilator/bin/bitwuzla", "0.8.2"],
+               "verilator": ["verilator/bin/verilator", "5.046"]}
+ },
+ "yosys-bin": {
+  "url": "https://github.com/edapack/yosys-bin/releases/download/v0.69.35518581703/yosys-bin-manylinux_2_28_x86_64-0.69.35518581703.tar.gz",
+  "sha256": "073b928c7c9676699e92a15c7f6cd911bff27d55cf128f9fa0e647e843578742",
+  "provides": {"boolector": ["yosys/bin/boolector", "3.2.4"]}
+ }
+}

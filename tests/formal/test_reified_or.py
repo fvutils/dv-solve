@@ -27,8 +27,9 @@ that is too eager is silently lossy.
 The conjunction cases further down cover Phase 3, which closed the same gap for
 `(= #b1 (bvand ...))` -- but by splitting the top-level ASSERT into one assert
 per conjunct rather than by rewriting the expression, precisely so the sysfunc
-translation is left alone. The one remaining xfail there is a different
-problem: a conjunct over a *derived* operand, which no propagator narrows.
+translation is left alone. The last case there is a different problem: a
+conjunct over a *derived* operand, which no propagator narrows; CDCL's bound
+decisions are what solve it.
 
 Usage:
     direnv exec . pytest tests/formal/test_reified_or.py -v
@@ -167,16 +168,15 @@ def test_reified_conjunction_restricts_the_domain(label, body) -> None:
     assert verdict == "sat", f"{label}: got {verdict}"
 
 
-@pytest.mark.xfail(strict=True, reason="power-of-two test: the second conjunct "
-                                       "is a derived bvand/bvsub, which no "
-                                       "propagator narrows on a 32-bit domain")
 def test_conjunction_with_derived_operand() -> None:
     """Splitting the assert is necessary but not sufficient.
 
     `z != 0 AND (z & (z-1)) == 0` splits cleanly, but the second conjunct
     constrains a *derived* term; the split gives it its own propagator and that
     propagator still cannot narrow a 32-bit z. Distinct from the domain-
-    restriction gap above -- this one needs the Class A / derived-operand work.
+    restriction gap above. Solved since CDCL makes bound decisions on a wide
+    variable that has taken part in conflicts (dvs_search.c, _bound_decision):
+    a failure then teaches a range, not one value.
     """
     verdict, _, _ = _run(
         "(= #b1 (bvand (__Vbv (not (= z #x00000000)))"

@@ -1551,6 +1551,31 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         }
     }
 
+    /* A Boolean if-then-else: g ↔ (c ? a : b), with the same ite propagator
+     * the AND/OR guards use. Verilator lifts every constraint to a bit with
+     * __Vbv, so `ite(ite(thold == 0, cnt == 0, ...), 1, 0)` arrived here as
+     * the condition of the outer reification; without this arm the whole
+     * constraint went uncompiled, every seeded solve was downgraded to
+     * `unknown` by validation, and --mode=verilator fell back to bit-blast
+     * re-diversification, which nearly never moved off one model. Only 1-bit
+     * branches: a wider ite has no truth value to reify. */
+    if (k == EXPR_ITE) {
+        ExprITE *ei = (ExprITE *)dvs_pool_ptr(&sp->pool, ref);
+        if (_expr_width(ctx, sp, ei->then_e, 0) > 1 ||
+            _expr_width(ctx, sp, ei->else_e, 0) > 1)
+            return EXPR_NULL;
+        uint32_t gc = _bool_to_var(ctx, sp, ei->cond);
+        if (gc == EXPR_NULL) return EXPR_NULL;
+        uint32_t ga = _bool_to_var(ctx, sp, ei->then_e);
+        if (ga == EXPR_NULL) return EXPR_NULL;
+        uint32_t gb = _bool_to_var(ctx, sp, ei->else_e);
+        if (gb == EXPR_NULL) return EXPR_NULL;
+        uint32_t g = _new_guard(ctx);
+        if (g == EXPR_NULL) return EXPR_NULL;
+        prop_add_ite_value_64(ctx, g, gc, ga, gb, 0);
+        return g;
+    }
+
     if (k != EXPR_BINARY) return EXPR_NULL;
 
     ExprBinary *eb = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
@@ -4105,6 +4130,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
             ctx->initial_vars = (Variable *)dvs_pool_ptr(&ctx->pool, iv_ref);
             memcpy(ctx->initial_vars, ctx->vars, save_n * sizeof(Variable));
             ctx->initial_n_vars = save_n;
+            ctx->initial_vars_cap = save_n;
 
             /* For tier-1 vars, also save the WideBounds64 contents.
              * The initial_vars[] have correct holes_offset values, so we
@@ -4130,6 +4156,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         } else {
             ctx->initial_vars   = NULL;
             ctx->initial_n_vars = 0;
+            ctx->initial_vars_cap = 0;
         }
     }
 
@@ -4164,6 +4191,57 @@ int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
     int rc = _solver_add_constraint_body(ctx, esp);
     dvs_sv_release(aux_sp, esp);
     return rc;
+}
+
+/* Record the variables an incremental add created, as they stand after its
+ * compile, in the dvs_solver_reset() snapshot. Without this a reset restored
+ * only the variables of the original compile: the auxiliaries of a later
+ * (assert) kept whatever the previous search left in them -- the values of the
+ * last model, or of the point where a timed-out search stopped -- so the next
+ * solve was confined to them, and answered a wrong `unsat` as soon as a new
+ * constraint disagreed (B67: `(assert (bvult (bvadd a b) #x80))`, sat with
+ * a = b = 0, then `a = 5`, `b = 7` was unsat; Verilator's XOR-hash asserts
+ * after a CDCL timeout).
+ *
+ * The add runs right after a reset, at level 0, so the state captured is
+ * implied by the constraints alone. Ids below `base` are not touched: they
+ * belong to the compile snapshot or to an earlier add. Returns -1 when the
+ * pool cannot hold the snapshot; the add then fails rather than leave a
+ * variable a reset cannot restore. */
+static int _snapshot_added_vars(dvs_ctx_t *ctx, uint32_t base) {
+    if (!ctx->initial_vars) return 0;          /* no snapshot: reset is a no-op */
+    uint32_t n = ctx->n_vars;
+    if (base > ctx->initial_n_vars) base = ctx->initial_n_vars;  /* close a gap */
+    if (n <= base) return 0;
+    if (n > ctx->initial_vars_cap) {
+        uint32_t cap = ctx->initial_vars_cap * 2;
+        if (cap < n + 64) cap = n + 64;
+        if (ctx->n_vars_capacity && cap > ctx->n_vars_capacity)
+            cap = ctx->n_vars_capacity > n ? ctx->n_vars_capacity : n;
+        uint32_t ref = dvs_pool_alloc(&ctx->pool, cap * (uint32_t)sizeof(Variable),
+                                      (uint32_t)_Alignof(Variable));
+        if (ref == EXPR_NULL) return -1;
+        Variable *grown = (Variable *)dvs_pool_ptr(&ctx->pool, ref);
+        memcpy(grown, ctx->initial_vars, ctx->initial_n_vars * sizeof(Variable));
+        ctx->initial_vars = grown;
+        ctx->initial_vars_cap = cap;
+    }
+    for (uint32_t i = base; i < n; i++) {
+        Variable *v = &ctx->vars[i];
+        ctx->initial_vars[i] = *v;
+        if (VAR_IS_TIER1(v->flags) && v->holes_offset != 0) {
+            /* As at compile: the snapshot keeps its own copy of the wide
+             * bounds, since the live copy changes during search. */
+            uint32_t wb_ref = dvs_pool_alloc(&ctx->pool, (uint32_t)sizeof(WideBounds64),
+                                             (uint32_t)_Alignof(WideBounds64));
+            if (wb_ref == EXPR_NULL) return -1;
+            *(WideBounds64 *)dvs_pool_ptr(&ctx->pool, wb_ref) =
+                *(WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+            ctx->initial_vars[i].holes_offset = wb_ref;
+        }
+    }
+    ctx->initial_n_vars = n;
+    return 0;
 }
 
 static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
@@ -4264,6 +4342,8 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
         }
     }
 
+    if (_snapshot_added_vars(ctx, init_base_n_vars) < 0) return -1;
+
     /* ---- Run propagation to fixpoint ---- */
     PropResult pr = dvs_solver_propagate(ctx);
     if (pr == PROP_CONFLICT && ctx->prop_aborted) {
@@ -4313,5 +4393,5 @@ int dvs_solver_add_array_vars(dvs_ctx_t *ctx,
         if (ctx->watcher_heads) ctx->watcher_heads[i] = EXPR_NULL;
     }
     if (end > ctx->n_vars) ctx->n_vars = end;
-    return 0;
+    return _snapshot_added_vars(ctx, elem_var_base);
 }

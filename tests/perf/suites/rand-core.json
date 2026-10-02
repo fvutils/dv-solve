@@ -1,0 +1,18 @@
+{
+  "suite": "rand-core",
+  "kind": "rand",
+  "n": 2000,
+  "about": "Randomization: N calls to randomize() per benchmark, every arm on the same problem.",
+  "benches": [
+    {"name": "countones"},
+    {"name": "ot_aon_wkup"},
+    {"name": "range_1000"},
+    {"name": "disjoint_ranges"},
+    {"name": "sum_eq_const"},
+    {"name": "a_lt_b"},
+    {"name": "dep_range"},
+    {"name": "bit_mask"},
+    {"name": "addr_aligned"},
+    {"name": "packet"}
+  ]
+}
