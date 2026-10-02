@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "dma_engine_small_bmc_d8",
   "result": "unsat",
-  "solve_time_ms": 2.9838279588148,
-  "peak_memory_kb": 299300,
+  "solve_time_ms": 2.122381003573537,
+  "peak_memory_kb": 443532,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""
