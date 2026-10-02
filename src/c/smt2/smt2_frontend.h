@@ -92,11 +92,16 @@ typedef struct {
 /* Array sort and value types                                          */
 /* ------------------------------------------------------------------ */
 
-/* Description of an (Array (_ BitVec M) (_ BitVec N)) sort. */
+/* Description of an (Array (_ BitVec M) (_ BitVec N)) sort.
+ *
+ * A nested (Array (_ BitVec I) (Array (_ BitVec J) (_ BitVec N))) -- Verilator's
+ * queues of queues and arrays in structs -- is one flat array keyed by the
+ * concatenation of both indices: addr_width = I + J, inner_addr = J. */
 typedef struct {
-    uint8_t  addr_width;   /* M */
+    uint8_t  addr_width;   /* M (I + J when nested) */
     uint8_t  data_width;   /* N */
-    uint8_t  _pad[2];
+    uint8_t  inner_addr;   /* J for a nested sort, else 0 */
+    uint8_t  _pad[1];
 } Smt2ArraySort;
 
 /* Frontend-side array value handle: vector of n_elems ExprRefs of width N.
@@ -146,11 +151,19 @@ typedef struct Smt2ArrayValue {
     uint32_t      n_sparse;
     uint32_t      sparse_cap;
     uint64_t     *sparse_idx;     /* concrete indices, n_sparse entries */
+    uint64_t     *sparse_idx_hi;  /* their bits 64..127 (128-bit keys: Verilator's
+                                   * string-keyed associative arrays) */
     uint32_t     *sparse_varid;   /* solver var_id of each index's element var.
                                    * Stored as var_id (not dvs_expr_t) so get-value
                                    * survives the dvs_builder_reset that follows
                                    * compilation -- like the dense path's
                                    * name->var lookup. */
+
+    /* Slice view: (select A k) of a nested array A at a constant k, an array
+     * of the inner sort whose element j is A's flat element (k ++ j). A
+     * per-command transient; only select reads it. */
+    struct Smt2ArrayValue *slice_of;
+    uint64_t      slice_lo, slice_hi;  /* k */
 } Smt2ArrayValue;
 
 /* Symbol-table entry for an array-typed declared variable. */
@@ -461,6 +474,9 @@ typedef struct {
     uint32_t             push_n_core_hist[32];
     dvs_builder_mark_t   push_bmark[32];     /* builder position at each push */
     uint8_t              push_incomplete[32];  /* `incomplete` at each push */
+    uint32_t             push_n_anodes[32];    /* abstract-array state at each push */
+    uint32_t             push_n_areads[32];
+    uint32_t             push_n_aeqs[32];
     uint32_t             push_depth;
 
     /* Incremental state: 1 once the initial problem has been compiled. */
@@ -515,12 +531,20 @@ typedef struct {
      * init. anodes[] owns the STORE/CONST/ITE DAG nodes created during
      * translation (BASE nodes are owned by array_vars[]); areads[] is the read
      * table. Both persist translation->check-sat and are freed at reset/destroy. */
-    int                  array_lazy;   /* DV_ARRAY set: abstract array path */
+    int                  array_lazy;   /* DV_ARRAY set: every array abstract */
     int                  array_eager;  /* DV_ARRAY=eager: one-shot Ackermann oracle */
+    int                  array_auto;   /* abstract only the sorts too large to expand
+                                        * densely (default; DV_ARRAY=0 turns it off) */
+    int                  bb_over_problem; /* bb_solver was built over fe->problem
+                                           * (the array engine), not bb_problem */
     Smt2ArrayValue     **anodes;
     uint32_t             n_anodes, anodes_cap;
     Smt2ArrayRead       *areads;
     uint32_t             n_areads, areads_cap;
+    /* Reads made by translation are areads[0, n_areads_user); a solve appends
+     * its own after them, in fe->problem's pool. Those are dropped before the
+     * next translation or solve, which rebuild from the builder. */
+    uint32_t             n_areads_user;
     Smt2ArrayEq         *aeqs;
     uint32_t             n_aeqs, aeqs_cap;
     /* Open-addressing index over areads[] keyed by (node, idx): maps a read key

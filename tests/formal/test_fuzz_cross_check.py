@@ -10,6 +10,10 @@ generated SMT2 is dumped in the failure message for a one-command repro.
 Coverage (how often dv-solve gives a definite answer) is logged, not asserted:
 the point of the fuzzer is soundness across the op space, not a coverage floor.
 
+A second fleet (``test_fuzz_cross_check_wide_lits``) runs the same generator
+in wide-literal mode: full-range constants (>= 2^64 on >64-bit widths, Phase
+W2) spelled as ``#x``/``#b``/``(_ bvK W)``.
+
 Seeds are fixed, so this is reproducible and non-flaky. Scale with
 ``FUZZ_N`` (default 160):  ``FUZZ_N=1000 pytest tests/formal/test_fuzz_cross_check.py``
 """
@@ -43,13 +47,12 @@ def z3_oracle():
     return _Z3
 
 
-@pytest.mark.parametrize("seed", _SEEDS)
-def test_fuzz_cross_check(seed, z3_oracle, tmp_path):
+def _cross_check(seed, z3_oracle, tmp_path, wide_lits):
     if not _DV_CDCL.is_available():
         pytest.skip("dv-solve-smt2 binary not built")
 
-    smt2 = generate_problem(seed)
-    f = tmp_path / f"fuzz_{seed}.smt2"
+    smt2 = generate_problem(seed, wide_lits=wide_lits)
+    f = tmp_path / f"fuzz_{seed}{'_wl' if wide_lits else ''}.smt2"
     f.write_text(smt2)
 
     z3 = z3_oracle.solve(f, timeout_s=TIMEOUT_S).result
@@ -69,8 +72,19 @@ def test_fuzz_cross_check(seed, z3_oracle, tmp_path):
         if res in _ANSWERS:
             assert res == z3, (
                 f"SOUNDNESS: dv-solve ({eng}) says '{res}', z3 says '{z3}' "
-                f"on fuzz seed {seed}\n--- repro ({f}) ---\n{smt2}"
+                f"on fuzz seed {seed} (wide_lits={wide_lits})"
+                f"\n--- repro ({f}) ---\n{smt2}"
             )
+
+
+@pytest.mark.parametrize("seed", _SEEDS)
+def test_fuzz_cross_check(seed, z3_oracle, tmp_path):
+    _cross_check(seed, z3_oracle, tmp_path, wide_lits=False)
+
+
+@pytest.mark.parametrize("seed", _SEEDS)
+def test_fuzz_cross_check_wide_lits(seed, z3_oracle, tmp_path):
+    _cross_check(seed, z3_oracle, tmp_path, wide_lits=True)
 
 
 def test_zz_fuzz_coverage_report():

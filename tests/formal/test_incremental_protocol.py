@@ -264,3 +264,39 @@ def test_push_pop_with_wide_variables(width, cmds, expect):
     out, _, _ = _run_interactive(
         f"(set-logic QF_BV)(declare-const x (_ BitVec {width})){cmds.format(w=width)}(exit)")
     assert _results(out) == expect
+
+
+_H = ("(set-logic QF_BV)(declare-fun x () (_ BitVec 4))(declare-fun y () (_ BitVec 4))"
+      "(declare-fun c () (_ BitVec 3))")
+
+
+@pytest.mark.parametrize("script,want", [
+    # B71: the second push met the conflict as it flushed `x == 4`, failed,
+    # and the pop then removed the scope holding `x == 4`.
+    ("(assert (= x #x3))(push 1)(assert (= x #x4))(push 1)(pop 1)(check-sat)", ["unsat"]),
+    ("(assert (= x y))(push 1)(assert (not (= x y)))(push 2)(pop 1)(check-sat)"
+     "(pop 1)(check-sat)(pop 1)(check-sat)", ["unsat", "unsat", "sat"]),
+    ("(assert (= x #x3))(push 1)(assert (= y #x4))(push 1)(assert (= y #x5))(check-sat)"
+     "(pop 1)(check-sat)", ["unsat", "sat"]),
+])
+def test_push_after_conflicting_assert_keeps_the_scope(script, want):
+    out, _, _ = _run_interactive(_H + script)
+    assert _results(out) == want
+
+
+@pytest.mark.parametrize("script", [
+    # B72: after a compile with internal vars (the ite), two declarations got
+    # the same var id, so z != w was z != z.
+    "(assert (not (= x (ite (= c #b001) y x))))(check-sat)"
+    "(declare-fun z () (_ BitVec 8))(declare-fun w () (_ BitVec 8))"
+    "(assert (not (= z w)))(check-sat)",
+    "(assert (not (= x (ite (= c #b001) y x))))(push 1)"
+    "(declare-fun z () (_ BitVec 8))(declare-fun w () (_ BitVec 8))"
+    "(assert (bvult z w))(check-sat)",
+    "(assert (not (= x (ite (= c #b001) y x))))(push 1)"
+    "(declare-fun S () (Array (_ BitVec 3) (_ BitVec 8)))(declare-fun i () (_ BitVec 3))"
+    "(declare-fun j () (_ BitVec 3))(assert (not (= (select S i) (select S j))))(check-sat)",
+])
+def test_declarations_after_a_compile_get_distinct_ids(script):
+    out, _, _ = _run_interactive(_H.replace("QF_BV", "QF_ABV") + script)
+    assert _results(out)[-1] == "sat"

@@ -109,3 +109,38 @@ def test_hash_option_needs_verilator_mode():
     r = subprocess.run([str(_EXE), "--verilator-hash=ignore"], input="", capture_output=True,
                        text=True, timeout=60)
     assert r.returncode == 2
+
+
+# ---- a large array under the Verilator protocol ------------------------------
+
+_ARR = ("(declare-fun data () (Array (_ BitVec 32) (_ BitVec 8)))"
+        "(declare-fun idx () (_ BitVec 2))(declare-fun sel () (_ BitVec 8))"
+        "(assert (= sel (select data ((_ zero_extend 30) idx))))"
+        + "".join(f"(assert (and (bvuge (select data #x0000000{k}) #x0a)"
+                  f" (bvule (select data #x0000000{k}) #x32)))" for k in range(4)))
+_ARR_GET = "(get-value (idx sel " + " ".join(
+    f"(select data #x0000000{k})" for k in range(4)) + "))"
+_ARR_VAL = re.compile(r"\(\(?(idx|sel|select data #x0000000(\d))\)? #b([01]+)\)")
+
+
+def test_verilator_mode_randomizes_a_large_array():
+    """A 32-bit-address array with a symbolic index takes the word-level array
+    engine. Each randomize must be a valid model, and they must vary -- not one
+    model repeated, nor only the free index varying."""
+    one = _ARR + "(check-sat)" + _ARR_GET + "(reset)"
+    r = subprocess.run([str(_EXE), "--interactive", "--mode=verilator"],
+                       input="(set-logic QF_ABV)(check-sat)(reset)" + one * 100,
+                       capture_output=True, text=True, timeout=120)
+    ms = []
+    for block in r.stdout.split("((idx")[1:]:
+        m = {}
+        for name, k, v in _ARR_VAL.findall("((idx" + block):
+            m[f"d{k}" if k else name] = int(v, 2)
+        ms.append(m)
+    assert len(ms) == 100, r.stdout[-400:]
+    for m in ms:
+        assert all(10 <= m[f"d{k}"] <= 50 for k in range(4)), m
+        assert m["sel"] == m[f"d{m['idx']}"], m
+    assert len({tuple(sorted(m.items())) for m in ms}) > 40
+    assert len({m["d0"] for m in ms}) > 5
+    assert len({m["idx"] for m in ms}) == 4

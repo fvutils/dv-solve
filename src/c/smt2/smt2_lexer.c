@@ -288,3 +288,30 @@ int smt2_token_eq(const Smt2Token *tok, const char *str) {
     if (tok->length != (uint32_t)slen) return 0;
     return memcmp(tok->start, str, slen) == 0;
 }
+
+int smt2_bvlit_limbs(const char *text, uint32_t len,
+                     uint64_t *limbs, uint32_t n_limbs) {
+    for (uint32_t i = 0; i < n_limbs; i++) limbs[i] = 0;
+    if (len < 3 || text[0] != '#') return -1;
+    unsigned bits_per;
+    if (text[1] == 'b' || text[1] == 'B')      bits_per = 1;
+    else if (text[1] == 'x' || text[1] == 'X') bits_per = 4;
+    else return -1;
+    /* Digits are most-significant first: walk them from the right end so the
+     * k-th digit from the right lands at bit k*bits_per. */
+    uint64_t bit = 0;
+    for (uint32_t i = len; i > 2; i--, bit += bits_per) {
+        char c = text[i - 1];
+        uint64_t d;
+        if (c >= '0' && c <= '9')                       d = (uint64_t)(c - '0');
+        else if (bits_per == 4 && c >= 'a' && c <= 'f') d = (uint64_t)(c - 'a' + 10);
+        else if (bits_per == 4 && c >= 'A' && c <= 'F') d = (uint64_t)(c - 'A' + 10);
+        else return -1;
+        if (bits_per == 1 && d > 1) return -1;
+        /* bit is a multiple of bits_per (1 or 4), so a digit never straddles
+         * a limb boundary. */
+        uint64_t limb = bit / 64;
+        if (limb < n_limbs) limbs[limb] |= d << (bit % 64);
+    }
+    return 0;
+}

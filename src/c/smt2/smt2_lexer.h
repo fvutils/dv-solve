@@ -88,6 +88,17 @@ const char *smt2_token_kind_name(Smt2TokenKind kind);
  */
 int smt2_token_eq(const Smt2Token *tok, const char *str);
 
+/**
+ * Decode the full value of a `#b…`/`#x…` literal into little-endian 64-bit
+ * limbs (limbs[0] = bits [0,63]). `text`/`len` is the literal's token text,
+ * including the leading '#'. A TOK_BITVEC_LIT's numval keeps only the low 64
+ * bits, so a literal wider than 64 bits must be re-read through this. Bits
+ * beyond n_limbs*64 are dropped (callers size n_limbs from the width).
+ * Returns 0 on success, -1 if `text` is not a well-formed literal.
+ */
+int smt2_bvlit_limbs(const char *text, uint32_t len,
+                     uint64_t *limbs, uint32_t n_limbs);
+
 #ifdef __cplusplus
 }
 #endif
