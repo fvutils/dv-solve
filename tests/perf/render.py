@@ -302,6 +302,7 @@ RARMS = {
     "uniform": "true random (ideal)",
     "dv-api@head": "dv-solve API",
     "dv-swizzle@head": "Verilator + dv-solve",
+    "dv-swizzle-nohash@head": "Verilator + dv-solve, parity ignored",
     "z3-swizzle": "Verilator + z3 {z3}",
     "bitwuzla-swizzle": "Verilator + bitwuzla {bitwuzla}",
     "dv-swizzle@anchor": "Verilator + dv-solve {anchor}",

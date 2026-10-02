@@ -37,6 +37,12 @@ static void _usage(FILE *f) {
         "                    assuming is served as a randomization-diversity\n"
         "                    request (one seeded base solve) instead of a literal\n"
         "                    assumption solve. Use for VERILATOR_SOLVER.\n"
+        "  --verilator-hash=H  honor | ignore (verilator mode; default honor).\n"
+        "                    Verilator follows each sat randomize() query with\n"
+        "                    up to four random parity asserts to vary a\n"
+        "                    deterministic solver's answer. ignore keeps the\n"
+        "                    model already found (it satisfies every user\n"
+        "                    constraint) and skips those asserts.\n"
         "\n"
         "If no file is given, reads from stdin.  Interactive mode is the\n"
         "default when stdin is a pipe/tty.\n");
@@ -173,7 +179,8 @@ static int _run_batch(FILE *f, int show_stats, int verilator_mode) {
     }
     smt2_frontend_init(&fe, stdout, err_fp);
     fe.print_stats = show_stats;
-    fe.verilator_mode = verilator_mode;
+    fe.verilator_mode = verilator_mode != 0;
+    fe.vlt_hash_ignore = verilator_mode == 2;
 
     int exit_code = 0;
     for (;;) {
@@ -224,7 +231,8 @@ static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
     }
     smt2_frontend_init(&fe, stdout, err_fp);
     fe.print_stats = show_stats;
-    fe.verilator_mode = verilator_mode;
+    fe.verilator_mode = verilator_mode != 0;
+    fe.vlt_hash_ignore = verilator_mode == 2;
 
     int exit_code = 0;
     for (;;) {
@@ -318,6 +326,7 @@ int main(int argc, char **argv) {
     int         force_batch = 0;
     int         no_incremental = 0;
     int         verilator_mode = 0;
+    int         hash_ignore = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -343,6 +352,18 @@ int main(int argc, char **argv) {
                 verilator_mode = 0;
             } else {
                 fprintf(stderr, "error: unknown mode '%s' (expected verilator|default)\n", m);
+                return 2;
+            }
+            continue;
+        }
+        if (strncmp(argv[i], "--verilator-hash=", 17) == 0) {
+            const char *h = argv[i] + 17;
+            if (strcmp(h, "ignore") == 0) {
+                hash_ignore = 1;
+            } else if (strcmp(h, "honor") == 0) {
+                hash_ignore = 0;
+            } else {
+                fprintf(stderr, "error: unknown --verilator-hash '%s' (expected honor|ignore)\n", h);
                 return 2;
             }
             continue;
@@ -396,6 +417,12 @@ int main(int argc, char **argv) {
     if (force_batch)       interactive = 0;
     if (force_interactive) interactive = 1;
 
+    /* 0: default, 1: verilator, 2: verilator with --verilator-hash=ignore */
+    if (hash_ignore && !verilator_mode) {
+        fprintf(stderr, "error: --verilator-hash applies only with --mode=verilator\n");
+        return 2;
+    }
+    if (verilator_mode && hash_ignore) verilator_mode = 2;
     int rc = _run_on_worker_stack(f, show_stats, verilator_mode, interactive);
 
     if (input_file) fclose(f);

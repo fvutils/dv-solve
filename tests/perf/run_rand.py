@@ -7,6 +7,8 @@ Arms (docs/results_publishing_design.md §2.1):
 - `<solver>-swizzle`: the solver behind Verilator 5.046's randomize()
   protocol (vlt_protocol.py), one process for all N calls, as in a
   simulation. `z3-swizzle` is what a Verilator user gets by default.
+- `dv-swizzle-nohash`: dv-solve under the same protocol with
+  `--verilator-hash=ignore`, which skips Verilator's parity asserts.
 - `dv-api`: dv-solve's own API (the Python builder over the C library), one
   compiled context, reset and solved with a new seed each call: what SV DPI
   and zuspec users get.
@@ -48,7 +50,13 @@ def make_arms(head: Path, anchor: Path | None, tools: dict) -> list:
     arms = [Arm("uniform", "uniform"),
             Arm("dv-api@head", "api", env=lib, build="head"),
             Arm("dv-swizzle@head", "swizzle",
-                [str(head), "--interactive", "--mode=verilator"], build="head")]
+                [str(head), "--interactive", "--mode=verilator"], build="head"),
+            # The same build told to skip Verilator's parity asserts: both
+            # settings are measured, so a benchmark where dv-solve's own spread
+            # is worse than the parity constraints' shows on the page.
+            Arm("dv-swizzle-nohash@head", "swizzle",
+                [str(head), "--interactive", "--mode=verilator", "--verilator-hash=ignore"],
+                build="head")]
     if anchor is not None:
         arms.append(Arm("dv-swizzle@anchor", "swizzle",
                         [str(anchor), "--interactive", "--mode=verilator"], build="anchor"))

@@ -26,6 +26,11 @@ With no file, commands are read from standard input.
 `--mode=verilator`
 : Serve Verilator's `randomize()` calls. See {doc}`../guides/verilator`.
 
+`--verilator-hash=H`
+: With `--mode=verilator`: `honor` (the default) solves the random parity
+  constraints Verilator adds to each `randomize()` call; `ignore` skips them
+  and keeps the solution already found. See {doc}`../guides/verilator`.
+
 `--version`
 : Print the version and exit.
 

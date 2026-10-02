@@ -54,6 +54,12 @@ design as first written:
   on `(reset)`). It is what a Verilator user of bitwuzla gets, so it is
   measured as is.
 - **No `dv-scenario` arm yet** (R6).
+- **Two dv-solve Verilator arms.** `dv-swizzle` honours Verilator's parity
+  asserts (the default); `dv-swizzle-nohash` runs `--verilator-hash=ignore`,
+  which skips them. Both are measured on every benchmark rather than choosing
+  per problem, so any benchmark where dv-solve's own spread is worse than the
+  parity constraints' is visible (first run: ignore is 12x cheaper, excess
+  JSD 0.021 against 0.003; ot_aon_wkup, a_lt_b and packet carry the gap).
 
 This document builds on `docs/ci_benchmark_publishing_plan.md` (2026-09-30)
 and replaces its §4 (harness), §5 (history), §6 (workflow) and §7

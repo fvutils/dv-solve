@@ -67,6 +67,7 @@ are known exactly.
 | Solver | How it is driven |
 |---|---|
 | Verilator + dv-solve, z3, bitwuzla | one solver process for all 2000 calls, sent exactly the commands Verilator 5.046 sends for each randomize() |
+| Verilator + dv-solve, parity ignored | the same, with `--verilator-hash=ignore`: dv-solve skips Verilator's parity constraints and keeps the solution it found. Measured beside the default so that a benchmark where dv-solve's own spread is worse than the parity constraints' shows |
 | dv-solve API | dv-solve's library called directly, one compiled problem solved with a new seed each call, as SystemVerilog DPI and zuspec do |
 | true random | a random choice among all solutions: what a perfect sampler scores at the same sample size |
 

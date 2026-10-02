@@ -2828,11 +2828,51 @@ static void _truncate_named(Smt2Frontend *fe, uint32_t n) {
     if (n < fe->n_named) fe->n_named = n;
 }
 
+/* ((_ extract i i) <declared var>): one bit of a declared variable. */
+static int _is_vlt_hash_bit(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->kind != SEXPR_LIST || s->list.count != 2) return 0;
+    const Sexpr *ix = s->list.items[0], *v = s->list.items[1];
+    if (ix->kind != SEXPR_LIST || ix->list.count != 4 ||
+        !sexpr_is_symbol(ix->list.items[0], "_") ||
+        !sexpr_is_symbol(ix->list.items[1], "extract") ||
+        ix->list.items[2]->kind != SEXPR_NUMERAL ||
+        ix->list.items[3]->kind != SEXPR_NUMERAL ||
+        ix->list.items[2]->numval != ix->list.items[3]->numval)
+        return 0;
+    if (v->kind != SEXPR_SYMBOL) return 0;
+    Smt2Var *var = _find_var(fe, v->sym.str, v->sym.len);
+    return var && ix->list.items[2]->numval < var->width;
+}
+
+/* Verilator's randomConstraint() with _VL_SOLVER_HASH_LEN 1:
+ *   (= #b0|#b1 (bvxor <bit> <bit> ...))   or   (= #b0|#b1 <bit>)
+ * where each <bit> is one bit of a declared variable. */
+static int _is_vlt_hash(Smt2Frontend *fe, const Sexpr *e) {
+    if (e->kind != SEXPR_LIST || e->list.count != 3 || !sexpr_is_symbol(e->list.items[0], "="))
+        return 0;
+    const Sexpr *lit = e->list.items[1], *x = e->list.items[2];
+    if (lit->kind != SEXPR_BITVEC || lit->bv.width != 1) return 0;
+    if (_is_vlt_hash_bit(fe, x)) return 1;
+    if (x->kind != SEXPR_LIST || x->list.count < 3 || !sexpr_is_symbol(x->list.items[0], "bvxor"))
+        return 0;
+    for (uint32_t i = 1; i < x->list.count; i++)
+        if (!_is_vlt_hash_bit(fe, x->list.items[i])) return 0;
+    return 1;
+}
+
 static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 2) {
         fprintf(fe->err, "error: assert requires exactly one expression\n");
         return -1;
     }
+    /* --verilator-hash=ignore: Verilator's parity asserts follow a `sat` and
+     * nothing else does in its protocol; skip exactly that shape there. */
+    if (fe->verilator_mode && fe->vlt_hash_ignore && fe->has_result &&
+        fe->last_result == DVS_SOLVE_OK && _is_vlt_hash(fe, cmd->list.items[1])) {
+        fe->vlt_hash_pending = 1;
+        return 0;
+    }
+    fe->vlt_hash_pending = 0;      /* any other assert: solve for real */
     _record_named(fe, cmd->list.items[1]);
     if (_try_split_reified_and(fe, cmd->list.items[1])) return 0;
 
@@ -3854,6 +3894,15 @@ static void _emit_bv_bin_literal_wide(FILE *out, const uint64_t *limbs,
 }
 
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
+    /* Only skipped parity asserts since the last `sat`: the model stands. */
+    if (fe->vlt_hash_pending) {
+        fe->vlt_hash_pending = 0;
+        if (fe->has_result && fe->last_result == DVS_SOLVE_OK) {
+            fprintf(fe->out, "sat\n");
+            fflush(fe->out);
+            return 0;
+        }
+    }
     (void)cmd;
     fe->core_hist_at_check = fe->n_core_hist;
     fe->core_replayable    = 1;
@@ -5150,6 +5199,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     uint64_t cached_fp = fe->cached_fp;
     int      cache_valid = fe->cache_valid, cached_result = fe->cached_result;
     int      verilator_cdcl = fe->verilator_cdcl;
+    int      vlt_hash_ignore = fe->vlt_hash_ignore;
     uint64_t cdcl_probe_fp = fe->cdcl_probe_fp;
     uint8_t  cdcl_route = fe->cdcl_route;
     /* Reused allocations (reset in place below rather than freed). */
@@ -5205,6 +5255,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->cache_valid = cache_valid;
     fe->cached_result = cached_result;
     fe->verilator_cdcl = verilator_cdcl;
+    fe->vlt_hash_ignore = vlt_hash_ignore;
     fe->cdcl_probe_fp = cdcl_probe_fp;
     fe->cdcl_route = cdcl_route;
     fe->builder = builder;

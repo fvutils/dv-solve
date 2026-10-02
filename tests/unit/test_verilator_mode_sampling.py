@@ -66,3 +66,46 @@ def test_verilator_mode_spreads_a_boolean_ite_problem():
     # the bit-blast fallback saw 5.
     assert len({(m["cnt"], m["thold"]) for m in ms}) > 150
     assert max(m["thold"] for m in ms) - min(m["thold"] for m in ms) > 100
+
+
+# ---- --verilator-hash=ignore ------------------------------------------------
+
+_PRE = ("(set-logic QF_ABV)(declare-fun x () (_ BitVec 8))"
+        "(assert (= #b1 (ite (bvult x #x10) #b1 #b0)))(check-sat)(get-value (x))")
+_HASH1 = "(assert (= #b1 (bvxor ((_ extract 0 0) x) ((_ extract 1 1) x))))(check-sat)(get-value (x))"
+_HASH0 = "(assert (= #b0 (bvxor ((_ extract 0 0) x) ((_ extract 1 1) x))))(check-sat)"
+
+
+def _run(script: str, *opts) -> list:
+    r = subprocess.run([str(_EXE), "--interactive", *opts], input=script, capture_output=True,
+                       text=True, timeout=60)
+    return r.stdout.split()
+
+
+def test_hash_ignore_keeps_the_model():
+    out = _run(_PRE + _HASH1 + _HASH0, "--mode=verilator", "--verilator-hash=ignore")
+    assert out.count("sat") == 3 and "unsat" not in out
+    vals = [w for w in out if w.startswith("((x")] + [w for w in out if w.startswith("#b")]
+    assert len(set(vals)) <= 2      # one model, printed twice
+
+
+def test_hash_honor_is_the_default():
+    for opts in (("--mode=verilator",), ("--mode=verilator", "--verilator-hash=honor")):
+        out = _run(_PRE + _HASH1 + _HASH0, *opts)
+        assert out[-1] == "unsat"   # the two parity asserts contradict
+
+
+def test_hash_ignore_enforces_any_other_assert():
+    # After skipped hashes a real constraint is solved for, and a constraint
+    # that merely looks bitwise but is not Verilator's shape is not skipped.
+    out = _run(_PRE + _HASH1 + "(assert (= x #x07))(check-sat)(get-value (x))"
+               + "(assert (= #b1 (bvxor ((_ extract 0 0) x) #b1)))(check-sat)",
+               "--mode=verilator", "--verilator-hash=ignore")
+    assert out[-1] == "unsat"       # x == 7 has bit 0 set: (1 ^ 1) == 1 is false
+    assert "((x" in " ".join(out) and "#b00000111))" in out
+
+
+def test_hash_option_needs_verilator_mode():
+    r = subprocess.run([str(_EXE), "--verilator-hash=ignore"], input="", capture_output=True,
+                       text=True, timeout=60)
+    assert r.returncode == 2
