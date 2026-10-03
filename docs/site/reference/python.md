@@ -11,7 +11,7 @@ For how problems are expressed, see {doc}`../concepts/problem-model`.
 ```{autoclass} dv_solve.builder.SolveProblemBuilder
 :members: add_var, add_constraint, add_soft_constraint, add_all_different, add_dist,
   expr_var, expr_const, expr_binary, expr_unary, expr_ite, expr_in_set, expr_in_range,
-  expr_in_ranges, expr_extract, expr_concat, expr_extend, expr_sum, expr_countones,
+  expr_in_ranges, expr_extract, expr_concat, expr_extend, expr_cast, expr_sum, expr_countones,
   expr_clog2, finalize, finalize_bytes, reset, destroy
 :member-order: bysource
 ```

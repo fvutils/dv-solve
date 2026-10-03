@@ -44,6 +44,8 @@ def run_doors(p: Problem, which, exe: str) -> list:
         out += doors.smt2_steps(p, exe)
     if "builder" in which and doors.builder_safe(p):
         out += doors.builder(p, BUILDER_LIMIT_MS)
+    if "protocol" in which and doors.builder_safe(p):
+        out += doors.protocol(p)
     return out
 
 
@@ -88,7 +90,7 @@ def campaign(seed: int, n: int, which, exe: str, out_dir: Path | None, log=print
         stats["problems"] += 1
         # Half the problems keep to the operators the builder shares with
         # SMT-LIB, so every door sees a share of the stimulus.
-        builder_safe = "builder" in which and rng.random() < 0.5
+        builder_safe = ("builder" in which or "protocol" in which) and rng.random() < 0.5
         layout = rng.choice(WIDE_WIDTHS) if rng.random() < wide else rng.choice(WIDTHS)
         p = Gen(rng, layout, builder_safe=builder_safe).problem()
         if max(layout.values()) > 8:
@@ -113,14 +115,17 @@ def campaign(seed: int, n: int, which, exe: str, out_dir: Path | None, log=print
         log("FAIL " + why)
 
         def sig(o):
-            return (o.door, o.expect, o.got, o.model_ok, _step_check_violation(o))
+            # A protocol outcome names its solve and pin, which are drawn from
+            # the problem text and so move as it shrinks: keep the door only.
+            door = "protocol" if o.door.startswith("protocol") else o.door
+            return (door, o.expect, o.got, o.model_ok, _step_check_violation(o))
 
         def still_fails(q, want=sig(first)):
             # The same door must fail the same way, or shrinking can wander
             # off to a different bug.
             door = want[0].split("[")[0]
             sel = {"smt2": ["smt2"], "smt2-incr": ["incr"], "smt2-steps": ["steps"],
-                   "builder": ["builder"]}[door]
+                   "builder": ["builder"], "protocol": ["protocol"]}[door]
             return any(sig(o) == want for o in failing(run_doors(q, sel, exe)))
         small = shrink(p, still_fails)
         log("     shrunk: " + small.smt2(get_model=False).replace("\n", " "))
@@ -135,7 +140,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--n", type=int, default=1000)
-    ap.add_argument("--doors", default="smt2,incr,steps,builder")
+    ap.add_argument("--doors", default="smt2,incr,steps,builder,protocol")
     ap.add_argument("--exe", default=str(DEFAULT_EXE))
     ap.add_argument("--out", default=str(HERE / "regressions"))
     ap.add_argument("--minutes", type=float, default=0.0,

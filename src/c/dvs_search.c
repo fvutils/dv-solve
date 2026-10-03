@@ -86,7 +86,7 @@ static int _sc_fork_solve(dvs_ctx_t *ctx, const Literal *assume, uint32_t n,
         _sc_in_child = 1;
         LCGCtx *lcg = (LCGCtx *)ctx->lcg;
         if (lcg) lcg->enabled = 0;
-        trail_backtrack(ctx, 0);
+        trail_backtrack(ctx, ctx->search_base);
         PropResult pr = PROP_OK;
         for (uint32_t i = 0; i < n && pr == PROP_OK; i++)
             pr = assume[i].is_lb ? ctx_tighten_lb64(ctx, assume[i].var_id, assume[i].bound)
@@ -905,15 +905,21 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
             return DVS_SOLVE_UNSAT;
     }
 
-    /* Seal compile-time + initial-propagation state as the level-0 baseline.
-     * level_marks[0] starts zeroed (trail_top=NULL), so trail_backtrack(ctx,0)
-     * would undo every trail entry including compile-time domain narrowings
-     * (e.g. (assert cond) → cond forced to [1,1]).  By resetting the mark
-     * here we ensure restarts and bounds_shave probes only undo search-time
-     * changes, not the compile-time ones. */
-    ctx->level_marks[0].trail_top   = ctx->trail_top;
-    ctx->level_marks[0].trail_count = ctx->trail_count;
-    ctx->level_marks[0].stack_mark  = dvs_stack_push(ctx->dynamic);
+    /* Seal compile-time + initial-propagation state as the search's root.
+     * The root is the level the solve starts at, not 0: each open checkpoint
+     * holds a level, so under checkpoints (and the pins made in them) the
+     * solve starts above 0, and levels below it belong to the checkpoints.
+     * Restarts, shave probes and backjumps return to this level and never
+     * below it; a search that went below it undid the caller's pins, and
+     * then backtracked to marks that no longer lay on the trail.
+     * Sealing the mark here (level_marks[0] starts zeroed, trail_top=NULL)
+     * also keeps compile-time narrowings, such as (assert cond) forcing cond
+     * to [1,1], out of reach of a restart. */
+    const uint32_t base = ctx->decision_level;
+    ctx->search_base = base;
+    ctx->level_marks[base].trail_top   = ctx->trail_top;
+    ctx->level_marks[base].trail_count = ctx->trail_count;
+    ctx->level_marks[base].stack_mark  = dvs_stack_push(ctx->dynamic);
 
     /* Pre-search bounds shaving (L2): tighten domains beyond what
      * individual propagator fixed-point can achieve. */
@@ -1035,15 +1041,15 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
 
             uint32_t cur = ctx->decision_level;
 
-            /* A conflict at decision level 0 means the problem is UNSAT:
-             * every permanent domain tightening at level 0 is justified by
-             * a propagation conflict, so if level-0 propagation itself
-             * conflicts there is no search path that can satisfy it. */
-            if (cur == 0) return DVS_SOLVE_UNSAT;
+            /* A conflict at the root means the problem is UNSAT: every
+             * tightening at or below the root is the problem's or the
+             * caller's, so if their propagation conflicts there is no
+             * search path that can satisfy it. */
+            if (cur <= base) return DVS_SOLVE_UNSAT;
 
             /* Restart check */
             if (max_conflicts > 0 && local_conflicts >= luby_limit) {
-                trail_backtrack(ctx, 0);
+                trail_backtrack(ctx, base);
                 local_conflicts = 0;
                 restart_count++;
                 ctx->keep_on = 0;   /* see _pick_value */
@@ -1099,6 +1105,12 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                         /* Backjump first so trail state matches the
                          * level the asserting literal will fire at. */
                         if (bt_level >= cur) bt_level = cur - 1;
+                        /* A clause whose other literals all lie at or below
+                         * the root (pins, a checkpoint's bounds) asserts at
+                         * the root: it keeps them as conditions, so it stays
+                         * true after a restore, but the search does not undo
+                         * them. */
+                        if (bt_level < base) bt_level = base;
                         trail_backtrack(ctx, bt_level);
 
                         /* Record the learnt clause with its LBD (count

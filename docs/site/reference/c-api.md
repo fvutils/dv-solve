@@ -221,6 +221,15 @@ Extend `operand` from `from_bits` to `to_bits` bits: with zeros when
 `sign_extend` is 0, with copies of the sign bit when it is 1.
 ```
 
+```{c:function} dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand, uint8_t to_bits, uint8_t to_signed)
+A cast of `operand` to a `to_bits`-bit integer, signed when `to_signed`:
+SystemVerilog's `T'(operand)`. When `to_bits` is wider than the operand, the
+operand is evaluated at `to_bits`, so a 64-bit cast of the product of two
+32-bit variables does not wrap at 32 bits. The value is then truncated to
+`to_bits`, or extended by the operand's own signedness, and read as signed or
+unsigned.
+```
+
 ```{c:function} dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand, uint8_t hi_bit, uint8_t lo_bit)
 `operand[hi_bit:lo_bit]`.
 ```

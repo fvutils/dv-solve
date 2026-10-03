@@ -317,6 +317,7 @@ The original questions, for the record:
 | B64: a Boolean `ite` branch comparing 64-bit constants folded as signed | Fixed (§9.12) |
 | B65: `ite_value_64` used signed min/max on unsigned 64-bit domains | Fixed (§9.12) |
 | B66: a builder array select ignored `x == y` merges of its elements | Fixed (§9.13) |
+| B71: a solve under checkpoints took level 0 as its root, so learning backjumped onto the checkpoints' levels and crashed (or rewound past the caller's pins) | Fixed: the search's root is the level it starts at (`search_base`) for restarts, shave probes, backjumps and the UNSAT test (§9.14) |
 | Guard-gated propagators: the learnt clause did not cite the guard | Fixed: analysis adds `guard >= 1` for a gated propagator's step |
 | Minimised `get-unsat-core` | Done; tests pass, including 400 brute-force random cores and a 6000-case stress run |
 | Pinned regressions | `tests/formal/test_lcg_soundness.py` (B50 ×2, B51, the livelock); `test_signed_ops.py::test_divrem_of_variables_matches_z3` (B52); `test_bool_ite_constraint.py` and `tests/unit/test_gated_constraints.py` (B53); `tests/c/test_prop_exhaustive.c` (B54, B55, B57, mul) |
@@ -390,8 +391,8 @@ Validated against history:
 | File | What it is |
 |---|---|
 | `ir.py` | Problem IR: terms as tuples, bit-exact SMT-LIB evaluation (division by zero included), SMT-LIB2 printer, enumeration |
-| `gen.py` | Constrained-random generator. It covers all 14 binary bit-vector operators and both unary ones; `ite` as a value and as a Boolean constraint (including the `x == K` / `x == y` conditions that take the guarded compile paths); extract, concat and both extends; all ten comparisons and the Boolean connectives; shared subterms, same-operand terms and `x == y` aliases; widths 1–8 with up to 12 free bits. It records the stimulus bins each problem hits. A `builder_safe` mode keeps to the operators whose SystemVerilog meaning equals SMT-LIB's. |
-| `doors.py` | Three front doors: SMT-LIB2 batch; SMT-LIB2 incremental (assert a prefix, check; push, assert the rest, check; pop, check); and the Python builder, solved with clause learning off and on. Every answer and model is judged against enumeration. |
+| `gen.py` | Constrained-random generator. It covers all 14 binary bit-vector operators and both unary ones; `ite` as a value and as a Boolean constraint (including the `x == K` / `x == y` conditions that take the guarded compile paths); extract, concat and both extends; all ten comparisons and the Boolean connectives; shared subterms, same-operand terms and `x == y` aliases; widths 1–8 with up to 12 free bits. It records the stimulus bins each problem hits. A `builder_safe` mode keeps to the operators whose SystemVerilog meaning equals SMT-LIB's, which includes unsigned division and remainder by a nonzero constant. |
+| `doors.py` | Four front doors: SMT-LIB2 batch; SMT-LIB2 incremental (assert a prefix, check; push, assert the rest, check; pop, check); the Python builder, solved with clause learning off and on; and the protocol a scenario generator drives the builder with (one context, eight seeded solves, each a checkpoint, maybe a pin, a second checkpoint, a five-restart learning search and the plain search when that gives up, then restores; §9.14). Every answer and model is judged against enumeration, the protocol's under its pin. |
 | `shrink.py` | Delta debugging on the IR. It drops constraints, replaces sub-terms by a child, a variable or 0/1, and lowers constants, keeping each change only while the same door fails the same way. |
 | `campaign.py` | CLI and library: `python -m tests.formal.soundness.campaign --seed S --n N`. It writes each shrunk failure to `regressions/` as JSON plus SMT-LIB2. Run against the step-checker build (`--exe`, `DVS_SOLVER_PATH`), it also counts invalid clauses and explanations as failures. |
 | `test_regressions.py` | Replays every recorded failure through every door. |
@@ -534,6 +535,11 @@ until the 10 s CDCL deadline before bitblast answers. HEAD answered such a
 problem in 0.07 s only through B51's unsound learning; without learning it
 times out too. Tool output pre-folds constants (none in the fixture corpus),
 so the fix, constant folding in the frontend, is queued rather than urgent.
+
+A multi-bit value used as a constraint of its own (`x & 4`, `x[1:0]`, an
+extend or a cast, as opposed to a comparison or a bare variable) was refused
+as uncompiled. SV elaboration now writes a value in a Boolean position as
+`value != 0` (`tests/unit/test_expr_cast.py`).
 
 Through the builder, identical sub-terms get separate auxiliary variables:
 `(x*y) > (x*y)` is proved `unsat` by search (0.3 s at 6 bits) rather than
@@ -842,3 +848,41 @@ Coverage lessons:
 - **A stimulus written for one mutant found a real bug before the mutant
   was applied.** Coverage holes found by mutation are worth closing even
   when the mutant itself looks unlikely.
+
+### 9.14 B71: a solve under checkpoints, and the door that reaches it
+
+Found while testing a scenario generator's use of the builder: one context,
+reused for many seeded solves, each made under a checkpoint with values
+committed earlier pinned, then a second checkpoint, a short learning search,
+and the plain search if that gives up. A fuzz harness driving exactly that
+protocol, on builder-safe problems with `%` and `/` by constants added, crashed
+in 15 of 16 shards of 2,000 problems (a segfault in `trail_backtrack`); the
+build before the last two search changes crashed in 13 of 16, so the defect
+was older than them.
+
+Each open checkpoint holds a decision level, so such a solve starts above
+level 0. The search took level 0 as its root: it sealed level 0's mark, its
+shave probes and restarts backtracked to 0, and its decisions then reused the
+checkpoints' levels. A learnt clause's backjump then reached a level whose
+mark was no longer on the trail. Traced: the trail stood at 6 entries where
+the solve had started at 8, so state made before the solve -- the caller's
+pins -- had been undone. Fix: the search's root is the level it starts at
+(`ctx->search_base`) for restarts, shave probes, the UNSAT test and the
+lowest backjump. A learnt clause keeps literals from levels below the root as
+conditions, so it stays valid after a restore. With the fix, 16 x 2,000
+problems x 12 solves (and two shards on an address-sanitizer build) report
+nothing.
+
+Pinned: `tests/unit/test_solve_under_checkpoints.py` (the shrunk problem, all
+pins, 12 seeds, in a child process; fails on the unfixed build), and the
+campaign's `protocol` door.
+
+Coverage lessons:
+- **The builder door asked each problem one question.** One solve with seed 1
+  on a fresh context never reaches state left by an earlier solve, a pin, or a
+  checkpoint level. The protocol a real caller uses is a front door of its
+  own.
+- **"Builder-safe" had dropped division entirely.** Its reason, the zero
+  divisor, does not apply to a constant divisor, which is how generated
+  constraints use it (`addr % 8 == 0`); the generator now produces it.
+

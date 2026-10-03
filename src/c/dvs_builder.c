@@ -539,6 +539,24 @@ dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
     return ref;
 }
 
+dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand,
+                                 uint8_t to_bits, uint8_t to_signed) {
+    if (to_bits == 0) return EXPR_NULL;
+    dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprCast),
+                                (uint32_t)_Alignof(ExprCast));
+    if (ref == EXPR_NULL) return EXPR_NULL;
+
+    uint32_t voff = ref - POOL_HEADER_SZ;
+    uint32_t local = voff - b->current->base_offset;
+    ExprCast *n = (ExprCast *)_block_ptr_at(b->current, local);
+    n->kind      = EXPR_CAST;
+    n->to_bits   = to_bits;
+    n->to_signed = to_signed ? 1 : 0;
+    n->_pad[0]   = n->_pad[1] = 0;
+    n->operand   = operand;
+    return ref;
+}
+
 dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
                              uint8_t from_bits, uint8_t to_bits,
                              uint8_t sign_extend, uint8_t dst_signed) {

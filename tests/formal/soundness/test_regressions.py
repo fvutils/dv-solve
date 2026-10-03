@@ -21,5 +21,5 @@ _FILES = sorted((Path(__file__).parent / "regressions").glob("*.json"))
 def test_regression(path):
     d = json.loads(path.read_text())
     p = from_json(d)
-    bad = failing(run_doors(p, ["smt2", "incr", "steps", "builder"], str(DEFAULT_EXE)))
+    bad = failing(run_doors(p, ["smt2", "incr", "steps", "builder", "protocol"], str(DEFAULT_EXE)))
     assert not bad, (d["why"], [(o.door, o.expect, o.got, o.model_ok) for o in bad])

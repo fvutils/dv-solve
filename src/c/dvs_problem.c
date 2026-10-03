@@ -185,6 +185,21 @@ dvs_expr_t expr_extend(dvs_problem_t *sp, dvs_expr_t operand,
     return ref;
 }
 
+dvs_expr_t expr_cast(dvs_problem_t *sp, dvs_expr_t operand,
+                  uint8_t to_bits, uint8_t to_signed) {
+    if (to_bits == 0) return EXPR_NULL;
+    dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprCast),
+                              (uint32_t)_Alignof(ExprCast));
+    if (ref == EXPR_NULL) return EXPR_NULL;
+    ExprCast *n = (ExprCast *)POOL_PTR(sp, ref);
+    n->kind      = EXPR_CAST;
+    n->to_bits   = to_bits;
+    n->to_signed = to_signed ? 1 : 0;
+    n->_pad[0]   = n->_pad[1] = 0;
+    n->operand   = operand;
+    return ref;
+}
+
 dvs_expr_t expr_extract(dvs_problem_t *sp, dvs_expr_t operand,
                      uint8_t hi_bit, uint8_t lo_bit) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprExtract),

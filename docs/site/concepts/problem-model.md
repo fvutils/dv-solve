@@ -103,6 +103,10 @@ Other expression forms:
 | `expr_extract(v, hi, lo)` | `v[hi:lo]` |
 | `expr_concat(hi, lo, lo_width)` | `{hi, lo}` |
 | `expr_extend(v, from_bits, to_bits, sign_extend)` | zero- or sign-extension |
+| `expr_cast(v, to_bits, to_signed)` | `T'(v)`: `v` evaluated at least `to_bits` wide, then truncated or extended and read at the new signedness |
+
+A value used where a condition is expected (as a constraint of its own, or as
+an operand of `&&`, `||` or `!`) holds when it is nonzero.
 
 Some relations are constraints in their own right. Pass what they return to
 `add_constraint`:

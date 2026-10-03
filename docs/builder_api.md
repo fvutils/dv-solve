@@ -58,6 +58,8 @@ ExprRef dvs_builder_expr_extend(SolveProblemBuilder *b, ExprRef operand,
                             uint8_t from, uint8_t to, uint8_t sign);
 ExprRef dvs_builder_expr_extract(SolveProblemBuilder *b, ExprRef operand,
                              uint8_t hi, uint8_t lo);
+ExprRef dvs_builder_expr_cast(SolveProblemBuilder *b, ExprRef operand,
+                          uint8_t to_bits, uint8_t to_signed);   /* T'(x) */
 ExprRef dvs_builder_add_constraint(SolveProblemBuilder *b, ExprRef root);
 ExprRef dvs_builder_add_source(SolveProblemBuilder *b, uint32_t n_vars,
                            uint32_t *var_ids);

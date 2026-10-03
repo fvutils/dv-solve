@@ -24,7 +24,7 @@ COVERPOINTS = {
     "problem_size": ("size:", [str(n) for n in range(1, 8)]),
     "width": ("width:", ["narrow", "16", "32", "33", "63", "64", "65"]),
 }
-DOORS = ["smt2", "smt2-incr", "builder"]
+DOORS = ["smt2", "smt2-incr", "builder", "protocol"]
 ANSWERS = ["sat", "unsat", "unknown", "timeout", "error"]
 
 

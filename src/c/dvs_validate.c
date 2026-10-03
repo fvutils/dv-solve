@@ -62,6 +62,10 @@ static int _has_loose_aux(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
         ExprExtend *ee = (ExprExtend *)dvs_pool_ptr(&sp->pool, ref);
         return _has_loose_aux(ctx, sp, ee->operand);
     }
+    case EXPR_CAST: {
+        ExprCast *ec = (ExprCast *)dvs_pool_ptr(&sp->pool, ref);
+        return _has_loose_aux(ctx, sp, ec->operand);
+    }
     case EXPR_EXTRACT: {
         ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ref);
         return _has_loose_aux(ctx, sp, ex->operand);
@@ -192,6 +196,12 @@ static VTy _vtype(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         ExprSvCast *ec = (ExprSvCast *)dvs_pool_ptr(&sp->pool, ref);
         t.w = ec->to_bits;
         t.s = ec->dst_signed ? 1 : 0;
+        break;
+    }
+    case EXPR_CAST: {
+        ExprCast *ec = (ExprCast *)dvs_pool_ptr(&sp->pool, ref);
+        t.w = ec->to_bits;
+        t.s = ec->to_signed ? 1 : 0;
         break;
     }
     case EXPR_EXTRACT: {
@@ -385,6 +395,19 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         if (!ee->sign_extend) bits &= _mask_for(ee->from_bits);
         return _wrap((VU)_wrap(bits, ee->to_bits, own_s), W, S);
     }
+    case EXPR_CAST: {
+        /* The operand at the wider of its own width and the cast's, at its
+         * own signedness (an assignment-like context); its low to_bits bits
+         * read at the cast's signedness. */
+        ExprCast *ec = (ExprCast *)dvs_pool_ptr(&sp->pool, ref);
+        VTy ot = _vtype(ctx, sp, ec->operand, skip);
+        if (*skip) return 0;
+        uint16_t ow = ot.w > ec->to_bits ? ot.w : ec->to_bits;
+        if (ow > V_MAXW) { *skip = 1; return 0; }
+        VI o = _ev(ctx, sp, ec->operand, ow, ot.s, skip);
+        if (*skip) return 0;
+        return _wrap((VU)_wrap((VU)o, ec->to_bits, ec->to_signed ? 1 : 0), W, S);
+    }
     case EXPR_EXTRACT: {
         ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ref);
         VTy ot = _vtype(ctx, sp, ex->operand, skip);
@@ -518,6 +541,13 @@ static void _dump_expr(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
         fprintf(err, "(%sext[%u->%u] ", ee->sign_extend ? "s" : "z",
                 ee->from_bits, ee->to_bits);
         _dump_expr(ctx, sp, ee->operand, err, depth+1);
+        fprintf(err, ")");
+        return;
+    }
+    case EXPR_CAST: {
+        ExprCast *ec = (ExprCast *)dvs_pool_ptr(&sp->pool, ref);
+        fprintf(err, "(cast[%s%u] ", ec->to_signed ? "s" : "u", ec->to_bits);
+        _dump_expr(ctx, sp, ec->operand, err, depth+1);
         fprintf(err, ")");
         return;
     }

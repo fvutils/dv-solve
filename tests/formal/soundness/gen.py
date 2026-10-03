@@ -2,8 +2,9 @@
 
 `Gen(rng, widths, builder_safe)` draws one Problem. With `builder_safe`, only
 operators whose SystemVerilog meaning (the Python/C builder's) equals their
-SMT-LIB meaning are used: no division (SV gives x for a zero divisor), no
-arithmetic shift right, no signed comparisons.
+SMT-LIB meaning are used: unsigned division and remainder by a nonzero
+constant only (SV gives x for a zero divisor), no arithmetic shift right, no
+signed comparisons.
 """
 from __future__ import annotations
 
@@ -11,7 +12,8 @@ import random
 
 from .ir import BV_BIN, BV_UN, CMP, Problem, width
 
-_BUILDER_BIN = ["bvadd", "bvsub", "bvmul", "bvand", "bvor", "bvxor", "bvshl", "bvlshr"]
+_BUILDER_BIN = ["bvadd", "bvsub", "bvmul", "bvudiv", "bvurem", "bvand", "bvor", "bvxor",
+                "bvshl", "bvlshr"]
 _BUILDER_CMP = ["=", "distinct", "bvult", "bvule", "bvugt", "bvuge"]
 
 # Variable layouts, all within ~12 free bits so enumeration stays cheap.
@@ -41,6 +43,7 @@ class Gen:
     def __init__(self, rng: random.Random, widths: dict, builder_safe: bool = False):
         self.rng = rng
         self.widths = widths
+        self.builder_safe = builder_safe
         self.bin_ops = _BUILDER_BIN if builder_safe else BV_BIN
         self.cmp_ops = _BUILDER_CMP if builder_safe else CMP
         self.pool: list = []      # built terms, for sharing
@@ -77,6 +80,11 @@ class Gen:
             op = rng.choice(self.bin_ops)
             a = self.bv(w, depth - 1)
             b = a if rng.random() < 0.08 else self.bv(w, depth - 1)
+            if op in ("bvudiv", "bvurem") and self.builder_safe:
+                # The builder shares SMT-LIB's meaning only for a nonzero
+                # divisor; a constant one is what generated constraints use
+                # (`slba % 8 == 0`).
+                b = ("const", rng.randrange(1, 1 << w), w)
             if a is b:
                 self.bins.add("shape:same-operand")
             t = (op, w, a, b)

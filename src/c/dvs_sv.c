@@ -396,6 +396,11 @@ static SvTy _type(SvE *E, dvs_expr_t ref) {
         t.w = x.to_bits; t.s = x.dst_signed ? 1 : 0;
         break;
     }
+    case EXPR_CAST: {
+        ExprCast x = *(ExprCast *)_P(E, ref);
+        t.w = x.to_bits; t.s = x.to_signed ? 1 : 0;
+        break;
+    }
     case EXPR_EXTRACT: {
         ExprExtract x = *(ExprExtract *)_P(E, ref);
         t.w = (uint16_t)(x.hi_bit - x.lo_bit + 1); t.s = 0;
@@ -416,6 +421,20 @@ static SvTy _type(SvE *E, dvs_expr_t ref) {
 }
 
 /* ---- rewriting --------------------------------------------------- */
+
+static dvs_expr_t _cmp(SvE *E, dvs_binop_t op, dvs_expr_t l0, dvs_expr_t r0,
+                       dvs_expr_t reuse);
+
+/* A value in a Boolean position (a constraint of its own, an operand of
+ * && || !, a condition) holds when it is nonzero: `x != 0` in the value's
+ * own type. The engines compile a comparison, and a bare variable, as a
+ * constraint; a multi-bit value of any other shape they could not. */
+static dvs_expr_t _nonzero(SvE *E, dvs_expr_t ref) {
+    SvTy t = _type(E, ref);
+    dvs_expr_t z = _mk_const(E, 0, t.s, t.w);
+    if (E->err) return EXPR_NULL;
+    return _cmp(E, DVS_BIN_NEQ, ref, z, EXPR_NULL);
+}
 
 static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint16_t W, uint8_t S);
 static dvs_expr_t _bool(SvE *E, dvs_expr_t ref);
@@ -565,6 +584,29 @@ static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint16_t W, uint8_t S) {
         dvs_expr_t n = (o == x.operand) ? ref
                   : _mk_cast(E, o, x.from_bits, x.to_bits, x.sign_extend,
                              x.dst_signed);
+        out = _conv(E, n, W, S);
+        break;
+    }
+    case EXPR_CAST: {
+        /* An assignment-like context: the operand is evaluated at the wider
+         * of its own width and the cast's, at its own signedness; the value
+         * is then truncated to the cast's width or extended by its own
+         * signedness, and read at the cast's signedness. */
+        ExprCast x = *(ExprCast *)_P(E, ref);
+        SvTy ot = _type(E, x.operand);
+        uint16_t ow = ot.w > x.to_bits ? ot.w : x.to_bits;
+        dvs_expr_t o = _val(E, x.operand, ow, ot.s);
+        if (E->err) break;
+        SvTy vt = _type(E, o);
+        dvs_expr_t n;
+        if (vt.w > x.to_bits) {
+            if (vt.w > 255) { E->err = 1; break; }
+            n = _mk_extract(E, o, (uint8_t)(x.to_bits - 1), 0);
+            if (x.to_signed)
+                n = _mk_cast(E, n, x.to_bits, x.to_bits, 0, 1);
+        } else {
+            n = _conv(E, o, x.to_bits, x.to_signed ? 1 : 0);
+        }
         out = _conv(E, n, W, S);
         break;
     }
@@ -804,8 +846,7 @@ static dvs_expr_t _bool(SvE *E, dvs_expr_t ref) {
         } else if (_is_cmp(b.op)) {
             out = _cmp(E, b.op, b.lhs, b.rhs, ref);
         } else {
-            SvTy t = _type(E, ref);
-            out = _val(E, ref, t.w, t.s);
+            out = _nonzero(E, ref);
         }
         break;
     }
@@ -816,8 +857,7 @@ static dvs_expr_t _bool(SvE *E, dvs_expr_t ref) {
             if (E->err) break;
             out = (x == u.operand) ? ref : _mk_un(E, DVS_UN_NOT, x);
         } else {
-            SvTy t = _type(E, ref);
-            out = _val(E, ref, t.w, t.s);
+            out = _nonzero(E, ref);
         }
         break;
     }
@@ -839,11 +879,10 @@ static dvs_expr_t _bool(SvE *E, dvs_expr_t ref) {
     case EXPR_EXTEND:
     case EXPR_EXTRACT:
     case EXPR_CONCAT:
-    case EXPR_SV_CAST: {
-        SvTy t = _type(E, ref);
-        out = _val(E, ref, t.w, t.s);
+    case EXPR_SV_CAST:
+    case EXPR_CAST:
+        out = _nonzero(E, ref);
         break;
-    }
     default:
         out = ref;
         break;

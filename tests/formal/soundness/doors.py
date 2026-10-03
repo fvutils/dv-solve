@@ -147,9 +147,18 @@ _UNSAFE = {"bvudiv", "bvurem", "bvsdiv", "bvsrem", "bvsmod", "bvashr",
            "bvslt", "bvsle", "bvsgt", "bvsge"}
 
 
+def _nonzero_const(t) -> bool:
+    return t[0] == "const" and t[1] != 0
+
+
 def builder_safe(p: Problem) -> bool:
-    """True when every operator means the same in SystemVerilog and SMT-LIB."""
+    """True when every operator means the same in SystemVerilog and SMT-LIB.
+
+    Unsigned division and remainder qualify when the divisor is a nonzero
+    constant: only a zero divisor separates the two (SystemVerilog gives x)."""
     def ok(t):
+        if t[0] in ("bvudiv", "bvurem") and _nonzero_const(t[3]):
+            return ok(t[2])
         if t[0] in _UNSAFE:
             return False
         if t[0] in ("var", "const", "true", "false"):
@@ -160,10 +169,12 @@ def builder_safe(p: Problem) -> bool:
 
 
 def _lower(b, t, ids):
-    from dv_solve.problem import (BIN_ADD, BIN_SUB, BIN_MUL, BIN_BAND, BIN_BOR, BIN_BXOR,
+    from dv_solve.problem import (BIN_ADD, BIN_SUB, BIN_MUL, BIN_DIV, BIN_MOD,
+                                  BIN_BAND, BIN_BOR, BIN_BXOR,
                                   BIN_LSHIFT, BIN_RSHIFT, BIN_EQ, BIN_NEQ, BIN_LT, BIN_LTE,
                                   BIN_GT, BIN_GTE, BIN_AND, BIN_OR, UN_NEG, UN_NOT, UN_INVERT)
-    binops = {"bvadd": BIN_ADD, "bvsub": BIN_SUB, "bvmul": BIN_MUL, "bvand": BIN_BAND,
+    binops = {"bvadd": BIN_ADD, "bvsub": BIN_SUB, "bvmul": BIN_MUL,
+              "bvudiv": BIN_DIV, "bvurem": BIN_MOD, "bvand": BIN_BAND,
               "bvor": BIN_BOR, "bvxor": BIN_BXOR, "bvshl": BIN_LSHIFT, "bvlshr": BIN_RSHIFT,
               "=": BIN_EQ, "distinct": BIN_NEQ, "bvult": BIN_LT, "bvule": BIN_LTE,
               "bvugt": BIN_GT, "bvuge": BIN_GTE, "xor": BIN_NEQ}
@@ -230,4 +241,87 @@ def builder(p: Problem, time_limit_ms: int = 10000) -> list:
                 m = {n: ctx.get_value(ids[n]) & ((1 << w) - 1) for n, w in p.widths.items()}
                 ok = all(ev(c, m) for c in p.cons)
             res.append(Outcome(f"builder[lcg={lcg}]", exp, got, ok))
+    return res
+
+
+# ---- The protocol a scenario generator uses (Python builder) ----
+
+PROTOCOL_SEEDS = 8
+
+
+def _pin_draws(p: Problem, n: int) -> list:
+    """Per solve, a pin (name, value) or None, the same on every replay of p."""
+    import hashlib
+    import random
+    rng = random.Random(hashlib.sha1(p.smt2(get_model=False).encode()).hexdigest())
+    out = []
+    for _ in range(n):
+        if rng.random() < 0.35:
+            name = rng.choice(sorted(p.widths))
+            out.append((name, rng.randrange(1 << p.widths[name])))
+        else:
+            out.append(None)
+    return out
+
+
+def protocol(p: Problem, seeds: int = PROTOCOL_SEEDS) -> list:
+    """One context, many seeded solves, as a scenario generator drives it.
+
+    Per solve: a checkpoint, maybe a pin (a value committed earlier), a second
+    checkpoint, a short search with clause learning; if that gives up or says
+    unsat, a restore to the second checkpoint and the plain search; then a
+    restore to the first. Every answer is judged against brute force under
+    its pin, and a model must keep the pin. A solve under checkpoints starts
+    above decision level 0, and the pins below it are the caller's: this is
+    the door that reaches it, with repeated solves on one context."""
+    from dv_solve.builder import SolveProblemBuilder
+    from dv_solve.ctx import (SolveCtx, CompileUnsatError, CompileIncompleteError,
+                              SOLVE_OK, SOLVE_UNSAT)
+    if max(p.widths.values()) > 64:
+        return []
+    ids = {n: i for i, n in enumerate(p.widths)}
+    b = SolveProblemBuilder()
+    for n, w in p.widths.items():
+        b.add_var(ids[n], width=w, is_signed=False, lo=0, hi=(1 << w) - 1)
+    for c in p.cons:
+        b.add_constraint(_lower(b, c, ids))
+    prob, _ = b.finalize()
+    try:
+        exp_any = "sat" if satisfiable(p.widths, p.cons) else "unsat"
+    except OracleUndecided:
+        return []
+    try:
+        ctx = SolveCtx(prob)
+    except CompileUnsatError:
+        return [Outcome("protocol", exp_any, "unsat")]
+    except CompileIncompleteError:
+        return [Outcome("protocol", exp_any, "unknown")]
+    res = []
+    with ctx:
+        for k, pin in enumerate(_pin_draws(p, seeds), start=1):
+            seed = k * 2654435761 % (1 << 32)
+            cons = list(p.cons)
+            if pin is not None:
+                name, v = pin
+                w = p.widths[name]
+                cons.append(("=", "bool", ("var", name, w), ("const", v, w)))
+            exp = "sat" if satisfiable(p.widths, cons) else "unsat"
+            door = f"protocol[k={k}{'' if pin is None else f' pin {pin[0]}={pin[1]}'}]"
+            cp = ctx.checkpoint()
+            if pin is not None and not ctx.pin(ids[pin[0]], pin[1]):
+                res.append(Outcome(door, exp, "unsat"))
+                ctx.restore(cp)
+                continue
+            inner = ctx.checkpoint()
+            rc = ctx.solve(seed=seed, max_restarts=5, use_lcg=True)
+            if rc != SOLVE_OK:
+                ctx.restore(inner)
+                rc = ctx.solve(seed=seed, max_restarts=10000)
+            got = {SOLVE_OK: "sat", SOLVE_UNSAT: "unsat"}.get(rc, "unknown")
+            ok = True
+            if got == "sat":
+                m = {n: ctx.get_value(ids[n]) & ((1 << w) - 1) for n, w in p.widths.items()}
+                ok = all(ev(c, m) for c in cons)
+            res.append(Outcome(door, exp, got, ok))
+            ctx.restore(cp)
     return res

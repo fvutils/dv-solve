@@ -4,7 +4,8 @@
  * For each variable, test whether the current upper/lower bound value
  * is feasible by tentatively assigning it and running propagation.
  * If propagation detects a conflict, permanently exclude that bound
- * at level 0.  Repeat until fixed point or budget exhaustion.
+ * at the search root (ctx->search_base).  Repeat until fixed point or
+ * budget exhaustion.
  */
 #include <stdint.h>
 #include "dvs_shave.h"
@@ -25,12 +26,12 @@ PropResult bounds_shave(dvs_ctx_t *ctx, uint32_t max_iters) {
                 int64_t lo = var_lo64(ctx, &ctx->vars[x]);
                 if (lo >= hi) break;  /* singleton or empty */
 
-                /* Tentatively assign x = hi at level 1 */
+                /* Tentatively assign x = hi one level above the root */
                 trail_push_level(ctx);
                 PropResult pr = ctx_tighten_lb64(ctx, x, hi);
                 if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, hi);
                 if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
-                trail_backtrack(ctx, 0);
+                trail_backtrack(ctx, ctx->search_base);
                 /* An aborted probe proves nothing; do not prune on it. */
                 if (ctx->prop_aborted) return PROP_CONFLICT;
 
@@ -57,7 +58,7 @@ PropResult bounds_shave(dvs_ctx_t *ctx, uint32_t max_iters) {
                 PropResult pr = ctx_tighten_lb64(ctx, x, lo);
                 if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, lo);
                 if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
-                trail_backtrack(ctx, 0);
+                trail_backtrack(ctx, ctx->search_base);
                 /* An aborted probe proves nothing; do not prune on it. */
                 if (ctx->prop_aborted) return PROP_CONFLICT;
 

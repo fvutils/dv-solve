@@ -81,6 +81,11 @@ typedef struct dvs_ctx_s {
     uint32_t           n_vars;        /* number of compiled variables  */
     uint32_t           n_vars_capacity; /* allocated size of vars array */
     uint32_t           decision_level;
+    /* The decision level a solve started at: its root. Each open checkpoint
+     * holds a level of its own, so a solve under checkpoints (and the pins
+     * made in them) starts above 0, and nothing the search does may undo
+     * what lies at or below this level. Set by the search at entry. */
+    uint32_t           search_base;
     uint64_t           trail_count;
     uint64_t           conflict_count;
     uint64_t           rng_state;

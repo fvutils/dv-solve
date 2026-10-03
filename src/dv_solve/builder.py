@@ -324,6 +324,21 @@ class SolveProblemBuilder:
             ctypes.c_uint8(1 if sign_extend else 0),
         )
 
+    def expr_cast(self, operand: int, to_bits: int, to_signed: bool = False) -> int:
+        """A cast of ``operand`` to a ``to_bits``-bit integer, signed when
+        ``to_signed``: SystemVerilog's ``T'(operand)``.
+
+        When ``to_bits`` is wider than the operand, the operand is evaluated
+        at ``to_bits`` (an assignment-like context), so a cast to 64 bits of
+        the product of two 32-bit variables does not wrap at 32 bits. The
+        value is then truncated to ``to_bits``, or extended by the operand's
+        own signedness, and read as signed or unsigned.
+        """
+        return self._lib.dvs_builder_expr_cast(
+            self._b, ctypes.c_uint32(operand), ctypes.c_uint8(to_bits),
+            ctypes.c_uint8(1 if to_signed else 0),
+        )
+
     def expr_extract(self, operand: int, hi_bit: int, lo_bit: int) -> int:
         """Bits ``hi_bit`` down to ``lo_bit`` of ``operand`` (inclusive)."""
         return self._lib.dvs_builder_expr_extract(

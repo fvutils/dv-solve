@@ -14,6 +14,6 @@ from .campaign import DEFAULT_EXE, campaign
 @pytest.mark.skipif(not DEFAULT_EXE.is_file(), reason="dv-solve-smt2 not built")
 @pytest.mark.parametrize("seed", [11, 12])
 def test_campaign_smoke(seed):
-    failures, stats, _ = campaign(seed, 150, ["smt2", "incr", "steps", "builder"],
+    failures, stats, _ = campaign(seed, 150, ["smt2", "incr", "steps", "builder", "protocol"],
                                   str(DEFAULT_EXE), out_dir=None, log=lambda *_: None)
     assert not failures, [why for why, _ in failures]

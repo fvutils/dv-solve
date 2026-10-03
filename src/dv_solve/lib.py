@@ -127,6 +127,8 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.expr_extract.restype  = c.c_uint32
     lib.expr_extract.argtypes = [c.c_void_p, c.c_uint32,
                                  c.c_uint8, c.c_uint8]
+    lib.expr_cast.restype  = c.c_uint32
+    lib.expr_cast.argtypes = [c.c_void_p, c.c_uint32, c.c_uint8, c.c_uint8]
 
     # SolveCtx
     lib.dvs_solver_create.restype  = c.c_void_p
@@ -325,6 +327,10 @@ def _wire_builder_argtypes(lib: ctypes.CDLL) -> None:
     lib.dvs_builder_expr_extend.restype  = c.c_uint32
     lib.dvs_builder_expr_extend.argtypes = [c.c_void_p, c.c_uint32,
                                         c.c_uint8, c.c_uint8, c.c_uint8]
+
+    lib.dvs_builder_expr_cast.restype  = c.c_uint32
+    lib.dvs_builder_expr_cast.argtypes = [c.c_void_p, c.c_uint32,
+                                          c.c_uint8, c.c_uint8]
 
     lib.dvs_builder_expr_extract.restype  = c.c_uint32
     lib.dvs_builder_expr_extract.argtypes = [c.c_void_p, c.c_uint32,

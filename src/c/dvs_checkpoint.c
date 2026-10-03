@@ -62,16 +62,15 @@ void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
     }
 
     /* trail_backtrack walks ctx->trail_top backward, stopping when it
-     * reaches ctx->level_marks[target_level].trail_top. Inside a push
-     * scope, dvs_solver_solve seals "level-0 baseline" at line 341 of
-     * dvs_search.c by overwriting level_marks[0] to the current trail
-     * state (so its restarts/bounds_shave only undo search-time
-     * tightenings, not compile-time ones). If the check-sat inside the
-     * push goes UNSAT, that overwrite leaves level_marks[m->decision_level]
-     * pointing at a *post*-push state — and trail_backtrack would stop
-     * there instead of walking all the way back to m->trail_top.
-     * Restore the mark from the saved checkpoint values so the backtrack
-     * undoes every trail entry recorded after dvs_solver_checkpoint(). */
+     * reaches ctx->level_marks[target_level].trail_top. A solve seals the
+     * level it starts at as its root (dvs_search.c, ctx->search_base) and
+     * overwrites that level's mark with the trail state at its start, and
+     * a dvs_solver_reset() in the scope re-opens the checkpoint's level.
+     * Either can leave level_marks[m->decision_level] pointing past this
+     * checkpoint, so that trail_backtrack would stop there instead of
+     * walking all the way back to m->trail_top. Restore the mark from the
+     * saved checkpoint values so the backtrack undoes every trail entry
+     * recorded after dvs_solver_checkpoint(). */
     ctx->level_marks[m->decision_level].trail_top   = m->trail_top;
     ctx->level_marks[m->decision_level].trail_count = m->trail_count;
     /* The stack mark too: the seal's push stands past every trail entry

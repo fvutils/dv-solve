@@ -32,6 +32,7 @@ typedef enum {
     EXPR_IN_RANGES = 14, /* value in [lo0,hi0] U [lo1,hi1] U ... */
     EXPR_SV_CAST  = 15, /* INTERNAL: explicit width/signedness conversion,
                          * produced only by SV elaboration (dvs_sv.h) */
+    EXPR_CAST     = 16, /* cast to a type: SV `T'(x)`  */
 } ExprKind;
 
 
@@ -151,6 +152,25 @@ typedef struct {
     uint8_t  dst_signed;  /* result signedness */
     dvs_expr_t  operand;
 } ExprSvCast;
+
+/** A cast to the type (`to_bits`, `to_signed`): SystemVerilog's
+ * `T'(operand)` for an integral T, and the cast of PSS and similar languages.
+ *
+ * The operand is an assignment-like context (IEEE 1800 6.24.1, 11.8.1): when
+ * `to_bits` is wider than the operand's own width it is propagated into the
+ * operand, so `cast(a * b, 64, 0)` multiplies 32-bit `a` and `b` at 64 bits;
+ * the operand's signedness stays its own. The value is then truncated to
+ * `to_bits`, or extended by the operand's signedness, and read as signed when
+ * `to_signed`. The node's own type is (`to_bits`, `to_signed`). SV
+ * elaboration rewrites it into extracts and EXPR_SV_CAST nodes, so no engine
+ * sees it. */
+typedef struct {
+    ExprKind kind;        /* EXPR_CAST        */
+    uint8_t  to_bits;     /* result width     */
+    uint8_t  to_signed;   /* result signedness */
+    uint8_t  _pad[2];
+    dvs_expr_t  operand;
+} ExprCast;
 
 /** Bit-slice extract: result = operand[hi_bit:lo_bit] */
 typedef struct {
@@ -381,6 +401,9 @@ dvs_expr_t expr_extend(dvs_problem_t *sp, dvs_expr_t operand,
                     uint8_t from_bits, uint8_t to_bits, uint8_t sign_extend);
 dvs_expr_t expr_extract(dvs_problem_t *sp, dvs_expr_t operand,
                      uint8_t hi_bit, uint8_t lo_bit);
+/** A cast of `operand` to (`to_bits`, `to_signed`); see ExprCast. */
+dvs_expr_t expr_cast(dvs_problem_t *sp, dvs_expr_t operand,
+                  uint8_t to_bits, uint8_t to_signed);
 
 dvs_expr_t expr_concat(dvs_problem_t *sp, dvs_expr_t hi, dvs_expr_t lo,
                     uint8_t lo_width);
