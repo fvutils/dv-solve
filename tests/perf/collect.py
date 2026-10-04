@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import builds, calib, run_rand, run_sat, schema, suites, tools
 
-SUITES = ("calib", "sat-core", "rand-core")
+SUITES = ("calib", "sat-core", "rand-core", "app-riscv-dv-core")
 NOISY_LOAD = 4.0             # host 1-min load above this marks the run noisy
 
 
@@ -85,6 +85,25 @@ def _rand(rec: dict, name: str, a) -> None:
         rec["valid"], rec["reason"] = False, f"{name}: {res['invalid']}"
 
 
+def _app(rec: dict, name: str, a) -> None:
+    """An application suite (riscv-dv): docs/riscv_dv_results_design.md.
+
+    Not trended yet: trend_lines() and the pages ignore the `app` family until
+    Verilator releases +verilator+rand+sampler+, which the suite's headline
+    arm (dv@solver) needs."""
+    from .apps.riscv_dv import build as app_build, suite as app_suite
+    vlt = a.app_verilator or os.environ.get("DVS_APP_VERILATOR")
+    uvm = a.app_uvm or os.environ.get("DVS_APP_UVM")
+    if not vlt or not uvm:
+        raise RuntimeError(f"{name} needs --app-verilator and --app-uvm "
+                           "(or $DVS_APP_VERILATOR and $DVS_APP_UVM)")
+    inputs = app_build.Inputs(app_suite.load(name), Path(vlt), Path(uvm),
+                              Path(a.build_root) / "riscv-dv", a.riscv_dv_repo)
+    app_suite.collect(rec, name, builds.head_bin(a.head_bin), tools.path("z3"), inputs,
+                      Path(a.build_root) / "app-work",
+                      log=lambda m: print(m, file=sys.stderr, flush=True))
+
+
 def collect(kind: str, suite_names: list, a=None) -> dict:
     load0 = calib.loadavg()
     utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -105,10 +124,18 @@ def collect(kind: str, suite_names: list, a=None) -> dict:
     try:
         if "calib" in suite_names:
             rec["calib"] = calib.calibrate()
-        if any(n != "calib" for n in suite_names):
-            rec["tools"].update(tools.check(["z3", "bitwuzla", "boolector"]))
+        need = set()
         for n in suite_names:
-            if n.startswith("rand-"):
+            if n.startswith("app-"):
+                need.add("z3")
+            elif n != "calib":
+                need.update(("z3", "bitwuzla", "boolector"))
+        if need:
+            rec["tools"].update(tools.check(sorted(need)))
+        for n in suite_names:
+            if n.startswith("app-"):
+                _app(rec, n, a)
+            elif n.startswith("rand-"):
                 _rand(rec, n, a)
             elif n != "calib":
                 _sat(rec, n, a)
@@ -129,7 +156,14 @@ def main(argv=None) -> int:
     ap.add_argument("--github-output", action="store_true")
     ap.add_argument("--head-bin", help="head dv-solve-smt2 (default build/dv-solve-smt2)")
     ap.add_argument("--anchor", default=builds.ANCHOR, help="anchor release tag, or 'none'")
-    ap.add_argument("--build-root", default="perf-builds", help="where tag builds go")
+    ap.add_argument("--build-root", default="perf-builds",
+                    help="where tag builds, riscv-dv generators and app work dirs go")
+    ap.add_argument("--app-verilator", help="Verilator source tree for app suites "
+                    "($DVS_APP_VERILATOR)")
+    ap.add_argument("--app-uvm", help="UVM directory (holding src/uvm_pkg.sv) for app "
+                    "suites ($DVS_APP_UVM)")
+    ap.add_argument("--riscv-dv-repo", help="local riscv-dv git repo holding the pinned "
+                    "commit (default: clone the suite's URL)")
     ap.add_argument("--workers", type=int, default=0, help="0: a quarter of the physical cores")
     ap.add_argument("--rand-workers", type=int, default=1,
                     help="randomization runs one at a time by default: z3's CPU time "

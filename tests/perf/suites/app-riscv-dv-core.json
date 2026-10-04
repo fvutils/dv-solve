@@ -1,0 +1,141 @@
+{
+ "suite": "app-riscv-dv-core",
+ "kind": "app",
+ "app": "riscv-dv",
+ "about": "riscv-dv instruction generation under Verilator, end to end: the nightly set (docs/riscv_dv_results_design.md \u00a74).",
+ "riscv_dv": {
+  "url": "https://github.com/chipsalliance/riscv-dv",
+  "commit": "0d71c2b666dec48dde0b804a2138426da56aa252"
+ },
+ "patches": [
+  "P01-riscv-dv-pmp-solve-before.patch"
+ ],
+ "runtime_patches": [
+  "V-P01-verilator-unary-and.patch"
+ ],
+ "timeout_s": 1800,
+ "reference": "z3@verilator",
+ "arms": [
+  {
+   "name": "dv@solver",
+   "solver": "dv",
+   "sampler": "solver",
+   "reps": 3,
+   "recorded": "extra"
+  },
+  {
+   "name": "z3@verilator",
+   "solver": "z3",
+   "sampler": "verilator",
+   "reps": 1,
+   "recorded": "timed"
+  }
+ ],
+ "cells": [
+  {
+   "target": "rv32imc",
+   "test": "riscv_rand_instr_test",
+   "gen_test": "riscv_instr_base_test",
+   "seed": 1,
+   "plusargs": [
+    "+instr_cnt=10000",
+    "+num_of_sub_program=5",
+    "+directed_instr_0=riscv_load_store_rand_instr_stream,4",
+    "+directed_instr_1=riscv_loop_instr,4",
+    "+directed_instr_2=riscv_hazard_instr_stream,4",
+    "+directed_instr_3=riscv_load_store_hazard_instr_stream,4",
+    "+directed_instr_4=riscv_multi_page_load_store_instr_stream,4",
+    "+directed_instr_5=riscv_mem_region_stress_test,4",
+    "+directed_instr_6=riscv_jal_instr,4"
+   ],
+   "why": "the randomize_gpr hot path; the typical cell"
+  },
+  {
+   "target": "rv32imc",
+   "test": "riscv_loop_test",
+   "gen_test": "riscv_instr_base_test",
+   "seed": 1,
+   "plusargs": [
+    "+instr_cnt=10000",
+    "+num_of_sub_program=5",
+    "+directed_instr_1=riscv_loop_instr,20"
+   ],
+   "why": "the nested-loop smod cell, dv-solve's slowest; bitblast routing"
+  },
+  {
+   "target": "rv32imc",
+   "test": "riscv_illegal_instr_test",
+   "gen_test": "riscv_rand_instr_test",
+   "seed": 1,
+   "plusargs": [
+    "+illegal_instr_ratio=5"
+   ],
+   "why": "constraints under (push), and the unsat calls"
+  },
+  {
+   "target": "rv32imc",
+   "test": "riscv_pmp_test",
+   "gen_test": "riscv_rand_instr_test",
+   "seed": 1,
+   "plusargs": [
+    "+pmp_randomize=0",
+    "+pmp_num_regions=1",
+    "+pmp_granularity=1",
+    "+pmp_region_0=L:0,A:TOR,X:1,W:1,R:1,ADDR:FFFFFFFF"
+   ],
+   "why": "the P01 area (pmp_cfg solve...before)"
+  },
+  {
+   "target": "rv64gc",
+   "test": "riscv_amo_test",
+   "gen_test": "riscv_rand_instr_test",
+   "seed": 1,
+   "plusargs": [
+    "+instr_cnt=5000",
+    "+num_of_sub_program=5",
+    "+directed_instr_0=riscv_lr_sc_instr_stream,10",
+    "+directed_instr_1=riscv_amo_instr_stream,10"
+   ],
+   "why": "DVS-F05 (the crash)"
+  },
+  {
+   "target": "rv64gc",
+   "test": "riscv_floating_point_rand_test",
+   "gen_test": "riscv_instr_base_test",
+   "seed": 1,
+   "plusargs": [
+    "+enable_floating_point=1",
+    "+instr_cnt=10000",
+    "+num_of_sub_program=5",
+    "+directed_instr_0=riscv_load_store_rand_instr_stream,4",
+    "+directed_instr_1=riscv_loop_instr,4",
+    "+directed_instr_2=riscv_multi_page_load_store_instr_stream,4",
+    "+directed_instr_3=riscv_mem_region_stress_test,4",
+    "+directed_instr_4=riscv_jal_instr,4"
+   ],
+   "why": "the FP config"
+  },
+  {
+   "target": "rv64gc",
+   "test": "riscv_loop_test",
+   "gen_test": "riscv_instr_base_test",
+   "seed": 1,
+   "plusargs": [
+    "+instr_cnt=10000",
+    "+num_of_sub_program=5",
+    "+directed_instr_1=riscv_loop_instr,20"
+   ],
+   "why": "the smod cell at 64 bits"
+  },
+  {
+   "target": "rv64gc",
+   "test": "riscv_no_fence_test",
+   "gen_test": "riscv_rand_instr_test",
+   "seed": 1,
+   "plusargs": [
+    "+no_fence=1"
+   ],
+   "why": "where z3@solver fails (every instruction atomic); checks the classifier"
+  }
+ ]
+}

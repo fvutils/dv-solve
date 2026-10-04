@@ -118,6 +118,20 @@ int dvs_bbsolver_resolve(dvs_bbsolver_t *bb, uint64_t seed);
  * array read vars, and would produce a spurious SAT. */
 int dvs_bbsolver_resolve_raw(dvs_bbsolver_t *bb);
 
+/** Enable (default) or disable the post-solve diversity flip-check. With it
+ *  off, a seeded solve returns the SAT model, with only unconstrained bits
+ *  filled from the seed. */
+void dvs_bbsolver_set_diversify(dvs_bbsolver_t *bb, int on);
+
+/** Point a live solver at `problem`, a re-finalized superset of the problem
+ *  it was built over: every expression and variable of the old problem must
+ *  sit at the same offset with the same content (the builder's append-only
+ *  finalize guarantees this when nothing was rewound in between). The caller
+ *  then adds the new constraints with dvs_bbsolver_assert. The solver does not
+ *  own `problem`; the old one may be freed afterwards. Returns 0, or -1 when
+ *  the solver blasts an SV-elaborated private copy (rebuild instead). */
+int dvs_bbsolver_rebase(dvs_bbsolver_t *bb, dvs_problem_t *problem);
+
 /**
  * Cube-and-conquer support (docs/cube_and_conquer_design.md, dvs_cube.[ch]).
  *

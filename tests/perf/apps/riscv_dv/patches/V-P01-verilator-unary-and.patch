@@ -1,0 +1,13 @@
+--- a/include/verilated_random.cpp	2026-09-06 15:10:51.000000000 +0000
++++ b/include/verilated_random.cpp	2026-10-02 23:14:22.795208665 +0000
+@@ -1074,7 +1074,9 @@
+ 
+         // Forbid this exact assignment so the next
+         // (check-sat) is forced to find a genuinely different witness.
+-        solver << "(assert (not (and";
++        // solver-bench V-P01: "and" needs >= 2 args in SMT-LIB; a one-element witness
++        // produced "(and X)", which strict solvers (bitwuzla) reject.
++        solver << "(assert (not (and true";
+         for (const auto& varEntry : witness) {
+             for (const auto& elemEntry : varEntry.second) {
+                 solver << " (=";

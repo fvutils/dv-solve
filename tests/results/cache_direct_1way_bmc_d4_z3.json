@@ -2,9 +2,9 @@
   "solver": "z3",
   "benchmark": "cache_direct_1way_bmc_d4",
   "result": "unsat",
-  "solve_time_ms": 5.538571043871343,
-  "peak_memory_kb": 443532,
-  "returncode": 0,
-  "stdout": "unsat\n",
+  "solve_time_ms": 6.884895032271743,
+  "peak_memory_kb": 267776,
+  "returncode": 1,
+  "stdout": "(error \"line 49 column 87: unknown constant const ((_ BitVec 1)) (Array (_ BitVec 4) (_ BitVec 1)) \")\nunsat\n",
   "stderr": ""
 }

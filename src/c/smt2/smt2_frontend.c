@@ -90,7 +90,7 @@ static int _add_var(Smt2Frontend *fe, const char *name, uint32_t len,
      * variable's domain with an int64 [lo,hi], which cannot represent a wide
      * value. Routing here is central — it covers scalar, aux, array-element,
      * and function-return vars alike. */
-    if (width > 64) fe->needs_bitblast = 1;
+    if (width > 64) { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "wide-var"; }
     /* n_vars is also the next free id (_next_var_id). An id taken past it --
      * _next_var_id skips the ids a compile used internally -- must move it on,
      * or the next declaration got the SAME id: after a compile with internal
@@ -249,7 +249,7 @@ static int64_t _bv_unsigned_hi(uint32_t width) {
  * a 1-bit result and never materialize a >=2^63-bounded aux var), so they stay
  * on CDCL — this keeps the routing targeted (width-64 arithmetic is rare). */
 static void _flag_wide_arith(Smt2Frontend *fe, uint32_t width) {
-    if (width >= 64) fe->needs_bitblast = 1;
+    if (width >= 64) { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "wide-arith"; }
 }
 
 /* Returns 1 on success (populates *out), 0 if not an Array sort,
@@ -582,7 +582,11 @@ static dvs_expr_t _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
 
     uint32_t var_id = _next_var_id(fe);
     int64_t max_val = _bv_unsigned_hi(arr->sort.data_width);
-    dvs_builder_add_var(fe->builder, var_id, arr->sort.data_width, 0, 0, max_val);
+    if (arr->has_default)
+        dvs_builder_add_var(fe->builder, var_id, arr->sort.data_width, 0,
+                            (int64_t)arr->default_val, (int64_t)arr->default_val);
+    else
+        dvs_builder_add_var(fe->builder, var_id, arr->sort.data_width, 0, 0, max_val);
     char nm[SMT2_MAX_NAME];
     snprintf(nm, sizeof(nm), "__arr%u_%llu", var_id, (unsigned long long)k);
     _add_var(fe, nm, (uint32_t)strlen(nm), var_id, arr->sort.data_width);
@@ -909,6 +913,9 @@ static TaggedExpr _abs_select(Smt2Frontend *fe, Smt2ArrayValue *node,
  * Each element var already made for a constant index becomes a read at that
  * index, so constraints already built on it keep their meaning. Returns 0, or
  * -1 when the array cannot be promoted (the caller taints). */
+static dvs_expr_t _abs_array_eq(Smt2Frontend *fe, Smt2ArrayValue *a,
+                                Smt2ArrayValue *b);
+
 static int _promote_sparse(Smt2Frontend *fe, Smt2ArrayValue *arr) {
     if (arr->is_abstract) return 0;
     if (!arr->is_sparse || !_abstract_sort(fe, arr->sort)) return -1;
@@ -958,6 +965,18 @@ static int _promote_sparse(Smt2Frontend *fe, Smt2ArrayValue *arr) {
     free(arr->sparse_varid); arr->sparse_varid = NULL;
     arr->n_sparse = arr->sparse_cap = 0;
     arr->is_sparse = 0;
+    if (arr->has_default) {
+        /* The default no longer reaches reads the word-level engine makes:
+         * restate it as the array equality it came from. */
+        arr->has_default = 0;
+        Smt2ArrayValue *c = _anode_new(fe, SMT2_ANODE_CONST, arr->sort);
+        if (!c) return -1;
+        c->store_val = _bv_const(fe, (int64_t)arr->default_val, arr->sort.data_width);
+        dvs_expr_t p = _abs_array_eq(fe, arr, c);
+        if (p == EXPR_NULL) return -1;
+        dvs_builder_add_constraint(fe->builder,
+            dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, p, _bv_const(fe, 1, 1)));
+    }
     return 0;
 }
 
@@ -1286,31 +1305,44 @@ static dvs_expr_t _udivrem_expr(Smt2Frontend *fe, dvs_expr_t A, dvs_expr_t B,
     return dvs_builder_expr_ite(b, b_is_zero, at_zero, q);
 }
 
+/* Flatten `e` (width `w`) to an aux var; see _flatten_to_var. */
+static dvs_expr_t _fv(Smt2Frontend *fe, dvs_expr_t e, uint16_t w) {
+    return _flatten_to_var(fe, (TaggedExpr){ { e, w }, 0, NULL }).te.ref;
+}
+
+/* -x as 0 - x: the CDCL engine's bvsub propagator wraps mod 2^w; its unary
+ * negate does not. */
+static dvs_expr_t _neg_expr(Smt2Frontend *fe, dvs_expr_t x, uint16_t w) {
+    return dvs_builder_expr_binary(fe->builder, DVS_BIN_SUB, _bv_const(fe, 0, w), x);
+}
+
 /* Build the SMT-LIB signed division (is_rem=0) or remainder (is_rem=1) of two
- * width-`w` operands, lowered to unsigned bvudiv/bvurem + sign muxing (round
- * toward zero). Reused by bvsdiv/bvsrem and by bvsmod. Returns an dvs_expr_t of
- * width `w`. The caller must set fe->needs_bitblast (the composed ITE is unsound
- * on the CDCL bounds engine). */
-static dvs_expr_t _signed_divrem_expr(dvs_builder_t *b, dvs_expr_t S_, dvs_expr_t T_,
+ * width-`w` operands: one unsigned bvudiv/bvurem of the magnitudes plus a sign
+ * fix (round toward zero). The quotient is negated when the signs differ, the
+ * remainder takes the dividend's sign. MIN's magnitude is 2^(w-1) unsigned,
+ * and a zero divisor gives SMT-LIB's results (s/0 = s<0 ? 1 : -1, s%0 = s).
+ *
+ * One divider, not one per sign quadrant: on bitblast each is a w*w-cell
+ * array, and four of them made riscv_loop_instr's `bvsmod` ~3x slower. Every
+ * step is its own aux var so the CDCL compile links each one; in that form
+ * CDCL answers bvsrem/bvsmod exactly, but its division propagator does not
+ * finish bvudiv, so these problems still route to bitblast.
+ *
+ * Reused by bvsdiv/bvsrem and by bvsmod. Returns an dvs_expr_t of width `w`.
+ * The caller must set fe->needs_bitblast. */
+static dvs_expr_t _signed_divrem_expr(Smt2Frontend *fe, dvs_expr_t S_, dvs_expr_t T_,
                                    uint16_t w, int is_rem) {
-    uint32_t uop = is_rem ? DVS_BIN_MOD : DVS_BIN_DIV;
-    dvs_expr_t msb_s = dvs_builder_expr_extract(b, S_, w - 1, w - 1);
-    dvs_expr_t msb_t = dvs_builder_expr_extract(b, T_, w - 1, w - 1);
-    dvs_expr_t nS = dvs_builder_expr_unary(b, DVS_UN_NEG, S_);
-    dvs_expr_t nT = dvs_builder_expr_unary(b, DVS_UN_NEG, T_);
-    dvs_expr_t q00 = dvs_builder_expr_binary(b, uop, S_, T_);
-    dvs_expr_t q10 = dvs_builder_expr_unary(b, DVS_UN_NEG, dvs_builder_expr_binary(b, uop, nS, T_));
-    dvs_expr_t q01, q11;
-    if (is_rem) {   /* remainder: sign follows the dividend s */
-        q01 = dvs_builder_expr_binary(b, uop, S_, nT);
-        q11 = dvs_builder_expr_unary(b, DVS_UN_NEG, dvs_builder_expr_binary(b, uop, nS, nT));
-    } else {        /* quotient: sign = sign(s) xor sign(t) */
-        q01 = dvs_builder_expr_unary(b, DVS_UN_NEG, dvs_builder_expr_binary(b, uop, S_, nT));
-        q11 = dvs_builder_expr_binary(b, uop, nS, nT);
-    }
-    dvs_expr_t hi = dvs_builder_expr_ite(b, msb_t, q11, q10);   /* s < 0 */
-    dvs_expr_t lo = dvs_builder_expr_ite(b, msb_t, q01, q00);   /* s >= 0 */
-    return dvs_builder_expr_ite(b, msb_s, hi, lo);
+    dvs_builder_t *b = fe->builder;
+    dvs_expr_t msb_s = _fv(fe, dvs_builder_expr_extract(b, S_, w - 1, w - 1), 1);
+    dvs_expr_t msb_t = _fv(fe, dvs_builder_expr_extract(b, T_, w - 1, w - 1), 1);
+    dvs_expr_t mag_s = _fv(fe, dvs_builder_expr_ite(b, msb_s,
+                           _fv(fe, _neg_expr(fe, S_, w), w), S_), w);
+    dvs_expr_t mag_t = _fv(fe, dvs_builder_expr_ite(b, msb_t,
+                           _fv(fe, _neg_expr(fe, T_, w), w), T_), w);
+    dvs_expr_t m = _fv(fe, _udivrem_expr(fe, mag_s, mag_t, w, is_rem), w);
+    dvs_expr_t neg = is_rem ? msb_s
+                   : _fv(fe, dvs_builder_expr_binary(b, DVS_BIN_BXOR, msb_s, msb_t), 1);
+    return dvs_builder_expr_ite(b, neg, _fv(fe, _neg_expr(fe, m, w), w), m);
 }
 
 /* Both operands are the same variable (after flattening). A comparison of a
@@ -1325,8 +1357,63 @@ static int _same_var(Smt2Frontend *fe, dvs_expr_t a, dvs_expr_t b) {
     return ((const ExprVar *)pa)->var_id == ((const ExprVar *)pb)->var_id;
 }
 
+/* A literal (leaf_kind 2) of at most 64 bits: 1 and its value, else 0. The
+ * connectives below fold these, so Verilator's constant guards --
+ * `(=> (__Vbool #b1) B)`, `(bvand (__Vbv ..) #b1)`, an ite on a folded test --
+ * never reach the engines as reified constants. A guard left as `1 == 1`
+ * is a free boolean to the CDCL search until every operand is decided: a
+ * one-line riscv-dv constraint under `(=> (__Vbool #b1) ..)` took 667
+ * conflicts and fell to bitblast. */
+static int _lit_value(Smt2Frontend *fe, TaggedExpr t, uint64_t *v) {
+    if (t.leaf_kind != 2 || t.array != NULL || t.te.width == 0 || t.te.width > 64) return 0;
+    const ExprConst *ec = (const ExprConst *)dvs_builder_ref_ptr(fe->builder, t.te.ref);
+    if (!ec || ec->kind != EXPR_CONST) return 0;
+    uint64_t m = t.te.width == 64 ? ~0ull : ((1ull << t.te.width) - 1);
+    *v = (uint64_t)ec->value & m;
+    return 1;
+}
+
 static TaggedExpr _bool_lit(Smt2Frontend *fe, int v) {
     return (TaggedExpr){ { _bv_const(fe, v ? 1 : 0, 1), 1 }, 2, NULL };
+}
+
+static int _is_app(const Sexpr *e, const char *name) {
+    size_t n = strlen(name);
+    return e->kind == SEXPR_LIST && e->list.count > 0
+        && e->list.items[0]->kind == SEXPR_SYMBOL
+        && e->list.items[0]->sym.len == n && memcmp(e->list.items[0]->sym.str, name, n) == 0;
+}
+
+static TaggedExpr _translate_tagged(Smt2Frontend *fe, const Sexpr *s);
+static TaggedExpr _flatten_to_var(Smt2Frontend *fe, TaggedExpr te);
+
+/* `(bvsmod x t) == 0`: t divides x. Equivalent, for every t, to
+ * `(bvurem |x| |t|) == 0` -- the signs only decide the remainder's sign, not
+ * whether it is zero, and at t == 0 both sides reduce to x == 0 (SMT-LIB's
+ * smod/urem by zero return the dividend). riscv_loop_instr's
+ * `(limit - init) % step == 0` is this shape. The unsigned remainder stays on
+ * the CDCL engine, where a general bvsmod forces the whole problem to
+ * bitblast (~4 ms a solve instead of ~0.1 ms). |x| of the most negative value
+ * wraps to itself, which read unsigned is the right magnitude. */
+static TaggedExpr _smod_is_zero(Smt2Frontend *fe, const Sexpr *smod) {
+    if (smod->list.count != 3) return TAGGED_NULL;
+    TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, smod->list.items[1]));
+    if (sa.te.ref == EXPR_NULL) return TAGGED_NULL;
+    TaggedExpr tb = _flatten_to_var(fe, _translate_tagged(fe, smod->list.items[2]));
+    if (tb.te.ref == EXPR_NULL) return TAGGED_NULL;
+    uint16_t w = sa.te.width ? sa.te.width : tb.te.width;
+    if (w == 0) return TAGGED_NULL;
+    dvs_builder_t *b = fe->builder;
+    dvs_expr_t mag[2];
+    dvs_expr_t ops[2] = { sa.te.ref, tb.te.ref };
+    for (int i = 0; i < 2; i++) {
+        dvs_expr_t msb = _fv(fe, dvs_builder_expr_extract(b, ops[i], w - 1, w - 1), 1);
+        mag[i] = _fv(fe, dvs_builder_expr_ite(b, msb, _fv(fe, _neg_expr(fe, ops[i], w), w),
+                                              ops[i]), w);
+    }
+    dvs_expr_t rem = _fv(fe, _udivrem_expr(fe, mag[0], mag[1], w, /*is_rem=*/1), w);
+    dvs_expr_t r = dvs_builder_expr_binary(b, DVS_BIN_EQ, rem, _bv_const(fe, 0, w));
+    return (TaggedExpr){ { r, 1 }, 0, NULL };
 }
 
 /* Signed comparison `a <op>s b`, lowered via the MSB-flip identity
@@ -1394,7 +1481,7 @@ static TaggedExpr _wide_const(Smt2Frontend *fe, const uint64_t *limbs, uint32_t 
         SMT2_TAINT(fe, "bitvector constant wider than the widest supported sort");
         return TAGGED_NULL;
     }
-    fe->needs_bitblast = 1;
+    { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "wide-const"; }
     uint32_t nl = (width + 63u) / 64u;
     uint64_t v[SMT2_BV_MAX_LIMBS];
     for (uint32_t i = 0; i < nl; i++) v[i] = limbs[i];
@@ -1478,7 +1565,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
              * time UNSAT (verified: sext(x32)->64 == 5 is wrongly unsat). The
              * bit-blast engine lowers sign-extend exactly, so force it. */
             if (sign && new_width >= 64)
-                fe->needs_bitblast = 1;
+                { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "sext64"; }
 
             /* Fold zero-extend of a constant: the value is unchanged, but
              * making it a real EXPR_CONST lets downstream passes (e.g. the
@@ -1876,6 +1963,43 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     /* These ops are :left-assoc in SMT-LIB, and Verilator emits them variadically
      * (e.g. (bvor a b c)). Left-fold over all operands so both the binary and
      * n-ary forms translate: (op a b c) == (op (op a b) c). */
+    /* bvand / bvor with literal operands: drop identities, short-circuit on the
+     * absorbing value, then fold the rest as BINOP_CASE does. */
+    {
+        int is_band = (oplen == 5 && memcmp(op, "bvand", 5) == 0);
+        int is_bor  = (oplen == 4 && memcmp(op, "bvor", 4) == 0);
+        if ((is_band || is_bor) && s->list.count >= 3) {
+            TaggedExpr acc = TAGGED_NULL;
+            uint16_t w = 0;
+            for (uint32_t i = 1; i < s->list.count; i++) {
+                TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
+                if (b.te.ref == EXPR_NULL || b.array != NULL) return TAGGED_NULL;
+                if (!w) w = b.te.width;
+                uint64_t v, ones = w >= 64 ? ~0ull : ((1ull << w) - 1);
+                if (b.te.width == w && _lit_value(fe, b, &v)) {
+                    if (v == (is_band ? 0 : ones))
+                        return (TaggedExpr){ { _bv_const(fe, (int64_t)v, w), w }, 2, NULL };
+                    if (v == (is_band ? ones : 0)) continue;
+                }
+                b = _flatten_to_var(fe, b);
+                if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
+                if (acc.te.ref == EXPR_NULL) { acc = b; continue; }
+                acc = _flatten_to_var(fe, acc);
+                if (acc.te.ref == EXPR_NULL) return TAGGED_NULL;
+                acc.te.ref = dvs_builder_expr_binary(fe->builder,
+                                                     is_band ? DVS_BIN_BAND : DVS_BIN_BOR,
+                                                     acc.te.ref, b.te.ref);
+                acc.leaf_kind = 0;
+            }
+            if (acc.te.ref == EXPR_NULL) {     /* every operand was the identity */
+                uint64_t id = is_band ? (w >= 64 ? ~0ull : ((1ull << w) - 1)) : 0;
+                return (TaggedExpr){ { _bv_const(fe, (int64_t)id, w), w }, 2, NULL };
+            }
+            _flag_wide_arith(fe, w);
+            return (TaggedExpr){ { acc.te.ref, w }, acc.leaf_kind, NULL };
+        }
+    }
+
 #define BINOP_CASE(name, binop) \
     if (oplen == sizeof(name)-1 && memcmp(op, name, oplen) == 0) { \
         if (s->list.count < 3) return TAGGED_NULL; \
@@ -1984,7 +2108,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             /* The ITE-of-unsigned-divisions this lowers to is solved exactly by
              * bitblast but left unpinned (wrong model) by the CDCL bounds
              * engine, so force bitblast for this problem. */
-            fe->needs_bitblast = 1;
+            { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "sdiv-srem"; }
             if (s->list.count != 3) return TAGGED_NULL;
             TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
             if (sa.te.ref == EXPR_NULL) return TAGGED_NULL;
@@ -1992,7 +2116,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             if (tb.te.ref == EXPR_NULL) return TAGGED_NULL;
             uint16_t w = sa.te.width ? sa.te.width : tb.te.width;
             if (w == 0) return TAGGED_NULL;
-            dvs_expr_t r = _signed_divrem_expr(fe->builder, sa.te.ref, tb.te.ref,
+            dvs_expr_t r = _signed_divrem_expr(fe, sa.te.ref, tb.te.ref,
                                             w, is_srem);
             return (TaggedExpr){ { r, w }, 0, NULL };
         }
@@ -2006,7 +2130,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
      */
     {
         if (oplen == 6 && memcmp(op, "bvsmod", 6) == 0) {
-            fe->needs_bitblast = 1;
+            { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "smod"; }
             if (s->list.count != 3) return TAGGED_NULL;
             TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
             if (sa.te.ref == EXPR_NULL) return TAGGED_NULL;
@@ -2015,7 +2139,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             uint16_t w = sa.te.width ? sa.te.width : tb.te.width;
             if (w == 0) return TAGGED_NULL;
             dvs_expr_t T_ = tb.te.ref;
-            dvs_expr_t r_expr = _signed_divrem_expr(fe->builder, sa.te.ref, T_, w, /*is_rem=*/1);
+            dvs_expr_t r_expr = _signed_divrem_expr(fe, sa.te.ref, T_, w, /*is_rem=*/1);
             /* Materialise the remainder into its own var: bvsmod references it
              * three times (sign bit, +t, ==0), and re-embedding the raw ITE tree
              * at each use makes the bitblaster produce inconsistent values for
@@ -2035,14 +2159,17 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         }
     }
 
-    /* bvsmod (signed modulo, sign follows the divisor) is intentionally NOT
-     * lowered here: an earlier attempt was only 219/256 correct on bitblast, so
-     * it is left to the honest `unknown` path rather than risk a wrong answer.
-     * SV `%` lowers to bvsrem (handled above), so bvsmod is comparatively rare. */
-
     /* = (equality) -- handles both BV and array operands */
     if (oplen == 1 && op[0] == '=') {
         if (s->list.count != 3) return TAGGED_NULL;
+        for (int i = 1; i <= 2; i++) {
+            const Sexpr *other = s->list.items[3 - i];
+            if (!_is_app(s->list.items[i], "bvsmod") || (other->kind == SEXPR_LIST && !_is_app(other, "_")))
+                continue;
+            uint64_t zv;
+            if (_lit_value(fe, _translate_tagged(fe, other), &zv) && zv == 0)
+                return _smod_is_zero(fe, s->list.items[i]);
+        }
 
         TaggedExpr a = _translate_tagged(fe, s->list.items[1]);
         TaggedExpr b = _translate_tagged(fe, s->list.items[2]);
@@ -2082,6 +2209,9 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         }
 
         /* BV/Bool equality */
+        uint64_t av, bv;
+        if (_lit_value(fe, a, &av) && _lit_value(fe, b, &bv) && a.te.width == b.te.width)
+            return _bool_lit(fe, av == bv);
         a = _flatten_to_var(fe, a);
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
         b = _flatten_to_var(fe, b);
@@ -2251,6 +2381,11 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         for (int i = (int)s->list.count - 2; i >= 1; i--) {
             TaggedExpr a = _translate_tagged(fe, s->list.items[i]);
             if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
+            uint64_t av, lv;
+            if (_lit_value(fe, a, &av) || (_lit_value(fe, last, &lv) && lv)) {
+                if (_lit_value(fe, a, &av) && !av) last = _bool_lit(fe, 1);  /* false => _ */
+                continue;                       /* true => b is b; a => true is true */
+            }
             dvs_expr_t not_a = dvs_builder_expr_unary(fe->builder, DVS_UN_NOT, a.te.ref);
             last.te.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_OR, not_a, last.te.ref);
             last.leaf_kind = 0;
@@ -2266,6 +2401,8 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (c.te.ref == EXPR_NULL) return TAGGED_NULL;
         TaggedExpr t = _translate_tagged(fe, s->list.items[2]);
         TaggedExpr e = _translate_tagged(fe, s->list.items[3]);
+        uint64_t cv;
+        if (_lit_value(fe, c, &cv)) return cv ? t : e;
 
         if (t.array != NULL && e.array != NULL) {
             if (t.array->slice_of || t.array->sort.inner_addr ||
@@ -2480,9 +2617,12 @@ static int _cmd_set_option(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->produce_models = 1;
         return 0;
     }
-    if (sexpr_is_keyword(key, ":seed")) {
-        if (val->kind == SEXPR_NUMERAL)
+    if (sexpr_is_keyword(key, ":seed") || sexpr_is_keyword(key, ":random-seed")) {
+        if (val->kind == SEXPR_NUMERAL) {
             fe->seed = val->numval;
+            fe->seed_given = 1;
+            fe->given_seed = val->numval;
+        }
         return 0;
     }
     if (sexpr_is_keyword(key, ":produce-unsat-cores")) {
@@ -2688,6 +2828,8 @@ static int _add_sort_const(Smt2Frontend *fe, const Sexpr *name_s,
     return 0;
 }
 
+static uint64_t _fp_mix(uint64_t h, const uint8_t *d, size_t n);
+
 static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
     Sexpr *name_s;
     Sexpr *sort_s;
@@ -2719,6 +2861,8 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
         fprintf(fe->err, "error: expected symbol for variable name\n");
         return -1;
     }
+    fe->shape_fp = _fp_mix(fe->shape_fp ^ 0x51u, (const uint8_t *)name_s->sym.str,
+                           name_s->sym.len);
 
     /* Case 1: declare-fun with arity > 0 -- sort-typed function */
     if (params && params->list.count > 0) {
@@ -2772,9 +2916,9 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
         /* Loud but in-sync: an unsupported sort taints the context so the next
          * (check-sat) is `unknown`, rather than exiting and hanging the driver.
          * The var is not created; asserts referencing it also taint. */
-        fprintf(fe->err, "error: unsupported sort (only BitVec 1-128, Bool, or "
-                         "Array) -> result will be unknown\n");
-        SMT2_TAINT(fe, "unsupported sort (only BitVec 1-128, Bool, Array)");
+        fprintf(fe->err, "error: unsupported sort (only BitVec 1-%d, Bool, or "
+                         "Array) -> result will be unknown\n", SMT2_MAX_BV_BITS);
+        SMT2_TAINT(fe, "unsupported sort (BitVec wider than SMT2_MAX_BV_BITS, or not BitVec/Bool/Array)");
         return 0;
     }
 
@@ -2912,6 +3056,12 @@ static void _builder_touched(Smt2Frontend *fe) {
 /* Is `s` the 1-bit literal #b1? Translating it is the cheapest reliable test:
  * it folds (_ bv1 1) and #b1 alike, and reports the width we need to check. */
 static int _is_bit1_literal(Smt2Frontend *fe, const Sexpr *s) {
+    /* Only an atom or `(_ bvN 1)` can be the literal. Translating any other
+     * term just to ask has side effects: a `(bvsmod ..)` operand flagged the
+     * whole problem for bitblast, and flattened operands leave their aux
+     * definitions in the builder. */
+    if (s->kind == SEXPR_LIST && !(s->list.count > 0 && sexpr_is_symbol(s->list.items[0], "_")))
+        return 0;
     TaggedExpr t = _translate_tagged(fe, s);
     if (t.te.ref == EXPR_NULL || t.leaf_kind != 2 || t.te.width != 1) return 0;
     ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, t.te.ref);
@@ -2971,9 +3121,39 @@ static dvs_expr_t _reified_bool(Smt2Frontend *fe, const Sexpr *s, int depth) {
     return t.te.ref;
 }
 
-/* Strip `(bvand #b1 Y)` / `(bvand Y #b1)` masks: identity on a 1-bit Y. */
+static int _is_bv_literal(const Sexpr *s, int value, uint16_t width);
+
+/* `(__Vbool #b1)`: Verilator's always-true guard. */
+static int _is_vlt_true_guard(const Sexpr *g) {
+    return g && g->kind == SEXPR_LIST && g->list.count == 2 &&
+           sexpr_is_symbol(g->list.items[0], "__Vbool") && _is_bv_literal(g->list.items[1], 1, 1);
+}
+
+/* Verilator's Bool round trip around a 1-bit Y, `(__Vbv (__Vbool Y))`, possibly
+ * under always-true guards, `(__Vbv (=> (__Vbool #b1) .. (__Vbool Y)))`: Y, else
+ * NULL. Constrained-random code emits a conjunction this way for a constraint
+ * guarded by a static condition; left wrapped it was not split into separate
+ * asserts, and the CDCL search took hundreds of conflicts on it as one reified
+ * conjunction (~50 ms, then bitblast). */
+static const Sexpr *_vlt_unwrap_bv1(Smt2Frontend *fe, const Sexpr *b) {
+    if (!fe->verilator_mode || !b || b->kind != SEXPR_LIST || b->list.count != 2 ||
+        !sexpr_is_symbol(b->list.items[0], "__Vbv"))
+        return NULL;
+    const Sexpr *x = b->list.items[1];
+    while (x && x->kind == SEXPR_LIST && x->list.count == 3 &&
+           sexpr_is_symbol(x->list.items[0], "=>") && _is_vlt_true_guard(x->list.items[1]))
+        x = x->list.items[2];
+    if (x && x->kind == SEXPR_LIST && x->list.count == 2 && sexpr_is_symbol(x->list.items[0], "__Vbool"))
+        return x->list.items[1];
+    return NULL;
+}
+
+/* Strip `(bvand #b1 Y)` / `(bvand Y #b1)` masks: identity on a 1-bit Y. In
+ * Verilator mode also the Bool round trip of _vlt_unwrap_bv1. */
 static const Sexpr *_strip_bit1_mask(Smt2Frontend *fe, const Sexpr *body) {
     for (;;) {
+        const Sexpr *u = _vlt_unwrap_bv1(fe, body);
+        if (u) { body = u; continue; }
         if (!body || body->kind != SEXPR_LIST || body->list.count != 3) return body;
         if (!sexpr_is_symbol(body->list.items[0], "bvand")) return body;
         if (_is_bit1_literal(fe, body->list.items[1]))
@@ -3005,6 +3185,98 @@ static dvs_expr_t _try_translate_reified_or(Smt2Frontend *fe, const Sexpr *s) {
         return EXPR_NULL;
 
     return _reified_bool(fe, body, 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Set membership: a large `x inside {c0, c1, ...}` as one EXPR_IN_SET */
+/*                                                                     */
+/* Verilator emits `inside` as a bvor of reified equalities, or as a   */
+/* Bool `or` of them, sometimes under `(=> (__Vbool #b1) ...)`. As an  */
+/* OR tree a set past DisjClause's 16 disjuncts compiles to one guard  */
+/* per value, and the search finds a member by trial: 22 ms a solve    */
+/* for one 32-bit riscv-dv field under three such sets. As an IN_SET   */
+/* it is one propagator whose gaps the compile punches out as holes,   */
+/* so the first value picked is a member. Smaller sets keep the        */
+/* DisjClause path, which already does the same.                       */
+/*                                                                     */
+/* Only a plain variable symbol against constants is taken, so a       */
+/* declined match leaves nothing behind but unused builder nodes.      */
+/* ------------------------------------------------------------------ */
+#define SMT2_INSET_MIN 17u
+#define SMT2_INSET_MAX 4096u
+
+typedef struct {
+    dvs_expr_t  x;         /* the variable, once the first leaf names it */
+    uint16_t    width;
+    uint32_t    n;
+    dvs_expr_t  elems[SMT2_INSET_MAX];
+} Smt2InSetAcc;
+
+static int _is_bv_literal(const Sexpr *s, int value, uint16_t width) {
+    return s && s->kind == SEXPR_BITVEC && s->bv.width == width && s->bv.width <= 64
+        && s->bv.value == (uint64_t)value;
+}
+
+/* `(= x c)` / `(= c x)`: x a variable of at most 32 bits, c a constant. */
+static int _inset_leaf(Smt2Frontend *fe, const Sexpr *s, Smt2InSetAcc *a) {
+    const Sexpr *p = s->list.items[1], *q = s->list.items[2];
+    if (p->kind != SEXPR_SYMBOL) { const Sexpr *t = p; p = q; q = t; }
+    if (p->kind != SEXPR_SYMBOL || q->kind == SEXPR_SYMBOL) return 0;
+    TaggedExpr v = _translate_tagged(fe, p);
+    if (v.te.ref == EXPR_NULL || v.leaf_kind != 1 || v.array
+            || v.te.width == 0 || v.te.width > 32)
+        return 0;
+    TaggedExpr c = _translate_tagged(fe, q);
+    if (c.te.ref == EXPR_NULL || c.leaf_kind != 2 || c.te.width != v.te.width) return 0;
+    if (a->x == EXPR_NULL) { a->x = v.te.ref; a->width = v.te.width; }
+    else if (!_same_operand(fe, a->x, v.te.ref)) return 0;
+    if (a->n >= SMT2_INSET_MAX) return 0;
+    a->elems[a->n++] = c.te.ref;
+    return 1;
+}
+
+/* Collect the disjuncts of a formula that holds iff x is one of them. */
+static int _inset_collect(Smt2Frontend *fe, const Sexpr *s, Smt2InSetAcc *a, int depth) {
+    if (!s || depth > 32) return 0;
+    if (_is_bv_literal(s, 0, 1)) return 1;                 /* #b0: bvor identity */
+    if (s->kind != SEXPR_LIST || s->list.count < 2) return 0;
+    const Sexpr *op = s->list.items[0];
+    if (sexpr_is_symbol(op, "bvor") || sexpr_is_symbol(op, "or")) {
+        for (uint32_t i = 1; i < s->list.count; i++)
+            if (!_inset_collect(fe, s->list.items[i], a, depth + 1)) return 0;
+        return 1;
+    }
+    if (s->list.count == 3 && sexpr_is_symbol(op, "=")) return _inset_leaf(fe, s, a);
+    if (!fe->verilator_mode) return 0;
+    /* Verilator's Bool <-> (_ BitVec 1) lifts, and `(=> (__Vbool #b1) B)`. */
+    if (s->list.count == 2 && (sexpr_is_symbol(op, "__Vbv") || sexpr_is_symbol(op, "__Vbool")))
+        return _inset_collect(fe, s->list.items[1], a, depth + 1);
+    if (s->list.count == 3 && sexpr_is_symbol(op, "=>")) {
+        const Sexpr *g = s->list.items[1];
+        if (!(g->kind == SEXPR_LIST && g->list.count == 2 && sexpr_is_symbol(g->list.items[0], "__Vbool")
+              && _is_bv_literal(g->list.items[1], 1, 1)))
+            return 0;
+        return _inset_collect(fe, s->list.items[2], a, depth + 1);
+    }
+    return 0;
+}
+
+/* `(= #b1 BODY)` where BODY holds iff x inside {...}: the IN_SET, else EXPR_NULL. */
+static dvs_expr_t _try_translate_in_set(Smt2Frontend *fe, const Sexpr *s) {
+    if (!s || s->kind != SEXPR_LIST || s->list.count != 3) return EXPR_NULL;
+    if (!sexpr_is_symbol(s->list.items[0], "=")) return EXPR_NULL;
+    const Sexpr *body;
+    if (_is_bv_literal(s->list.items[1], 1, 1))      body = s->list.items[2];
+    else if (_is_bv_literal(s->list.items[2], 1, 1)) body = s->list.items[1];
+    else return EXPR_NULL;
+    Smt2InSetAcc *a = (Smt2InSetAcc *)malloc(sizeof *a);
+    if (!a) return EXPR_NULL;
+    a->x = EXPR_NULL; a->width = 0; a->n = 0;
+    dvs_expr_t r = EXPR_NULL;
+    if (_inset_collect(fe, _strip_bit1_mask(fe, body), a, 0) && a->n >= SMT2_INSET_MIN)
+        r = dvs_builder_expr_in_set(fe->builder, a->x, a->n, a->elems);
+    free(a);
+    return r;
 }
 
 /* ------------------------------------------------------------------ */
@@ -3197,6 +3469,123 @@ static int _is_vlt_hash(Smt2Frontend *fe, const Sexpr *e) {
     return 1;
 }
 
+/* Verilator (5.052+) UniGen2 enumeration shapes:
+ *   blocking clause  (not (and [true] (= <term> <bv-literal>) ...))
+ *   hash constraint  (= #b... (bvxor ...))  |  (= #b... (concat (bvxor ...) ...))
+ * A session carrying these is an enumeration loop whose witness Verilator's own
+ * sampler picks, so CDCL's sampling buys nothing there; and XOR plus nogood
+ * enumeration is the bit-blaster's strength and interval CDCL's worst case
+ * (per-query time grew to the 10 s cap). Such sessions route to bitblast. */
+/* A term Verilator hashes a bit of: a declared variable, or an element of an
+ * array variable, `(select <base> <bv-literal>)` with <base> itself such a term
+ * (nested arrays). */
+static int _is_vlt_hashed_term(const Sexpr *t) {
+    while (t->kind == SEXPR_LIST) {
+        if (t->list.count != 3 || !sexpr_is_symbol(t->list.items[0], "select")
+            || t->list.items[2]->kind != SEXPR_BITVEC)
+            return 0;
+        t = t->list.items[1];
+    }
+    return t->kind == SEXPR_SYMBOL;
+}
+
+/* One operand of a Verilator hash XOR: `#b0` (UniGen2 seeds every chain with
+ * it) or one bit, `((_ extract i i) <term>)`, of a variable or array element.
+ * Nothing else, so a user constraint that happens to be an XOR (`a ^ b`) is
+ * not mistaken for a hash. */
+static int _is_vlt_xor_arg(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->kind == SEXPR_BITVEC) return s->bv.width == 1;
+    if (_is_vlt_hash_bit(fe, s)) return 1;
+    if (s->kind != SEXPR_LIST || s->list.count != 2) return 0;
+    const Sexpr *ix = s->list.items[0];
+    return ix->kind == SEXPR_LIST && ix->list.count == 4
+        && sexpr_is_symbol(ix->list.items[0], "_")
+        && sexpr_is_symbol(ix->list.items[1], "extract")
+        && ix->list.items[2]->kind == SEXPR_NUMERAL
+        && ix->list.items[3]->kind == SEXPR_NUMERAL
+        && ix->list.items[2]->numval == ix->list.items[3]->numval
+        && _is_vlt_hashed_term(s->list.items[1]);
+}
+
+static int _is_vlt_xor(Smt2Frontend *fe, const Sexpr *x) {
+    if (x->kind != SEXPR_LIST || x->list.count < 2 || !sexpr_is_symbol(x->list.items[0], "bvxor"))
+        return 0;
+    for (uint32_t i = 1; i < x->list.count; i++)
+        if (!_is_vlt_xor_arg(fe, x->list.items[i])) return 0;
+    return 1;
+}
+
+static int _is_vlt_enum(Smt2Frontend *fe, const Sexpr *e) {
+    if (e->kind != SEXPR_LIST) return 0;
+    if (e->list.count == 2 && sexpr_is_symbol(e->list.items[0], "not")) {
+        const Sexpr *a = e->list.items[1];
+        if (a->kind != SEXPR_LIST || a->list.count < 2 || !sexpr_is_symbol(a->list.items[0], "and"))
+            return 0;
+        for (uint32_t i = 1; i < a->list.count; i++) {
+            const Sexpr *x = a->list.items[i];
+            if (sexpr_is_symbol(x, "true")) continue;
+            if (x->kind != SEXPR_LIST || x->list.count != 3 || !sexpr_is_symbol(x->list.items[0], "=")
+                || x->list.items[2]->kind != SEXPR_BITVEC)
+                return 0;
+        }
+        return 1;
+    }
+    if (e->list.count == 3 && sexpr_is_symbol(e->list.items[0], "=")
+        && e->list.items[1]->kind == SEXPR_BITVEC) {
+        const Sexpr *x = e->list.items[2];
+        if (_is_vlt_xor(fe, x)) return 1;
+        if (x->kind == SEXPR_LIST && x->list.count >= 3 && sexpr_is_symbol(x->list.items[0], "concat")) {
+            for (uint32_t i = 1; i < x->list.count; i++)
+                if (!_is_vlt_xor(fe, x->list.items[i])) return 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* `(assert (= a ((as const (Array ..)) v)))` on a declared sparse array `a`
+ * with a literal `v`: Verilator emits this to clear a dynamic array before
+ * sizing it, often for arrays the problem never reads. Record `v` as the
+ * array's default (see Smt2ArrayValue.has_default) instead of building a
+ * word-level equality, which routed the whole problem to the array engine at
+ * ~5 ms a solve. Top level only (a pop could not undo it), and a second default
+ * on the same array falls through to the general path. Returns 1 if taken. */
+static int _try_sparse_default(Smt2Frontend *fe, const Sexpr *e) {
+    if (fe->push_depth > 0 || e->kind != SEXPR_LIST || e->list.count != 3 ||
+        !sexpr_is_symbol(e->list.items[0], "="))
+        return 0;
+    for (int side = 0; side < 2; side++) {
+        const Sexpr *a = e->list.items[1 + side], *c = e->list.items[2 - side];
+        if (a->kind != SEXPR_SYMBOL || c->kind != SEXPR_LIST || c->list.count != 2)
+            continue;
+        const Sexpr *h = c->list.items[0];
+        if (h->kind != SEXPR_LIST || h->list.count != 3 ||
+            !sexpr_is_symbol(h->list.items[0], "as") ||
+            !sexpr_is_symbol(h->list.items[1], "const"))
+            continue;
+        Smt2ArrayVar *av = _find_array_var(fe, a->sym.str, a->sym.len);
+        if (!av || !av->value) return 0;
+        Smt2ArrayValue *v = av->value;
+        Smt2ArraySort sort;
+        if (_parse_array_sort(fe, h->list.items[2], &sort) <= 0 ||
+            sort.addr_width != v->sort.addr_width || sort.data_width != v->sort.data_width)
+            return 0;
+        uint64_t lo, hi;
+        if (!v->is_sparse || v->is_abstract || v->has_default || v->sort.inner_addr ||
+            v->sort.data_width > 63 ||
+            !_const_index(fe, c->list.items[1], v->sort.data_width, &lo, &hi))
+            return 0;
+        v->has_default = 1;
+        v->default_val = lo;
+        for (uint32_t i = 0; i < v->n_sparse; i++)
+            _add_user_constraint(fe, dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ,
+                dvs_builder_expr_var(fe->builder, v->sparse_varid[i]),
+                _bv_const(fe, (int64_t)lo, v->sort.data_width)));
+        return 1;
+    }
+    return 0;
+}
+
 static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 2) {
         fprintf(fe->err, "error: assert requires exactly one expression\n");
@@ -3210,11 +3599,15 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
         return 0;
     }
     fe->vlt_hash_pending = 0;      /* any other assert: solve for real */
+    if (fe->verilator_mode && !fe->vlt_enum && _is_vlt_enum(fe, cmd->list.items[1])) fe->vlt_enum = 1;
     _record_named(fe, cmd->list.items[1]);
     if (_try_split_reified_and(fe, cmd->list.items[1])) return 0;
 
+    if (_try_sparse_default(fe, cmd->list.items[1])) return 0;
+
     TypedExpr te;
-    dvs_expr_t reified = _try_translate_reified_or(fe, cmd->list.items[1]);
+    dvs_expr_t reified = _try_translate_in_set(fe, cmd->list.items[1]);
+    if (reified == EXPR_NULL) reified = _try_translate_reified_or(fe, cmd->list.items[1]);
     if (reified != EXPR_NULL) {
         te.ref = reified;
         te.width = 1;
@@ -3304,7 +3697,9 @@ static int _ensure_compiled(Smt2Frontend *fe) {
      * start from a problem-sized estimate and, if dvs_solver_compile overflows the
      * pool, reallocate a larger contiguous buffer and recompile. This gives
      * dynamic sizing with no risk of under-provisioning (capped at the old max). */
-    size_t sz = _ctx_buf_size_for(fe->problem);
+    if (!fe->ctx_buf_scale) fe->ctx_buf_scale = 1;
+    size_t sz = _ctx_buf_size_for(fe->problem) * fe->ctx_buf_scale;
+    if (sz > (size_t)CTX_BUF_SIZE) sz = (size_t)CTX_BUF_SIZE;
     for (;;) {
         fe->ctx_buf = malloc(sz);
         if (!fe->ctx_buf) return -1;
@@ -3320,6 +3715,24 @@ static int _ensure_compiled(Smt2Frontend *fe) {
         /* Vars[] capacity headroom for yosys-smtbmc-style incremental aux vars. */
         fe->ctx->incremental_capacity_hint = 8192;
         int rc = dvs_solver_compile(fe->ctx, fe->problem);
+        /* The pool cannot grow once compiled, and an incremental assert
+         * (e.g. after a push) that overflows it leaves its constraints
+         * uncompiled -- the first such add also re-copies the reset snapshot
+         * of every variable. Keep a quarter of the compile's use free;
+         * failing that, recompile into a bigger pool. */
+        if (rc >= 0 && sz < (size_t)CTX_BUF_SIZE) {
+            size_t used = fe->ctx->pool.used, cap = fe->ctx->pool.capacity;
+            size_t want = used / 4 > ((size_t)512 << 10) ? used / 4 : ((size_t)512 << 10);
+            if (cap - used < want) {
+                dvs_solver_destroy(fe->ctx); fe->ctx = NULL;
+                dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
+                free(fe->ctx_buf); fe->ctx_buf = NULL;
+                size_t need = used + want;
+                while (sz < need && sz < (size_t)CTX_BUF_SIZE) { sz *= 2; if (fe->ctx_buf_scale < 64) fe->ctx_buf_scale *= 2; }
+                if (sz > (size_t)CTX_BUF_SIZE) sz = (size_t)CTX_BUF_SIZE;
+                continue;
+            }
+        }
         if (rc >= 0) {
             /* rc > 0 (some constraints left uncompiled; validation and
              * escalation cover them) is a context like any other. Leaving
@@ -3339,6 +3752,7 @@ static int _ensure_compiled(Smt2Frontend *fe) {
             dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
             free(fe->ctx_buf); fe->ctx_buf = NULL;
             sz = (sz * 4 < (size_t)CTX_BUF_SIZE) ? sz * 4 : (size_t)CTX_BUF_SIZE;
+            if (fe->ctx_buf_scale < 64) fe->ctx_buf_scale *= 4;
             continue;
         }
         if (rc != -2) {
@@ -3365,6 +3779,7 @@ static void _start_cdcl_retention(Smt2Frontend *fe) {
     } else {
         dvs_builder_reset(fe->builder);
         fe->cdcl_retained = 0;
+        fe->bb_inc = 0;
         memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
     }
 }
@@ -3377,6 +3792,7 @@ static void _aux_handed_off(Smt2Frontend *fe) {
     } else {
         dvs_builder_reset(fe->builder);
         fe->cdcl_retained = 0;
+        fe->bb_inc = 0;
         memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
     }
     fe->builder_retained = 0;
@@ -3391,6 +3807,14 @@ static int _flush_aux(Smt2Frontend *fe) {
     dvs_problem_t *aux = _explicit(dvs_builder_finalize_since(fe->builder, &fe->aux_mark, &aux_sz));
     if (!aux) return -1;
     int rc = dvs_solver_add_constraint(fe->ctx, aux);
+    /* An add that overflows the context pool compiles only part of `aux`, and
+     * can read the failed allocation as a conflict: neither its `unsat` nor
+     * the context can be trusted. Report it incomplete -- check-sat then
+     * answers from bitblast -- and give later instances a bigger pool. */
+    if (fe->ctx->pool.overflow) {
+        if (fe->ctx_buf_scale && fe->ctx_buf_scale < 64) fe->ctx_buf_scale *= 2;
+        rc = 1;
+    }
     /* Retain the aux dvs_problem_t (instead of freeing) so the post-solve
      * model-validation pass can re-evaluate the constraints it contributed.
      * Storage is reclaimed in smt2_frontend_destroy. */
@@ -3414,7 +3838,7 @@ static int _flush_aux(Smt2Frontend *fe) {
     return rc;
 }
 
-/* FNV-1a fingerprint of a finalized dvs_problem_t. dvs_builder_finalize() zeroes the
+/* Fingerprint of a finalized dvs_problem_t. dvs_builder_finalize() zeroes the
  * whole buffer then fills it deterministically from the builder's blocks, and
  * every dvs_expr_t is a pool-relative offset, so identical problems produce
  * byte-identical content and thus the same fingerprint. We hash the leading
@@ -3422,14 +3846,26 @@ static int _flush_aux(Smt2Frontend *fe) {
  * header (which may hold non-deterministic bookkeeping). Used only as a cache
  * key in Verilator mode; a collision would at worst reuse a wrong-but-still-
  * sound model, and the space (64-bit) makes that astronomically unlikely. */
+static uint64_t _fp_mix(uint64_t h, const uint8_t *d, size_t n) {
+    /* Eight bytes per step: the byte-wise loop was ~17% of an enumeration-heavy
+     * run, since every check-sat hashes the whole pool. */
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        memcpy(&w, d + i, 8);
+        h = (h ^ w) * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 32;
+    }
+    for (; i < n; i++) { h ^= d[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
 static uint64_t _problem_fingerprint(const dvs_problem_t *p) {
-    uint64_t h = 1469598103934665603ULL;              /* FNV-1a offset basis */
-    const uint8_t *lead = (const uint8_t *)p;
+    uint64_t h = 1469598103934665603ULL;
     size_t lead_len = (size_t)((const uint8_t *)&p->pool - (const uint8_t *)p);
-    for (size_t i = 0; i < lead_len; i++) { h ^= lead[i]; h *= 1099511628211ULL; }
-    const uint8_t *data = (const uint8_t *)&p->pool + sizeof(dvs_pool_t);
-    size_t used = p->pool.used;
-    for (size_t i = 0; i < used; i++) { h ^= data[i]; h *= 1099511628211ULL; }
+    h = _fp_mix(h, (const uint8_t *)p, lead_len);
+    h = _fp_mix(h, (const uint8_t *)&p->pool + sizeof(dvs_pool_t), p->pool.used);
+    h ^= (uint64_t)p->pool.used;
     return h ? h : 1;                                  /* never return 0 */
 }
 
@@ -4095,6 +4531,7 @@ static void _free_bb(Smt2Frontend *fe) {
     if (fe->bb_solver)  { dvs_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
     if (fe->bb_problem) { free(fe->bb_problem); fe->bb_problem = NULL; }
     fe->bb_over_problem = 0;
+    fe->bb_inc = 0;
 }
 
 /* Solve `p` with the bit-blast engine. `owned`, if non-NULL, is `p` handed
@@ -4194,6 +4631,113 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
     return rc == DVS_BB_ERROR ? -1 : 0;
 }
 
+/* Does the builder hold every assertion in scope? After a CDCL compile it does
+ * only while retention lasts (_start_cdcl_retention); otherwise unless it was
+ * reset beside an unrebuildable fe->problem (_ensure_problem's -2). */
+static int _builder_is_full(const Smt2Frontend *fe) {
+    if (fe->ctx || fe->compiled) return fe->cdcl_retained;
+    return !fe->problem || fe->builder_retained;
+}
+
+/* Verilator UniGen2 enumeration (vlt_enum): inside a push scope Verilator
+ * re-solves after every blocking clause `(assert (not (and (= v c) ...)))`,
+ * up to 61 times per cell. Solving each from scratch re-blasted the whole
+ * accumulated set into a fresh SAT instance -- quadratic in the clauses, and
+ * 10x Bitwuzla on riscv-dv. Instead keep one CaDiCaL instance per scope and
+ * add only the constraints asserted since the last check-sat; it keeps its
+ * learned clauses too. Pop, reset or any builder rewind drops the instance
+ * (it cannot retract), and the next check-sat rebuilds it.
+ *
+ * No diversify pass: Verilator draws uniformly from the cell itself, so which
+ * witness comes back first does not matter, and the flip-check was the other
+ * big per-query cost.
+ *
+ * Returns 1 when it answered, 0 to leave the query to the regular path. */
+static int _check_sat_enum(Smt2Frontend *fe) {
+    dvs_builder_t *b = fe->builder;
+    if (!b || fe->n_aux_problems || !_builder_is_full(fe)) return 0;
+
+    size_t sz = 0;
+    dvs_problem_t *np = _explicit(dvs_builder_finalize(b, &sz));
+    if (!np) return 0;
+
+    int rc = DVS_BB_UNKNOWN, done = 0;
+    if (fe->bb_inc && fe->bb_solver && b->n_constraints > fe->bb_inc_ncons
+            && b->n_softs == fe->bb_inc_nsofts && b->n_dists == fe->bb_inc_ndists
+            && b->n_alldiffs == fe->bb_inc_nalldiffs) {
+        /* Constraints are prepended, so the new ones lead the list, ending at
+         * the head the instance already holds. */
+        uint32_t k = b->n_constraints - fe->bb_inc_ncons;
+        dvs_expr_t *roots = (dvs_expr_t *)malloc(k * sizeof(dvs_expr_t));
+        dvs_expr_t cur = np->constraints_head;
+        uint32_t i = 0;
+        while (roots && i < k && cur != EXPR_NULL) {
+            ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(np, cur);
+            roots[i++] = cs->root;
+            cur = cs->next;
+        }
+        if (roots && i == k && cur == fe->bb_inc_head
+                && dvs_bbsolver_rebase(fe->bb_solver, np) == 0) {
+            free(fe->bb_problem);
+            fe->bb_problem = np;
+            np = NULL;
+            int arc = 0;
+            for (uint32_t j = k; j-- > 0 && arc == 0; )   /* oldest first */
+                arc = dvs_bbsolver_assert(fe->bb_solver, roots[j]);
+            if (arc == 0) {
+                rc = dvs_bbsolver_resolve(fe->bb_solver, fe->seed);
+                done = 1;
+            }
+        }
+        free(roots);
+        if (!done) {
+            /* Half-applied: the instance is unusable. Rebuild from scratch. */
+            _free_bb(fe);
+            if (!np) {
+                np = _explicit(dvs_builder_finalize(b, &sz));
+                if (!np) return 0;
+            }
+        }
+    }
+    if (!done) {
+        _free_bb(fe);
+        fe->bb_solver = dvs_bbsolver_new_backend(NULL, np, /*prefer_cadical=*/1);
+        if (!fe->bb_solver) { free(np); return 0; }
+        fe->bb_problem = np;
+        dvs_bbsolver_set_diversify(fe->bb_solver, 0);
+        rc = dvs_bbsolver_check(fe->bb_solver, fe->seed);
+    }
+
+    if ((rc == DVS_BB_SAT || rc == DVS_BB_UNSAT)
+            && dvs_bbsolver_is_incremental(fe->bb_solver)) {
+        fe->bb_inc           = 1;
+        fe->bb_inc_head      = b->constraints_head;
+        fe->bb_inc_ncons     = b->n_constraints;
+        fe->bb_inc_nsofts    = b->n_softs;
+        fe->bb_inc_ndists    = b->n_dists;
+        fe->bb_inc_nalldiffs = b->n_alldiffs;
+    } else {
+        fe->bb_inc = 0;
+    }
+    fe->cache_valid = 0;            /* not a whole-problem identity-cache entry */
+    fe->bb_model_valid = (rc == DVS_BB_SAT);
+    if (rc == DVS_BB_SAT) {
+        fprintf(fe->out, "sat\n");
+        fe->last_result = DVS_SOLVE_OK;
+        fe->has_result = 1;
+    } else if (rc == DVS_BB_UNSAT) {
+        fprintf(fe->out, "unsat\n");
+        fe->last_result = DVS_SOLVE_UNSAT;
+        fe->has_result = 1;
+    } else {
+        /* unknown/error: let the regular path have a go from scratch */
+        _free_bb(fe);
+        return 0;
+    }
+    fflush(fe->out);
+    return 1;
+}
+
 /* True when the cube-and-conquer engine is explicitly selected
  * (DV_ENGINE=cube). Opt-in only: cube-and-conquer targets single hard QF_BV
  * instances, so it never auto-engages — the caller asks for it. */
@@ -4268,6 +4812,7 @@ static int _engine_is_bitblast(Smt2Frontend *fe) {
      * MUST bitblast — even under an explicit DV_ENGINE=cdcl, since CDCL would
      * return a wrong model here. This overrides the env, deliberately. */
     if (fe->needs_bitblast) return 1;
+    if (fe->shape_bb) return 1;   /* this check-sat's shape belongs to bitblast */
     const char *e = getenv("DV_ENGINE");
     if (e) {
         if (strcmp(e, "bitblast") == 0 || strcmp(e, "bb") == 0) return 1;
@@ -4330,10 +4875,92 @@ static void _end_assumptions(Smt2Frontend *fe) {
     if (fe->ctx) dvs_solver_restore(fe->ctx, cp);
 }
 
+static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd);
+
+/* Per-shape engine choice (Verilator mode). The exact-instance probe in
+ * check-sat keys on the problem fingerprint, but many randomize() call sites
+ * inline the object's non-rand state as constants, so every call is a new
+ * instance and the probe never settles anything. The shape -- the declared
+ * variable names -- is the same on every call, so learn the engine there.
+ *
+ * Neither engine is uniformly cheaper. riscv_illegal_instr (~6000 search
+ * variables from bit-sliced instr_bin) costs CDCL 10-50 ms where bitblast
+ * needs ~1 ms; riscv_loop_instr's divisibility test costs CDCL ~2.5 ms where
+ * bitblast, building a 32-bit divider, needs ~6 ms. So measure: once CDCL
+ * averages over SHAPE_SLOW_US on a shape, send the next SHAPE_TRIALS
+ * instances to bitblast, and keep bitblast only if it was at least twice as
+ * fast; otherwise CDCL is confirmed and the shape is not measured again.
+ * Wall time, like the probe's budget, only picks which engine answers; both
+ * are exact, so no verdict depends on it. */
+#define SHAPE_TAB_N    256u
+#define SHAPE_SLOW_US  3000u
+#define SHAPE_TRIALS   2u
+enum { SHAPE_LEARN = 0, SHAPE_CDCL = 1, SHAPE_BITBLAST = 2 };
+typedef struct {
+    uint64_t key;
+    uint64_t cdcl_us, bb_us;
+    uint16_t cdcl_n, bb_n;
+    uint8_t  state;
+} Smt2ShapeCost;
+
+static Smt2ShapeCost *_shape_slot(Smt2Frontend *fe) {
+    if (!fe->shape_fp) return NULL;
+    if (!fe->shape_tab) {
+        fe->shape_tab = calloc(SHAPE_TAB_N, sizeof(Smt2ShapeCost));
+        if (!fe->shape_tab) return NULL;
+    }
+    Smt2ShapeCost *e = &((Smt2ShapeCost *)fe->shape_tab)[fe->shape_fp % SHAPE_TAB_N];
+    if (e->key != fe->shape_fp) { memset(e, 0, sizeof *e); e->key = fe->shape_fp; }
+    return e;
+}
+
+/* Route this check-sat to bitblast for its shape: decided, or on trial. */
+static int _shape_wants_bitblast(Smt2Frontend *fe) {
+    Smt2ShapeCost *e = _shape_slot(fe);
+    if (!e) return 0;
+    if (e->state == SHAPE_BITBLAST) return 1;
+    return e->state == SHAPE_LEARN && e->cdcl_n >= 2
+        && e->cdcl_us > (uint64_t)SHAPE_SLOW_US * e->cdcl_n && e->bb_n < SHAPE_TRIALS;
+}
+
+/* After a check-sat: account its time to the engine the shape routing chose
+ * (fe->shape_route: 1 CDCL, 2 bitblast) and settle the shape when it can. */
+static void _shape_record(Smt2Frontend *fe, long us) {
+    Smt2ShapeCost *e = fe->shape_route ? _shape_slot(fe) : NULL;
+    if (!e || e->state != SHAPE_LEARN || us < 0) return;
+    if (fe->shape_route == 1 && e->cdcl_n < 0xFFFF) { e->cdcl_n++; e->cdcl_us += (uint64_t)us; }
+    if (fe->shape_route == 2) { e->bb_n++; e->bb_us += (uint64_t)us; }
+    if (e->bb_n >= SHAPE_TRIALS)
+        e->state = e->bb_us * 2 * e->cdcl_n < e->cdcl_us * e->bb_n ? SHAPE_BITBLAST : SHAPE_CDCL;
+}
+
+/* DV_LOG in Verilator mode: one `vlt-time <us> <engine>/<why>` line per
+ * check-sat, so solve time can be attributed to the routing decision. */
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
+    if (!fe->verilator_mode) return _cmd_check_sat_body(fe, cmd);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    fe->vlt_route = "other";
+    fe->cdcl_ticks = 0;
+    fe->shape_route = 0;
+    fe->shape_bb = 0;
+    int rc = _cmd_check_sat_body(fe, cmd);
+    fe->shape_bb = 0;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long us = (long)((t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000);
+    _shape_record(fe, us);
+    if (!getenv("DV_LOG")) return rc;
+    fprintf(fe->err, "vlt-time %ld %s vars=%u props=%u conflicts=%llu ticks=%u\n",
+            us, fe->vlt_route, fe->ctx ? fe->ctx->n_vars : 0u, fe->ctx ? fe->ctx->n_props : 0u,
+            fe->ctx ? (unsigned long long)fe->ctx->conflict_count : 0ull, fe->cdcl_ticks);
+    return rc;
+}
+
+static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
     /* Only skipped parity asserts since the last `sat`: the model stands. */
     if (fe->vlt_hash_pending) {
         fe->vlt_hash_pending = 0;
+        fe->vlt_route = "hash-skip";
         if (fe->has_result && fe->last_result == DVS_SOLVE_OK) {
             fprintf(fe->out, "sat\n");
             fflush(fe->out);
@@ -4364,9 +4991,10 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     /* In Verilator mode every solve draws a fresh seed so the returned model
      * varies run-to-run (that is where randomization diversity comes from --
      * the following check-sat-assuming reuses this model rather than re-solving,
-     * so each randomize() costs a single solve). */
+     * so each randomize() costs a single solve). A seed the driver set for this
+     * transaction wins, offset by one because seed 0 means "no diversity". */
     if (fe->verilator_mode)
-        fe->seed = ++fe->div_counter;
+        fe->seed = fe->seed_given ? fe->given_seed + 1 : ++fe->div_counter;
 
     /* Abstract arrays: the lazy engine's own finalize + lemmas-on-demand
      * refinement, from the builder, on every check-sat. Any other path would
@@ -4377,8 +5005,10 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     if (fe->n_anodes > 0 && (fe->n_areads > 0 || fe->n_aeqs > 0)
         && (!fe->array_eager || fe->problem || fe->compiled)) {
         /* (DV_ARRAY=eager emits its axioms once, before the first finalize.) */
-        if (!fe->array_eager && !fe->compiled && (!fe->problem || fe->builder_retained))
+        if (!fe->array_eager && !fe->compiled && (!fe->problem || fe->builder_retained)) {
+            fe->vlt_route = "bitblast/array";
             return _check_sat_array(fe);
+        }
         if (fe->print_stats || getenv("DV_LOG"))
             fprintf(fe->err, "cdcl-unknown: abstract arrays after a CDCL compile\n");
         SMT2_EMIT_UNKNOWN(fe);
@@ -4422,10 +5052,15 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * loop re-solves an identical instance thousands of times, so an instance
      * CDCL cannot handle must cost one bounded probe, not a probe per call. */
     int cdcl_probing = 0;
-    if (fe->verilator_mode && fe->verilator_cdcl && !fe->needs_bitblast
+    int shape_slow = fe->verilator_mode && !getenv("DV_ENGINE") && _shape_wants_bitblast(fe);
+    if (fe->verilator_mode && fe->verilator_cdcl && !fe->needs_bitblast && !fe->vlt_enum
+            && !shape_slow
             && !fe->array_lazy && !fe->array_eager && !_engine_is_cube(fe)
             && !getenv("DV_ENGINE")) {
-        if (_ensure_problem(fe) == 0 && fe->problem) {
+        /* After a compile plus later asserts (e.g. under push) the full set
+         * cannot be re-finalized; key on the compiled base problem then,
+         * rather than reuse a route decided for some other instance. */
+        if ((_ensure_problem(fe) == 0 || fe->compiled) && fe->problem) {
             uint64_t rfp = _problem_fingerprint(fe->problem);
             if (fe->cdcl_route != 0 && fe->cdcl_probe_fp == rfp) {
                 /* Decision already made for this exact instance. */
@@ -4438,8 +5073,33 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
             }
         }
     }
+    /* cdcl_route survives (reset) and may have been decided for a different
+     * instance (e.g. Verilator's start-up handshake), so it never overrides a
+     * problem that must bitblast: that forced a >64-bit problem onto CDCL, whose
+     * compile declined it -> `unknown` for every riscv-dv cfg.randomize(). */
     int route_cdcl = cdcl_probing || (fe->verilator_mode && fe->verilator_cdcl
-                                      && fe->cdcl_route == 1);
+                                      && !fe->needs_bitblast && !fe->vlt_enum
+                                      && !shape_slow && fe->cdcl_route == 1);
+    fe->shape_bb    = shape_slow;
+    fe->shape_route = route_cdcl ? 1 : shape_slow ? 2 : 0;
+
+    /* Verilator routing trace: which engine this check-sat starts on, and why.
+     * (A CDCL `unknown` may still escalate to bitblast further down.) */
+    if (fe->verilator_mode && getenv("DV_LOG")) {
+        const char *eng = route_cdcl ? "cdcl" : _engine_is_bitblast(fe) ? "bitblast" : "cdcl";
+        const char *why = cdcl_probing                ? "probe"
+                        : route_cdcl                  ? "sticky"
+                        : fe->needs_bitblast          ? (fe->nb_why ? fe->nb_why : "needs-bitblast")
+                        : fe->vlt_enum                ? "enumeration"
+                        : !fe->verilator_cdcl         ? "opt-out"
+                        : shape_slow                  ? "cdcl-slow"
+                        : fe->cdcl_route == 2         ? "cdcl-declined"
+                        :                               "logic";
+        fprintf(fe->err, "vlt-route: %s (%s)\n", eng, why);
+        static char rbuf[64];
+        snprintf(rbuf, sizeof rbuf, "%s/%s", eng, why);
+        fe->vlt_route = rbuf;
+    }
 
     if (_engine_is_cube(fe)) {
         int prc = _ensure_problem(fe);
@@ -4457,6 +5117,9 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     }
 
     if (_engine_is_bitblast(fe) && !route_cdcl) {
+        if (fe->verilator_mode && fe->vlt_enum && !getenv("DV_VLT_ENUM_SCRATCH")
+                && _check_sat_enum(fe))
+            return 0;
         int prc = _ensure_problem(fe);
         if (prc == -2 && fe->cdcl_retained) {
             /* fe->problem predates asserts made after a CDCL compile, and
@@ -4488,6 +5151,14 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->last_result = DVS_SOLVE_UNSAT;
         fe->has_result = 1;
         return 0;
+    }
+    if (crc < 0 && fe->problem && !getenv("DV_NO_BITBLAST")) {
+        /* CDCL could not build a context; the bit-blaster still can. */
+        if (fe->print_stats || getenv("DV_LOG"))
+            fprintf(fe->err, "cdcl-compile-failed (rc=%d): escalating to bitblast\n", crc);
+        fe->vlt_route = "bitblast/compile-failed";
+        if (cdcl_probing) fe->cdcl_route = 2;
+        return _check_sat_bitblast(fe);
     }
     if (crc < 0) {
         if (fe->print_stats || getenv("DV_LOG"))
@@ -4524,6 +5195,24 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
         return -1;
+    }
+    if (fe->ctx->pool.overflow && !getenv("DV_NO_BITBLAST")) {
+        /* Part of the asserted set never reached the context (see _flush_aux):
+         * solve the full retained set on bitblast instead. */
+        if (fe->print_stats || getenv("DV_LOG"))
+            fprintf(fe->err, "cdcl-pool-overflow: escalating to bitblast\n");
+        fe->vlt_route = "bitblast/pool-overflow";
+        if (fe->cdcl_retained && !fe->has_aux) {
+            size_t full_sz = 0;
+            dvs_problem_t *full = _explicit(dvs_builder_finalize(fe->builder, &full_sz));
+            if (full) return _check_sat_bitblast_on(fe, full, full);
+        }
+        if (fe->n_aux_problems == 0) return _check_sat_bitblast(fe);
+        SMT2_EMIT_UNKNOWN(fe);
+        fflush(fe->out);
+        fe->last_result = DVS_SOLVE_TIMEOUT;
+        fe->has_result = 1;
+        return 0;
     }
 
     dvs_solve_opts_t opts;
@@ -4597,7 +5286,9 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
      * captured Verilator transcripts), so the bound costs no coverage. */
     if (cdcl_probing) opts.time_limit_ms = 50;
 
+    uint32_t ticks0 = fe->ctx->prop_ticks;
     fe->last_result = dvs_solver_solve(fe->ctx, &opts);
+    fe->cdcl_ticks = fe->ctx->prop_ticks - ticks0;
     fe->has_result = 1;
 
     if (opts.use_lcg && getenv("DV_LCG_STATS") && fe->ctx->lcg) {
@@ -4678,6 +5369,11 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
 
     if (fe->last_result == DVS_SOLVE_TIMEOUT
         && !getenv("DV_NO_BITBLAST")) {   /* audit mode: keep pure-CDCL unknown */
+        if (fe->vlt_route) {
+            static char ebuf[80];
+            snprintf(ebuf, sizeof ebuf, "%s->bitblast", fe->vlt_route);
+            fe->vlt_route = ebuf;
+        }
         if (fe->n_aux_problems == 0)
             return _check_sat_bitblast(fe);
         /* Constraints were asserted after the compile, so fe->problem is not
@@ -4798,7 +5494,7 @@ static void _emit_sparse_array(Smt2Frontend *fe, Smt2ArrayVar *av) {
         for (uint32_t i = 0; i < v->n_sparse; i++) fprintf(fe->out, "(store ");
         fprintf(fe->out, "((as const (Array (_ BitVec %u) (_ BitVec %u))) ",
                 (unsigned)av->sort.addr_width, dw);
-        _emit_bv_bin_literal(fe->out, 0, dw);
+        _emit_bv_bin_literal(fe->out, v->has_default ? v->default_val : 0, dw);
         fprintf(fe->out, ")");
         for (uint32_t i = 0; i < v->n_sparse; i++) {
             fprintf(fe->out, " ");
@@ -5319,6 +6015,8 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
                     if (_sparse_find(av->value, f_lo, f_hi, &vid)) {
                         val = _fe_get_var_value(fe, vid);
                         elem_vid = vid;
+                    } else if (av->value->has_default) {
+                        val = (int64_t)av->value->default_val;
                     } else {
                         val = _free_elem_value(fe, seed_key, arr_s->sym.len);
                     }
@@ -5590,6 +6288,10 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
 }
 
 static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
+    /* The incremental enumeration solver holds the popped scope's asserts and
+     * cannot retract them. (The builder rewinds below, so a later finalize
+     * could even put a different constraint at the same offset.) */
+    fe->bb_inc = 0;
     _end_assumptions(fe);
     /* push always compiles and flushes, so anything still pending in the
      * builder was asserted inside the scope being popped: drop it, or it would
@@ -5990,6 +6692,7 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
 }
 
 void smt2_frontend_destroy(Smt2Frontend *fe) {
+    free(fe->shape_tab);
     _truncate_named(fe, 0);
     free(fe->named);
     free(fe->core_hist);   /* the copies themselves live in persistent_arena */
@@ -6060,6 +6763,8 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     int      vlt_hash_ignore = fe->vlt_hash_ignore;
     uint64_t cdcl_probe_fp = fe->cdcl_probe_fp;
     uint8_t  cdcl_route = fe->cdcl_route;
+    uint32_t ctx_buf_scale = fe->ctx_buf_scale;
+    void    *shape_tab = fe->shape_tab;
     /* Reused allocations (reset in place below rather than freed). */
     dvs_builder_t *builder = fe->builder;
     SexprArena           parena  = fe->persistent_arena;
@@ -6118,6 +6823,8 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->vlt_hash_ignore = vlt_hash_ignore;
     fe->cdcl_probe_fp = cdcl_probe_fp;
     fe->cdcl_route = cdcl_route;
+    fe->ctx_buf_scale = ctx_buf_scale;
+    fe->shape_tab = shape_tab;
     fe->builder = builder;
     fe->persistent_arena = parena;
 }

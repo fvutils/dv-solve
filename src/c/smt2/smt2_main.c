@@ -102,7 +102,7 @@ static int _read_one_sexpr(FILE *f, GrowBuf *g) {
     int started = 0;
     int c;
 
-    while ((c = fgetc(f)) != EOF) {
+    while ((c = getc_unlocked(f)) != EOF) {
         if (_grow_push(g, c) < 0) return -1;
 
         if (in_comment) {
@@ -129,7 +129,7 @@ static int _read_one_sexpr(FILE *f, GrowBuf *g) {
         } else if (!isspace((unsigned char)c) && depth == 0 && !started) {
             /* Top-level atom (rare in SMT-LIB).  Consume contiguous non-
              * whitespace, then return. */
-            while ((c = fgetc(f)) != EOF) {
+            while ((c = getc_unlocked(f)) != EOF) {
                 if (isspace((unsigned char)c) || c == '(' || c == ')' || c == ';') {
                     ungetc(c, f);
                     break;

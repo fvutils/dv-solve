@@ -25,7 +25,7 @@ Any other logic is an error. The logic also selects the solving engine; see
 | `set-logic` | the logics above |
 | `set-option` | `:produce-models`, `:produce-unsat-cores`, `:seed`; other options are accepted and ignored |
 | `set-info` | accepted and ignored |
-| `declare-const`, `declare-fun` | Bool, `(_ BitVec n)` for n up to 128, arrays of bit-vectors, and functions over them |
+| `declare-const`, `declare-fun` | Bool, `(_ BitVec n)` for n up to 192, arrays of bit-vectors, and functions over them |
 | `declare-sort` | arity 0 (opaque sorts) |
 | `declare-datatypes` | single-constructor records whose fields are Bool or bit-vectors |
 | `define-fun` | yes |
@@ -75,7 +75,7 @@ definitions.
 
 Not yet supported (a problem that uses them gets `unknown`): `bvnand`, `bvnor`, `bvxnor`, `bvcomp`, `rotate_left` and `rotate_right`.
 
-Bit-vector widths up to 128 bits are supported. Constants must fit in 64 bits.
+Bit-vector widths, constants included, up to 192 bits are supported.
 See {doc}`../concepts/soundness` for what happens beyond these limits.
 
 ## Batch and interactive input

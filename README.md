@@ -36,6 +36,17 @@ cmake --build build
 See [Installation](https://dvkit.org/fvutils/dv-solve/getting-started/install)
 for the details, including the optional CaDiCaL back end.
 
+To develop in a checkout, set up the workspace with IVPM and build in place:
+
+```bash
+ivpm update -d dev
+packages/python/bin/python setup.py build_ext --inplace
+```
+
+That fetches CaDiCaL and the Python environment into `packages/`, then builds
+the libraries into `build/lib` and `dv-solve-smt2` into `build/bin`. The
+`dv_solve` package in `src/` loads the library from `build/lib`.
+
 ## Quick start
 
 ```python

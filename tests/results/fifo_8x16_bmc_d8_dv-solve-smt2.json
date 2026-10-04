@@ -2,8 +2,8 @@
   "solver": "dv-solve-smt2",
   "benchmark": "fifo_8x16_bmc_d8",
   "result": "unsat",
-  "solve_time_ms": 2.8881930047646165,
-  "peak_memory_kb": 443532,
+  "solve_time_ms": 4.25003410782665,
+  "peak_memory_kb": 267776,
   "returncode": 1,
   "stdout": "unsat\n",
   "stderr": ""
