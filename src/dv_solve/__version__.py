@@ -26,7 +26,7 @@
 # sibling packages numbered 0.0.1.<run-id>, which sort ABOVE a bare 0.0.1.
 # The estate moves to 0.1.0 so that a real release outranks that stream.
 
-BASE = "0.1.0"
+BASE = "0.2.0"
 SUFFIX = ""
 
 __version__ = (BASE, SUFFIX)
