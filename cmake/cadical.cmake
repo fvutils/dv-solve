@@ -84,10 +84,28 @@ if(APPLE)
     # symbols left out of -exported_symbol become private extern and are then
     # turned static (unless -keep_private_externs). Mach-O names carry a
     # leading underscore.
+    #
+    # ld64 must be told -arch, and links one architecture per invocation. A
+    # universal build (CMAKE_OSX_ARCHITECTURES="x86_64;arm64", as the wheel
+    # backend configures) compiles fat objects, so link each slice on its own
+    # and lipo the results back together.
+    set(_cadical_archs ${CMAKE_OSX_ARCHITECTURES})
+    if(NOT _cadical_archs)
+        set(_cadical_archs ${CMAKE_SYSTEM_PROCESSOR})
+    endif()
+    set(_cadical_cmds)
+    set(_cadical_slices)
+    foreach(_arch IN LISTS _cadical_archs)
+        set(_slice ${CMAKE_CURRENT_BINARY_DIR}/cadical_localized_${_arch}.o)
+        list(APPEND _cadical_cmds
+            COMMAND ${CMAKE_LINKER} -r -arch ${_arch} $<TARGET_OBJECTS:cadical_objs>
+                    -exported_symbol _ccadical_* -o ${_slice})
+        list(APPEND _cadical_slices ${_slice})
+    endforeach()
     add_custom_command(
         OUTPUT ${CADICAL_LOCALIZED}
-        COMMAND ${CMAKE_LINKER} -r $<TARGET_OBJECTS:cadical_objs>
-                -exported_symbol _ccadical_* -o ${CADICAL_LOCALIZED}
+        ${_cadical_cmds}
+        COMMAND lipo -create ${_cadical_slices} -output ${CADICAL_LOCALIZED}
         DEPENDS cadical_objs
         COMMAND_EXPAND_LISTS
         VERBATIM
