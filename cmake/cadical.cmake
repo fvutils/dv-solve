@@ -58,21 +58,51 @@ target_compile_features(cadical_objs PRIVATE cxx_std_17)
 set_target_properties(cadical_objs PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #   NBUILD - skip generated build.hpp; NDEBUG - assertions off
 target_compile_definitions(cadical_objs PRIVATE NBUILD NDEBUG)
+
+# NBUILD also skips CaDiCaL's ./configure feature probes, so replicate the one
+# that matters for portability: closefrom() exists only in glibc >= 2.34 (not
+# manylinux_2_28) and is absent on macOS. Without it, file.cpp needs
+# -DNCLOSEFROM to use its own close() loop instead.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+extern \"C\" {
+#include <unistd.h>
+}
+int main () { closefrom (3); return 0; }
+" DVS_CADICAL_HAVE_CLOSEFROM)
+if(NOT DVS_CADICAL_HAVE_CLOSEFROM)
+    target_compile_definitions(cadical_objs PRIVATE NCLOSEFROM)
+endif()
 target_compile_options(cadical_objs PRIVATE -O3 -fPIC -Wno-unused-parameter)
 
 # 2. Partial-link all objects into one relocatable object, then localize every
 #    defined global except the ccadical_* API (-w enables the wildcard).
 set(CADICAL_MERGED  ${CMAKE_CURRENT_BINARY_DIR}/cadical_merged.o)
 set(CADICAL_LOCALIZED ${CMAKE_CURRENT_BINARY_DIR}/cadical_localized.o)
-add_custom_command(
-    OUTPUT ${CADICAL_LOCALIZED}
-    COMMAND ${CMAKE_LINKER} -r $<TARGET_OBJECTS:cadical_objs> -o ${CADICAL_MERGED}
-    COMMAND ${CMAKE_OBJCOPY} -w --keep-global-symbol=ccadical_*
-            ${CADICAL_MERGED} ${CADICAL_LOCALIZED}
-    DEPENDS cadical_objs
-    COMMAND_EXPAND_LISTS
-    VERBATIM
-    COMMENT "Merging + localizing CaDiCaL (keeps only ccadical_* global)")
+if(APPLE)
+    # Mach-O: there is no objcopy, but ld64 does both steps at once. With -r,
+    # symbols left out of -exported_symbol become private extern and are then
+    # turned static (unless -keep_private_externs). Mach-O names carry a
+    # leading underscore.
+    add_custom_command(
+        OUTPUT ${CADICAL_LOCALIZED}
+        COMMAND ${CMAKE_LINKER} -r $<TARGET_OBJECTS:cadical_objs>
+                -exported_symbol _ccadical_* -o ${CADICAL_LOCALIZED}
+        DEPENDS cadical_objs
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+        COMMENT "Merging + localizing CaDiCaL (keeps only ccadical_* global)")
+else()
+    add_custom_command(
+        OUTPUT ${CADICAL_LOCALIZED}
+        COMMAND ${CMAKE_LINKER} -r $<TARGET_OBJECTS:cadical_objs> -o ${CADICAL_MERGED}
+        COMMAND ${CMAKE_OBJCOPY} -w --keep-global-symbol=ccadical_*
+                ${CADICAL_MERGED} ${CADICAL_LOCALIZED}
+        DEPENDS cadical_objs
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+        COMMENT "Merging + localizing CaDiCaL (keeps only ccadical_* global)")
+endif()
 add_custom_target(cadical_localize DEPENDS ${CADICAL_LOCALIZED})
 
 # 3. Wrap the localized object as the linkable static library.
