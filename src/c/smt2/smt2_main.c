@@ -18,7 +18,11 @@
 #include "smt2/smt2_parser.h"
 #include "smt2/smt2_frontend.h"
 
-#define VERSION_STRING "dv-solve-smt2 0.1.0"
+/* DVS_VERSION comes from src/dv_solve/__version__.py, through CMake. */
+#ifndef DVS_VERSION
+#define DVS_VERSION "unknown"
+#endif
+#define VERSION_STRING "dv-solve-smt2 " DVS_VERSION
 
 static void _usage(FILE *f) {
     fprintf(f,

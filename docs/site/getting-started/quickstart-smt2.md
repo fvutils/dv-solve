@@ -2,7 +2,7 @@
 
 `dv-solve-smt2` reads [SMT-LIB2](https://smt-lib.org/) from a file or from
 standard input and answers each `check-sat` with `sat`, `unsat` or `unknown`.
-It is built from source; see {doc}`install`.
+`pip install dv-solve` puts it on `PATH` on Linux and macOS; see {doc}`install`.
 
 ## Solve a file
 
