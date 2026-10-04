@@ -528,6 +528,22 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_STRIP AND NOT MSVC)
         COMMAND ${CMAKE_STRIP} ${_dvs_strip_args} $<TARGET_FILE:dv-solve-smt2>
         VERBATIM)
 endif()
+# Drop the GNU property note from the Linux x86_64 executable. The
+# manylinux_2_34 image (AlmaLinux 9) builds glibc for x86-64-v2, so its
+# crt1.o is marked "ISA needed: x86-64-v2", and the linker copies that into
+# every executable (not into shared libraries, which do not link crt1.o).
+# auditwheel then refuses the wheel for the baseline x86_64 policy, although
+# none of dv-solve's own code needs more than baseline. -z x86-64-baseline
+# cannot override it: that image's ld aborts on the merge. The note also holds
+# the CET (IBT/SHSTK) markers, which are lost with it.
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_OBJCOPY
+        AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+        AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    add_custom_command(TARGET dv-solve-smt2 POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} --remove-section .note.gnu.property
+                $<TARGET_FILE:dv-solve-smt2>
+        VERBATIM)
+endif()
 install(TARGETS dv-solve-smt2 RUNTIME DESTINATION bin)
 
 endif()  # DVS_BUILD_SMT2
