@@ -104,17 +104,17 @@ _COVERED = {
     ("getting-started/quickstart-verilator.md", "verilator --binary packet.sv"):
         "test_quickstart_verilator",
     ("getting-started/quickstart-verilator.md",
-     'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator"'):
+     'export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"'):
         "test_quickstart_verilator",
     ("getting-started/quickstart-verilator.md", "addr=00000a1c len=5 kind=14"):
         "test_quickstart_verilator",
     ("getting-started/quickstart-verilator.md", "./obj_dir/Vpacket +verilator+seed+1"):
         "test_quickstart_verilator",
     ("guides/verilator.md",
-     'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator"'):
+     'export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"'):
         "test_verilator_guide_setup",
     ("guides/verilator.md",
-     'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator '
+     'export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator '
      '--verilator-hash=ignore"'):
         "test_verilator_guide_hash_ignore",
     ("guides/verilator.md",
@@ -307,7 +307,7 @@ def _verilator_run(src: Path, tmp: Path, env: dict, build: str, run: str) -> str
     shutil.copy(src, tmp / src.name)
     b = _sh(build, tmp, env)
     assert b.returncode == 0, b.stdout[-2000:] + b.stderr[-2000:]
-    r = _sh(run.replace("/path/to/dv-solve-smt2", _smt2_exe()), tmp, env, timeout=120)
+    r = _sh(run, tmp, env, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
     return r.stdout + r.stderr
 
@@ -317,7 +317,7 @@ def test_quickstart_verilator(shell_env: dict, tmp_path: Path) -> None:
     _need(_smt2_exe(), "dv-solve-smt2")
     page = "getting-started/quickstart-verilator.md"
     build = _block(page, "verilator --binary packet.sv").text
-    run = _block(page, 'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 '
+    run = _block(page, 'export VERILATOR_SOLVER="dv-solve-smt2 '
                        '--interactive --mode=verilator"').text
     shown = _block(page, "addr=00000a1c len=5 kind=14").text
     out = _verilator_run(_EXAMPLES / "verilator" / "packet.sv", tmp_path, shell_env, build, run)
@@ -327,7 +327,7 @@ def test_quickstart_verilator(shell_env: dict, tmp_path: Path) -> None:
 
     # The same seed repeats a run; a different seed gives different values.
     seeded = _block(page, "./obj_dir/Vpacket +verilator+seed+1").text
-    export = run.splitlines()[0].replace("/path/to/dv-solve-smt2", _smt2_exe())
+    export = run.splitlines()[0]
     runs = [_sh(export + "\n" + cmd, tmp_path, shell_env, timeout=120).stdout
             for cmd in (seeded, seeded, seeded.replace("seed+1", "seed+2"))]
     pkts = [_packets(o) for o in runs]
@@ -339,10 +339,10 @@ def test_quickstart_verilator(shell_env: dict, tmp_path: Path) -> None:
 # ------------------------------------------------------------------ #
 
 def test_verilator_guide_setup() -> None:
-    guide = _block("guides/verilator.md", 'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 '
+    guide = _block("guides/verilator.md", 'export VERILATOR_SOLVER="dv-solve-smt2 '
                                           '--interactive --mode=verilator"').text
     quick = _block("getting-started/quickstart-verilator.md",
-                   'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 '
+                   'export VERILATOR_SOLVER="dv-solve-smt2 '
                    '--interactive --mode=verilator"').body[0]
     assert guide.strip() == quick, "the guide and the quick start set VERILATOR_SOLVER differently"
 
@@ -352,7 +352,7 @@ def test_verilator_guide_hash_ignore() -> None:
     contradicts the one before it, keeps answering sat (the parity constraint
     is skipped), where the default answers unsat."""
     exe = _need(_smt2_exe(), "dv-solve-smt2")
-    line = _block("guides/verilator.md", 'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 '
+    line = _block("guides/verilator.md", 'export VERILATOR_SOLVER="dv-solve-smt2 '
                                          '--interactive --mode=verilator '
                                          '--verilator-hash=ignore"').body[0]
     args = line.split('"')[1].split()[1:]
@@ -365,7 +365,7 @@ def test_verilator_guide_hash_ignore() -> None:
         assert r.stdout.split()[-1] == want, (a, r.stdout)
 
 
-_VLT_RUN = 'export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator"\n'
+_VLT_RUN = 'export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"\n'
 
 
 def test_verilator_guide_unsat(shell_env: dict, tmp_path: Path) -> None:

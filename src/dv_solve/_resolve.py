@@ -472,3 +472,123 @@ def require_svdirs() -> List[str]:
     if inst is None:
         raise missing_artifact_error("SV sources (%s)" % _SENTINEL_SV)
     raise _incomplete_error(inst, "SV sources (%s)" % _SENTINEL_SV, "")
+
+
+# --------------------------------------------------------- dv-solve-smt2 ----
+#
+# The SMT-LIB2 command-line tool is statically linked against the solver, so
+# unlike the libraries it cannot be mismatched with the installation the
+# Python API loads: any copy is self-contained. It still follows the same
+# order, so that the answer is the one a user of THIS package expects.
+#
+#   1. The override (DVS_SOLVER_PATH), alone, as for the libraries: the root
+#      itself or its bin/.
+#   2. The installed wheel's own copy. pip puts it in the environment's
+#      scripts directory (bin/, or Scripts\ on Windows), outside the package,
+#      so it is found through the distribution's RECORD -- which works for
+#      venv, --user and system installs alike. Only a distribution whose
+#      RECORD holds THIS package's __init__.py counts, so a wheel installed
+#      elsewhere cannot answer for a source checkout.
+#   3. A built source checkout: <build>/bin (the install destination), then
+#      <build> itself (CMake's link output).
+#   4. PATH, as a last resort.
+
+SMT2_NAME = "dv-solve-smt2"
+
+
+def smt2_filename() -> str:
+    """The platform's file name for the SMT-LIB2 tool."""
+    if platform.system() == "Windows":
+        return SMT2_NAME + ".exe"
+    return SMT2_NAME
+
+
+def _is_exe(path: str) -> bool:
+    return _is_file(path) and os.access(path, os.X_OK)
+
+
+def _dist_smt2() -> Optional[str]:
+    """The executable recorded by the distribution that owns this package."""
+    try:
+        from importlib import metadata
+        dist = metadata.distribution("dv-solve")
+    except Exception:
+        return None
+    files = dist.files or []
+    init = os.path.join(_pkg_dir(), "__init__.py")
+    owns = any(f.name == "__init__.py" and f.parent.name == "dv_solve"
+               and os.path.abspath(str(dist.locate_file(f))) == init
+               for f in files)
+    if not owns:
+        return None
+    name = smt2_filename()
+    for f in files:
+        if f.name == name:
+            p = os.path.abspath(str(dist.locate_file(f)))
+            if _is_exe(p):
+                return p
+    return None
+
+
+def smt2_search_paths() -> List[str]:
+    """Every location probed for the SMT-LIB2 tool, best first (for
+    diagnostics; the RECORD and PATH lookups are named, not expanded)."""
+    name, j = smt2_filename(), os.path.join
+    root = override_root()
+    if root:
+        return [j(root, name), j(root, "bin", name)]
+    out = ["the dv-solve distribution's installed scripts (RECORD)"]
+    for bd in (j(_src_root(), n) for n in _BUILD_DIR_NAMES):
+        out += [j(bd, "bin", name), j(bd, name)]
+    out.append("PATH")
+    return out
+
+
+def find_smt2_exe() -> Optional[str]:
+    """Absolute path to ``dv-solve-smt2``, or ``None``. See above for order."""
+    name, j = smt2_filename(), os.path.join
+    root = override_root()
+    if root:
+        for p in (j(root, name), j(root, "bin", name)):
+            if _is_exe(p):
+                return os.path.abspath(p)
+        return None                         # the override is terminal
+    hit = _dist_smt2()
+    if hit:
+        return hit
+    for bd in (j(_src_root(), n) for n in _BUILD_DIR_NAMES):
+        for p in (j(bd, "bin", name), j(bd, name)):
+            if _is_exe(p):
+                return os.path.abspath(p)
+    import shutil
+    hit = shutil.which(SMT2_NAME)
+    return os.path.abspath(hit) if hit else None
+
+
+def require_smt2_exe() -> str:
+    """Like :func:`find_smt2_exe` but raises an actionable ``RuntimeError``."""
+    hit = find_smt2_exe()
+    if hit is not None:
+        return hit
+    raise smt2_missing_error()
+
+
+def smt2_missing_error() -> RuntimeError:
+    """The error for a missing ``dv-solve-smt2``, naming where it looked."""
+    detail = ""
+    if platform.system() == "Windows":
+        detail = ("The Windows wheel does not include it yet; it needs a "
+                  "POSIX system (Linux or macOS).")
+    elif override_root():
+        detail = "%s is set, so no other location was searched." % _override_var()
+    return RuntimeError(
+        "dv-solve: %s not found.%s\n"
+        "Searched:\n%s\n"
+        "Fixes:\n"
+        "  - Install a binary wheel (Linux, macOS):  pip install dv-solve\n"
+        "  - Build from source (needs CMake + a C compiler):\n"
+        "        cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=build\n"
+        "        ninja -C build install\n"
+        "  - Or point DVS_SOLVER_PATH at a directory or prefix holding it."
+        % (smt2_filename(), (" " + detail) if detail else "",
+           "\n".join("  - %s" % p for p in smt2_search_paths())))

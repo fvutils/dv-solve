@@ -92,9 +92,9 @@ if(MSVC)
     include_directories(${DVS_WIN_COMPAT})
 endif()
 
-# The CLI (dv-solve-smt2) and the C unit-test executables are developer tools,
-# not part of any wheel. They also pull in POSIX-only APIs (setenv) and internal
-# data symbols that aren't exported from the DLLs, so skip them on MSVC.
+# The C unit-test executables are developer tools, not part of any wheel. They
+# also pull in POSIX-only APIs (setenv) and internal data symbols that aren't
+# exported from the DLLs, so skip them on MSVC.
 # Force the portable (no __int128, no GCC overflow builtins) arithmetic path of
 # src/c/dvs_i128.h -- what MSVC builds use -- so it can be tested on Linux.
 option(DVS_NO_INT128 "Use the portable 64-bit code instead of __int128" OFF)
@@ -102,9 +102,26 @@ if(DVS_NO_INT128)
     add_compile_definitions(DVS_NO_INT128=1)
 endif()
 
-option(DV_SOLVE_BUILD_TOOLS "Build the dv-solve CLI and C test executables" ON)
+# The C test and benchmark executables. Wheel builds turn them off through the
+# DV_SOLVE_BUILD_TOOLS environment variable (set in pyproject.toml's
+# [tool.cibuildwheel] section), since the ivpm_build backend has no way to pass
+# -D options and the wheel ships none of them.
+if(DEFINED ENV{DV_SOLVE_BUILD_TOOLS})
+    set(_dvs_tools_default $ENV{DV_SOLVE_BUILD_TOOLS})
+else()
+    set(_dvs_tools_default ON)
+endif()
+option(DV_SOLVE_BUILD_TOOLS "Build the C test and benchmark executables" ${_dvs_tools_default})
 if(MSVC)
     set(DV_SOLVE_BUILD_TOOLS OFF)
+endif()
+
+# The dv-solve-smt2 CLI. It ships in the wheel (pip puts it on PATH), so it is
+# built independently of DV_SOLVE_BUILD_TOOLS. It needs POSIX headers
+# (unistd.h, pthread.h, sys/resource.h), so not under MSVC yet.
+option(DVS_BUILD_SMT2 "Build the dv-solve-smt2 SMT-LIB2 command-line tool" ON)
+if(MSVC)
+    set(DVS_BUILD_SMT2 OFF)
 endif()
 
 if(DV_SOLVE_BUILD_TOOLS)
@@ -132,6 +149,21 @@ endif()
 set(DVS_CONTRA_SOURCES
     src/c/dvs_contradiction.c
 )
+
+# ------------------------------------------------------------------ #
+# Version                                                             #
+# ------------------------------------------------------------------ #
+# src/dv_solve/__version__.py is the single source of the version. The
+# SMT-LIB2 tool reports it (--version, get-info :version).
+
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/src/dv_solve/__version__.py _dvs_base
+    REGEX "^BASE = ")
+string(REGEX REPLACE "^BASE = \"([^\"]*)\".*" "\\1" DVS_VERSION "${_dvs_base}")
+message(STATUS "dv-solve: version ${DVS_VERSION}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dv_solve/__version__.py)
+set_source_files_properties(src/c/smt2/smt2_main.c src/c/smt2/smt2_frontend.c
+    PROPERTIES COMPILE_DEFINITIONS "DVS_VERSION=\"${DVS_VERSION}\"")
 
 # ------------------------------------------------------------------ #
 # Source list                                                          #
@@ -389,28 +421,6 @@ target_include_directories(test_smt2_parser PRIVATE
 )
 add_test(NAME test_smt2_parser COMMAND test_smt2_parser)
 
-# ------------------------------------------------------------------ #
-# dv-solve-smt2 executable                                            #
-# ------------------------------------------------------------------ #
-
-set(SMT2_SOURCES
-    src/c/smt2/smt2_lexer.c
-    src/c/smt2/smt2_parser.c
-    src/c/smt2/smt2_frontend.c
-    src/c/smt2/smt2_main.c
-)
-
-add_executable(dv-solve-smt2 ${SMT2_SOURCES})
-target_link_libraries(dv-solve-smt2 PRIVATE dv_solve Threads::Threads)
-target_include_directories(dv-solve-smt2 PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/c
-)
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(dv-solve-smt2 PRIVATE -fsanitize=address -g -O0)
-    target_link_options(dv-solve-smt2 PRIVATE -fsanitize=address)
-endif()
-install(TARGETS dv-solve-smt2 RUNTIME DESTINATION bin)
-
 # In-process randomize() benchmark: reuses the frontend parser to build one
 # problem once, then times rediversify+readback -- the per-randomize cost an
 # embedded (DPI) Verilator integration would pay, with no parse/build/reset/IPC.
@@ -456,3 +466,68 @@ endif()
 add_test(NAME test_smt2_frontend COMMAND test_smt2_frontend)
 
 endif()  # DV_SOLVE_BUILD_TOOLS
+
+# ------------------------------------------------------------------ #
+# dv-solve-smt2 executable                                            #
+# ------------------------------------------------------------------ #
+# Linked against a static build of the library, so the executable is
+# self-contained: pip installs it into <env>/bin, and the relative path from
+# there to site-packages/dv_solve (where the shared library lives) differs
+# between venv, --user and system installs, so no RPATH could reach it.
+
+if(DVS_BUILD_SMT2)
+
+add_library(dv_solve_static STATIC ${DVS_SOURCES})
+target_link_libraries(dv_solve_static PUBLIC kissat Threads::Threads)
+if(DVS_WITH_CADICAL)
+    # PUBLIC rather than dvs_apply_cadical's PRIVATE: a static archive does
+    # not carry its dependencies, so they have to reach the executable's link.
+    target_link_libraries(dv_solve_static PUBLIC cadical)
+    target_compile_definitions(dv_solve_static PRIVATE DVS_WITH_CADICAL=1)
+endif()
+if(DVS_CONTRADICTION_ANALYSIS)
+    target_sources(dv_solve_static PRIVATE ${DVS_CONTRA_SOURCES})
+    target_compile_definitions(dv_solve_static PRIVATE DVS_CONTRADICTION_ANALYSIS=1)
+endif()
+target_include_directories(dv_solve_static PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
+)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(dv_solve_static PRIVATE -fsanitize=address -g -O0)
+endif()
+
+set(SMT2_SOURCES
+    src/c/smt2/smt2_lexer.c
+    src/c/smt2/smt2_parser.c
+    src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_main.c
+)
+
+add_executable(dv-solve-smt2 ${SMT2_SOURCES})
+target_link_libraries(dv-solve-smt2 PRIVATE dv_solve_static Threads::Threads)
+if(DVS_WITH_CADICAL)
+    # CaDiCaL is C++; link with the C++ driver so libstdc++/libc++ is pulled in.
+    set_target_properties(dv-solve-smt2 PROPERTIES LINKER_LANGUAGE CXX)
+endif()
+target_include_directories(dv-solve-smt2 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/c
+)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(dv-solve-smt2 PRIVATE -fsanitize=address -g -O0)
+    target_link_options(dv-solve-smt2 PRIVATE -fsanitize=address)
+endif()
+# Strip release builds: the wheel ships this file, and the symbol table is
+# most of its size. -x on macOS keeps what dyld needs from a Mach-O exe.
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_STRIP AND NOT MSVC)
+    if(APPLE)
+        set(_dvs_strip_args -x)
+    else()
+        set(_dvs_strip_args --strip-all)
+    endif()
+    add_custom_command(TARGET dv-solve-smt2 POST_BUILD
+        COMMAND ${CMAKE_STRIP} ${_dvs_strip_args} $<TARGET_FILE:dv-solve-smt2>
+        VERBATIM)
+endif()
+install(TARGETS dv-solve-smt2 RUNTIME DESTINATION bin)
+
+endif()  # DVS_BUILD_SMT2

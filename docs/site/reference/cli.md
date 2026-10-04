@@ -6,6 +6,13 @@ dv-solve-smt2 [options] [file.smt2]
 
 With no file, commands are read from standard input.
 
+`pip install dv-solve` installs the executable into the environment's `bin/`
+directory on Linux and macOS (not yet on Windows). It is statically linked
+against the solver, so it needs nothing from the Python package at run time.
+From Python, `dv_solve.get_smt2_exe()` returns its path: the installed
+wheel's copy first, then a source checkout's `build/bin`, then `PATH`. A
+source build puts it in `build/` (and `build/bin` after `cmake --install`).
+
 ## Options
 
 `--engine=E`

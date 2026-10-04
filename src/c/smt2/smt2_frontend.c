@@ -10,6 +10,11 @@
 #include "dvs_cube.h"
 #include "dvs_i128.h"
 
+/* DVS_VERSION comes from src/dv_solve/__version__.py, through CMake. */
+#ifndef DVS_VERSION
+#define DVS_VERSION "unknown"
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
@@ -6170,7 +6175,7 @@ static int _cmd_get_info(Smt2Frontend *fe, const Sexpr *cmd) {
     if (sexpr_is_keyword(key, ":name")) {
         fprintf(fe->out, "(:name \"dv-solve-smt2\")\n");
     } else if (sexpr_is_keyword(key, ":version")) {
-        fprintf(fe->out, "(:version \"0.1.0\")\n");
+        fprintf(fe->out, "(:version \"%s\")\n", DVS_VERSION);
     } else if (sexpr_is_keyword(key, ":authors")) {
         fprintf(fe->out, "(:authors \"dv-solve contributors\")\n");
     } else {

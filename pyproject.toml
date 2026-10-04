@@ -1,12 +1,14 @@
 [build-system]
 # ivpm-build's PEP 517 backend drives the CMake build, bundles the native
 # libraries into the wheel, and tags it platform-specific (py3-none-<plat>).
-# 0.2.0.27908268978 is the first published build carrying the platform-tagging
-# fix; a >= floor stays compatible with later (e.g. 0.2.1/0.3.0) releases.
+# 0.2.1 is the first release with [[tool.ivpm-build.scripts]], which puts
+# dv-solve-smt2 in the wheel (an older backend ignores the table and ships a
+# wheel without it); it also carries the 0.2.0 platform-tagging fix. A >= floor
+# stays compatible with later releases.
 requires = [
     "setuptools>=64",
     "wheel",
-    "ivpm-build>=0.2.0.27908268978",
+    "ivpm-build>=0.2.1",
 ]
 build-backend = "ivpm_build.backend"
 
@@ -82,6 +84,15 @@ pkg = "dv_solve"
 src = "src/sv"
 dst = "share"
 
+# The SMT-LIB2 command-line tool → <dist>.data/scripts/, which pip installs
+# into the environment's bin/ (on PATH). Statically linked against the solver
+# (CMakeLists.txt), so it needs nothing from the package at run time.
+# Optional because it is not built under MSVC yet: the Windows wheel ships
+# without it.
+[[tool.ivpm-build.scripts]]
+src = "build/bin/dv-solve-smt2{exeext}"
+optional = true
+
 # ---------------------------------------------------------------------------
 # cibuildwheel — binary wheels in CI
 #
@@ -96,6 +107,10 @@ build = "cp311-*"
 skip = "*-musllinux*"
 # Verify the bundled native lib actually loads from the installed wheel.
 test-command = "python {project}/tests/wheel_smoke.py"
+# Skip the C test and benchmark executables (CMakeLists.txt reads this): the
+# wheel ships none of them, and they cost most of the time on the emulated
+# aarch64 runners. dv-solve-smt2 is built regardless.
+environment = { DV_SOLVE_BUILD_TOOLS = "OFF" }
 
 [tool.cibuildwheel.linux]
 # cibuildwheel always builds Linux wheels inside a manylinux container, so the

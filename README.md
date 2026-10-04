@@ -25,8 +25,15 @@ dv-solve can't decide a problem it says `unknown` rather than guessing.
 pip install dv-solve
 ```
 
-The wheel holds the Python package, the native libraries, the C header and the
-SystemVerilog packages. `dv-solve-smt2` comes from a source build:
+The wheel holds the Python package, the native libraries, the C header, the
+SystemVerilog packages and, on Linux and macOS, the `dv-solve-smt2`
+executable, which pip puts on `PATH`:
+
+```bash
+dv-solve-smt2 --version
+```
+
+To build everything from source instead:
 
 ```bash
 cmake -S . -B build -DDVS_WITH_CADICAL=OFF

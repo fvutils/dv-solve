@@ -169,6 +169,24 @@ def get_dpi_lib():
     return os.path.join(_pkg_dir(), _lib_filename("dv_solve_dpi"))
 
 
+def get_smt2_exe():
+    """Absolute path to the ``dv-solve-smt2`` SMT-LIB2 command-line tool.
+
+    The wheel installs it into the environment's scripts directory, so in an
+    activated environment it is also simply ``dv-solve-smt2`` on PATH. Use
+    this when PATH may hold a different copy, or when the environment is not
+    activated (for example, to set ``VERILATOR_SOLVER`` from a script).
+
+    Order: ``DVS_SOLVER_PATH`` (alone, when set), this package's own wheel
+    install, a built source checkout (``build/bin``, then ``build``), PATH.
+    The tool is statically linked, so any copy found is self-contained.
+
+    Raises ``RuntimeError`` naming every location searched when none is found
+    -- always the case on Windows today, whose wheel does not include it.
+    """
+    return _resolve.require_smt2_exe()
+
+
 def resolve_report():
     """What this installation actually resolved to, for diagnostics.
 
@@ -182,7 +200,8 @@ def resolve_report():
     inst = _resolve.select_installation()
     errors = {}
     for key, fn in (("link_dirs", get_libdirs), ("dpi_lib", get_dpi_lib),
-                    ("incdirs", get_incdirs), ("svdirs", get_svdirs)):
+                    ("incdirs", get_incdirs), ("svdirs", get_svdirs),
+                    ("smt2_exe", get_smt2_exe)):
         try:
             fn()
         except RuntimeError as e:
@@ -199,5 +218,6 @@ def resolve_report():
         "dpi_lib": _resolve.find_library("dv_solve_dpi"),
         "incdirs": _resolve.find_incdirs(),
         "svdirs": _resolve.find_svdirs(),
+        "smt2_exe": _resolve.find_smt2_exe(),
         "errors": errors,
     }

@@ -497,3 +497,85 @@ def test_legacy_override_name_is_honoured(monkeypatch, tmp_path):
     assert _resolve.override_root() == str(tmp_path / "legacy")
     monkeypatch.setenv("DVS_SOLVER_PATH", str(tmp_path / "new"))
     assert _resolve.override_root() == str(tmp_path / "new")
+
+
+# ---------------------------------------------------------- dv-solve-smt2 --
+
+
+def _exe(d):
+    """Create an executable dv-solve-smt2 in *d* and return its path."""
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, _resolve.smt2_filename())
+    with open(p, "w") as fh:
+        fh.write("#!/bin/sh\n")
+    os.chmod(p, 0o755)
+    return p
+
+
+@pytest.fixture
+def _smt2_isolated(tmp_path, monkeypatch):
+    """No wheel RECORD and an empty PATH, unless a test supplies them."""
+    monkeypatch.setattr(_resolve, "_dist_smt2", lambda: None)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+    _install(monkeypatch, tmp_path / "site" / "dv_solve", tmp_path / "checkout")
+    return tmp_path
+
+
+def test_smt2_checkout_prefers_install_bin(_smt2_isolated):
+    co = _smt2_isolated / "checkout" / "build"
+    _exe(str(co))
+    want = _exe(str(co / "bin"))
+    assert _resolve.find_smt2_exe() == want
+
+
+def test_smt2_checkout_link_output(_smt2_isolated):
+    want = _exe(str(_smt2_isolated / "checkout" / "build"))
+    assert _resolve.find_smt2_exe() == want
+
+
+def test_smt2_wheel_beats_checkout(_smt2_isolated, monkeypatch):
+    wheel = _exe(str(_smt2_isolated / "venv" / "bin"))
+    _exe(str(_smt2_isolated / "checkout" / "build" / "bin"))
+    monkeypatch.setattr(_resolve, "_dist_smt2", lambda: wheel)
+    assert _resolve.find_smt2_exe() == wheel
+
+
+def test_smt2_path_is_last_resort(_smt2_isolated, monkeypatch):
+    on_path = _exe(str(_smt2_isolated / "elsewhere"))
+    monkeypatch.setenv("PATH", os.path.dirname(on_path))
+    assert _resolve.find_smt2_exe() == on_path
+    want = _exe(str(_smt2_isolated / "checkout" / "build" / "bin"))
+    assert _resolve.find_smt2_exe() == want
+
+
+def test_smt2_override_is_terminal(_smt2_isolated, monkeypatch):
+    override = _smt2_isolated / "override"
+    override.mkdir()
+    _exe(str(_smt2_isolated / "checkout" / "build" / "bin"))
+    monkeypatch.setenv("DVS_SOLVER_PATH", str(override))
+    assert _resolve.find_smt2_exe() is None
+    with pytest.raises(RuntimeError, match="DVS_SOLVER_PATH is set"):
+        _resolve.require_smt2_exe()
+    want = _exe(str(override / "bin"))
+    assert _resolve.find_smt2_exe() == want
+
+
+@pytest.mark.skipif(os.name == "nt", reason="no execute bit on Windows")
+def test_smt2_not_executable_is_skipped(_smt2_isolated):
+    p = _exe(str(_smt2_isolated / "checkout" / "build" / "bin"))
+    os.chmod(p, 0o644)
+    assert _resolve.find_smt2_exe() is None
+
+
+def test_smt2_missing_names_search(_smt2_isolated):
+    with pytest.raises(RuntimeError) as ei:
+        _resolve.require_smt2_exe()
+    msg = str(ei.value)
+    assert "dv-solve-smt2" in msg and "RECORD" in msg and "PATH" in msg
+
+
+def test_smt2_dist_must_own_this_package(tmp_path, monkeypatch):
+    """A dv-solve wheel installed elsewhere must not answer for this copy."""
+    _install(monkeypatch, tmp_path / "checkout" / "src" / "dv_solve",
+             tmp_path / "checkout")
+    assert _resolve._dist_smt2() is None

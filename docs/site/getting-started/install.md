@@ -9,7 +9,7 @@ executable). How you install depends on which of them you need.
 | The Python API | PyPI |
 | The DPI library and SystemVerilog packages | PyPI (they are bundled in the wheel) |
 | The C library and headers | PyPI, or a source build |
-| The `dv-solve-smt2` executable | a source build (it is not in the wheel) |
+| The `dv-solve-smt2` executable | PyPI on Linux and macOS, or a source build |
 
 ## From PyPI
 
@@ -32,7 +32,14 @@ dv_solve.get_libdirs()   # directories holding the shared libraries
 dv_solve.get_incdirs()   # C include directories
 dv_solve.get_svdirs()    # SystemVerilog package directories
 dv_solve.get_dpi_lib()   # path to the DPI shared library
+dv_solve.get_smt2_exe()  # path to dv-solve-smt2
 ```
+
+On Linux and macOS the wheel also installs the `dv-solve-smt2` executable
+into the environment's `bin/` directory, so it is on `PATH` whenever the
+environment is active. It is statically linked, so it runs without the
+Python package. The Windows wheel does not include it yet; on Windows,
+`get_smt2_exe()` raises an error saying so.
 
 ## From source
 

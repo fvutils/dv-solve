@@ -7,7 +7,7 @@ This page explains how dv-solve serves those calls. For the setup, see
 ## Setting it up
 
 ```bash
-export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator"
+export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"
 ```
 
 Verilator reads the variable when the simulation starts, so the same compiled
@@ -48,7 +48,7 @@ with the solution it already found, which satisfies every constraint of the
 class. Only Verilator's request for variety is not honoured.
 
 ```bash
-export VERILATOR_SOLVER="/path/to/dv-solve-smt2 --interactive --mode=verilator --verilator-hash=ignore"
+export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator --verilator-hash=ignore"
 ```
 
 Calls get much cheaper. Whether the values spread as well depends on the
