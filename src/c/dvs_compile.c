@@ -716,7 +716,7 @@ static int _compile_gated_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp,
         }
     }
 
-reify:
+reify: ;
     /* Anything else: reify the constraint as a 0/1 var g (g <-> root) and add
      * guard -> g. Compiling it normally and gating the propagators that
      * appeared was unsound (B53): _compile_constraint also tightens root
