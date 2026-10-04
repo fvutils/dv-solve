@@ -109,21 +109,30 @@ def test_sticky_probe_amortizes() -> None:
 
 
 def test_routing_rescues_a_bitblast_timeout() -> None:
-    """t_constraint_shift_width: bitblast does not finish; CDCL solves it fast.
+    """t_constraint_shift_width: CDCL solves it fast.
 
-    A concrete case where the routing turns a hang into an answer.
+    Bitblast used to hang here (diversify re-propagated the barrel shifter's
+    fanout in LIFO order); that is fixed, but the CDCL route must stay fast.
     """
     v, dt, _ = _loop("t_constraint_shift_width", 20, {}, timeout=60)
     assert v and v[0] == "sat", f"expected sat, got {v[:1]}"
     assert dt / 20 * 1e3 < 50.0, f"{dt/20*1e3:.1f} ms/call is too slow"
 
 
-def test_opt_out_env_is_honoured() -> None:
+def _routes(name: str, env: dict, tmp_path) -> list:
+    log = tmp_path / f"route{len(env)}.log"
+    _loop(name, 5, {**env, "DV_LOG": str(log)})
+    return re.findall(r"vlt-route: (\w+) \(([\w-]+)\)", log.read_text())
+
+
+def test_opt_out_env_is_honoured(tmp_path) -> None:
     """DV_VERILATOR_CDCL=0 must restore the bitblast path.
 
-    Verified via the observable difference: under bitblast-always,
-    shift_width does not complete in a short budget.
+    Observed through the DV_LOG routing trace. (This used to rely on bitblast
+    timing out on shift_width; bitblast's diversify no longer blows up on
+    shifters, so a timeout is no longer an observable.)
     """
-    with pytest.raises(subprocess.TimeoutExpired):
-        _loop("t_constraint_shift_width", 5,
-              {"DV_VERILATOR_CDCL": "0"}, timeout=10)
+    default = _routes("t_constraint_shift_width", {}, tmp_path)
+    opt_out = _routes("t_constraint_shift_width", {"DV_VERILATOR_CDCL": "0"}, tmp_path)
+    assert default and any(eng == "cdcl" for eng, _ in default), default
+    assert opt_out and all(r == ("bitblast", "opt-out") for r in opt_out), opt_out

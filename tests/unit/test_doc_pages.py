@@ -121,7 +121,8 @@ _COVERED = {
      "%Warning-UNSATCONSTR: bad.sv:3: Unsatisfied constraint: 'constraint c1 { x > 10; }'"):
         "test_verilator_guide_unsat",
     ("guides/verilator.md",
-     "%Warning: .../verilated_random.cpp:624: Internal: Solver error: unknown"):
+     "%Warning: .../verilated_random.cpp:362: Solver returned unknown (timed out or incomplete), "
+     "so randomize() may return 0; warned once"):
         "test_verilator_guide_unknown",
     ("guides/systemverilog-dpi.md", "python3 packet_problem.py        # writes packet_problem_pkg.sv"):
         "test_dpi_guide",
@@ -377,13 +378,13 @@ def test_verilator_guide_unsat(shell_env: dict, tmp_path: Path) -> None:
     assert out.splitlines()[:len(shown)] == shown, out
 
 
-# A constant wider than 64 bits is beyond what dv-solve supports (see the
+# A variable wider than 192 bits is beyond what dv-solve supports (see the
 # SMT-LIB2 guide), so Verilator gets `unknown`. If this starts solving, pick
 # another unsupported construct.
 _UNKNOWN_SV = """\
 class Item;
-  rand bit [127:0] w, v;
-  constraint c { w * v == 128'd12345678901234567890123; }
+  rand bit [255:0] w, v;
+  constraint c { w * v == 256'd12345678901234567890123; }
 endclass
 module top;
   initial begin
@@ -398,8 +399,9 @@ endmodule
 def test_verilator_guide_unknown(shell_env: dict, tmp_path: Path) -> None:
     _need(_verilator(), "verilator")
     _need(_smt2_exe(), "dv-solve-smt2")
-    shown = _block("guides/verilator.md", "%Warning: .../verilated_random.cpp:624: "
-                                          "Internal: Solver error: unknown").body[0]
+    shown = _block("guides/verilator.md", "%Warning: .../verilated_random.cpp:362: Solver returned "
+                                          "unknown (timed out or incomplete), so randomize() "
+                                          "may return 0; warned once").body[0]
     src = tmp_path / "src" / "unk.sv"
     src.parent.mkdir()
     src.write_text(_UNKNOWN_SV)

@@ -763,6 +763,33 @@ static uint32_t _const_singleton_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
 
 
 static int _is_bool_op(dvs_binop_t op);
+static int _init_aux_tiered(dvs_ctx_t *ctx, Variable *v, uint16_t width,
+                            uint8_t flags, int64_t lo, int64_t hi);
+
+/* A one-value variable holding c + delta, the constant a strict comparison
+ * with `peer` becomes non-strict on. It takes the peer's width and signedness
+ * under the declared-variable tier policy, so values at and above 2^31 stay
+ * exact (an int32 singleton read them back negative, B24). Out of the peer's
+ * range -- `x < 0` on an unsigned x is `x <= -1` -- it falls back to a signed
+ * int32 singleton, which the reification compares correctly against any peer.
+ * EXPR_NULL when neither fits: the caller leaves the constraint uncompiled. */
+static uint32_t _adjacent_const_var(dvs_ctx_t *ctx, uint32_t peer, int64_t c, int delta) {
+    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    if ((delta < 0 && c == INT64_MIN) || (delta > 0 && c == INT64_MAX)) return EXPR_NULL;
+    int64_t val = c + delta;
+    const Variable *p = &ctx->vars[peer];
+    uint32_t id = ctx->n_vars;
+    Variable *v = &ctx->vars[id];
+    if (_init_aux_tiered(ctx, v, p->width, (uint8_t)(VAR_AUX | (p->flags & VAR_SIGNED)),
+                         val, val) != 0) {
+        if (val < INT32_MIN || val > INT32_MAX) return EXPR_NULL;
+        _init_tier0(v, 32, val < 0 ? VAR_SIGNED : 0, val, val);
+    }
+    ctx->n_vars = id + 1;
+    if (ctx->watcher_heads) ctx->watcher_heads[id] = EXPR_NULL;
+    return id;
+}
+
 
 /* ------------------------------------------------------------------ */
 /* Is `r = a op b` exactly representable by the propagator we emit?    */
@@ -952,34 +979,28 @@ static int _compile_binexpr_eq_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
     case DVS_BIN_GTE:
         prop_add_reification_32(ctx, r_id, b_id, a_id, 0);
         return 1;
-    case DVS_BIN_LT: {
-        /* r ↔ (a < b)  ≡  r ↔ (a ≤ b-1).  Need a const-var for b-1 when b is a
-         * constant (and b-1 fits the int32 singleton storage); otherwise defer. */
-        int64_t b_cv;
-        if (_is_const(sp, binop->rhs, &b_cv) &&
-            b_cv - 1 >= INT32_MIN && b_cv - 1 <= INT32_MAX &&
-            ctx->n_vars < ctx->n_vars_capacity) {
-            uint32_t bm1 = ctx->n_vars;
-            _init_tier0(&ctx->vars[bm1], 32, (b_cv - 1 < 0) ? VAR_SIGNED : 0,
-                        b_cv - 1, b_cv - 1);
-            ctx->n_vars = bm1 + 1;
-            if (ctx->watcher_heads) ctx->watcher_heads[bm1] = EXPR_NULL;
-            prop_add_reification_32(ctx, r_id, a_id, bm1, 0);
+    case DVS_BIN_LT:
+    case DVS_BIN_GT: {
+        /* Strict comparisons with a constant side, as non-strict ones on the
+         * adjacent constant: x < c is x <= c-1, and c < y is c+1 <= y (GT is
+         * the mirror). Only `x < c` and `c > x` were handled, so `x > c` and
+         * `c < x` -- e.g. `step > 0` after the signed-compare MSB flip,
+         * `v > 2^31` -- were left uncompiled and the model broke them. */
+        int lt = binop->op == DVS_BIN_LT;
+        dvs_expr_t lo_ref = lt ? binop->lhs : binop->rhs;   /* lo < hi */
+        dvs_expr_t hi_ref = lt ? binop->rhs : binop->lhs;
+        uint32_t lo_id = lt ? a_id : b_id, hi_id = lt ? b_id : a_id;
+        int64_t k;
+        if (_is_const(sp, hi_ref, &k)) {
+            uint32_t kv = _adjacent_const_var(ctx, lo_id, k, -1);
+            if (kv == EXPR_NULL) break;
+            prop_add_reification_32(ctx, r_id, lo_id, kv, 0);
             return 1;
         }
-        break;
-    }
-    case DVS_BIN_GT: {
-        int64_t a_cv;
-        if (_is_const(sp, binop->lhs, &a_cv) &&
-            a_cv - 1 >= INT32_MIN && a_cv - 1 <= INT32_MAX &&
-            ctx->n_vars < ctx->n_vars_capacity) {
-            uint32_t am1 = ctx->n_vars;
-            _init_tier0(&ctx->vars[am1], 32, (a_cv - 1 < 0) ? VAR_SIGNED : 0,
-                        a_cv - 1, a_cv - 1);
-            ctx->n_vars = am1 + 1;
-            if (ctx->watcher_heads) ctx->watcher_heads[am1] = EXPR_NULL;
-            prop_add_reification_32(ctx, r_id, b_id, am1, 0);
+        if (_is_const(sp, lo_ref, &k)) {
+            uint32_t kv = _adjacent_const_var(ctx, hi_id, k, +1);
+            if (kv == EXPR_NULL) break;
+            prop_add_reification_32(ctx, r_id, kv, hi_id, 0);
             return 1;
         }
         break;
@@ -3274,6 +3295,11 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
             vals[i] = (int32_t)cv;
         }
 
+        /* The 32-bit propagator reads the inline bounds, which only a tier-0
+         * variable keeps: an unsigned 32-bit or wider one stores 64-bit bounds,
+         * and the 32-bit template then saw [0,0] and never rejected a value
+         * outside the set. Choose by the variable's storage, not the values. */
+        if (!VAR_IS_TIER0(ctx->vars[vid].flags)) fits32 = 0;
         uint32_t ref = fits32 ? prop_add_in_set_32(ctx, vid, ne, vals, 0)
                               : prop_add_in_set_64(ctx, vid, ne, vals64, 0);
         return (ref != EXPR_NULL) ? 1 : 0;

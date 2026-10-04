@@ -346,6 +346,10 @@ add_executable(test_public_api tests/c/test_public_api.c)
 target_link_libraries(test_public_api PRIVATE dv_solve)
 add_test(NAME test_public_api COMMAND test_public_api)
 
+add_executable(test_ctx_dirty_buffer tests/c/test_ctx_dirty_buffer.c)
+target_link_libraries(test_ctx_dirty_buffer PRIVATE dv_solve)
+add_test(NAME test_ctx_dirty_buffer COMMAND test_ctx_dirty_buffer)
+
 add_executable(test_dvs_arena tests/c/test_dvs_arena.c)
 target_link_libraries(test_dvs_arena PRIVATE dv_solve)
 target_include_directories(test_dvs_arena PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -418,6 +422,18 @@ add_executable(bench_inproc
 )
 target_link_libraries(bench_inproc PRIVATE dv_solve)
 target_include_directories(bench_inproc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+
+# Replays a captured Verilator session over a pipe, through the in-process
+# SMT-LIB front end, and through the builder API (cold and with a compiled-
+# context cache), to cost each layer of the SMT-LIB integration.
+add_executable(bench_vlt_replay
+    tests/c/bench_vlt_replay.c
+    src/c/smt2/smt2_lexer.c
+    src/c/smt2/smt2_parser.c
+    src/c/smt2/smt2_frontend.c
+)
+target_link_libraries(bench_vlt_replay PRIVATE dv_solve)
+target_include_directories(bench_vlt_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 
 # ------------------------------------------------------------------ #
 # SMT-LIB2 frontend unit tests                                        #

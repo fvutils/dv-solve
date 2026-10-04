@@ -31,7 +31,7 @@ extern size_t g_smt2_translate_stack_bytes;
 /* ------------------------------------------------------------------ */
 
 #define SMT2_MAX_NAME       128
-#define SMT2_MAX_BV_BITS    128   /* widest BitVec sort accepted (Phase W1: >64-bit is bitblast-routed) */
+#define SMT2_MAX_BV_BITS    192   /* widest BitVec sort accepted (>64-bit is bitblast-routed); riscv-dv rv64 vtype is 154 */
 #define SMT2_MAX_FUNS      8192   /* yosys-smtbmc emits one per BMC unroll step */
 #define SMT2_MAX_FUN_PARAMS   8
 #define SMT2_MAX_SORTS       16
@@ -158,6 +158,12 @@ typedef struct Smt2ArrayValue {
                                    * survives the dvs_builder_reset that follows
                                    * compilation -- like the dense path's
                                    * name->var lookup. */
+    /* Sparse array asserted equal to a constant array at the top level,
+     * `(assert (= a ((as const ..) v)))`: every element is `default_val`. Each
+     * element var is made fixed at it, so the array stays off the word-level
+     * engine (which costs milliseconds even when nothing reads the array). */
+    uint8_t       has_default;
+    uint64_t      default_val;
 
     /* Slice view: (select A k) of a nested array A at a constant k, an array
      * of the inner sort whose element j is A's flat element (k ++ j). A
@@ -339,6 +345,12 @@ typedef struct {
      * keeps standard semantics. */
     int                  verilator_mode;
     uint64_t             div_counter;   /* seeds successive diversity solves */
+    /* :random-seed (or :seed) given since the last (reset). In verilator mode
+     * it seeds this transaction's solves instead of div_counter, so a driver
+     * that takes the model as the random result (Verilator's
+     * +verilator+solver+sampling+1) gets results that follow its own seed. */
+    int                  seed_given;
+    uint64_t             given_seed;
 
     /* --verilator-hash=ignore (verilator mode only). Verilator 5.x follows
      * every satisfiable randomize() query with up to four random parity
@@ -350,6 +362,9 @@ typedef struct {
      * results pages measure both settings. */
     int                  vlt_hash_ignore;
     int                  vlt_hash_pending;  /* a hash was skipped since the last check-sat */
+    int                  vlt_enum;          /* session holds UniGen2 enumeration asserts: bitblast */
+    const char          *vlt_route;         /* DV_LOG: route of the current check-sat */
+    const char          *nb_why;            /* DV_LOG: first needs_bitblast trigger */
 
     /* Verilator-mode identity cache. Verilator re-sends an identical problem
      * after every (reset), so a matching fingerprint lets us skip the bit-blast
@@ -523,6 +538,17 @@ typedef struct {
     uint64_t             cdcl_probe_fp;
     uint8_t              cdcl_route;
 
+    /* Multiplier (x1, x2, x4, ...) on the CDCL context-pool estimate. Raised when
+     * a compile leaves too little room for later incremental asserts, or an
+     * incremental assert overflows the pool; carried across (reset) so the
+     * re-solved instances of a randomize() loop are sized right first time. */
+    uint32_t             ctx_buf_scale;
+    uint32_t             cdcl_ticks;      /* propagator firings of the last CDCL solve */
+    uint64_t             shape_fp;        /* hash of the declared names since (reset) */
+    void                *shape_tab;       /* Smt2ShapeCost[]: per-shape engine choice, kept across (reset) */
+    uint8_t              shape_route;     /* engine the shape routing chose for this check-sat: 1 CDCL, 2 bitblast */
+    uint8_t              shape_bb;        /* this check-sat goes to bitblast by its shape */
+
     /* Array variable table (persistent: element vars survive commands) */
     Smt2ArrayVar         array_vars[SMT2_MAX_ARRAY_VARS];
     uint32_t             n_array_vars;
@@ -537,6 +563,12 @@ typedef struct {
                                         * densely (default; DV_ARRAY=0 turns it off) */
     int                  bb_over_problem; /* bb_solver was built over fe->problem
                                            * (the array engine), not bb_problem */
+    /* Incremental enumeration (_check_sat_enum): bb_solver is a live CaDiCaL
+     * instance over bb_problem, holding the builder's constraints as they
+     * stood below. Cleared by _free_bb, pop and any builder reset. */
+    int                  bb_inc;
+    dvs_expr_t           bb_inc_head;      /* builder constraints_head then */
+    uint32_t             bb_inc_ncons, bb_inc_nsofts, bb_inc_ndists, bb_inc_nalldiffs;
     Smt2ArrayValue     **anodes;
     uint32_t             n_anodes, anodes_cap;
     Smt2ArrayRead       *areads;

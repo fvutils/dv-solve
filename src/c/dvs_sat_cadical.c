@@ -21,6 +21,7 @@
 typedef struct {
     dvs_alloc_t *alloc;
     CCaDiCaL    *solver;
+    int          configured;  /* left CONFIGURING: options are now fatal to set */
 } cadical_impl_t;
 
 static void *cd_xalloc(dvs_alloc_t *a, size_t sz) {
@@ -43,16 +44,19 @@ static void cd_reserve(void *impl, dvs_sat_var_t max_var) {
     /* CaDiCaL grows its variable table automatically on add(); reserve is an
      * optional hint. Declare up-front to avoid incremental regrowth. */
     cadical_impl_t *c = (cadical_impl_t *)impl;
+    c->configured = 1;
     if (max_var > 0) ccadical_declare_more_variables(c->solver, (int)max_var);
 }
 
 static void cd_add(void *impl, dvs_sat_lit_t lit) {
     cadical_impl_t *c = (cadical_impl_t *)impl;
+    c->configured = 1;
     ccadical_add(c->solver, (int)lit);
 }
 
 static int cd_solve(void *impl, const dvs_sat_lit_t *assumps, size_t n) {
     cadical_impl_t *c = (cadical_impl_t *)impl;
+    c->configured = 1;
     /* Real IPASIR assumptions: valid for this solve only, cleared afterward. */
     for (size_t i = 0; i < n; i++) {
         ccadical_assume(c->solver, (int)assumps[i]);
@@ -73,7 +77,9 @@ static int cd_failed(void *impl, dvs_sat_lit_t lit) {
 
 static void cd_set_seed(void *impl, uint64_t seed) {
     cadical_impl_t *c = (cadical_impl_t *)impl;
-    if (!c->solver || seed == 0) return;
+    /* CaDiCaL aborts on an option set once clauses exist; a re-solve of a live
+     * instance (dvs_bbsolver_resolve) keeps the seed it started with. */
+    if (!c->solver || seed == 0 || c->configured) return;
     int cs = (int)((seed ^ (seed >> 32)) & 0x7FFFFFFF);
     if (cs == 0) cs = 1;
     ccadical_set_option(c->solver, "seed", cs);
@@ -127,6 +133,7 @@ void *dvs_sat_cadical_create(dvs_alloc_t *alloc, const dvs_sat_vtbl **vt_out) {
     cadical_impl_t *c = (cadical_impl_t *)cd_xalloc(alloc, sizeof(*c));
     if (!c) return NULL;
     c->alloc  = alloc;
+    c->configured = 0;
     c->solver = ccadical_init();
     if (!c->solver) {
         cd_xfree(alloc, c, sizeof(*c));
@@ -138,6 +145,12 @@ void *dvs_sat_cadical_create(dvs_alloc_t *alloc, const dvs_sat_vtbl **vt_out) {
      * uses the classic IPASIR streaming contract where add() implicitly defines
      * variables, so disable the check (this does not disable 'factor' itself). */
     ccadical_set_option(c->solver, "factorcheck", 0);
+    /* No bounded variable addition: 'factor' mints extension variables past
+     * our max var during a solve, and our variable ids are AIG node ids, so the
+     * next clause added after that solve (an incremental assert, an array
+     * lemma) collides with one and CaDiCaL aborts. Every CaDiCaL user here is
+     * incremental. */
+    ccadical_set_option(c->solver, "factor", 0);
     *vt_out = &CADICAL_VTBL;
     return c;
 }

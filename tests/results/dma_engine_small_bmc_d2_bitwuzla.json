@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "dma_engine_small_bmc_d2",
   "result": "sat",
-  "solve_time_ms": 1.761171966791153,
-  "peak_memory_kb": 443532,
+  "solve_time_ms": 4.8527749022468925,
+  "peak_memory_kb": 267776,
   "returncode": 0,
   "stdout": "sat\n",
   "stderr": ""

@@ -81,23 +81,32 @@ void sexpr_arena_reset(SexprArena *arena) {
 /* Parser internals                                                    */
 /* ------------------------------------------------------------------ */
 
-/** Temporary growable list for collecting child nodes. */
+/** Temporary growable list for collecting child nodes. Most lists are short,
+ *  so the first SEXPR_LIST_INLINE children live on the stack. */
+#define SEXPR_LIST_INLINE 16
 typedef struct {
     Sexpr **items;
     uint32_t count;
     uint32_t capacity;
+    Sexpr   *inline_items[SEXPR_LIST_INLINE];
 } SexprList;
 
 static void _list_init(SexprList *l) {
-    l->items    = NULL;
+    l->items    = l->inline_items;
     l->count    = 0;
-    l->capacity = 0;
+    l->capacity = SEXPR_LIST_INLINE;
 }
 
 static int _list_push(SexprList *l, Sexpr *s) {
     if (l->count == l->capacity) {
-        uint32_t newcap = l->capacity ? l->capacity * 2 : 8;
-        Sexpr **tmp = (Sexpr **)realloc(l->items, newcap * sizeof(Sexpr *));
+        uint32_t newcap = l->capacity * 2;
+        Sexpr **tmp;
+        if (l->items == l->inline_items) {
+            tmp = (Sexpr **)malloc(newcap * sizeof(Sexpr *));
+            if (tmp) memcpy(tmp, l->items, l->count * sizeof(Sexpr *));
+        } else {
+            tmp = (Sexpr **)realloc(l->items, newcap * sizeof(Sexpr *));
+        }
         if (!tmp) return -1;
         l->items    = tmp;
         l->capacity = newcap;
@@ -107,19 +116,18 @@ static int _list_push(SexprList *l, Sexpr *s) {
 }
 
 static void _list_free(SexprList *l) {
-    free(l->items);
-    l->items    = NULL;
+    if (l->items != l->inline_items) free(l->items);
+    l->items    = l->inline_items;
     l->count    = 0;
-    l->capacity = 0;
+    l->capacity = SEXPR_LIST_INLINE;
 }
 
 static Sexpr *_alloc_sexpr(SexprArena *arena) {
     return (Sexpr *)sexpr_arena_alloc(arena, sizeof(Sexpr), _Alignof(Sexpr));
 }
 
-/** Parse one atom or list from the lexer (recursive). */
-static Sexpr *_parse_one(Smt2Lexer *lex, SexprArena *arena) {
-    Smt2Token tok = smt2_lexer_next(lex);
+/** Parse one atom or list starting at the already-lexed `tok` (recursive). */
+static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
 
     switch (tok.kind) {
     case TOK_EOF:
@@ -187,16 +195,13 @@ static Sexpr *_parse_one(Smt2Lexer *lex, SexprArena *arena) {
         _list_init(&children);
 
         for (;;) {
-            Smt2Token peek = smt2_lexer_peek(lex);
-            if (peek.kind == TOK_RPAREN) {
-                smt2_lexer_next(lex); /* consume ')' */
-                break;
-            }
-            if (peek.kind == TOK_EOF || peek.kind == TOK_ERROR) {
+            Smt2Token next = smt2_lexer_next(lex);
+            if (next.kind == TOK_RPAREN) break;
+            if (next.kind == TOK_EOF || next.kind == TOK_ERROR) {
                 _list_free(&children);
                 return NULL;
             }
-            Sexpr *child = _parse_one(lex, arena);
+            Sexpr *child = _parse_tok(lex, arena, next);
             if (!child) {
                 _list_free(&children);
                 return NULL;
@@ -238,7 +243,7 @@ Sexpr *sexpr_parse(Smt2Lexer *lex, SexprArena *arena) {
     /* Skip to the next meaningful token */
     Smt2Token peek = smt2_lexer_peek(lex);
     if (peek.kind == TOK_EOF) return NULL;
-    return _parse_one(lex, arena);
+    return _parse_tok(lex, arena, smt2_lexer_next(lex));
 }
 
 int sexpr_is_symbol(const Sexpr *s, const char *str) {

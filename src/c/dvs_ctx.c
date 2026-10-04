@@ -23,6 +23,12 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     if (static_size < min_size) return NULL;
 
     dvs_ctx_t *ctx        = (dvs_ctx_t *)static_buf;
+    /* Zero every header field first: the caller's buffer may be recycled, and
+     * the per-field list below had fallen behind the struct (initial_vars,
+     * var_holes_head, prop_guard_vars, ... were left as whatever the buffer
+     * held). Compile's set punch-out read initial_vars before setting it and
+     * dereferenced garbage once dv-solve-smt2 reused a dirty buffer. */
+    memset(ctx, 0, offsetof(dvs_ctx_t, pool));
     ctx->vars            = NULL;
     ctx->n_vars          = 0;
     ctx->n_vars_capacity = 0;

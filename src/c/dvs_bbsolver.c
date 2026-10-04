@@ -105,6 +105,12 @@ struct dvs_bbsolver_s {
     uint32_t        n_asserts;
     uint32_t        asserts_cap;
     int8_t         *node_val;
+
+    /* DV_BB_NO_MEMO, read once at construction: getenv per blasted node was
+     * ~7% of an enumeration-heavy Verilator run. */
+    int             no_memo;
+    /* Skip the post-solve flip-check (dvs_bbsolver_set_diversify). */
+    int             no_diversify;
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -620,7 +626,7 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
          * computed once. Falls back to plain recursion when memoization is off
          * (DV_BB_NO_MEMO) or the ref is out of cache range (the only path that
          * can still deep-recurse, both non-default). */
-        int memo = (getenv("DV_BB_NO_MEMO") == NULL) && S->cache != NULL;
+        int memo = !S->no_memo && S->cache != NULL;
         if (!memo || ref >= S->cache_cap) {
             dvs_bv_t a = bb_predicate(S, b->lhs);
             dvs_bv_t c = bb_predicate(S, b->rhs);
@@ -961,7 +967,7 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width) 
      * Cache them by dvs_expr_t alone. EXPR_CONST is hint-dependent (sized to
      * caller context) so it stays uncached and cheap. DV_BB_NO_MEMO
      * disables the cache for debugging. */
-    int memoize = (*kp != EXPR_CONST) && getenv("DV_BB_NO_MEMO") == NULL;
+    int memoize = (*kp != EXPR_CONST) && !S->no_memo;
     if (memoize && ref < S->cache_cap && S->cache[ref].bv.size != 0) {
         return S->cache[ref].bv;
     }
@@ -1106,6 +1112,7 @@ static dvs_bbsolver_t *bbsolver_new_ex(dvs_alloc_t *alloc, dvs_problem_t *proble
     if (!S) return NULL;
     memset(S, 0, sizeof(*S));
     S->alloc = alloc;
+    S->no_memo = getenv("DV_BB_NO_MEMO") != NULL;
     /* Builder-API expressions follow SystemVerilog sizing rules: blast the
      * elaborated form, where those rules are explicit (dvs_sv.h). An SMT-LIB
      * problem is flagged explicit already and is used as-is. */
@@ -1210,31 +1217,65 @@ static inline int _lit_val(const int8_t *nv, dvs_aig_node_t lit) {
     return lit < 0 ? !v : v;
 }
 
-/* Propagate a just-changed node value through its fanout cone. nv[start] has
- * already been set to its new value; recompute every AND node reachable upward
- * (via the fo_off/fo_adj CSR fanout index) with a worklist until the valuation
- * reaches its fixed point. Only nodes in the changed cone are touched -- cost is
- * proportional to the affected region, not the whole AIG. `inq` guards against a
- * node sitting in the worklist twice and is left all-zero on return (every
- * pushed node is popped). Node ids are topological but the worklist may pop out
- * of order; that only causes a few redundant recomputes -- a DAG converges to
- * the same fixed point regardless of visit order. */
-static void _prop_cone(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t *R,
-                       const uint32_t *fo_off, const uint32_t *fo_adj,
-                       uint32_t *wl, uint8_t *inq, uint32_t start) {
-    uint32_t top = 0;
-    wl[top++] = start; inq[start] = 1;
-    while (top) {
-        uint32_t u = wl[--top]; inq[u] = 0;
-        for (uint32_t e = fo_off[u]; e < fo_off[u + 1]; e++) {
-            uint32_t pn = fo_adj[e];
-            int np = _lit_val(nv, L[pn]) & _lit_val(nv, R[pn]);
-            if (np != nv[pn]) {
-                nv[pn] = (int8_t)np;
-                if (!inq[pn]) { inq[pn] = 1; wl[top++] = pn; }
-            }
-        }
+/* Binary min-heap over node ids (the worklist of _prop_cone). */
+static void _heap_push(uint32_t *h, uint32_t *n, uint32_t v) {
+    uint32_t i = (*n)++;
+    while (i && h[(i - 1) / 2] > v) { h[i] = h[(i - 1) / 2]; i = (i - 1) / 2; }
+    h[i] = v;
+}
+static uint32_t _heap_pop(uint32_t *h, uint32_t *n) {
+    uint32_t top = h[0], v = h[--(*n)], i = 0;
+    for (;;) {
+        uint32_t c = 2 * i + 1;
+        if (c >= *n) break;
+        if (c + 1 < *n && h[c + 1] < h[c]) c++;
+        if (h[c] >= v) break;
+        h[i] = h[c]; i = c;
     }
+    if (*n) h[i] = v;
+    return top;
+}
+
+/* Propagate a just-changed node value through its fanout cone. nv[start] has
+ * already been set to its new value; recompute the AND nodes reachable upward
+ * (via the fo_off/fo_adj CSR fanout index) until the valuation reaches its fixed
+ * point. Only nodes in the changed cone are touched.
+ *
+ * The worklist is a min-heap on node id. Ids are topological (children before
+ * parents), so every node is recomputed at most once, after all of its changed
+ * children. A LIFO worklist re-evaluated a node once per changed path reaching
+ * it: on reconvergent logic (a bit-blasted divider) that is exponential, and a
+ * single flip of a 122-bit packed struct feeding a 32-bit bvudiv never finished.
+ * `inq` guards against duplicates and is left all-zero on return.
+ *
+ * Every changed node id is appended to trail[*nt] so the caller can undo the
+ * flip by inverting exactly those nodes. areq[id] marks top-level assertions
+ * (bit 0: must be 1, bit 1: must be 0); because each node's value is final when
+ * it is computed, the first assertion to take a violating value rejects the
+ * flip on the spot, and the rest of the cone is never visited. Returns 1 when
+ * every assertion still holds, 0 on a rejection. */
+static int _prop_cone(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t *R,
+                      const uint32_t *fo_off, const uint32_t *fo_adj,
+                      const uint8_t *areq, uint32_t *wl, uint8_t *inq,
+                      uint32_t *trail, uint32_t *nt, uint32_t start) {
+    uint32_t n = 0;
+    for (uint32_t e = fo_off[start]; e < fo_off[start + 1]; e++)
+        if (!inq[fo_adj[e]]) { inq[fo_adj[e]] = 1; _heap_push(wl, &n, fo_adj[e]); }
+    while (n) {
+        uint32_t pn = _heap_pop(wl, &n);
+        inq[pn] = 0;
+        int np = _lit_val(nv, L[pn]) & _lit_val(nv, R[pn]);
+        if (np == nv[pn]) continue;
+        nv[pn] = (int8_t)np;
+        trail[(*nt)++] = pn;
+        if (areq[pn] & (np ? 2u : 1u)) {
+            for (uint32_t i = 0; i < n; i++) inq[wl[i]] = 0;
+            return 0;
+        }
+        for (uint32_t e = fo_off[pn]; e < fo_off[pn + 1]; e++)
+            if (!inq[fo_adj[e]]) { inq[fo_adj[e]] = 1; _heap_push(wl, &n, fo_adj[e]); }
+    }
+    return 1;
 }
 
 /* Diversity flip-check: after a SAT solve, randomize the don't-care variable
@@ -1252,7 +1293,7 @@ static void _prop_cone(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t
  * problems (where BMC-style seed 0 is used anyway). */
 #define DVS_DIVERSIFY_MAX_NODES 200000u
 static void _diversify(dvs_bbsolver_t *S) {
-    if (S->seed == 0 || !S->aig) return;
+    if (S->seed == 0 || !S->aig || S->no_diversify) return;
     uint32_t N = (uint32_t)dvs_aig_num_nodes(S->aig);
     if (N == 0 || N > DVS_DIVERSIFY_MAX_NODES) return;
 
@@ -1284,9 +1325,18 @@ static void _diversify(dvs_bbsolver_t *S) {
     uint32_t *fo_off = (uint32_t *)malloc(((size_t)N + 2) * sizeof(uint32_t));
     uint8_t  *inq    = (uint8_t  *)calloc((size_t)N + 1, 1);
     uint32_t *wl     = (uint32_t *)malloc(((size_t)N + 1) * sizeof(uint32_t));
-    if (!cnt || !fo_off || !inq || !wl) {
-        free(cnt); free(fo_off); free(inq); free(wl);
+    uint32_t *trail  = (uint32_t *)malloc(((size_t)N + 1) * sizeof(uint32_t));
+    uint8_t  *areq   = (uint8_t  *)calloc((size_t)N + 1, 1);
+    if (!cnt || !fo_off || !inq || !wl || !trail || !areq) {
+        free(cnt); free(fo_off); free(inq); free(wl); free(trail); free(areq);
         free(L); free(R); S->node_val = nv; return;   /* keep the valid (undiversified) model */
+    }
+    /* Mark each asserted node with the value it must keep. */
+    for (uint32_t a = 0; a < S->n_asserts; a++) {
+        dvs_aig_node_t lit = S->assert_nodes[a];
+        uint32_t id = (uint32_t)(lit < 0 ? -lit : lit);
+        if (id == 0 || id > N || lit == DVS_AIG_TRUE || lit == DVS_AIG_FALSE) continue;
+        areq[id] |= (lit < 0) ? 2u : 1u;          /* lit>0: node must be 1 */
     }
     for (uint32_t id = 1; id <= N; id++) {
         if (!L[id]) continue;
@@ -1300,7 +1350,7 @@ static void _diversify(dvs_bbsolver_t *S) {
     fo_off[N + 1] = acc;
     uint32_t *fo_adj = (uint32_t *)malloc((acc ? (size_t)acc : 1) * sizeof(uint32_t));
     if (!fo_adj) {
-        free(cnt); free(fo_off); free(inq); free(wl);
+        free(cnt); free(fo_off); free(inq); free(wl); free(trail); free(areq);
         free(L); free(R); S->node_val = nv; return;
     }
     for (uint32_t i = 0; i <= N; i++) cnt[i] = fo_off[i];   /* reuse cnt as fill cursor */
@@ -1323,15 +1373,13 @@ static void _diversify(dvs_bbsolver_t *S) {
             int tgt = (int)(_free_var_fill(S->seed, vi, p) & 1);
             int desired = (lit < 0) ? !tgt : tgt;       /* input-node polarity */
             if (nv[base] == desired) continue;
-            int old = nv[base];
+            if (areq[base] & (desired ? 2u : 1u)) continue;  /* asserted input */
+            uint32_t nt = 0;
             nv[base] = (int8_t)desired;
-            _prop_cone(nv, L, R, fo_off, fo_adj, wl, inq, base);
-            int ok = 1;
-            for (uint32_t a = 0; a < S->n_asserts; a++)
-                if (_lit_val(nv, S->assert_nodes[a]) != 1) { ok = 0; break; }
-            if (!ok) {                                  /* revert: repropagate old value */
-                nv[base] = (int8_t)old;
-                _prop_cone(nv, L, R, fo_off, fo_adj, wl, inq, base);
+            trail[nt++] = base;
+            if (!_prop_cone(nv, L, R, fo_off, fo_adj, areq, wl, inq, trail, &nt, base)) {
+                /* revert: every touched node was boolean-inverted */
+                for (uint32_t t = 0; t < nt; t++) nv[trail[t]] = (int8_t)!nv[trail[t]];
             }
         }
     }
@@ -1341,6 +1389,8 @@ static void _diversify(dvs_bbsolver_t *S) {
     free(fo_adj);
     free(inq);
     free(wl);
+    free(trail);
+    free(areq);
     free(L);
     free(R);
     S->node_val = nv;
@@ -2171,6 +2221,32 @@ static void bb_grow_vars(dvs_bbsolver_t *S) {
         }
         cur = vs->next;
     }
+}
+
+void dvs_bbsolver_set_diversify(dvs_bbsolver_t *S, int on) {
+    if (S) S->no_diversify = !on;
+}
+
+int dvs_bbsolver_rebase(dvs_bbsolver_t *S, dvs_problem_t *problem) {
+    if (!S || !problem || S->orig_problem) return -1;
+    S->problem = problem;
+    /* Extend the memo cache over the new pool range, so shared subterms of the
+     * added constraints are blasted once. */
+    uint32_t cap = dvs_pool_used(&problem->pool);
+    if (cap > S->cache_cap) {
+        if (cap < 2 * S->cache_cap) cap = 2 * S->cache_cap;   /* amortized growth */
+        bb_cache_entry_t *nc = (bb_cache_entry_t *)xalloc(S->alloc,
+                                                          cap * sizeof(bb_cache_entry_t));
+        if (nc) {
+            if (S->cache) memcpy(nc, S->cache, S->cache_cap * sizeof(bb_cache_entry_t));
+            memset(nc + S->cache_cap, 0, (cap - S->cache_cap) * sizeof(bb_cache_entry_t));
+            xfree(S->alloc, S->cache, S->cache_cap * sizeof(bb_cache_entry_t));
+            S->cache = nc;
+            S->cache_cap = cap;
+        }
+    }
+    bb_grow_vars(S);
+    return 0;
 }
 
 int dvs_bbsolver_assert(dvs_bbsolver_t *S, dvs_expr_t pred_ref) {

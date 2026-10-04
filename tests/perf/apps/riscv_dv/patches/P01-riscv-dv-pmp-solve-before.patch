@@ -1,0 +1,30 @@
+diff --git a/src/riscv_pmp_cfg.sv b/src/riscv_pmp_cfg.sv
+index e256178..8fbc310 100644
+--- a/src/riscv_pmp_cfg.sv
++++ b/src/riscv_pmp_cfg.sv
+@@ -103,7 +103,9 @@ class riscv_pmp_cfg extends uvm_object;
+ 
+   constraint xwr_c {
+     foreach (pmp_cfg[i]) {
++`ifndef VERILATOR  // solver-bench P01: unsupported nested-array solve-before
+       solve mseccfg.mml before pmp_cfg[i].w, pmp_cfg[i].r;
++`endif
+       !(!mseccfg.mml && pmp_cfg[i].w && !pmp_cfg[i].r);
+     }
+   }
+@@ -144,6 +146,7 @@ class riscv_pmp_cfg extends uvm_object;
+     }
+   }
+ 
++`ifndef VERILATOR  // solver-bench P01: unsupported nested-array solve-before
+   constraint modes_before_addr_c {
+     foreach (pmp_cfg[i]) {
+       solve allow_high_addrs before pmp_cfg[i].addr, pmp_cfg[i].addr_mode;
+@@ -151,6 +154,7 @@ class riscv_pmp_cfg extends uvm_object;
+       solve pmp_cfg[i].addr_mode before pmp_cfg[i].addr;
+     }
+   }
++`endif
+ 
+   constraint addr_legal_tor_c {
+     foreach (pmp_cfg[i]) {

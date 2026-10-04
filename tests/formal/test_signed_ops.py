@@ -11,8 +11,7 @@ Guards against both a lowering regression and the CDCL-routing regression: if
 signed div/rem ever stops force-routing to bitblast, CDCL returns wrong values
 and this fails.
 
-Note: bvsmod is deliberately NOT lowered (an earlier attempt was only 219/256
-correct); it stays at honest `unknown`. If bvsmod support is added, extend this.
+bvsmod is lowered on top of the signed remainder and covered the same way.
 """
 from __future__ import annotations
 

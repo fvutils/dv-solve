@@ -84,11 +84,15 @@ If a constraint uses something dv-solve doesn't support, dv-solve answers
 `unknown` (see {doc}`../concepts/soundness`). Verilator reports that as
 
 ```text
-%Warning: .../verilated_random.cpp:624: Internal: Solver error: unknown
+%Warning: .../verilated_random.cpp:362: Solver returned unknown (timed out or incomplete), so randomize() may return 0; warned once
 ```
 
 and `randomize()` returns 0. The SMT-LIB2 operators dv-solve does not support
 yet are listed in {doc}`smt2-solver`.
 
 To see why dv-solve answered `unknown`, set `DV_LOG` to a file name before
-running the simulation. dv-solve writes the reason for each `unknown` there.
+running the simulation. dv-solve writes the reason for each `unknown` there,
+and one `vlt-route:` line per `check-sat` naming the engine it was routed to
+and why (for example `vlt-route: bitblast (enumeration)` for the hash-cell
+enumeration Verilator 5.052 uses to sample a constraint set it has seen
+before).
