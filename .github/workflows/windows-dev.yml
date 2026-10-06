@@ -92,9 +92,9 @@ jobs:
           name: wheels-windows-dev
           path: ./wheelhouse/*.whl
 
-  debug:
-    # Native stack for the access violation in BVSatCtx.check (pre-existing on
-    # Windows; reproduces with CaDiCaL off). RelWithDebInfo + cdb.
+  asan:
+    # MSVC AddressSanitizer on the kissat-only build: reports the first bad
+    # access behind the crashes in propagation, not where they end up.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,18 +107,32 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-      - name: Build (RelWithDebInfo, kissat only)
+      - name: Build (ASan, kissat only)
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=build -DDVS_WITH_CADICAL=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=build -DDVS_WITH_CADICAL=OFF "-DCMAKE_C_FLAGS=/fsanitize=address /Zi" "-DCMAKE_CXX_FLAGS=/fsanitize=address /Zi" "-DCMAKE_SHARED_LINKER_FLAGS=/DEBUG /INCREMENTAL:NO" "-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /INCREMENTAL:NO"
           cmake --build build
           cmake --install build
-      - name: Find cdb
-        shell: bash
-        run: ls "/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/" | head -20 || true
-      - name: Crash under cdb
+      - name: C tests under ASan
+        shell: cmd
+        run: |
+          for /f "delims=" %%d in ('where cl') do set CLDIR=%%~dpd
+          set PATH=%CD%\build\lib;%CD%\build;%CLDIR%;%PATH%
+          set FI=/FI"%CD%\src\c\compat\win\msvc_compat.h" /Isrc\c\compat\win
+          set RC=0
+          for %%t in (test_dvs_sat test_dvs_aig test_dvs_aig_cnf test_dvs_bitblast test_dvs_bbsolver test_dvs_bbsolver_incremental test_dvs_bvdom) do (
+            echo ===== %%t
+            cl /nologo /O1 /Zi /fsanitize=address /Isrc\c /Isrc\c\sat\kissat\src %FI% tests\c\%%t.c build\dv_solve.lib /Fe:build\%%t.exe /link /INCREMENTAL:NO >nul || (echo compile failed: %%t & set RC=1)
+            if exist build\%%t.exe build\%%t.exe > build\%%t.out 2>&1 || (echo FAILED: %%t & set RC=1)
+            if exist build\%%t.out powershell -Command "Get-Content build\%%t.out -Tail 40"
+          )
+          exit /b %RC%
+      - name: Python test under ASan
+        if: always()
         shell: cmd
         env:
           PYTHONPATH: src
         run: |
+          for /f "delims=" %%d in ('where cl') do set CLDIR=%%~dpd
+          set PATH=%CD%\build\lib;%CLDIR%;%PATH%
           python -m pip install -q pytest
-          "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe" -G -lines -y "srv*;%CD%\build;%CD%\build\lib" -c "sxe -c \".lastevent; .ecxr; r; kpn 60; q\" av; g" python -m pytest tests/unit/test_bvsat.py -k relational -x -q -p no:cacheprovider -p no:faulthandler
+          python -m pytest tests/unit/test_bvsat.py -x -q -p no:cacheprovider -p no:faulthandler -k relational
