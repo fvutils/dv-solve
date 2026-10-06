@@ -9,6 +9,9 @@ package:
       url: https://github.com/arminbiere/cadical.git
       tag: rel-3.0.0
   - name: dev
+    # cadical is a build input of the native library (cmake/cadical.cmake)
+    # unless configured with DVS_WITH_CADICAL=OFF, so dev needs it too.
+    uses: use
     deps:
     - name: zuspec-dataclasses
       url: https://github.com/zuspec/zuspec-dataclasses.git
