@@ -57,7 +57,27 @@ def main():
         print("FAIL: no reported include dir holds dv_solve.h:", incdirs)
         return 1
 
+    rc = check_cxx_runtime_bundled()
+    if rc:
+        return rc
     return check_smt2()
+
+
+def check_cxx_runtime_bundled():
+    """On Windows the wheel must carry MSVCP140.dll (delvewheel, see
+    pyproject.toml). Loading the library is not evidence of that: the CI
+    runners have the Visual C++ Redistributable installed system-wide, so the
+    load succeeds with or without the bundled copy."""
+    if platform.system() != "Windows":
+        return 0
+    from importlib import metadata
+    names = [f.name.lower() for f in (metadata.distribution("dv-solve").files or [])]
+    bundled = [n for n in names if n.startswith("msvcp140") and n.endswith(".dll")]
+    print("bundled C++ runtime:", bundled)
+    if not bundled:
+        print("FAIL: the Windows wheel does not bundle MSVCP140.dll")
+        return 1
+    return 0
 
 
 SMT2_PROBLEM = """\
