@@ -91,3 +91,34 @@ jobs:
         with:
           name: wheels-windows-dev
           path: ./wheelhouse/*.whl
+
+  debug:
+    # Native stack for the access violation in BVSatCtx.check (pre-existing on
+    # Windows; reproduces with CaDiCaL off). RelWithDebInfo + cdb.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ninja
+        run: choco install ninja --no-progress
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build (RelWithDebInfo, kissat only)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=build -DDVS_WITH_CADICAL=OFF
+          cmake --build build
+          cmake --install build
+      - name: Find cdb
+        shell: bash
+        run: ls "/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/" | head -20 || true
+      - name: Crash under cdb
+        shell: cmd
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m pip install -q pytest
+          "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe" -G -lines -y "srv*;%CD%\build;%CD%\build\lib" -c "sxe -c \".lastevent; .ecxr; r; kpn 60; q\" av; g" python -m pytest tests/unit/test_bvsat.py -k relational -x -q -p no:cacheprovider -p no:faulthandler
