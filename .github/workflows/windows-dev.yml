@@ -1,0 +1,59 @@
+# TEMPORARY: fast iteration on the MSVC + CaDiCaL build (feat/windows-cadical).
+# Windows only, so a push gets an answer in minutes rather than waiting on the
+# full wheel matrix. Publishes nothing. Remove before merging.
+name: Windows dev
+
+on:
+  push:
+    branches: ["feat/windows-cadical"]
+  workflow_dispatch:
+
+jobs:
+  msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ninja
+        run: choco install ninja --no-progress
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Fetch CaDiCaL sources
+        run: pipx run ivpm update -d use -a --py-skip-install
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=build
+
+      - name: Build
+        # -k 0: report every failing translation unit, not just the first.
+        run: cmake --build build -- -k 0
+
+      - name: Install
+        run: cmake --install build
+
+      - name: Dependencies of the DLLs
+        run: |
+          dumpbin /nologo /dependents build/lib/dv_solve.dll
+          dumpbin /nologo /dependents build/lib/dv_solve_dpi.dll
+
+      - name: CaDiCaL backend C test
+        shell: cmd
+        run: |
+          cl /nologo /O2 /Isrc\c /FIsrc\c\compat\win\msvc_compat.h /Isrc\c\compat\win tests\c\test_dvs_sat_cadical.c build\dv_solve.lib /Fe:build\test_dvs_sat_cadical.exe
+          set PATH=%CD%\build\lib;%CD%\build;%PATH%
+          build\test_dvs_sat_cadical.exe
+
+      - name: Python unit tests
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m pip install -q pytest
+          python -m pytest tests/unit -q -p no:cacheprovider --continue-on-collection-errors -x

@@ -61,10 +61,6 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/kissat.cmake)
 # pure-C, kissat-only build with no C++ runtime (see
 # docs/cadical_integration_plan.md).
 option(DVS_WITH_CADICAL "Build the incremental CaDiCaL SAT backend (adds a C++/libstdc++ dependency)" ON)
-if(MSVC)
-    # CaDiCaL is not wired for MSVC here; keep Windows builds pure-C/kissat.
-    set(DVS_WITH_CADICAL OFF)
-endif()
 if(DVS_WITH_CADICAL)
     enable_language(CXX)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cadical.cmake)

@@ -17,6 +17,9 @@ struct rusage {
     long           ru_maxrss;  /* peak resident set size, in KB */
 };
 
+#ifdef __cplusplus
+extern "C"
+#endif
 int getrusage(int who, struct rusage *usage);
 
 #endif /* _MSC_VER */

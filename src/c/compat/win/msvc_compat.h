@@ -1,6 +1,7 @@
 /* MSVC compatibility shim, force-included (/FI) into every translation unit
  * when building with MSVC. Provides the GCC/Clang builtins and POSIX stat
- * helpers the dv-solve and kissat sources rely on. POSIX functions live in the
+ * helpers the dv-solve, kissat and CaDiCaL sources rely on (CaDiCaL is C++, so
+ * everything here must also compile as C++). POSIX functions live in the
  * unistd.h and sys-header shims under this directory; this header only covers
  * things that must be visible everywhere (builtins) or are macros (S_IS*).
  *
@@ -22,6 +23,9 @@
 #ifndef CLOCK_MONOTONIC
 #define CLOCK_REALTIME  0
 #define CLOCK_MONOTONIC 1
+#ifdef __cplusplus
+extern "C"
+#endif
 int clock_gettime(int clk_id, struct timespec *ts);
 #endif
 
@@ -57,8 +61,10 @@ static __forceinline int dvs__ctz64(unsigned long long x) {
 #define __builtin_ctzll(x) dvs__ctz64((unsigned long long)(x))
 #define __builtin_prefetch(addr, ...) ((void)(addr))
 #define __builtin_alloca(n) _alloca(n)
+#define __builtin_unreachable() __assume(0)
 
 /* ---- checked arithmetic ---------------------------------------------- *
+ * C only (_Generic); no C++ source uses these builtins.
  * Only the unsigned 32-bit add (dvs_arena.c) and unsigned 64-bit multiply
  * (dvs_prop_templates.c) are reached here; the int64 multiply elsewhere is
  * already guarded with #ifdef __GNUC__. _Generic flags any unexpected type at
@@ -74,11 +80,13 @@ static __forceinline int dvs__mul_ovf_u64(uint64_t a, uint64_t b, uint64_t *r) {
     *r = _umul128(a, b, &hi);
     return hi != 0;
 }
+#ifndef __cplusplus
 #define __builtin_add_overflow(a, b, r) _Generic((r), \
     uint32_t *: dvs__add_ovf_u32,                     \
     uint64_t *: dvs__add_ovf_u64)((a), (b), (r))
 #define __builtin_mul_overflow(a, b, r) _Generic((r), \
     uint64_t *: dvs__mul_ovf_u64)((a), (b), (r))
+#endif
 
 /* ---- stat() mode test macros MSVC lacks ------------------------------ */
 #ifndef S_ISDIR
