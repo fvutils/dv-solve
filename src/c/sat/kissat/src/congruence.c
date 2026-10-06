@@ -1,3 +1,4 @@
+#include "bitfield.h"
 #include "congruence.h"
 #include "dense.h"
 #include "fifo.h"
@@ -37,10 +38,10 @@ struct gate {
   unsigned lhs;
   unsigned hash;
   unsigned tag : 2;
-  bool garbage : 1;
-  bool indexed : 1;
-  bool marked : 1;
-  bool shrunken : 1;
+  KISSAT_BOOL_BITFIELD garbage : 1;
+  KISSAT_BOOL_BITFIELD indexed : 1;
+  KISSAT_BOOL_BITFIELD marked : 1;
+  KISSAT_BOOL_BITFIELD shrunken : 1;
   unsigned arity : LD_MAX_ARITY;
   unsigned rhs[];
 };

@@ -1,3 +1,4 @@
+#include "bitfield.h"
 #include "kitten.h"
 #include "random.h"
 #include "stack.h"
@@ -157,7 +158,7 @@ struct kink {
 struct katch {
   unsigned blit;
   unsigned ref : 31;
-  bool binary : 1;
+  KISSAT_BOOL_BITFIELD binary : 1;
 };
 
 #else

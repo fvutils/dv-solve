@@ -1,12 +1,14 @@
 #ifndef _clause_h_INCLUDED
 #define _clause_h_INCLUDED
 
+#include "bitfield.h"
 #include "arena.h"
 #include "literal.h"
 #include "reference.h"
 #include "utilities.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 
 typedef struct clause clause;
 
@@ -19,14 +21,14 @@ typedef struct clause clause;
 struct clause {
   unsigned glue : LD_MAX_GLUE;
 
-  bool garbage : 1;
-  bool quotient : 1;
-  bool reason : 1;
-  bool redundant : 1;
-  bool shrunken : 1;
-  bool subsume : 1;
-  bool swept : 1;
-  bool vivify : 1;
+  KISSAT_BOOL_BITFIELD garbage : 1;
+  KISSAT_BOOL_BITFIELD quotient : 1;
+  KISSAT_BOOL_BITFIELD reason : 1;
+  KISSAT_BOOL_BITFIELD redundant : 1;
+  KISSAT_BOOL_BITFIELD shrunken : 1;
+  KISSAT_BOOL_BITFIELD subsume : 1;
+  KISSAT_BOOL_BITFIELD swept : 1;
+  KISSAT_BOOL_BITFIELD vivify : 1;
 
   unsigned used : LD_MAX_USED;
 
@@ -37,6 +39,11 @@ struct clause {
 };
 
 #define SIZE_OF_CLAUSE_HEADER ((size_t) & ((clause *) 0)->searched)
+
+/* dv-solve fork: kissat asserts this (collect.c) only with assertions on;
+   check it at compile time. See bitfield.h. */
+typedef char kissat_clause_header_is_one_word
+    [offsetof (clause, searched) == sizeof (unsigned) ? 1 : -1];
 
 #define BEGIN_LITS(C) ((C)->lits)
 #define END_LITS(C) (BEGIN_LITS (C) + (C)->size)

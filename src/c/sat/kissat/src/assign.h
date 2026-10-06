@@ -1,6 +1,7 @@
 #ifndef _assign_h_INCLUDED
 #define _assign_h_INCLUDED
 
+#include "bitfield.h"
 #include <stdbool.h>
 
 #define DECISION_REASON UINT_MAX
@@ -16,11 +17,11 @@ struct assigned {
   unsigned level;
   unsigned trail;
 
-  bool analyzed : 1;
-  bool binary : 1;
-  bool poisoned : 1;
-  bool removable : 1;
-  bool shrinkable : 1;
+  KISSAT_BOOL_BITFIELD analyzed : 1;
+  KISSAT_BOOL_BITFIELD binary : 1;
+  KISSAT_BOOL_BITFIELD poisoned : 1;
+  KISSAT_BOOL_BITFIELD removable : 1;
+  KISSAT_BOOL_BITFIELD shrinkable : 1;
 
   unsigned reason;
 };
