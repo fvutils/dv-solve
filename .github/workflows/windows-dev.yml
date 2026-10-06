@@ -47,7 +47,7 @@ jobs:
       - name: CaDiCaL backend C test
         shell: cmd
         run: |
-          cl /nologo /O2 /Isrc\c /FIsrc\c\compat\win\msvc_compat.h /Isrc\c\compat\win tests\c\test_dvs_sat_cadical.c build\dv_solve.lib /Fe:build\test_dvs_sat_cadical.exe
+          cl /nologo /O2 /Isrc\c /FI"%CD%\src\c\compat\win\msvc_compat.h" /Isrc\c\compat\win tests\c\test_dvs_sat_cadical.c build\dv_solve.lib /Fe:build\test_dvs_sat_cadical.exe
           set PATH=%CD%\build\lib;%CD%\build;%PATH%
           build\test_dvs_sat_cadical.exe
 
