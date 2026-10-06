@@ -15,23 +15,37 @@ typedef struct binary_tagged_literal binary_watch;
 typedef struct binary_tagged_literal blocking_watch;
 typedef struct binary_tagged_reference large_watch;
 
+/* dv-solve fork: MSVC starts a new bitfield storage unit whenever the
+ * declared type changes, so 'unsigned lit : 31; bool binary : 1' is 8 bytes
+ * there (lit in bytes 0-3, binary in byte 4) instead of GCC/Clang's one
+ * 32-bit word. Watches live in 'unsigned' vectors and are read through
+ * 'union watch' below, so every watch then lost its binary flag and read
+ * half of the next slot -- an access violation in propagation on Windows.
+ * Declaring the flag 'unsigned' keeps one storage unit under MSVC; other
+ * compilers keep 'bool', and their layout is unchanged. */
+#ifdef _MSC_VER
+#define KISSAT_WATCH_FLAG unsigned
+#else
+#define KISSAT_WATCH_FLAG bool
+#endif
+
 struct binary_tagged_literal {
 #ifdef KISSAT_IS_BIG_ENDIAN
-  bool binary : 1;
+  KISSAT_WATCH_FLAG binary : 1;
   unsigned lit : 31;
 #else
   unsigned lit : 31;
-  bool binary : 1;
+  KISSAT_WATCH_FLAG binary : 1;
 #endif
 };
 
 struct binary_tagged_reference {
 #ifdef KISSAT_IS_BIG_ENDIAN
-  bool binary : 1;
+  KISSAT_WATCH_FLAG binary : 1;
   unsigned ref : 31;
 #else
   unsigned ref : 31;
-  bool binary : 1;
+  KISSAT_WATCH_FLAG binary : 1;
 #endif
 };
 
@@ -42,6 +56,11 @@ union watch {
   large_watch large;
   unsigned raw;
 };
+
+/* dv-solve fork: kissat asserts this (substitute.c, watch.h) but only with
+ * assertions on, and release builds define NDEBUG. Check it at compile time
+ * so a compiler with another bitfield layout fails the build instead. */
+typedef char kissat_watch_is_one_word[sizeof (watch) == sizeof (unsigned) ? 1 : -1];
 
 typedef vector watches;
 
