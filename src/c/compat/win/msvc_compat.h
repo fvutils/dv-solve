@@ -64,6 +64,11 @@ static __forceinline int dvs__ctz64(unsigned long long x) {
 #define __builtin_alloca(n) _alloca(n)
 #define __builtin_unreachable() __assume(0)
 
+/* GCC's decorated function name (CaDiCaL's API tracing). */
+#ifndef __PRETTY_FUNCTION__
+#define __PRETTY_FUNCTION__ __FUNCSIG__
+#endif
+
 /* ---- checked arithmetic ---------------------------------------------- *
  * C only (_Generic); no C++ source uses these builtins.
  * Only the unsigned 32-bit add (dvs_arena.c) and unsigned 64-bit multiply
@@ -101,6 +106,9 @@ static __forceinline int dvs__mul_ovf_u64(uint64_t a, uint64_t b, uint64_t *r) {
 #endif
 #ifndef S_ISREG
 #define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#ifndef S_ISFIFO
+#define S_ISFIFO(m) (((m) & _S_IFMT) == _S_IFIFO)
 #endif
 
 #endif /* _MSC_VER */
