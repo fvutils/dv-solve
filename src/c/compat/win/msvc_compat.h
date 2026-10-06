@@ -16,6 +16,7 @@
 #include <malloc.h>
 #include <stdint.h>
 #include <sys/stat.h>   /* _S_IFMT/_S_IFDIR before we define S_IS* */
+#include <stdio.h>      /* _getc_nolock / _putc_nolock */
 #include <time.h>       /* struct timespec (C11) for clock_gettime shim */
 
 /* POSIX monotonic clock used by the dv-solve timing helpers (dvs_placement.c,
@@ -86,6 +87,12 @@ static __forceinline int dvs__mul_ovf_u64(uint64_t a, uint64_t b, uint64_t *r) {
     uint64_t *: dvs__add_ovf_u64)((a), (b), (r))
 #define __builtin_mul_overflow(a, b, r) _Generic((r), \
     uint64_t *: dvs__mul_ovf_u64)((a), (b), (r))
+#endif
+
+/* ---- POSIX unlocked stdio (CaDiCaL's file.hpp) ----------------------- */
+#ifndef getc_unlocked
+#define getc_unlocked(f)    _getc_nolock(f)
+#define putc_unlocked(c, f) _putc_nolock((c), (f))
 #endif
 
 /* ---- stat() mode test macros MSVC lacks ------------------------------ */
