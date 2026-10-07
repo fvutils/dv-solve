@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -10,6 +11,119 @@
 #include "dvs_lcg.h"
 #include "dvs_bbsolver.h"
 #include "dvs_cube.h"
+
+
+/* ------------------------------------------------------------------ */
+/* Input errors (plan D1/D2 in docs/fw_hdl_implementation_plan.md)     */
+/* ------------------------------------------------------------------ */
+
+/* The body of an SMT-LIB string literal: `"` doubles, control chars become ' '. */
+static void _fprint_smt2_string_body(FILE *out, const char *s) {
+    for (; *s; s++) {
+        if (*s == '"') fputs("\"\"", out);
+        else if ((unsigned char)*s < 0x20) fputc(' ', out);
+        else fputc(*s, out);
+    }
+}
+
+static void _report_error(Smt2Frontend *fe, uint32_t line, uint32_t col,
+                          int poison, const char *fmt, va_list ap) {
+    char msg[sizeof fe->input_err_reason - 32];
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    if (poison && !fe->input_poisoned) {
+        if (line)
+            snprintf(fe->input_err_reason, sizeof fe->input_err_reason,
+                     "line %u column %u: %s", line, col, msg);
+        else
+            snprintf(fe->input_err_reason, sizeof fe->input_err_reason, "%s", msg);
+    }
+    if (poison) fe->input_poisoned = 1;
+    uint32_t n = ++fe->n_input_errors;
+    if (n > SMT2_MAX_REPORTED_ERRORS + 1) return;
+    fputs("(error \"", fe->out);
+    if (n > SMT2_MAX_REPORTED_ERRORS) {
+        fputs("too many errors; further errors are not reported", fe->out);
+    } else {
+        if (line) fprintf(fe->out, "line %u column %u: ", line, col);
+        _fprint_smt2_string_body(fe->out, msg);
+    }
+    fputs("\")\n", fe->out);
+    fflush(fe->out);
+}
+
+void smt2_frontend_input_error(Smt2Frontend *fe, uint32_t line, uint32_t col,
+                               const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    _report_error(fe, line, col, 1, fmt, ap);
+    va_end(ap);
+}
+
+/* A query that cannot be answered (get-value with no model, a term we cannot
+ * evaluate): an `(error ...)` response and the error exit status, but the
+ * assertions are intact, so the session is not poisoned. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 2, 3)))
+#endif
+static void _query_error(Smt2Frontend *fe, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    _report_error(fe, fe->cmd_line, fe->cmd_col, 0, fmt, ap);
+    va_end(ap);
+}
+
+/* An in-memory output stream, to build a response that may still turn into an
+ * error (open_memstream where there is one, else a temporary file). */
+typedef struct { FILE *f; char *buf; size_t len; } Smt2MemOut;
+
+static int _memout_open(Smt2MemOut *m) {
+    m->buf = NULL;
+    m->len = 0;
+#ifdef _WIN32
+    m->f = tmpfile();
+#else
+    m->f = open_memstream(&m->buf, &m->len);
+#endif
+    return m->f != NULL;
+}
+
+/* Close the stream; copy what was written to `dest` unless it is NULL. */
+static void _memout_finish(Smt2MemOut *m, FILE *dest) {
+#ifdef _WIN32
+    long n = ftell(m->f);
+    if (dest && n > 0) {
+        char tmp[4096];
+        rewind(m->f);
+        size_t r;
+        while ((r = fread(tmp, 1, sizeof tmp, m->f)) > 0) fwrite(tmp, 1, r, dest);
+    }
+    fclose(m->f);
+#else
+    fclose(m->f);
+    if (dest && m->len) fwrite(m->buf, 1, m->len, dest);
+    free(m->buf);
+#endif
+    m->f = NULL;
+}
+
+/* An input error at the command being dispatched. */
+#define _input_error(fe, ...) \
+    smt2_frontend_input_error((fe), (fe)->cmd_line, (fe)->cmd_col, __VA_ARGS__)
+
+/* An ill-formed term (see Smt2Frontend.term_err): keep the first message, and
+ * log it as a diagnostic. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 2, 3)))
+#endif
+static void _term_error(Smt2Frontend *fe, const char *fmt, ...) {
+    char msg[sizeof fe->term_err];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    if (!fe->term_err[0]) memcpy(fe->term_err, msg, sizeof msg);
+    fprintf(fe->err, "error: %s\n", msg);
+}
 #include "dvs_i128.h"
 #include "dvs_stackinfo.h"
 
@@ -93,7 +207,8 @@ static int _add_var(Smt2Frontend *fe, const char *name, uint32_t len,
     v->var_id   = var_id;
     v->width    = width;
     v->is_signed = 0;
-    v->_pad[0] = v->_pad[1] = 0;
+    v->is_bool  = 0;
+    v->_pad     = 0;
     /* Any >64-bit variable is bitblast-only: the CDCL bounds engine models a
      * variable's domain with an int64 [lo,hi], which cannot represent a wide
      * value. Routing here is central — it covers scalar, aux, array-element,
@@ -219,8 +334,23 @@ static const Sexpr *_resolve_sym(Smt2Frontend *fe, const Sexpr *s) {
 /* Sort parsing                                                        */
 /* ------------------------------------------------------------------ */
 
+/* A sort with a (define-sort) alias resolved; anything else unchanged. Alias
+ * definitions are stored expanded, so one lookup is enough; aliases nested
+ * in a compound sort are resolved by the parsers below as they recurse. */
+static const Sexpr *_expand_sort(Smt2Frontend *fe, const Sexpr *sort) {
+    if (!fe->n_sort_aliases || !sort || sort->kind != SEXPR_SYMBOL) return sort;
+    for (uint32_t i = 0; i < fe->n_sort_aliases; i++)
+        if (_name_eq(sort->sym.str, sort->sym.len, fe->sort_aliases[i].name))
+            return fe->sort_aliases[i].def;
+    return sort;
+}
+
+static int _is_bool_sort(Smt2Frontend *fe, const Sexpr *sort) {
+    return sexpr_is_symbol(_expand_sort(fe, sort), "Bool");
+}
+
 static uint8_t _parse_bitvec_sort(Smt2Frontend *fe, const Sexpr *sort) {
-    (void)fe;
+    sort = _expand_sort(fe, sort);
     if (!sort) return 0;
     if (sort->kind == SEXPR_SYMBOL) {
         if (_name_eq(sort->sym.str, sort->sym.len, "Bool")) return 1;
@@ -267,6 +397,7 @@ static void _flag_wide_arith(Smt2Frontend *fe, uint32_t width) {
 static int _parse_array_sort_x(Smt2Frontend *fe, const Sexpr *s, Smt2ArraySort *out,
                                int nested_ok) {
     /* (Array (_ BitVec M) (_ BitVec N)) */
+    s = _expand_sort(fe, s);
     if (!s || s->kind != SEXPR_LIST) return 0;
     if (s->list.count != 3) return 0;
     if (!sexpr_is_symbol(s->list.items[0], "Array")) return 0;
@@ -301,6 +432,7 @@ static int _parse_array_sort(Smt2Frontend *fe, const Sexpr *s, Smt2ArraySort *ou
 
 /* Returns 1 if sort is an opaque (declare-sort) sort name. */
 static int _is_opaque_sort(Smt2Frontend *fe, const Sexpr *sort) {
+    sort = _expand_sort(fe, sort);
     if (!sort || sort->kind != SEXPR_SYMBOL) return 0;
     return _is_known_sort(fe, sort->sym.str, sort->sym.len);
 }
@@ -1106,7 +1238,7 @@ static TaggedExpr _flatten_to_var(Smt2Frontend *fe, TaggedExpr tg) {
 static TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
                                   const Sexpr *call) {
     if (call->list.count != (uint32_t)sf->n_params + 1) {
-        fprintf(fe->err, "error: arity mismatch for '%s' (expected %u, got %u)\n",
+        _term_error(fe, "arity mismatch for '%s' (expected %u, got %u)",
                 sf->name, sf->n_params, call->list.count - 1);
         return TAGGED_NULL;
     }
@@ -1170,7 +1302,7 @@ static TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
 static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
                                  const Sexpr *call) {
     if (call->list.count != fd->n_params + 1) {
-        fprintf(fe->err, "error: arity mismatch for define-fun '%s' (expected %u, got %u)\n",
+        _term_error(fe, "arity mismatch for define-fun '%s' (expected %u, got %u)",
                 fd->name, fd->n_params, call->list.count - 1);
         return TAGGED_NULL;
     }
@@ -1291,7 +1423,7 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
         return (TaggedExpr){ { EXPR_NULL, 0 }, 0, av->value };
     }
 
-    fprintf(fe->err, "error: unknown variable '%.*s'\n",
+    _term_error(fe, "unknown variable '%.*s'",
             (int)s->sym.len, s->sym.str);
     return TAGGED_NULL;
 }
@@ -1551,7 +1683,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             dvs_expr_t r = _bv_const(fe, (int64_t)bv_val, w);
             return (TaggedExpr){ { r, w }, 2, NULL };
         }
-        fprintf(fe->err, "error: unexpected indexed identifier\n");
+        _term_error(fe, "unexpected indexed identifier");
         return TAGGED_NULL;
     }
 
@@ -1638,14 +1770,14 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         Smt2ArraySort sort;
         int r = _parse_array_sort(fe, head->list.items[2], &sort);
         if (r <= 0) {
-            fprintf(fe->err, "error: (as const ...) requires valid Array sort\n");
+            _term_error(fe, "(as const ...) requires valid Array sort");
             return TAGGED_NULL;
         }
         if (s->list.count != 2) return TAGGED_NULL;
 
         TaggedExpr val_te = _translate_tagged(fe, s->list.items[1]);
         if (val_te.te.ref == EXPR_NULL || val_te.array != NULL) {
-            fprintf(fe->err, "error: (as const ...) value must be a BV\n");
+            _term_error(fe, "(as const ...) value must be a BV");
             return TAGGED_NULL;
         }
 
@@ -1678,13 +1810,13 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
      * before any xi binding takes effect.  We pre-translate eagerly. */
     if (head->kind == SEXPR_SYMBOL && sexpr_is_symbol(head, "let")) {
         if (s->list.count != 3) {
-            fprintf(fe->err, "error: malformed let (expected 3 elements)\n");
+            _term_error(fe, "malformed let (expected 3 elements)");
             return TAGGED_NULL;
         }
         const Sexpr *binds = s->list.items[1];
         const Sexpr *body  = s->list.items[2];
         if (binds->kind != SEXPR_LIST) {
-            fprintf(fe->err, "error: let: binding list must be a list\n");
+            _term_error(fe, "let: binding list must be a list");
             return TAGGED_NULL;
         }
         uint32_t n = binds->list.count;
@@ -1744,7 +1876,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         }
     let_bad:
         if (let_heap) { free(let_vals); free(let_names); }
-        fprintf(fe->err, "error: malformed let binding\n");
+        _term_error(fe, "malformed let binding");
         fe->subst_depth = saved;
         return TAGGED_NULL;
     let_oom:
@@ -1754,7 +1886,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     }
 
     if (head->kind != SEXPR_SYMBOL) {
-        fprintf(fe->err, "error: expected symbol at head of expression\n");
+        _term_error(fe, "expected symbol at head of expression");
         return TAGGED_NULL;
     }
 
@@ -1779,14 +1911,14 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
         TaggedExpr arr_te = _translate_tagged(fe, s->list.items[1]);
         if (arr_te.array == NULL) {
-            fprintf(fe->err, "error: select: first argument is not an array\n");
+            _term_error(fe, "select: first argument is not an array");
             return TAGGED_NULL;
         }
         Smt2ArrayValue *arr = arr_te.array;
 
         TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
         if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
-            fprintf(fe->err, "error: select: index must be a BV\n");
+            _term_error(fe, "select: index must be a BV");
             return TAGGED_NULL;
         }
 
@@ -1872,7 +2004,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
         TaggedExpr arr_te = _translate_tagged(fe, s->list.items[1]);
         if (arr_te.array == NULL) {
-            fprintf(fe->err, "error: store: first argument is not an array\n");
+            _term_error(fe, "store: first argument is not an array");
             return TAGGED_NULL;
         }
         Smt2ArrayValue *arr = arr_te.array;
@@ -1888,12 +2020,12 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (arr->is_abstract) {
             TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
             if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
-                fprintf(fe->err, "error: store: index must be a BV\n");
+                _term_error(fe, "store: index must be a BV");
                 return TAGGED_NULL;
             }
             TaggedExpr val_te = _translate_tagged(fe, s->list.items[3]);
             if (val_te.te.ref == EXPR_NULL || val_te.array != NULL) {
-                fprintf(fe->err, "error: store: value must be a BV\n");
+                _term_error(fe, "store: value must be a BV");
                 return TAGGED_NULL;
             }
             idx_te = _flatten_to_var(fe, idx_te);
@@ -1915,13 +2047,13 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
         TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
         if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
-            fprintf(fe->err, "error: store: index must be a BV\n");
+            _term_error(fe, "store: index must be a BV");
             return TAGGED_NULL;
         }
 
         TaggedExpr val_te = _translate_tagged(fe, s->list.items[3]);
         if (val_te.te.ref == EXPR_NULL || val_te.array != NULL) {
-            fprintf(fe->err, "error: store: value must be a BV\n");
+            _term_error(fe, "store: value must be a BV");
             return TAGGED_NULL;
         }
 
@@ -2202,7 +2334,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             }
             /* Array equality: AND of element-wise equalities */
             if (a.array->n_elems != b.array->n_elems) {
-                fprintf(fe->err, "error: array equality on arrays with different sizes\n");
+                _term_error(fe, "array equality on arrays with different sizes");
                 return TAGGED_NULL;
             }
             dvs_expr_t result = EXPR_NULL;
@@ -2216,7 +2348,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return (TaggedExpr){ { result, 1 }, 0, NULL };
         }
         if (a.array != NULL || b.array != NULL) {
-            fprintf(fe->err, "error: type mismatch in equality (array vs scalar)\n");
+            _term_error(fe, "type mismatch in equality (array vs scalar)");
             return TAGGED_NULL;
         }
 
@@ -2431,7 +2563,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                 return (TaggedExpr){ { EXPR_NULL, 0 }, 0, node };
             }
             if (t.array->n_elems != e.array->n_elems) {
-                fprintf(fe->err, "error: ite branches are arrays of different sizes\n");
+                _term_error(fe, "ite branches are arrays of different sizes");
                 return TAGGED_NULL;
             }
             Smt2ArrayValue *arr = _make_array_value(fe, t.array->sort);
@@ -2490,7 +2622,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (k.te.ref == EXPR_NULL) return TAGGED_NULL;
         uint16_t w = a.te.width;
         if (w == 0 || w > 255 || k.te.width != w) {
-            fprintf(fe->err, "error: bvashr operands must share a width\n");
+            _term_error(fe, "bvashr operands must share a width");
             return TAGGED_NULL;
         }
         dvs_expr_t as = dvs_builder_expr_sv_cast(fe->builder, a.te.ref,
@@ -2536,7 +2668,7 @@ static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s) {
     case SEXPR_LIST:
         return _translate_list_tagged(fe, s);
     default:
-        fprintf(fe->err, "error: unexpected S-expression kind in expression\n");
+        _term_error(fe, "unexpected S-expression kind in expression");
         return TAGGED_NULL;
     }
 }
@@ -2605,7 +2737,7 @@ static const Sexpr *_sexpr_deep_copy(SexprArena *arena, const Sexpr *src) {
 
 static int _cmd_set_logic(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 2 || cmd->list.items[1]->kind != SEXPR_SYMBOL) {
-        fprintf(fe->err, "error: set-logic requires a logic name\n");
+        _input_error(fe, "set-logic requires a logic name");
         return -1;
     }
     const Sexpr *l = cmd->list.items[1];
@@ -2614,7 +2746,7 @@ static int _cmd_set_logic(Smt2Frontend *fe, const Sexpr *cmd) {
     if (sexpr_is_symbol(l, "QF_ABV"))   { fe->logic = SMT2_LOGIC_QF_ABV;   return 0; }
     if (sexpr_is_symbol(l, "QF_AUFBV")) { fe->logic = SMT2_LOGIC_QF_AUFBV; return 0; }
     if (sexpr_is_symbol(l, "ALL"))      { fe->logic = SMT2_LOGIC_ALL;      return 0; }
-    fprintf(fe->err, "error: unsupported logic '%.*s' (supported: QF_BV, QF_UFBV, QF_ABV, QF_AUFBV, ALL)\n",
+    _input_error(fe, "unsupported logic '%.*s' (supported: QF_BV, QF_UFBV, QF_ABV, QF_AUFBV, ALL)",
             (int)l->sym.len, l->sym.str);
     return -1;
 }
@@ -2665,17 +2797,17 @@ static int _add_sort_fun(Smt2Frontend *fe, const Sexpr *name_s,
 static int _cmd_declare_datatypes(Smt2Frontend *fe, const Sexpr *cmd) {
     /* (declare-datatypes <par-list> <defn-list>) */
     if (cmd->list.count != 3) {
-        fprintf(fe->err, "error: declare-datatypes expects (pars defs)\n");
+        _input_error(fe, "declare-datatypes expects (pars defs)");
         return -1;
     }
     const Sexpr *pars = cmd->list.items[1];
     const Sexpr *defs = cmd->list.items[2];
     if (pars->kind != SEXPR_LIST || defs->kind != SEXPR_LIST) {
-        fprintf(fe->err, "error: declare-datatypes: malformed pars/defs\n");
+        _input_error(fe, "declare-datatypes: malformed pars/defs");
         return -1;
     }
     if (pars->list.count == 0 || pars->list.count != defs->list.count) {
-        fprintf(fe->err, "error: declare-datatypes: pars/defs length mismatch\n");
+        _input_error(fe, "declare-datatypes: pars/defs length mismatch");
         return -1;
     }
 
@@ -2685,13 +2817,13 @@ static int _cmd_declare_datatypes(Smt2Frontend *fe, const Sexpr *cmd) {
         if (par->kind != SEXPR_LIST || par->list.count != 2 ||
             par->list.items[0]->kind != SEXPR_SYMBOL ||
             par->list.items[1]->kind != SEXPR_NUMERAL) {
-            fprintf(fe->err, "error: declare-datatypes: malformed par entry\n");
+            _input_error(fe, "declare-datatypes: malformed par entry");
             return -1;
         }
         const Sexpr *name_s = par->list.items[0];
         if (par->list.items[1]->numval != 0) {
-            fprintf(fe->err, "error: declare-datatypes: type parameters "
-                    "not supported (got arity %lld for %.*s)\n",
+            _input_error(fe, "unsupported: declare-datatypes type parameters "
+                    "(got arity %lld for %.*s)",
                     (long long)par->list.items[1]->numval,
                     (int)name_s->sym.len, name_s->sym.str);
             return -1;
@@ -2700,8 +2832,8 @@ static int _cmd_declare_datatypes(Smt2Frontend *fe, const Sexpr *cmd) {
         /* defs[di] = (CTOR ...) — list of constructors */
         const Sexpr *ctors = defs->list.items[di];
         if (ctors->kind != SEXPR_LIST || ctors->list.count != 1) {
-            fprintf(fe->err, "error: declare-datatypes: only single-constructor "
-                    "record types are supported (got %u constructors for %.*s)\n",
+            _input_error(fe, "unsupported: declare-datatypes with more than one "
+                    "constructor (got %u for %.*s)",
                     (unsigned)(ctors->kind == SEXPR_LIST ? ctors->list.count : 0u),
                     (int)name_s->sym.len, name_s->sym.str);
             return -1;
@@ -2709,7 +2841,7 @@ static int _cmd_declare_datatypes(Smt2Frontend *fe, const Sexpr *cmd) {
 
         /* Register type name as opaque sort */
         if (fe->n_sort_names >= SMT2_MAX_SORTS) {
-            fprintf(fe->err, "error: too many sorts declared\n");
+            _input_error(fe, "unsupported: too many sorts declared");
             return -1;
         }
         if (!_is_known_sort(fe, name_s->sym.str, name_s->sym.len)) {
@@ -2724,7 +2856,7 @@ static int _cmd_declare_datatypes(Smt2Frontend *fe, const Sexpr *cmd) {
         const Sexpr *ctor = ctors->list.items[0];
         if (ctor->kind != SEXPR_LIST || ctor->list.count < 1 ||
             ctor->list.items[0]->kind != SEXPR_SYMBOL) {
-            fprintf(fe->err, "error: declare-datatypes: malformed constructor\n");
+            _input_error(fe, "declare-datatypes: malformed constructor");
             return -1;
         }
 
@@ -2735,17 +2867,17 @@ static int _cmd_declare_datatypes(Smt2Frontend *fe, const Sexpr *cmd) {
             const Sexpr *field = ctor->list.items[fi];
             if (field->kind != SEXPR_LIST || field->list.count != 2 ||
                 field->list.items[0]->kind != SEXPR_SYMBOL) {
-                fprintf(fe->err, "error: declare-datatypes: malformed field\n");
+                _input_error(fe, "declare-datatypes: malformed field");
                 return -1;
             }
             const Sexpr *fname = field->list.items[0];
             const Sexpr *ftype = field->list.items[1];
 
-            int is_bool = sexpr_is_symbol(ftype, "Bool");
+            int is_bool = _is_bool_sort(fe, ftype);
             uint8_t bvw = is_bool ? 1 : _parse_bitvec_sort(fe, ftype);
             if (bvw == 0) {
-                fprintf(fe->err, "error: declare-datatypes: field '%.*s' "
-                        "has unsupported type (only BitVec and Bool allowed)\n",
+                _input_error(fe, "unsupported: declare-datatypes field '%.*s' "
+                        "type (only BitVec and Bool)",
                         (int)fname->sym.len, fname->sym.str);
                 return -1;
             }
@@ -2757,21 +2889,21 @@ static int _cmd_declare_datatypes(Smt2Frontend *fe, const Sexpr *cmd) {
 
 static int _cmd_declare_sort(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 3) {
-        fprintf(fe->err, "error: declare-sort requires name and arity\n");
+        _input_error(fe, "declare-sort requires name and arity");
         return -1;
     }
     const Sexpr *name_s = cmd->list.items[1];
     const Sexpr *arity_s = cmd->list.items[2];
     if (name_s->kind != SEXPR_SYMBOL || arity_s->kind != SEXPR_NUMERAL) {
-        fprintf(fe->err, "error: malformed declare-sort\n");
+        _input_error(fe, "malformed declare-sort");
         return -1;
     }
     if (arity_s->numval != 0) {
-        fprintf(fe->err, "error: only arity-0 sorts supported\n");
+        _input_error(fe, "unsupported: declare-sort with arity > 0");
         return -1;
     }
     if (fe->n_sort_names >= SMT2_MAX_SORTS) {
-        fprintf(fe->err, "error: too many sorts declared\n");
+        _input_error(fe, "unsupported: too many sorts declared");
         return -1;
     }
     if (_is_known_sort(fe, name_s->sym.str, name_s->sym.len)) return 0;
@@ -2784,10 +2916,69 @@ static int _cmd_declare_sort(Smt2Frontend *fe, const Sexpr *cmd) {
     return 0;
 }
 
+/* (define-sort NAME () SORT). Only aliases without parameters: that is all
+ * Yosys's write_smt2 -stbv emits (a module's state sort). */
+static int _cmd_define_sort(Smt2Frontend *fe, const Sexpr *cmd) {
+    if (cmd->list.count != 4) {
+        _input_error(fe, "malformed define-sort, expected (define-sort <symbol> (<symbol>*) <sort>)");
+        return 0;
+    }
+    const Sexpr *name_s = cmd->list.items[1];
+    const Sexpr *pars   = cmd->list.items[2];
+    const Sexpr *def    = cmd->list.items[3];
+    if (name_s->kind != SEXPR_SYMBOL) {
+        _input_error(fe, "invalid sort definition, symbol expected");
+        return 0;
+    }
+    if (pars->kind != SEXPR_LIST) {
+        _input_error(fe, "invalid sort definition, parameter list expected");
+        return 0;
+    }
+    if (pars->list.count != 0) {
+        _input_error(fe, "unsupported: define-sort with parameters ('%.*s')",
+                     (int)name_s->sym.len, name_s->sym.str);
+        return 0;
+    }
+    if (name_s->sym.len >= SMT2_MAX_NAME) {
+        _input_error(fe, "sort name too long ('%.40s...')", name_s->sym.str);
+        return 0;
+    }
+    if (_expand_sort(fe, name_s) != name_s || _is_known_sort(fe, name_s->sym.str, name_s->sym.len)
+            || sexpr_is_symbol(name_s, "Bool") || sexpr_is_symbol(name_s, "BitVec")
+            || sexpr_is_symbol(name_s, "Array")) {
+        _input_error(fe, "sort '%.*s' is already defined", (int)name_s->sym.len, name_s->sym.str);
+        return 0;
+    }
+    /* Resolve aliases in the definition now, so a use needs one lookup. */
+    def = _expand_sort(fe, def);
+    Smt2ArraySort as;
+    int ok = _parse_bitvec_sort(fe, def) != 0 || _is_opaque_sort(fe, def)
+          || _parse_array_sort_x(fe, def, &as, /*nested_ok=*/1) == 1;
+    if (!ok) {
+        _input_error(fe, "define-sort '%.*s': unknown or unsupported sort",
+                     (int)name_s->sym.len, name_s->sym.str);
+        return 0;
+    }
+    if (fe->n_sort_aliases == fe->sort_alias_cap) {
+        uint32_t cap = fe->sort_alias_cap ? fe->sort_alias_cap * 2 : 8;
+        Smt2SortAlias *a = (Smt2SortAlias *)realloc(fe->sort_aliases, cap * sizeof(*a));
+        if (!a) { SMT2_TAINT(fe, "out of memory in define-sort"); return 0; }
+        fe->sort_aliases = a;
+        fe->sort_alias_cap = cap;
+    }
+    const Sexpr *copy = _sexpr_deep_copy(&fe->persistent_arena, def);
+    if (!copy) { SMT2_TAINT(fe, "out of memory in define-sort"); return 0; }
+    Smt2SortAlias *a = &fe->sort_aliases[fe->n_sort_aliases++];
+    memcpy(a->name, name_s->sym.str, name_s->sym.len);
+    a->name[name_s->sym.len] = '\0';
+    a->def = copy;
+    return 0;
+}
+
 static int _add_sort_fun(Smt2Frontend *fe, const Sexpr *name_s,
                          uint8_t n_params, uint8_t return_width, int is_bool) {
     if (fe->n_sort_funs >= SMT2_MAX_SORT_FUNS) {
-        fprintf(fe->err, "error: too many sort-typed functions declared\n");
+        _input_error(fe, "unsupported: too many sort-typed functions declared");
         return -1;
     }
     Smt2SortFun *sf = &fe->sort_funs[fe->n_sort_funs++];
@@ -2806,7 +2997,7 @@ static int _add_sort_fun(Smt2Frontend *fe, const Sexpr *name_s,
 static int _add_sort_fun_array(Smt2Frontend *fe, const Sexpr *name_s,
                                uint8_t n_params, Smt2ArraySort array_sort) {
     if (fe->n_sort_funs >= SMT2_MAX_SORT_FUNS) {
-        fprintf(fe->err, "error: too many sort-typed functions declared\n");
+        _input_error(fe, "unsupported: too many sort-typed functions declared");
         return -1;
     }
     Smt2SortFun *sf = &fe->sort_funs[fe->n_sort_funs++];
@@ -2825,7 +3016,7 @@ static int _add_sort_fun_array(Smt2Frontend *fe, const Sexpr *name_s,
 static int _add_sort_const(Smt2Frontend *fe, const Sexpr *name_s,
                            const Sexpr *sort_s) {
     if (fe->n_sort_consts >= SMT2_MAX_SORT_CONSTS) {
-        fprintf(fe->err, "error: too many sort-typed constants declared\n");
+        _input_error(fe, "unsupported: too many sort-typed constants declared");
         return -1;
     }
     Smt2SortConst *sc = &fe->sort_consts[fe->n_sort_consts++];
@@ -2849,7 +3040,7 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
 
     if (sexpr_is_command(cmd, "declare-const")) {
         if (cmd->list.count != 3) {
-            fprintf(fe->err, "error: declare-const requires name and sort\n");
+            _input_error(fe, "declare-const requires name and sort");
             return -1;
         }
         name_s = cmd->list.items[1];
@@ -2857,20 +3048,20 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
     } else {
         /* declare-fun */
         if (cmd->list.count != 4) {
-            fprintf(fe->err, "error: declare-fun requires name, params, sort\n");
+            _input_error(fe, "declare-fun requires name, params, sort");
             return -1;
         }
         name_s = cmd->list.items[1];
         params = cmd->list.items[2];
         sort_s = cmd->list.items[3];
         if (params->kind != SEXPR_LIST) {
-            fprintf(fe->err, "error: declare-fun params must be a list\n");
+            _input_error(fe, "declare-fun params must be a list");
             return -1;
         }
     }
 
     if (name_s->kind != SEXPR_SYMBOL) {
-        fprintf(fe->err, "error: expected symbol for variable name\n");
+        _input_error(fe, "expected symbol for variable name");
         return -1;
     }
     fe->shape_fp = _fp_mix(fe->shape_fp ^ 0x51u, (const uint8_t *)name_s->sym.str,
@@ -2880,7 +3071,7 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
     if (params && params->list.count > 0) {
         for (uint32_t i = 0; i < params->list.count; i++) {
             if (!_is_opaque_sort(fe, params->list.items[i])) {
-                fprintf(fe->err, "error: declare-fun param sort must be a declared sort\n");
+                _input_error(fe, "unsupported: declare-fun with a parameter that is not a declare-sort sort");
                 return -1;
             }
         }
@@ -2891,14 +3082,14 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
             return _add_sort_fun_array(fe, name_s,
                                        (uint8_t)params->list.count, array_sort);
         }
-        int is_bool = sexpr_is_symbol(sort_s, "Bool");
+        int is_bool = _is_bool_sort(fe, sort_s);
         uint8_t rw = _parse_bitvec_sort(fe, sort_s);
         if (rw == 0) {
             /* Opaque return sort: treat as width-1 accessor */
             if (_is_opaque_sort(fe, sort_s)) {
                 rw = 1; is_bool = 0;
             } else {
-                fprintf(fe->err, "error: declare-fun return sort must be Bool, BitVec, or Array\n");
+                _input_error(fe, "unsupported: declare-fun return sort (Bool, BitVec or Array only)");
                 return -1;
             }
         }
@@ -2938,10 +3129,12 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
     int64_t max_val = _bv_unsigned_hi(width);
 
     dvs_builder_add_var(fe->builder, var_id, width, 0, 0, max_val);
+    uint32_t slot = fe->n_vars;   /* _add_var fills this entry */
     if (_add_var(fe, name_s->sym.str, name_s->sym.len, var_id, width) < 0) {
         fprintf(fe->err, "error: out of memory adding variable\n");
         return -1;
     }
+    fe->vars[slot].is_bool = (uint8_t)_is_bool_sort(fe, sort_s);
     _builder_touched(fe);
     return 0;
 }
@@ -2949,7 +3142,7 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
 static int _cmd_define_fun(Smt2Frontend *fe, const Sexpr *cmd) {
     /* (define-fun NAME ((p1 S1) (p2 S2) ...) RET BODY) */
     if (cmd->list.count != 5) {
-        fprintf(fe->err, "error: define-fun requires name, params, sort, body\n");
+        _input_error(fe, "define-fun requires name, params, sort, body");
         return -1;
     }
     const Sexpr *name_s = cmd->list.items[1];
@@ -2958,15 +3151,15 @@ static int _cmd_define_fun(Smt2Frontend *fe, const Sexpr *cmd) {
     const Sexpr *body_s = cmd->list.items[4];
 
     if (name_s->kind != SEXPR_SYMBOL || params_s->kind != SEXPR_LIST) {
-        fprintf(fe->err, "error: malformed define-fun\n");
+        _input_error(fe, "malformed define-fun");
         return -1;
     }
     if (fe->n_funs >= SMT2_MAX_FUNS) {
-        fprintf(fe->err, "error: too many define-fun macros\n");
+        _input_error(fe, "unsupported: too many define-fun macros");
         return -1;
     }
     if (params_s->list.count > SMT2_MAX_FUN_PARAMS) {
-        fprintf(fe->err, "error: define-fun has too many parameters\n");
+        _input_error(fe, "unsupported: define-fun has too many parameters");
         return -1;
     }
 
@@ -3003,7 +3196,7 @@ static int _cmd_define_fun(Smt2Frontend *fe, const Sexpr *cmd) {
         fd->return_width = 0;
     } else {
         fd->is_array_return = 0;
-        fd->is_bool_return = sexpr_is_symbol(sort_s, "Bool") ? 1 : 0;
+        fd->is_bool_return = _is_bool_sort(fe, sort_s) ? 1 : 0;
         fd->return_width = _parse_bitvec_sort(fe, sort_s);
         if (fd->return_width == 0) fd->return_width = 1;
     }
@@ -3012,7 +3205,7 @@ static int _cmd_define_fun(Smt2Frontend *fe, const Sexpr *cmd) {
         const Sexpr *p = params_s->list.items[i];
         if (p->kind != SEXPR_LIST || p->list.count != 2 ||
             p->list.items[0]->kind != SEXPR_SYMBOL) {
-            fprintf(fe->err, "error: malformed define-fun parameter\n");
+            _input_error(fe, "malformed define-fun parameter");
             return -1;
         }
         const Sexpr *pname = p->list.items[0];
@@ -3032,7 +3225,7 @@ static int _cmd_define_fun(Smt2Frontend *fe, const Sexpr *cmd) {
             fd->param_is_sort[i] = 0;
             fd->param_widths[i] = _parse_bitvec_sort(fe, psort);
             if (fd->param_widths[i] == 0) {
-                fprintf(fe->err, "error: define-fun parameter sort unsupported\n");
+                _input_error(fe, "unsupported: define-fun parameter sort");
                 return -1;
             }
         }
@@ -3600,7 +3793,7 @@ static int _try_sparse_default(Smt2Frontend *fe, const Sexpr *e) {
 
 static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 2) {
-        fprintf(fe->err, "error: assert requires exactly one expression\n");
+        _input_error(fe, "assert requires exactly one expression");
         return -1;
     }
     /* --verilator-hash=ignore: Verilator's parity asserts follow a `sat` and
@@ -3619,6 +3812,7 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     if (_try_sparse_default(fe, cmd->list.items[1])) return 0;
 
     TypedExpr te;
+    fe->term_err[0] = '\0';
     dvs_expr_t reified = _try_translate_in_set(fe, cmd->list.items[1]);
     if (reified == EXPR_NULL) reified = _try_translate_reified_or(fe, cmd->list.items[1]);
     if (reified != EXPR_NULL) {
@@ -3633,6 +3827,13 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
          * (check-sat) answers `unknown` rather than an unsound result, and keep
          * the REPL running so the driver's protocol stream stays synchronized
          * (exiting here would close the pipe and hang a driver blocked on read). */
+        /* An ill-formed term (unknown symbol, sort mismatch) is an input
+         * error, unless the context is already tainted: then an unknown
+         * symbol is most likely one whose unsupported declaration tainted it. */
+        if (fe->term_err[0] && !fe->incomplete) {
+            _input_error(fe, "%s", fe->term_err);
+            return 0;
+        }
         fprintf(fe->err, "error: failed to translate assert expression "
                          "(unsupported construct) -> result will be unknown\n");
         SMT2_TAINT(fe, "assert used an untranslatable construct");
@@ -4988,9 +5189,10 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
     /* A previous answer's bit-blast model is not this answer's (B36). */
     fe->bb_model_valid = 0;
 
-    /* Tainted context (an assert used an unsupported construct): answer honestly
-     * with `unknown` rather than solve a problem that is missing constraints. */
-    if (fe->incomplete) {
+    /* Tainted context (an assert used an unsupported construct), or input that
+     * was malformed: answer honestly with `unknown` rather than solve a problem
+     * that is missing constraints. */
+    if (fe->incomplete || fe->input_poisoned) {
         if (fe->print_stats || getenv("DV_LOG"))
             fprintf(fe->err, "cdcl-unknown: tainted at %s:%u -- %s\n",
                     "smt2_frontend.c", fe->incomplete_line,
@@ -5939,17 +6141,118 @@ static void _emit_eval_value(FILE *out, EvalVal v, unsigned width) {
     _emit_bv_bin_literal_wide(out, limbs, (EVAL_MAX_W + 63) / 64, width);
 }
 
+/* Print a term the way z3 echoes a get-value key: as written, except that a
+ * bit-vector literal is `#x` when its width is a multiple of 4, else `#b`. */
+static void _fprint_term(FILE *out, const Sexpr *s) {
+    if (s->kind == SEXPR_BITVEC) {
+        uint32_t w = s->bv.width ? s->bv.width : 1;
+        if (w % 4) { _fprint_sexpr(out, s); return; }
+        fputs("#x", out);
+        for (uint32_t d = w / 4; d-- > 0;) {
+            uint32_t bit = d * 4;
+            uint64_t limb = s->bv.limbs ? s->bv.limbs[bit / 64]
+                          : (bit < 64 ? s->bv.value : 0);
+            fputc("0123456789abcdef"[(limb >> (bit % 64)) & 0xF], out);
+        }
+        return;
+    }
+    if (s->kind == SEXPR_LIST) {
+        fputc('(', out);
+        for (uint32_t i = 0; i < s->list.count; i++) {
+            if (i) fputc(' ', out);
+            _fprint_term(out, s->list.items[i]);
+        }
+        fputc(')', out);
+        return;
+    }
+    _fprint_sexpr(out, s);
+}
+
+/* Whether a get-value term has sort Bool, so its value prints as true/false.
+ * Syntactic: the operators that return Bool, Bool-declared symbols, and
+ * define-funs declared to return Bool. */
+static int _term_is_bool(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->kind == SEXPR_SYMBOL) {
+        if (sexpr_is_symbol(s, "true") || sexpr_is_symbol(s, "false")) return 1;
+        Smt2Var *v = _find_var(fe, s->sym.str, s->sym.len);
+        if (v) return v->is_bool;
+        Smt2FunDef *fd = _find_fun(fe, s->sym.str, s->sym.len);
+        return fd && fd->is_bool_return;
+    }
+    if (s->kind != SEXPR_LIST || s->list.count == 0) return 0;
+    const Sexpr *h = s->list.items[0];
+    if (h->kind != SEXPR_SYMBOL) return 0;
+    static const char *const ops[] = {
+        "=", "distinct", "not", "and", "or", "xor", "=>",
+        "bvult", "bvule", "bvugt", "bvuge", "bvslt", "bvsle", "bvsgt", "bvsge",
+    };
+    for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++)
+        if (sexpr_is_symbol(h, ops[i])) return 1;
+    if (sexpr_is_symbol(h, "ite") && s->list.count == 4)
+        return _term_is_bool(fe, s->list.items[2]);
+    Smt2FunDef *fd = _find_fun(fe, h->sym.str, h->sym.len);
+    return fd && fd->is_bool_return;
+}
+
+static int _get_value_body(Smt2Frontend *fe, const Sexpr *vars_list);
+
 static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
     if (!fe->has_result || fe->last_result != DVS_SOLVE_OK) {
-        fprintf(fe->err, "error: get-value requires a prior sat result\n");
+        _query_error(fe, "get-value: no model available, the last check-sat did not answer sat");
         return 0;
     }
-    if (cmd->list.count != 2 || cmd->list.items[1]->kind != SEXPR_LIST) {
-        fprintf(fe->err, "error: get-value requires a list of variables\n");
+    if (cmd->list.count != 2 || cmd->list.items[1]->kind != SEXPR_LIST
+            || cmd->list.items[1]->list.count == 0) {
+        _query_error(fe, "get-value expects a non-empty list of terms");
         return 0;
     }
-    Sexpr *vars_list = cmd->list.items[1];
+    const Sexpr *vars_list = cmd->list.items[1];
 
+    /* Plain declared names (every Verilator and smtbmc query) cannot fail:
+     * answer straight to the output. Anything else is built in memory first,
+     * so a term we cannot evaluate turns the whole response into an error
+     * rather than a partial list. */
+    int simple = 1;
+    for (uint32_t i = 0; i < vars_list->list.count && simple; i++) {
+        const Sexpr *t = vars_list->list.items[i];
+        simple = t->kind == SEXPR_SYMBOL
+              && (_find_var(fe, t->sym.str, t->sym.len)
+                  || _find_array_var(fe, t->sym.str, t->sym.len));
+    }
+    if (simple) return _get_value_body(fe, vars_list) < 0 ? 0 : 0;
+
+    Smt2MemOut m;
+    if (!_memout_open(&m)) return _get_value_body(fe, vars_list) < 0 ? 0 : 0;
+    FILE *real = fe->out;
+    fe->out = m.f;
+    int bad = _get_value_body(fe, vars_list);
+    fe->out = real;
+    _memout_finish(&m, bad < 0 ? real : NULL);
+    if (bad >= 0) {
+        Smt2MemOut t;
+        if (_memout_open(&t)) {
+            _fprint_term(t.f, vars_list->list.items[bad]);
+            fputc('\0', t.f);
+            fflush(t.f);
+#ifdef _WIN32
+            _memout_finish(&t, NULL);
+            _query_error(fe, "get-value: cannot evaluate this term");
+#else
+            _query_error(fe, "get-value: cannot evaluate '%.80s'", t.buf ? t.buf : "?");
+            _memout_finish(&t, NULL);
+#endif
+        } else {
+            _query_error(fe, "get-value: cannot evaluate a term");
+        }
+    }
+    fflush(fe->out);
+    return 0;
+}
+
+/* Print the get-value response for `vars_list`. Returns -1 when every term was
+ * answered, else the index of the first term that could not be evaluated (the
+ * output is then incomplete and the caller discards it). */
+static int _get_value_body(Smt2Frontend *fe, const Sexpr *vars_list) {
     fprintf(fe->out, "(");
     int first = 1;
     for (uint32_t i = 0; i < vars_list->list.count; i++) {
@@ -5971,7 +6274,9 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
             Smt2Var *v = _find_var(fe, name_s->sym.str, name_s->sym.len);
             if (v) {
                 fprintf(fe->out, "(%.*s ", (int)name_s->sym.len, name_s->sym.str);
-                if (v->width > 64) {
+                if (v->is_bool) {
+                    fputs(_fe_get_var_value(fe, v->var_id) & 1 ? "true" : "false", fe->out);
+                } else if (v->width > 64) {
                     uint64_t limbs[(SMT2_MAX_BV_BITS + 63) / 64];
                     uint32_t nl = (v->width + 63u) / 64u;
                     _fe_get_var_value_wide(fe, v->var_id, limbs, nl);
@@ -6085,49 +6390,27 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
          * (get-value (|UNROLL#28|)) where UNROLL#28 is a define-fun. */
         int ok = 1;
         EvalRet ev = _eval_sexpr(fe, name_s, &ok);
-        if (ok) {
-            uint16_t w = ev.width ? ev.width : 1;
-            /* Emit echoing the original expression as the key. For a
-             * plain symbol we emit it bare; for a list we print its
-             * canonical form (limited to what we evaluated). */
-            if (name_s->kind == SEXPR_SYMBOL) {
-                fprintf(fe->out, "(%.*s ", (int)name_s->sym.len, name_s->sym.str);
-                _emit_eval_value(fe->out, ev.value, (unsigned)w);
-                fprintf(fe->out, ")");
-            } else {
-                /* For a list expression, smtbmc typically only queries
-                 * symbols, so this branch is rarely hit. Print a
-                 * minimal valid response. */
-                fprintf(fe->out, "(? ");
-                _emit_eval_value(fe->out, ev.value, (unsigned)w);
-                fprintf(fe->out, ")");
-            }
-            continue;
-        }
-
-        if (name_s->kind == SEXPR_SYMBOL) {
-            fprintf(fe->err, "error: unknown variable in get-value: '%.*s'\n",
-                    (int)name_s->sym.len, name_s->sym.str);
-        } else {
-            fprintf(fe->err, "error: unsupported expression in get-value\n");
-        }
-        /* Emit a placeholder so smtio's parser sees a well-formed pair
-         * instead of an empty list (which crashes the parser). */
-        if (name_s->kind == SEXPR_SYMBOL) {
-            fprintf(fe->out, "(%.*s #b0)", (int)name_s->sym.len, name_s->sym.str);
-        } else {
-            fprintf(fe->out, "(? #b0)");
-        }
+        if (!ok) return (int)i;   /* never a placeholder value (fw-hdl R1) */
+        /* The key echoes the term (SMT-LIB 2.6 §4.2.6: consumers pair values
+         * with terms by it). */
+        fputc('(', fe->out);
+        _fprint_term(fe->out, name_s);
+        fputc(' ', fe->out);
+        if (_term_is_bool(fe, name_s))
+            fputs(ev.value & 1 ? "true" : "false", fe->out);
+        else
+            _emit_eval_value(fe->out, ev.value, ev.width ? ev.width : 1u);
+        fputc(')', fe->out);
     }
     fprintf(fe->out, ")\n");
     fflush(fe->out);
-    return 0;
+    return -1;
 }
 
 static int _cmd_get_model(Smt2Frontend *fe, const Sexpr *cmd) {
     (void)cmd;
     if (!fe->has_result || fe->last_result != DVS_SOLVE_OK) {
-        fprintf(fe->err, "error: get-model requires a prior sat result\n");
+        _query_error(fe, "get-model: no model available, the last check-sat did not answer sat");
         return 0;
     }
     fprintf(fe->out, "(\n");
@@ -6139,6 +6422,10 @@ static int _cmd_get_model(Smt2Frontend *fe, const Sexpr *cmd) {
         /* Skip array element vars (they appear as part of array model) */
         if (strchr(v->name, '[') != NULL) continue;
         int64_t val = _fe_get_var_value(fe, v->var_id);
+        if (v->is_bool) {
+            fprintf(fe->out, "  (define-fun %s () Bool %s)\n", v->name, val & 1 ? "true" : "false");
+            continue;
+        }
         fprintf(fe->out, "  (define-fun %s () (_ BitVec %u) (_ bv%" PRIu64 " %u))\n",
                 v->name, (unsigned)v->width,
                 (uint64_t)val, (unsigned)v->width);
@@ -6166,11 +6453,12 @@ static int _cmd_get_model(Smt2Frontend *fe, const Sexpr *cmd) {
 
 static int _cmd_echo(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 2 || cmd->list.items[1]->kind != SEXPR_STRING) {
-        fprintf(fe->err, "error: echo requires a string\n");
+        _query_error(fe, "echo expects a string");
         return 0;
     }
+    /* The token keeps its quotes: echo it as written (SMT-LIB 2.6 §4.2.1). */
     const Sexpr *s = cmd->list.items[1];
-    fprintf(fe->out, "\"%.*s\"\n", (int)s->sym.len, s->sym.str);
+    fprintf(fe->out, "%.*s\n", (int)s->sym.len, s->sym.str);
     fflush(fe->out);
     return 0;
 }
@@ -6188,6 +6476,20 @@ static int _cmd_get_info(Smt2Frontend *fe, const Sexpr *cmd) {
         fprintf(fe->out, "(:version \"%s\")\n", DVS_VERSION);
     } else if (sexpr_is_keyword(key, ":authors")) {
         fprintf(fe->out, "(:authors \"dv-solve contributors\")\n");
+    } else if (sexpr_is_keyword(key, ":reason-unknown")) {
+        /* Why the last check-sat said `unknown`, most specific cause first. */
+        if (fe->input_poisoned) {
+            fprintf(fe->out, "(:reason-unknown \"input error: ");
+            _fprint_smt2_string_body(fe->out, fe->input_err_reason);
+            fprintf(fe->out, "\")\n");
+        } else if (fe->incomplete) {
+            fprintf(fe->out, "(:reason-unknown \"unsupported: ");
+            _fprint_smt2_string_body(fe->out, fe->incomplete_why
+                                     ? fe->incomplete_why : "construct");
+            fprintf(fe->out, "\")\n");
+        } else {
+            fprintf(fe->out, "(:reason-unknown incomplete)\n");
+        }
     } else {
         fprintf(fe->out, "(:unsupported)\n");
     }
@@ -6259,7 +6561,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->has_result = 1;
         }
         if (fe->push_depth + n > SMT2_MAX_PUSH) {
-            fprintf(fe->err, "error: push: max push depth exceeded\n");
+            _input_error(fe, "push: max push depth exceeded");
             return -1;
         }
         for (uint32_t i = 0; i < n; i++) {
@@ -6286,7 +6588,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             return -1;
         }
         if (fe->push_depth >= SMT2_MAX_PUSH) {
-            fprintf(fe->err, "error: push: max push depth exceeded\n");
+            _input_error(fe, "push: max push depth exceeded");
             return -1;
         }
         fe->push_stack[fe->push_depth++] = (uint32_t)cp;
@@ -6345,7 +6647,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
     }
     for (uint32_t i = 0; i < n; i++) {
         if (fe->push_depth == 0) {
-            fprintf(fe->err, "error: pop: stack underflow\n");
+            _input_error(fe, "pop: stack underflow");
             return -1;
         }
         fe->push_depth--;
@@ -6517,14 +6819,14 @@ static int _cmd_get_unsat_core(Smt2Frontend *fe, const Sexpr *cmd) {
 
 static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 2 || cmd->list.items[1]->kind != SEXPR_LIST) {
-        fprintf(fe->err, "error: check-sat-assuming requires a literal list\n");
+        _input_error(fe, "check-sat-assuming requires a literal list");
         return -1;
     }
 
     fe->core_replayable = 0;   /* the core would have to cover the assumptions */
 
-    /* Tainted context -> honest `unknown` (see _cmd_check_sat). */
-    if (fe->incomplete) {
+    /* Tainted or poisoned context -> honest `unknown` (see _cmd_check_sat). */
+    if (fe->incomplete || fe->input_poisoned) {
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
         fe->last_result = DVS_SOLVE_TIMEOUT;
@@ -6607,13 +6909,13 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
             nlen = lit->list.items[1]->sym.len;
             positive = 0;
         } else {
-            fprintf(fe->err, "error: malformed assumption literal\n");
+            _input_error(fe, "malformed assumption literal");
             dvs_solver_restore(fe->ctx, (uint32_t)cp);
             return -1;
         }
         Smt2Var *v = _find_var(fe, name, nlen);
         if (!v) {
-            fprintf(fe->err, "error: unknown assumption var '%.*s'\n", (int)nlen, name);
+            _input_error(fe, "unknown assumption literal '%.*s'", (int)nlen, name);
             dvs_solver_restore(fe->ctx, (uint32_t)cp);
             return -1;
         }
@@ -6725,6 +7027,7 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     free(fe->vars);
     free(fe->funs);
     free(fe->subst_stack);
+    free(fe->sort_aliases);
     sexpr_arena_destroy(&fe->persistent_arena);
     /* Free persistent array var allocations (dense elems[] or sparse map).
      * Abstract (DV_ARRAY) values are owned by anodes[] -- freed below -- so skip
@@ -6781,6 +7084,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     uint8_t  cdcl_route = fe->cdcl_route;
     uint32_t ctx_buf_scale = fe->ctx_buf_scale;
     void    *shape_tab = fe->shape_tab;
+    uint32_t n_input_errors = fe->n_input_errors;   /* drives the exit status */
     /* Reused allocations (reset in place below rather than freed). */
     dvs_builder_t *builder = fe->builder;
     SexprArena           parena  = fe->persistent_arena;
@@ -6795,6 +7099,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     free(fe->vars);
     free(fe->funs);          /* re-zeroed by the memset below; realloc'd on next define-fun */
     free(fe->subst_stack);   /* re-zeroed by the memset below; realloc'd on next let */
+    free(fe->sort_aliases);
     for (uint32_t i = 0; i < fe->n_array_vars; i++) {
         if (fe->array_vars[i].value && !fe->array_vars[i].value->is_abstract) {
             free(fe->array_vars[i].value->elems);
@@ -6841,6 +7146,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->cdcl_route = cdcl_route;
     fe->ctx_buf_scale = ctx_buf_scale;
     fe->shape_tab = shape_tab;
+    fe->n_input_errors = n_input_errors;
     fe->builder = builder;
     fe->persistent_arena = parena;
 }
@@ -6851,7 +7157,7 @@ static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd);
  * unsat core. Options, info and queries are not: none can change a verdict. */
 static int _core_shapes_assertions(const Sexpr *head) {
     static const char *const kinds[] = {
-        "set-logic", "declare-sort", "declare-const", "declare-fun",
+        "set-logic", "declare-sort", "define-sort", "declare-const", "declare-fun",
         "define-fun", "declare-datatypes", "assert",
     };
     for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
@@ -6894,12 +7200,19 @@ static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     /* Reset per-command transient allocations from prior command */
     _cmd_alloc_reset(fe);
 
-    if (!cmd || cmd->kind != SEXPR_LIST || cmd->list.count == 0)
+    if (!cmd) return 0;
+    if (cmd->kind != SEXPR_LIST) {
+        _input_error(fe, "invalid command, '(' expected");
         return 0;
+    }
+    if (cmd->list.count == 0) {
+        _input_error(fe, "empty command '()'");
+        return 0;
+    }
 
     Sexpr *head = cmd->list.items[0];
     if (head->kind != SEXPR_SYMBOL) {
-        fprintf(fe->err, "error: expected command symbol\n");
+        _input_error(fe, "invalid command, a command name is expected");
         return 0;
     }
 
@@ -6911,6 +7224,8 @@ static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
         return 0;
     if (sexpr_is_symbol(head, "declare-sort"))
         return _cmd_declare_sort(fe, cmd);
+    if (sexpr_is_symbol(head, "define-sort"))
+        return _cmd_define_sort(fe, cmd);
     if (sexpr_is_symbol(head, "declare-const"))
         return _cmd_declare_const(fe, cmd);
     if (sexpr_is_symbol(head, "declare-fun"))
@@ -6943,7 +7258,7 @@ static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
         return _cmd_declare_datatypes(fe, cmd);
     }
     if (sexpr_is_symbol(head, "declare-datatype")) {
-        fprintf(fe->err, "warning: declare-datatype not supported, ignored\n");
+        _input_error(fe, "unsupported command 'declare-datatype'");
         return 0;
     }
     if (sexpr_is_symbol(head, "reset-assertions")) {
@@ -6976,8 +7291,7 @@ static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     if (sexpr_is_symbol(head, "exit"))
         return 1;
 
-    fprintf(fe->err, "(error \"unsupported: %.*s\")\n",
-            (int)head->sym.len, head->sym.str);
+    _input_error(fe, "unsupported command '%.*s'", (int)head->sym.len, head->sym.str);
     return 0;
 }
 

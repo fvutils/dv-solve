@@ -68,6 +68,10 @@ void  sexpr_arena_reset(SexprArena *arena);
  * Returns NULL on EOF or parse error.  All Sexpr nodes and their
  * backing storage are allocated from the arena.
  */
+/* Parse the next s-expression. Returns NULL at end of input, and also for
+ * malformed input: then lex->err_msg (with err_line/err_col) says what is
+ * wrong, and the lexer has skipped to the end of the malformed s-expression so
+ * the next call resumes at the following one. */
 Sexpr *sexpr_parse(Smt2Lexer *lex, SexprArena *arena);
 
 /* ------------------------------------------------------------------ */

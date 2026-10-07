@@ -347,17 +347,19 @@ static void test_declare_datatypes_record_of_bv(void) {
 
 static void test_declare_datatypes_rejects_sum(void) {
     Smt2Frontend fe;
-    FILE *err_f = tmpfile();
-    smt2_frontend_init(&fe, stderr, err_f);
-    /* Two constructors → sum type, rejected. */
+    FILE *out_f = tmpfile();
+    smt2_frontend_init(&fe, out_f, stderr);
+    /* Two constructors → sum type, rejected with an (error ...) response. */
     int rc = _run(&fe,
         "(declare-datatypes ((Color 0)) (((red) (green) (blue))))");
     ASSERT_EQ_INT(rc, -1);
-    rewind(err_f);
+    rewind(out_f);
     char buf[256] = {0};
-    (void)fread(buf, 1, sizeof(buf)-1, err_f);
-    ASSERT_TRUE(strstr(buf, "single-constructor") != NULL);
-    fclose(err_f);
+    (void)fread(buf, 1, sizeof(buf)-1, out_f);
+    ASSERT_TRUE(strstr(buf, "(error ") != NULL);
+    ASSERT_TRUE(strstr(buf, "more than one constructor") != NULL);
+    ASSERT_TRUE(fe.input_poisoned);
+    fclose(out_f);
     smt2_frontend_destroy(&fe);
 }
 

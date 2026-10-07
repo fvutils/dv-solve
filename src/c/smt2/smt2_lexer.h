@@ -34,6 +34,8 @@ typedef struct {
     uint32_t      length;   /* token length in bytes                */
     uint64_t      numval;   /* parsed numeric value (NUMERAL/BITVEC_LIT) */
     uint32_t      bv_width; /* bit width (BITVEC_LIT only)         */
+    uint32_t      line;     /* 1-based position of the token's first byte */
+    uint32_t      col;
 } Smt2Token;
 
 /* ------------------------------------------------------------------ */
@@ -46,6 +48,17 @@ typedef struct {
     size_t      pos;      /* current read position                 */
     uint32_t    line;     /* 1-based line number                   */
     uint32_t    col;      /* 1-based column number                 */
+    /* Open '(' not yet closed. A ')' at depth 0 is a stray paren: it is
+     * still returned as TOK_RPAREN, and the parser reports it. */
+    uint32_t    depth;
+    uint32_t    cmd_line; /* position of the '(' that opened the current */
+    uint32_t    cmd_col;  /* top-level s-expression (depth went 0 -> 1)  */
+    /* Set by sexpr_parse when it returns NULL for malformed input (as opposed
+     * to end of input); NULL otherwise. Points into err_buf. */
+    const char *err_msg;
+    uint32_t    err_line;
+    uint32_t    err_col;
+    char        err_buf[160];
 } Smt2Lexer;
 
 /* ------------------------------------------------------------------ */
@@ -66,7 +79,7 @@ void smt2_lexer_init(Smt2Lexer *lex, const char *buf, size_t len);
  *
  * Returns a token by value.  After EOF the lexer keeps returning
  * TOK_EOF.  On a lexical error it returns TOK_ERROR with start/length
- * pointing at the offending byte(s).
+ * pointing at the offending byte(s); smt2_token_error() describes it.
  */
 Smt2Token smt2_lexer_next(Smt2Lexer *lex);
 
@@ -81,6 +94,11 @@ Smt2Token smt2_lexer_peek(Smt2Lexer *lex);
  * Return a human-readable name for a token kind (for diagnostics).
  */
 const char *smt2_token_kind_name(Smt2TokenKind kind);
+
+/**
+ * Describe a TOK_ERROR token (what is malformed about it), for diagnostics.
+ */
+const char *smt2_token_error(const Smt2Token *tok);
 
 /**
  * Compare a token's text to a NUL-terminated string.

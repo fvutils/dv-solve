@@ -22,7 +22,7 @@ dv-solve-smt2 quickstart.smt2
 ```
 
 The exit code reflects the last `check-sat`: `0` for `sat`, `1` for `unsat`,
-`2` for `unknown` or an error. See {doc}`../reference/cli`.
+`2` for `unknown`, and `4` if the input had an error. See {doc}`../reference/cli`.
 
 ## Get a different solution each time
 

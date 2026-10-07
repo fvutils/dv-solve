@@ -78,7 +78,8 @@ typedef struct {
     uint32_t var_id;
     uint8_t  width;
     uint8_t  is_signed;
-    uint8_t  _pad[2];
+    uint8_t  is_bool;    /* declared Bool: get-value prints true/false */
+    uint8_t  _pad;
 } Smt2Var;
 
 /* One recorded command for get-unsat-core replay: a deep copy of the command
@@ -222,6 +223,14 @@ typedef struct {
     char     name[SMT2_MAX_NAME];
     char     sort_name[SMT2_MAX_NAME];
 } Smt2SortConst;
+
+/* (define-sort NAME () SORT): a sort alias. `def` is SORT with every alias in
+ * it already expanded, deep-copied into persistent_arena. Aliases are global:
+ * (pop) does not remove them, as with :global-declarations. */
+typedef struct {
+    char         name[SMT2_MAX_NAME];
+    const Sexpr *def;
+} Smt2SortAlias;
 
 /* Parameterized macro (define-fun) */
 typedef struct {
@@ -455,6 +464,9 @@ typedef struct {
     /* Opaque sorts */
     char                 sort_names[SMT2_MAX_SORTS][SMT2_MAX_NAME];
     uint32_t             n_sort_names;
+    Smt2SortAlias       *sort_aliases;     /* heap; see Smt2SortAlias */
+    uint32_t             n_sort_aliases;
+    uint32_t             sort_alias_cap;
 
     /* Sort-typed declare-fun entries (e.g., accessor functions) */
     Smt2SortFun          sort_funs[SMT2_MAX_SORT_FUNS];
@@ -545,6 +557,24 @@ typedef struct {
     const char          *incomplete_why;
     uint32_t             incomplete_line;
 
+    /* Input errors (malformed or unsupported commands; plan D2 in
+     * docs/fw_hdl_implementation_plan.md). Each is answered with an SMT-LIB
+     * `(error "...")` on fe->out. After one, the session is poisoned: every
+     * check-sat answers `unknown`, because we cannot know what the bad input
+     * meant. (reset) clears the poison; n_input_errors survives it and drives
+     * the exit status (SMT2_EXIT_INPUT_ERROR). */
+    uint32_t             n_input_errors;
+    int                  input_poisoned;
+    char                 input_err_reason[200];
+    /* First ill-formed-term message of the current assert (unknown symbol,
+     * arity or sort mismatch). Recorded rather than printed, because the
+     * translator also runs speculatively; reported as an input error only if
+     * the assert as a whole fails to translate. */
+    char                 term_err[160];
+    /* Position of the command being dispatched, for error messages (0: none). */
+    uint32_t             cmd_line;
+    uint32_t             cmd_col;
+
     int                  verilator_cdcl;
     uint64_t             cdcl_probe_fp;
     uint8_t              cdcl_route;
@@ -607,6 +637,18 @@ typedef struct {
 /* API                                                                 */
 /* ------------------------------------------------------------------ */
 
+/* Exit status of dv-solve-smt2 (plan D3; documented in --help). */
+#define SMT2_EXIT_SAT          0
+#define SMT2_EXIT_UNSAT        1
+#define SMT2_EXIT_UNKNOWN      2   /* also: no check-sat was run */
+#define SMT2_EXIT_ORACLE_ABORT 3
+#define SMT2_EXIT_INPUT_ERROR  4
+#define SMT2_EXIT_USAGE        5
+#define SMT2_EXIT_INTERNAL     6
+
+/* Errors reported per session before further ones are only counted. */
+#define SMT2_MAX_REPORTED_ERRORS 20
+
 /**
  * Initialise a frontend.  Caller owns *fe and must call smt2_frontend_destroy().
  */
@@ -623,6 +665,18 @@ void smt2_frontend_destroy(Smt2Frontend *fe);
  * @return  0 to continue, 1 on (exit), -1 on fatal error.
  */
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd);
+
+/**
+ * Report an input error: print `(error "line L column C: <msg>")` on fe->out
+ * (the position is left out when line is 0) and poison the session (see
+ * Smt2Frontend.input_poisoned). printf-style.
+ */
+void smt2_frontend_input_error(Smt2Frontend *fe, uint32_t line, uint32_t col,
+                               const char *fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 4, 5)))
+#endif
+    ;
 
 /**
  * Answer a (get-value ...) command given as text into a malloc'd buffer,

@@ -28,7 +28,14 @@ source build puts it in `build/` (and `build/bin` after `cmake --install`).
   standard input.
 
 `--stats`
-: Explain `unknown` results: write the reason to the diagnostic stream.
+: Explain `unknown` results: write the reason to standard error.
+
+`-v`, `--verbose`
+: Print warnings and diagnostics to standard error.
+
+`--exit-codes=C`
+: `default`, or `satcomp` to exit `10` for `sat`, `20` for `unsat` and `0`
+  for `unknown`, as boolector and bitwuzla do.
 
 `--mode=verilator`
 : Serve Verilator's `randomize()` calls. See {doc}`../guides/verilator`.
@@ -52,11 +59,19 @@ source build puts it in `build/` (and `build/bin` after `cmake --install`).
 
 | Code | Meaning |
 |---|---|
-| `0` | the last `check-sat` returned `sat`, or there was no `check-sat` |
+| `0` | the last `check-sat` returned `sat` |
 | `1` | the last `check-sat` returned `unsat` |
-| `2` | the last `check-sat` returned `unknown`, or a command failed |
+| `2` | the last `check-sat` returned `unknown`, or there was no `check-sat` |
+| `3` | the z3 oracle disagreed and `DV_ORACLE_ON_FAIL=abort` was set |
+| `4` | the input had an error; this takes precedence over any answer |
+| `5` | usage error: an unknown option, or a file that cannot be read |
+| `6` | internal error |
+
+`unsat` exits `1`, so a `set -e` script stops at a successful proof. Test the
+status, or use `--exit-codes=satcomp`.
 
 ## Diagnostics
 
-Diagnostics go to standard error when standard output is a terminal, and are
-appended to a log file otherwise. See {doc}`environment`.
+Errors in the input are `(error "...")` responses on standard output (see
+{doc}`../guides/smt2-solver`). Warnings and statistics are printed only with
+`--stats`, `-v` or `DV_LOG`. See {doc}`environment`.

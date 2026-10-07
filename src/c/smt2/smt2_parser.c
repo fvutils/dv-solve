@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "smt2/smt2_parser.h"
@@ -126,21 +127,42 @@ static Sexpr *_alloc_sexpr(SexprArena *arena) {
     return (Sexpr *)sexpr_arena_alloc(arena, sizeof(Sexpr), _Alignof(Sexpr));
 }
 
+/* Record the first parse error of this s-expression (see Smt2Lexer.err_msg). */
+static void _perr(Smt2Lexer *lex, uint32_t line, uint32_t col, const char *msg,
+                  const Smt2Token *tok) {
+    if (lex->err_msg) return;
+    if (tok && tok->length)
+        snprintf(lex->err_buf, sizeof lex->err_buf, "%s '%.*s'", msg,
+                 (int)(tok->length > 40 ? 40 : tok->length), tok->start);
+    else
+        snprintf(lex->err_buf, sizeof lex->err_buf, "%s", msg);
+    lex->err_msg  = lex->err_buf;
+    lex->err_line = line;
+    lex->err_col  = col;
+}
+
+static void _perr_oom(Smt2Lexer *lex) {
+    _perr(lex, lex->line, lex->col, "out of memory while parsing", NULL);
+}
+
 /** Parse one atom or list starting at the already-lexed `tok` (recursive). */
 static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
 
     switch (tok.kind) {
     case TOK_EOF:
+        return NULL;
     case TOK_ERROR:
+        _perr(lex, tok.line, tok.col, smt2_token_error(&tok), &tok);
         return NULL;
 
     case TOK_RPAREN:
-        /* Unmatched ')' -- caller should not see this. */
+        /* Only reached for a ')' with no '(' to close (a list consumes its own). */
+        _perr(lex, tok.line, tok.col, "unexpected ')'", NULL);
         return NULL;
 
     case TOK_SYMBOL: {
         Sexpr *s = _alloc_sexpr(arena);
-        if (!s) return NULL;
+        if (!s) { _perr_oom(lex); return NULL; }
         s->kind    = SEXPR_SYMBOL;
         s->sym.str = tok.start;
         s->sym.len = tok.length;
@@ -148,14 +170,14 @@ static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
     }
     case TOK_NUMERAL: {
         Sexpr *s = _alloc_sexpr(arena);
-        if (!s) return NULL;
+        if (!s) { _perr_oom(lex); return NULL; }
         s->kind   = SEXPR_NUMERAL;
         s->numval = tok.numval;
         return s;
     }
     case TOK_BITVEC_LIT: {
         Sexpr *s = _alloc_sexpr(arena);
-        if (!s) return NULL;
+        if (!s) { _perr_oom(lex); return NULL; }
         s->kind     = SEXPR_BITVEC;
         s->bv.value = tok.numval;
         s->bv.width = tok.bv_width;
@@ -166,16 +188,18 @@ static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
             uint32_t nl = (tok.bv_width + 63u) / 64u;
             uint64_t *limbs = (uint64_t *)sexpr_arena_alloc(
                 arena, nl * sizeof(uint64_t), _Alignof(uint64_t));
-            if (!limbs ||
-                smt2_bvlit_limbs(tok.start, tok.length, limbs, nl) != 0)
+            if (!limbs) { _perr_oom(lex); return NULL; }
+            if (smt2_bvlit_limbs(tok.start, tok.length, limbs, nl) != 0) {
+                _perr(lex, tok.line, tok.col, "invalid bit-vector literal", &tok);
                 return NULL;
+            }
             s->bv.limbs = limbs;
         }
         return s;
     }
     case TOK_KEYWORD: {
         Sexpr *s = _alloc_sexpr(arena);
-        if (!s) return NULL;
+        if (!s) { _perr_oom(lex); return NULL; }
         s->kind    = SEXPR_KEYWORD;
         s->sym.str = tok.start;
         s->sym.len = tok.length;
@@ -183,7 +207,7 @@ static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
     }
     case TOK_STRING: {
         Sexpr *s = _alloc_sexpr(arena);
-        if (!s) return NULL;
+        if (!s) { _perr_oom(lex); return NULL; }
         s->kind    = SEXPR_STRING;
         s->sym.str = tok.start;
         s->sym.len = tok.length;
@@ -197,7 +221,9 @@ static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
         for (;;) {
             Smt2Token next = smt2_lexer_next(lex);
             if (next.kind == TOK_RPAREN) break;
-            if (next.kind == TOK_EOF || next.kind == TOK_ERROR) {
+            if (next.kind == TOK_EOF) {
+                _perr(lex, lex->cmd_line, lex->cmd_col,
+                      "unexpected end of input: '(' is never closed", NULL);
                 _list_free(&children);
                 return NULL;
             }
@@ -207,13 +233,14 @@ static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
                 return NULL;
             }
             if (_list_push(&children, child) < 0) {
+                _perr_oom(lex);
                 _list_free(&children);
                 return NULL;
             }
         }
 
         Sexpr *s = _alloc_sexpr(arena);
-        if (!s) { _list_free(&children); return NULL; }
+        if (!s) { _perr_oom(lex); _list_free(&children); return NULL; }
         s->kind       = SEXPR_LIST;
         s->list.count = children.count;
 
@@ -222,7 +249,7 @@ static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
             size_t sz = children.count * sizeof(Sexpr *);
             Sexpr **arr = (Sexpr **)sexpr_arena_alloc(arena, sz,
                                                        _Alignof(Sexpr *));
-            if (!arr) { _list_free(&children); return NULL; }
+            if (!arr) { _perr_oom(lex); _list_free(&children); return NULL; }
             memcpy(arr, children.items, sz);
             s->list.items = arr;
         } else {
@@ -240,10 +267,21 @@ static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
 /* ------------------------------------------------------------------ */
 
 Sexpr *sexpr_parse(Smt2Lexer *lex, SexprArena *arena) {
+    lex->err_msg = NULL;
     /* Skip to the next meaningful token */
     Smt2Token peek = smt2_lexer_peek(lex);
     if (peek.kind == TOK_EOF) return NULL;
-    return _parse_tok(lex, arena, smt2_lexer_next(lex));
+    uint32_t depth0 = lex->depth;
+    Sexpr *s = _parse_tok(lex, arena, smt2_lexer_next(lex));
+    if (!s && lex->err_msg) {
+        /* Resynchronise: skip the rest of the malformed s-expression, so the
+         * next call starts at the following command rather than mid-list. */
+        while (lex->depth > depth0) {
+            Smt2Token t = smt2_lexer_next(lex);
+            if (t.kind == TOK_EOF) break;
+        }
+    }
+    return s;
 }
 
 int sexpr_is_symbol(const Sexpr *s, const char *str) {

@@ -37,6 +37,7 @@ static void _usage(FILE *f) {
         "  --help            Show this help\n"
         "  --version         Print version\n"
         "  --stats           Print statistics to stderr\n"
+        "  -v, --verbose     Print warnings and diagnostics to stderr\n"
         "  --interactive     Force interactive (per-command) stdin mode\n"
         "  --batch           Force batch (whole-file) stdin mode\n"
         "  --smt2            Accepted for compatibility (the only supported mode)\n"
@@ -46,6 +47,8 @@ static void _usage(FILE *f) {
         "                    assuming is served as a randomization-diversity\n"
         "                    request (one seeded base solve) instead of a literal\n"
         "                    assumption solve. Use for VERILATOR_SOLVER.\n"
+        "  --exit-codes=C    default | satcomp. satcomp exits 10 for sat, 20 for\n"
+        "                    unsat and 0 for unknown, as boolector and bitwuzla do.\n"
         "  --verilator-hash=H  honor | ignore (verilator mode; default honor).\n"
         "                    Verilator follows each sat randomize() query with\n"
         "                    up to four random parity asserts to vary a\n"
@@ -54,7 +57,24 @@ static void _usage(FILE *f) {
         "                    constraint) and skips those asserts.\n"
         "\n"
         "If no file is given, reads from stdin.  Interactive mode is the\n"
-        "default when stdin is a pipe/tty.\n");
+        "default when stdin is a pipe/tty.\n"
+        "\n"
+        "Errors in the input are SMT-LIB responses on stdout:\n"
+        "  (error \"line L column C: ...\")\n"
+        "After an input error, every check-sat answers unknown, and\n"
+        "(get-info :reason-unknown) names the error. Warnings and diagnostics\n"
+        "are silent unless --stats, -v or DV_LOG is given. DV_LOG=<path> (a\n"
+        "value containing '/' or '.') appends them to that file instead.\n"
+        "\n"
+        "Exit status (from the last check-sat):\n"
+        "  0  sat\n"
+        "  1  unsat (a proof: note that `set -e` scripts stop here)\n"
+        "  2  unknown, or no check-sat was run\n"
+        "  3  the z3 oracle disagreed and DV_ORACLE_ON_FAIL=abort\n"
+        "  4  the input had an error (takes precedence over any answer)\n"
+        "  5  usage error (bad option, unreadable file)\n"
+        "  6  internal error\n"
+        "With --exit-codes=satcomp, 0/1/2 become 10/20/0.\n");
 }
 
 /* Read an entire stream into a malloc'd buffer (batch mode). */
@@ -102,17 +122,25 @@ static int _grow_push(GrowBuf *g, int c) {
 }
 
 /* Read one complete top-level S-expression from f into g.
- * Returns 1 on success, 0 on clean EOF, -1 on error. */
-static int _read_one_sexpr(FILE *f, GrowBuf *g) {
+ * Returns 1 on success, 0 on clean EOF, 2 for an s-expression still open at
+ * end of input (g holds it, for the parser to report), -1 out of memory.
+ * A ')' with nothing open is returned on its own, also for the parser to
+ * report. pos is the 1-based line/column of the next byte to read; start
+ * receives the position of g's first byte. */
+typedef struct { uint32_t line, col; } SrcPos;
+static int _read_one_sexpr(FILE *f, GrowBuf *g, SrcPos *pos, SrcPos *start) {
     g->len = 0;
+    *start = *pos;
     int depth = 0;
     int in_string = 0;
+    int in_quoted = 0;      /* inside |quoted symbol|, which may hold parens */
     int in_comment = 0;
     int started = 0;
     int c;
 
     while ((c = getc_unlocked(f)) != EOF) {
         if (_grow_push(g, c) < 0) return -1;
+        if (c == '\n') { pos->line++; pos->col = 1; } else pos->col++;
 
         if (in_comment) {
             if (c == '\n') in_comment = 0;
@@ -122,11 +150,18 @@ static int _read_one_sexpr(FILE *f, GrowBuf *g) {
             if (c == '"') in_string = 0;
             continue;
         }
+        if (in_quoted) {
+            if (c == '|') in_quoted = 0;
+            continue;
+        }
         if (c == ';') { in_comment = 1; continue; }
         if (c == '"') { in_string  = 1; continue; }
+        if (c == '|' && depth > 0) { in_quoted = 1; continue; }
 
         if (c == '(') { depth++; started = 1; }
-        else if (c == ')') {
+        else if (c == ')' && depth == 0) {
+            return 1;                      /* stray ')': the parser reports it */
+        } else if (c == ')') {
             depth--;
             if (depth == 0 && started) {
                 /* Null-terminate for safety (lexer uses length, but
@@ -144,6 +179,7 @@ static int _read_one_sexpr(FILE *f, GrowBuf *g) {
                     break;
                 }
                 if (_grow_push(g, c) < 0) return -1;
+                pos->col++;
             }
             return 1;
         }
@@ -151,7 +187,7 @@ static int _read_one_sexpr(FILE *f, GrowBuf *g) {
     /* EOF. Only an s-expression that was opened and never closed is an error;
      * trailing whitespace or comments after the last command (every file ends
      * in a newline) are a clean end of input. */
-    return started ? -1 : 0;
+    return started ? 2 : 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -203,12 +239,51 @@ static int _dispatch_checked(Smt2Frontend *fe, Smt2Oracle *orc, const Sexpr *cmd
     return rc;
 }
 
+/* Where warnings and diagnostics go (plan D1): nowhere unless asked for. A
+ * driver such as yosys-smtbmc merges our stderr into the response stream, so
+ * nothing may be written there unrequested. Errors are not diagnostics: they
+ * are `(error ...)` responses on stdout. */
+static int g_verbose;
+static FILE *_diag_stream(int show_stats) {
+    const char *log = getenv("DV_LOG");
+    if (log && *log && (strchr(log, '/') || strchr(log, '.'))) {
+        FILE *lf = fopen(log, "a");
+        if (lf) return lf;
+    }
+    if (show_stats || g_verbose || (log && *log)) return stderr;
+#if defined(_WIN32)
+    FILE *nf = fopen("NUL", "w");
+#else
+    FILE *nf = fopen("/dev/null", "w");
+#endif
+    return nf ? nf : stderr;
+}
+
+static void _close_diag(FILE *f) {
+    if (f && f != stderr) fclose(f);
+}
+
+static int g_exit_satcomp;
+
+/* The exit status for a finished session (plan D3, --help). */
+static int _exit_status(const Smt2Frontend *fe, int internal_error) {
+    if (internal_error)     return SMT2_EXIT_INTERNAL;
+    if (fe->n_input_errors) return SMT2_EXIT_INPUT_ERROR;
+    int verdict = !fe->has_result                       ? SMT2_EXIT_UNKNOWN
+                : fe->last_result == DVS_SOLVE_OK      ? SMT2_EXIT_SAT
+                : fe->last_result == DVS_SOLVE_UNSAT   ? SMT2_EXIT_UNSAT
+                :                                        SMT2_EXIT_UNKNOWN;
+    if (g_exit_satcomp)
+        return verdict == SMT2_EXIT_SAT ? 10 : verdict == SMT2_EXIT_UNSAT ? 20 : 0;
+    return verdict;
+}
+
 static int _run_batch(FILE *f, int show_stats, int verilator_mode) {
     size_t buf_len;
     char *buf = _read_all(f, &buf_len);
     if (!buf) {
         fprintf(stderr, "error: out of memory reading input\n");
-        return 2;
+        return SMT2_EXIT_INTERNAL;
     }
 
     Smt2Lexer lex;
@@ -224,13 +299,7 @@ static int _run_batch(FILE *f, int show_stats, int verilator_mode) {
      * combined stream and treats any non-protocol line as an
      * "unexpected response". Redirect diagnostics to a log file
      * in that case so the SMT2 response channel stays clean. */
-    FILE *err_fp = stderr;
-    if (!isatty(fileno(stdout))) {
-        const char *log_env = getenv("DV_LOG");
-        const char *log_path = (log_env && *log_env) ? log_env : "/tmp/dv-solve.log";
-        FILE *lf = fopen(log_path, "a");
-        if (lf) err_fp = lf;
-    }
+    FILE *err_fp = _diag_stream(show_stats);
     smt2_frontend_init(&fe, stdout, err_fp);
     fe.print_stats = show_stats;
     fe.verilator_mode = verilator_mode != 0;
@@ -238,32 +307,38 @@ static int _run_batch(FILE *f, int show_stats, int verilator_mode) {
 
     Smt2Oracle *orc = smt2_oracle_from_env(g_argc, g_argv, verilator_mode != 0,
                                            verilator_mode == 2, err_fp);
-    int exit_code = 0;
+    int failed = 0;
     for (;;) {
         sexpr_arena_reset(&arena);
         size_t at = lex.pos;
+        Smt2Token first = smt2_lexer_peek(&lex);
         Sexpr *cmd = sexpr_parse(&lex, &arena);
-        if (!cmd) break;
+        if (!cmd) {
+            if (!lex.err_msg) break;        /* end of input */
+            /* Malformed input: report it and carry on with the next command
+             * (the parser has skipped past the bad one). The session is now
+             * poisoned, so no verdict follows. */
+            smt2_frontend_input_error(&fe, lex.err_line, lex.err_col, "%s", lex.err_msg);
+            continue;
+        }
+        fe.cmd_line = first.line;
+        fe.cmd_col  = first.col;
 
         int rc = _dispatch_checked(&fe, orc, cmd, buf + at, lex.pos - at);
         if (rc == 1) break;                 /* (exit) */
         /* A command error is recorded but does NOT terminate the REPL: staying
          * alive keeps the response stream in sync with the driver (an early exit
          * closes the pipe and hangs a driver blocked on read). */
-        if (rc < 0) exit_code = 2;
+        if (rc < 0) failed = 1;
     }
 
-    if (exit_code == 0 && fe.has_result) {
-        switch (fe.last_result) {
-        case DVS_SOLVE_OK:      exit_code = 0; break;
-        case DVS_SOLVE_UNSAT:   exit_code = 1; break;
-        case DVS_SOLVE_TIMEOUT: exit_code = 2; break;
-        }
-    }
+    int exit_code = _exit_status(&fe, 0);
+    if (failed && exit_code != SMT2_EXIT_INPUT_ERROR) exit_code = g_exit_satcomp ? 0 : SMT2_EXIT_UNKNOWN;
 
     smt2_oracle_finish(orc);
     smt2_frontend_destroy(&fe);
     sexpr_arena_destroy(&arena);
+    _close_diag(err_fp);
     free(buf);
     return exit_code;
 }
@@ -280,13 +355,7 @@ static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
      * combined stream and treats any non-protocol line as an
      * "unexpected response". Redirect diagnostics to a log file
      * in that case so the SMT2 response channel stays clean. */
-    FILE *err_fp = stderr;
-    if (!isatty(fileno(stdout))) {
-        const char *log_env = getenv("DV_LOG");
-        const char *log_path = (log_env && *log_env) ? log_env : "/tmp/dv-solve.log";
-        FILE *lf = fopen(log_path, "a");
-        if (lf) err_fp = lf;
-    }
+    FILE *err_fp = _diag_stream(show_stats);
     smt2_frontend_init(&fe, stdout, err_fp);
     fe.print_stats = show_stats;
     fe.verilator_mode = verilator_mode != 0;
@@ -294,18 +363,33 @@ static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
 
     Smt2Oracle *orc = smt2_oracle_from_env(g_argc, g_argv, verilator_mode != 0,
                                            verilator_mode == 2, err_fp);
-    int exit_code = 0;
+    int failed = 0, internal = 0;
+    SrcPos pos = { 1, 1 };
     for (;;) {
-        int r = _read_one_sexpr(f, &cmd_buf);
+        SrcPos start;
+        int r = _read_one_sexpr(f, &cmd_buf, &pos, &start);
         if (r == 0) break;       /* clean EOF */
-        if (r < 0)  { exit_code = 2; break; }
+        if (r < 0)  { fprintf(stderr, "error: out of memory reading input\n");
+                      internal = 1; break; }
 
         Smt2Lexer lex;
         smt2_lexer_init(&lex, cmd_buf.buf, cmd_buf.len);
+        lex.line = start.line;
+        lex.col  = start.col;
 
         sexpr_arena_reset(&arena);
+        Smt2Token first = smt2_lexer_peek(&lex);
         Sexpr *cmd = sexpr_parse(&lex, &arena);
-        if (!cmd) continue;
+        if (!cmd) {
+            if (lex.err_msg) {
+                smt2_frontend_input_error(&fe, lex.err_line, lex.err_col, "%s", lex.err_msg);
+                fflush(stdout);
+            }
+            if (r == 2) break;   /* input ended inside an s-expression */
+            continue;
+        }
+        fe.cmd_line = first.line;
+        fe.cmd_col  = first.col;
 
         int rc = _dispatch_checked(&fe, orc, cmd, cmd_buf.buf, cmd_buf.len);
         fflush(stdout);
@@ -313,20 +397,17 @@ static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
         /* Keep the REPL alive on a command error so the response stream stays
          * in sync with the driver (an early exit would hang a driver that is
          * blocked reading our next reply). */
-        if (rc < 0) exit_code = 2;
+        if (rc < 0) failed = 1;
     }
 
-    if (exit_code == 0 && fe.has_result) {
-        switch (fe.last_result) {
-        case DVS_SOLVE_OK:      exit_code = 0; break;
-        case DVS_SOLVE_UNSAT:   exit_code = 1; break;
-        case DVS_SOLVE_TIMEOUT: exit_code = 2; break;
-        }
-    }
+    int exit_code = _exit_status(&fe, internal);
+    if (failed && exit_code != SMT2_EXIT_INPUT_ERROR && exit_code != SMT2_EXIT_INTERNAL)
+        exit_code = g_exit_satcomp ? 0 : SMT2_EXIT_UNKNOWN;
 
     smt2_oracle_finish(orc);
     smt2_frontend_destroy(&fe);
     sexpr_arena_destroy(&arena);
+    _close_diag(err_fp);
     free(cmd_buf.buf);
     return exit_code;
 }
@@ -402,6 +483,22 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (strcmp(argv[i], "--stats") == 0) { show_stats = 1; continue; }
+        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+            g_verbose = 1;
+            continue;
+        }
+        if (strncmp(argv[i], "--exit-codes=", 13) == 0) {
+            const char *c = argv[i] + 13;
+            if (strcmp(c, "satcomp") == 0) {
+                g_exit_satcomp = 1;
+            } else if (strcmp(c, "default") == 0) {
+                g_exit_satcomp = 0;
+            } else {
+                fprintf(stderr, "error: unknown --exit-codes '%s' (expected default|satcomp)\n", c);
+                return SMT2_EXIT_USAGE;
+            }
+            continue;
+        }
         if (strcmp(argv[i], "--interactive") == 0) { force_interactive = 1; continue; }
         if (strcmp(argv[i], "--batch") == 0) { force_batch = 1; continue; }
         if (strcmp(argv[i], "--smt2") == 0) { continue; }  /* compat no-op */
@@ -416,7 +513,7 @@ int main(int argc, char **argv) {
                 verilator_mode = 0;
             } else {
                 fprintf(stderr, "error: unknown mode '%s' (expected verilator|default)\n", m);
-                return 2;
+                return SMT2_EXIT_USAGE;
             }
             continue;
         }
@@ -428,7 +525,7 @@ int main(int argc, char **argv) {
                 hash_ignore = 0;
             } else {
                 fprintf(stderr, "error: unknown --verilator-hash '%s' (expected honor|ignore)\n", h);
-                return 2;
+                return SMT2_EXIT_USAGE;
             }
             continue;
         }
@@ -451,14 +548,14 @@ int main(int argc, char **argv) {
                 setenv("DV_ENGINE", "bitblast", 1);
             } else {
                 fprintf(stderr, "error: unknown engine '%s' (expected cdcl|bitblast|auto)\n", eng);
-                return 2;
+                return SMT2_EXIT_USAGE;
             }
             continue;
         }
         if (argv[i][0] == '-' && argv[i][1] != '\0') {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             _usage(stderr);
-            return 2;
+            return SMT2_EXIT_USAGE;
         }
         input_file = argv[i];
     }
@@ -470,7 +567,7 @@ int main(int argc, char **argv) {
         f = fopen(input_file, "r");
         if (!f) {
             fprintf(stderr, "error: cannot open '%s'\n", input_file);
-            return 2;
+            return SMT2_EXIT_USAGE;
         }
         interactive = 0;   /* file input is always batch */
     } else {
@@ -484,7 +581,7 @@ int main(int argc, char **argv) {
     /* 0: default, 1: verilator, 2: verilator with --verilator-hash=ignore */
     if (hash_ignore && !verilator_mode) {
         fprintf(stderr, "error: --verilator-hash applies only with --mode=verilator\n");
-        return 2;
+        return SMT2_EXIT_USAGE;
     }
     if (verilator_mode && hash_ignore) verilator_mode = 2;
     int rc = _run_on_worker_stack(f, show_stats, verilator_mode, interactive);

@@ -143,6 +143,8 @@ _NOT_RUN = {
     ("getting-started/install.md", "ivpm update -d use        # fetches CaDiCaL into ./packages"):
         "fetches packages from the network",
     ("internals/architecture.md", " Python / C builder ─┐"): "a diagram, not code",
+    ("guides/smt2-solver.md", "(error \"line 10 column 31: unexpected ')'\")"):
+        "an example response; tests/formal/test_smt2_conformance.py checks the format",
     ("results/methodology.md", "python3 -m tests.perf.tools fetch --dest perf-tools"):
         "downloads the pinned solvers and times the whole suite; perf.yml runs these "
         "steps every night, and test_perf_render.py checks the rendering",

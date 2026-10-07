@@ -111,7 +111,7 @@ def test_hash_ignore_enforces_any_other_assert():
 def test_hash_option_needs_verilator_mode():
     r = subprocess.run([str(_EXE), "--verilator-hash=ignore"], input="", capture_output=True,
                        text=True, timeout=60)
-    assert r.returncode == 2
+    assert r.returncode == 5          # usage error (--help)
 
 
 # ---- a large array under the Verilator protocol ------------------------------

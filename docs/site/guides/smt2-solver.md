@@ -94,9 +94,36 @@ pipe needs. `--batch` and `--interactive` override the default.
 :lines: 2-
 ```
 
+Bool values print as `true` and `false`. `get-value` accepts terms as well as
+names, and echoes each term as written (bit-vector literals in `#x` form when
+their width is a multiple of 4).
+
+## Errors
+
+An error in the input is answered on standard output, as SMT-LIB specifies:
+
+```text
+(error "line 10 column 31: unexpected ')'")
+```
+
+This covers malformed s-expressions, malformed commands, and commands or forms
+dv-solve does not support. After an error, dv-solve keeps reading (so a tool
+driving it over a pipe stays in step), but every later `check-sat` answers
+`unknown`, because the meaning of the bad input is not known.
+`(get-info :reason-unknown)` names the error, `(reset)` starts afresh, and the
+exit status is `4`.
+
+A `get-value` or `get-model` that cannot be answered (no model, or a term
+dv-solve cannot evaluate) is also an `(error ...)`, but leaves the assertions
+alone. dv-solve never prints a placeholder value.
+
+A construct that is well formed but not supported inside a term, such as an
+unsupported operator, makes `check-sat` answer `unknown` without an error;
+`(get-info :reason-unknown)` says which construct.
+
 ## Diagnostics
 
-Errors and warnings go to standard error when standard output is a terminal.
-When standard output is a pipe or a file, they are appended to a log file
-instead, so they can never be mistaken for a solver response by a tool reading
-the output. The log is `/tmp/dv-solve.log` unless `DV_LOG` names another file.
+Warnings and statistics are not printed unless asked for: `--stats` or `-v`
+print them to standard error, and `DV_LOG` sends them to a file. Nothing is
+written to standard error otherwise, because some tools (yosys-smtbmc) read it
+as part of the response stream.
