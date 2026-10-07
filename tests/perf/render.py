@@ -189,7 +189,7 @@ def page_sat(rec: dict, s: dict, gen: Path) -> str:
         ts = sorted(r["cpu_ms_min"] for r in rows if f"{r['arm']}@{r['build']}" == k and ok(r))
         series[_name(rec, k)] = ts
     (gen / "sat-cactus.svg").write_text(svg.cactus(series, "CPU time per fixture, ms (log scale)",
-                                                   "fixtures answered"))
+                                                   "fixtures answered"), encoding="utf-8")
     rat_b = normalize.ratios(rec, SUITE, "bitwuzla@ref")
     groups = {}
     for r, fx in zip(rat_b, man["fixtures"]):
@@ -198,7 +198,7 @@ def page_sat(rec: dict, s: dict, gen: Path) -> str:
             groups[fx["cat"]].append(math.exp(r / 1000))
     (gen / "sat-vs-bitwuzla.svg").write_text(
         svg.strip({c: v for c, v in groups.items() if v},
-                  "dv-solve speed-up (log scale)", _name(rec, "bitwuzla@ref")))
+                  "dv-solve speed-up (log scale)", _name(rec, "bitwuzla@ref")), encoding="utf-8")
 
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
@@ -206,7 +206,7 @@ def page_sat(rec: dict, s: dict, gen: Path) -> str:
     for r in rows:
         w.writerow([r["fixture"], r["cat"], _name(rec, f"{r['arm']}@{r['build']}"), r["verdict"],
                     r["cpu_ms_min"], r["cpu_ms_med"], r["wall_ms_min"], r["reps"]])
-    (gen / "sat-core.csv").write_text(buf.getvalue())
+    (gen / "sat-core.csv").write_text(buf.getvalue(), encoding="utf-8")
 
     L = ["# SMT-LIB2 solving", "",
          f"Each of the {s['n']} fixtures of the `{SUITE}` suite is solved by every "
@@ -381,13 +381,13 @@ def page_rand(rec: dict, rs: dict, gen: Path) -> str:
            for b in rs["benches"] for a in arms
            if a != "uniform" and (b, a) in by and by[(b, a)].get("cpu_ms")]
     (gen / "rand-quality-cost.svg").write_text(svg.scatter(
-        pts, "CPU per randomize(), ms (log scale)", "excess JSD (lower is better)"))
+        pts, "CPU per randomize(), ms (log scale)", "excess JSD (lower is better)"), encoding="utf-8")
     panels = {b: {_rname(rec, a): by[(b, a)]["hist"] for a in arms if (b, a) in by}
               for b in rs["benches"]}
-    (gen / "rand-histograms.svg").write_text(svg.small_multiples(panels))
+    (gen / "rand-histograms.svg").write_text(svg.small_multiples(panels), encoding="utf-8")
     cost = {b: {_rname(rec, a): by[(b, a)].get("cpu_ms") for a in arms
                 if a != "uniform" and (b, a) in by} for b in rs["benches"]}
-    (gen / "rand-cost.svg").write_text(svg.dotplot(cost, "CPU per randomize(), ms (log scale)"))
+    (gen / "rand-cost.svg").write_text(svg.dotplot(cost, "CPU per randomize(), ms (log scale)"), encoding="utf-8")
 
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
@@ -402,7 +402,7 @@ def page_rand(rec: dict, rs: dict, gen: Path) -> str:
                     rs["xjsd"].get((r["bench"], r["arm"])), r["chi2p"], r.get("thin"),
                     r["distinct"], r.get("cpu_ms"), r.get("p50_ms"), r.get("p95_ms"),
                     r.get("p99_ms"), r.get("checks"), r["bad"]])
-    (gen / "rand-core.csv").write_text(buf.getvalue())
+    (gen / "rand-core.csv").write_text(buf.getvalue(), encoding="utf-8")
 
     n = man["benches"][0]["n"] if man["benches"] else 0
     sp = rs["speedup"]
@@ -486,17 +486,17 @@ def render(records_dir, out: Path) -> str:
     rec, rrec = current(records), current_rand(records)
     rs = rand_summary(rrec) if rrec else None
     if rrec:
-        (out / "randomization.md").write_text(page_rand(rrec, rs, gen))
+        (out / "randomization.md").write_text(page_rand(rrec, rs, gen), encoding="utf-8")
     else:
-        (out / "randomization.md").write_text(RAND_PLACEHOLDER)
+        (out / "randomization.md").write_text(RAND_PLACEHOLDER, encoding="utf-8")
     if rec is None:
         (out / "index.md").write_text(PLACEHOLDER.format(title="Results") +
-                                      "\n```{toctree}\n:hidden:\n\nsat\nrandomization\nmethodology\n```\n")
-        (out / "sat.md").write_text(PLACEHOLDER.format(title="SMT-LIB2 solving"))
+                                      "\n```{toctree}\n:hidden:\n\nsat\nrandomization\nmethodology\n```\n", encoding="utf-8")
+        (out / "sat.md").write_text(PLACEHOLDER.format(title="SMT-LIB2 solving"), encoding="utf-8")
         return "placeholder"
     s = summary(rec)
-    (out / "index.md").write_text(page_index(rec, s, rrec, rs))
-    (out / "sat.md").write_text(page_sat(rec, s, gen))
+    (out / "index.md").write_text(page_index(rec, s, rrec, rs), encoding="utf-8")
+    (out / "sat.md").write_text(page_sat(rec, s, gen), encoding="utf-8")
     return rec["run"]["utc"]
 
 

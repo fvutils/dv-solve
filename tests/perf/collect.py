@@ -187,7 +187,7 @@ def main(argv=None) -> int:
         f.write(json.dumps(rec, indent=1, sort_keys=True).encode())
     print(name)
     if a.github_output and os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
             f.write(f"name={name}\n")
     if not rec["valid"]:
         print(f"INVALID run: {rec['reason']}", file=sys.stderr)

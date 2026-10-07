@@ -12,6 +12,7 @@ Each case here used to compile and solve:
 """
 from __future__ import annotations
 
+import os
 import threading
 
 import pytest
@@ -73,6 +74,19 @@ def test_too_deep_expression_is_refused():
         SolveCtx(_deep_problem(25000))
 
 
+def test_deep_expression_under_the_limit_does_not_crash():
+    # Just under the depth limit, on the main thread: Linux's 8 MB stack
+    # compiles it, Windows' smaller one must refuse it rather than overflow.
+    try:
+        SolveCtx(_deep_problem(19990))
+    except CompileUnsupportedError:
+        pass
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="threading.stack_size sets a Windows thread's initial commit, "
+           "not its reservation, so it cannot make the stack small")
 def test_deep_expression_on_a_small_stack_is_refused_not_a_crash():
     # Under the depth limit, but too deep for a 512 KB stack (a Windows
     # thread has 1 MB, a macOS secondary thread 512 KB): compile must notice

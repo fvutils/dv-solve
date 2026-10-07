@@ -25,7 +25,7 @@ from . import history, schema
 def _write_jsonl(path: Path, lines: list) -> None:
     lines = sorted(lines, key=schema.line_key)
     path.write_text("".join(json.dumps(l, sort_keys=True, separators=(",", ":")) + "\n"
-                            for l in lines))
+                            for l in lines), encoding="utf-8")
 
 
 def consolidate(records: list, root: Path = history.HISTORY) -> dict:
@@ -55,13 +55,13 @@ def consolidate(records: list, root: Path = history.HISTORY) -> dict:
         if not mp.exists():
             mp.parent.mkdir(parents=True, exist_ok=True)
             mp.write_text(json.dumps({k: m[k] for k in ("id", "cpu", "cores", "mem_gb", "kernel")},
-                                     indent=1, sort_keys=True) + "\n")
+                                     indent=1, sort_keys=True) + "\n", encoding="utf-8")
             summary["machines"].append(m["id"])
         for man in rec.get("manifests", {}).values():
             mp = root / "manifests" / f"{man['hash']}.json"
             if not mp.exists():
                 mp.parent.mkdir(parents=True, exist_ok=True)
-                mp.write_text(json.dumps(man, indent=1, sort_keys=True) + "\n")
+                mp.write_text(json.dumps(man, indent=1, sort_keys=True) + "\n", encoding="utf-8")
                 summary["manifests"].append(man["hash"])
         ref = rec["run"]["ref"]
         if rec["kind"] == "release" and rec["valid"] and ref.startswith("refs/tags/"):

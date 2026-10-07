@@ -34,7 +34,7 @@ def _php(n: int) -> str:
 
 # name -> (smt2 text, expected answer)
 def kernels() -> dict:
-    ops = (_REPO / "tests/formal/smt2/verilator/t_constraint_operators.smt2").read_text()
+    ops = (_REPO / "tests/formal/smt2/verilator/t_constraint_operators.smt2").read_text(encoding="utf-8")
     return {"z3-ops": (ops, "sat"), "z3-php10": (_php(10), "unsat")}
 
 
@@ -74,7 +74,7 @@ def calibrate(reps: int = 5) -> dict:
 def loadavg() -> float:
     """1-minute load average of the whole host (/proc/loadavg is not namespaced)."""
     try:
-        return float(Path("/proc/loadavg").read_text().split()[0])
+        return float(Path("/proc/loadavg").read_text(encoding="utf-8").split()[0])
     except OSError:
         return -1.0
 
@@ -83,7 +83,7 @@ def machine() -> dict:
     """Machine class. Nothing here names the host (design §4.4)."""
     cpu = "unknown"
     try:
-        for line in Path("/proc/cpuinfo").read_text().splitlines():
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
             if line.startswith("model name"):
                 cpu = line.split(":", 1)[1].strip()
                 break
@@ -91,7 +91,7 @@ def machine() -> dict:
         pass
     mem_gb = 0
     try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
             if line.startswith("MemTotal:"):
                 mem_gb = round(int(line.split()[1]) / (1024 * 1024))
                 break
