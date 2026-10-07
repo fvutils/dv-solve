@@ -190,6 +190,9 @@ typedef struct dvs_ctx_s {
     /* Custom value selector hook (for cost-guided search) */
     int64_t          (*value_selector_fn)(struct dvs_ctx_s *, uint32_t, void *);
     void              *value_selector_data;
+    /* The oracle check attached by dvs_solver_set_oracle(), or NULL
+     * (dvs_oracle.c). */
+    struct dvs_octx_s *oracle;
     dvs_pool_t         pool;          /* MUST be last field            */
     /* static pool data region follows immediately                      */
 } dvs_ctx_t;

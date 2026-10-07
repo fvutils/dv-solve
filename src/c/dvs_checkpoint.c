@@ -1,5 +1,6 @@
 #include <string.h>
 #include "dvs_ctx.h"
+#include "dvs_oracle_hooks.h"
 #include "dvs_lcg.h"
 #include "dvs_propagator.h"
 #include "dvs_trail.h"
@@ -8,7 +9,15 @@
 /* dvs_solver_checkpoint -- save solver state                              */
 /* ------------------------------------------------------------------ */
 
+static int _solver_checkpoint(dvs_ctx_t *ctx);
+
 int dvs_solver_checkpoint(dvs_ctx_t *ctx) {
+    int cp = _solver_checkpoint(ctx);
+    if (ctx->oracle) dvs_oracle_on_checkpoint(ctx, cp);
+    return cp;
+}
+
+static int _solver_checkpoint(dvs_ctx_t *ctx) {
     if (ctx->n_checkpoints >= MAX_CHECKPOINTS) return -1;
 
     uint32_t cp = ctx->n_checkpoints++;
@@ -41,7 +50,15 @@ int dvs_solver_checkpoint(dvs_ctx_t *ctx) {
 /* dvs_solver_restore -- restore solver state to checkpoint               */
 /* ------------------------------------------------------------------ */
 
+static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp);
+
 void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
+    int valid = cp < ctx->n_checkpoints;
+    _solver_restore(ctx, cp);
+    if (valid && ctx->oracle) dvs_oracle_on_restore(ctx, cp);
+}
+
+static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
     if (cp >= ctx->n_checkpoints) return;
 
     CheckpointMark *m = &ctx->checkpoints[cp];

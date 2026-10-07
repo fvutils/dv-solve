@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "dvs_ctx.h"
+#include "dvs_oracle_hooks.h"
 #include "dvs_lcg.h"
 
 /* ------------------------------------------------------------------ */
@@ -140,6 +141,7 @@ int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t boun
 
 void dvs_solver_destroy(dvs_ctx_t *ctx) {
     if (!ctx) return;
+    dvs_oracle_on_destroy(ctx);
     if (ctx->lcg) {
         lcg_destroy((LCGCtx *)ctx->lcg);
         free(ctx->lcg);

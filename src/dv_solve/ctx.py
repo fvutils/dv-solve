@@ -93,6 +93,10 @@ class SolveCtx:
     Args:
         problem: The finalized problem buffer.
         ctx_buf_size: Initial working-memory size, in bytes.
+        oracle: A :class:`dv_solve.oracle.Oracle` to check every answer with;
+            by default the one set by :func:`dv_solve.oracle.set_default_oracle`,
+            if any. ``False``: none.
+        label: Names this context in the oracle's records.
 
     Raises:
         CompileUnsatError: The constraints are provably unsatisfiable.
@@ -100,7 +104,8 @@ class SolveCtx:
         CompileUnsupportedError: The problem goes beyond a supported limit.
     """
 
-    def __init__(self, problem: "SolveProblem", ctx_buf_size: int = _CTX_BUF_SIZE) -> None:  # noqa: F821
+    def __init__(self, problem: "SolveProblem", ctx_buf_size: int = _CTX_BUF_SIZE,  # noqa: F821
+                 oracle=None, label=None) -> None:
         lib = _load_lib()
         if lib is None:
             raise _library_not_found_error()
@@ -127,6 +132,15 @@ class SolveCtx:
             raise RuntimeError("dvs_solver_create failed")
         self._ctx = ctx  # c_void_p value
 
+        # The oracle check, attached before compile: it takes the problem from
+        # the compile call.
+        if oracle is None:
+            from .oracle import get_default_oracle
+            oracle = get_default_oracle()
+        self._oracle = oracle or None
+        if self._oracle is not None:
+            self._oracle._attach(self, ctx, label)
+
         # Compile constraints from the problem into this context.
         # Accept either SolveProblem (has _sp) or raw ctypes buffer
         sp_ptr = getattr(problem, "_sp", None)
@@ -134,6 +148,12 @@ class SolveCtx:
             # Raw ctypes buffer -- cast to void pointer
             sp_ptr = ctypes.cast(problem, ctypes.c_void_p).value
         rc = lib.dvs_solver_compile(self._ctx, sp_ptr)
+        if self._oracle is not None and rc != 0:
+            # The context is about to be dropped without dvs_solver_destroy.
+            oracle = self._oracle
+            self._detach_oracle()
+            if rc == -2:
+                oracle._after()
         # On every error path below, NULL out self._ba after releasing it: the
         # half-constructed SolveCtx still exists (the exception unwinds out of
         # __init__) and will be garbage-collected, at which point __del__ ->
@@ -188,9 +208,15 @@ class SolveCtx:
         except Exception:
             pass
 
+    def _detach_oracle(self) -> None:
+        if getattr(self, "_oracle", None) is not None:
+            self._oracle._detach(self, self._ctx)
+            self._oracle = None
+
     def destroy(self) -> None:
         """Release the native memory. Also called when the context is garbage-collected."""
         if self._ba is not None:
+            self._detach_oracle()
             # dvs_solver_destroy frees what the context malloc'd beside its
             # buffer (the clause-learning state, the scope log); without it
             # each context that learnt leaked several MiB.
@@ -260,7 +286,10 @@ class SolveCtx:
             time_limit_ms=time_limit_ms,
             use_lcg=1 if use_lcg else 0,
         )
-        return self._lib.dvs_solver_solve(self._ctx, ctypes.byref(opts))
+        rc = self._lib.dvs_solver_solve(self._ctx, ctypes.byref(opts))
+        if self._oracle is not None:
+            self._oracle._after()
+        return rc
 
     def reset(self) -> None:
         """Clear the previous solution so :meth:`solve` can run again."""

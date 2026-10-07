@@ -169,7 +169,7 @@ execute_process(COMMAND git rev-parse --short HEAD
 if(NOT _dvs_git_rc EQUAL 0 OR DVS_GIT_COMMIT STREQUAL "")
     set(DVS_GIT_COMMIT "unknown")
 endif()
-set_source_files_properties(src/c/smt2/smt2_oracle.c
+set_source_files_properties(src/c/dvs_oracle_core.c
     PROPERTIES COMPILE_DEFINITIONS
     "DVS_VERSION=\"${DVS_VERSION}\";DVS_GIT_COMMIT=\"${DVS_GIT_COMMIT}\"")
 
@@ -213,6 +213,9 @@ set(DVS_SOURCES
     src/c/dvs_arena.c
     src/c/dvs_bvdom.c
     src/c/dvs_bvbounds.c
+    src/c/dvs_oracle_core.c
+    src/c/dvs_smt2_emit.c
+    src/c/dvs_oracle.c
 )
 
 # The CaDiCaL backend translation unit (pure C over the ccadical.h C API) is

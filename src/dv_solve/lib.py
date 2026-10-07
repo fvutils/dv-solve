@@ -171,6 +171,22 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.dvs_solver_propagate_only.restype  = c.c_int
     lib.dvs_solver_propagate_only.argtypes = [c.c_void_p]
 
+    # Oracle check (dv_solve.oracle.Oracle). Absent from a library older than
+    # the API oracle; Oracle() then says so.
+    if hasattr(lib, "dvs_oracle_create"):
+        lib.dvs_oracle_create.restype  = c.c_void_p
+        lib.dvs_oracle_create.argtypes = [c.c_void_p, c.c_void_p]
+        lib.dvs_oracle_destroy.restype  = None
+        lib.dvs_oracle_destroy.argtypes = [c.c_void_p]
+        lib.dvs_solver_set_oracle.restype  = c.c_int
+        lib.dvs_solver_set_oracle.argtypes = [c.c_void_p, c.c_void_p, c.c_char_p]
+        lib.dvs_oracle_last_result.restype  = c.c_int
+        lib.dvs_oracle_last_result.argtypes = [c.c_void_p]
+        lib.dvs_oracle_get_stats.restype  = None
+        lib.dvs_oracle_get_stats.argtypes = [c.c_void_p, c.c_void_p]
+        lib.dvs_oracle_run_dir.restype  = c.c_char_p
+        lib.dvs_oracle_run_dir.argtypes = [c.c_void_p]
+
     # Reset / re-solve helpers
     lib.dvs_solver_reset.restype  = None
     lib.dvs_solver_reset.argtypes = [c.c_void_p]
