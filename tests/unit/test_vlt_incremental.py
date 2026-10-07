@@ -44,13 +44,13 @@ def _run(script: str, tmp_path: Path, env_extra=None):
                        capture_output=True, text=True, timeout=120, env=env)
     verdicts = [l for l in r.stdout.split() if l in ("sat", "unsat", "unknown")]
     vals = [(n, int(v, 2)) for n, v in _VAL.findall(r.stdout)]
-    text = log.read_text() if log.exists() else ""
+    text = log.read_text(encoding="utf-8") if log.exists() else ""
     routes = [l.split()[2] for l in text.splitlines() if l.startswith("vlt-time")]
     return verdicts, vals, routes, text
 
 
 def _illegal_instr(seed: int, push: bool = True, variant: int = 0) -> str:
-    body = _FIXTURE.read_text()
+    body = _FIXTURE.read_text(encoding="utf-8")
     if not push:
         body = body.replace("(push 1)\n", "")
     if variant:

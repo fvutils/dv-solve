@@ -224,7 +224,7 @@ _BIT = re.compile(r"\(\(_ extract (\d+) \d+\)\(select __Varg1 #x([0-9a-f]+)\)\)"
 def test_recorded_array_xor_rounds():
     """The recorded session (tests/unit/data): every round answers, and each
     model keeps the element ranges and every XOR asserted so far."""
-    src = (Path(__file__).parent / "data" / "vlt5052_array_xor_rounds.smt2").read_text()
+    src = (Path(__file__).parent / "data" / "vlt5052_array_xor_rounds.smt2").read_text(encoding="utf-8")
     getv = "(get-value (" + "".join("(select __Varg1 #x%08x)" % i for i in range(30)) + "))\n"
     verdicts, _, r = _run(src.replace("(exit)", getv + "(exit)"), timeout=60)
     assert "unknown" not in verdicts, r.stdout + r.stderr

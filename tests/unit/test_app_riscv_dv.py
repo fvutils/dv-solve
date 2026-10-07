@@ -133,7 +133,7 @@ def test_solver_cpu_survives_a_killed_wrapper(tmp_path, rusage_bin, kill_wrapper
     os.wait4(p.pid, 0)
     p.returncode = 0
     orphans = run._reap_orphans(deadline_s=5)
-    rows = [json.loads(l) for l in out.read_text().splitlines()]
+    rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()]
     spawned = [r["pid"] for r in rows if r["event"] == "spawn"]
     done = {r["pid"]: r["user_s"] + r["sys_s"] for r in rows if r["event"] == "done"}
     assert len(spawned) == 1

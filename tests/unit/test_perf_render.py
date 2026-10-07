@@ -74,7 +74,7 @@ def test_trend_line_carries_ratios_in_manifest_order():
 def test_render_writes_every_page(tmp_path, monkeypatch):
     monkeypatch.setattr(render, "load_records", lambda d: [_record()])
     assert render.render(None, tmp_path) == "20261003T050000Z"
-    index, sat = (tmp_path / "index.md").read_text(), (tmp_path / "sat.md").read_text()
+    index, sat = (tmp_path / "index.md").read_text(encoding="utf-8"), (tmp_path / "sat.md").read_text(encoding="utf-8")
     assert "bitwuzla 0.8.2" in index and "v0.1.0" in index
     assert "## Every fixture" in sat and "f0" in sat
     for f in ("sat-cactus.svg", "sat-vs-bitwuzla.svg", "sat-core.csv"):
@@ -84,7 +84,7 @@ def test_render_writes_every_page(tmp_path, monkeypatch):
 def test_render_placeholder_without_data(tmp_path, monkeypatch):
     monkeypatch.setattr(render, "load_records", lambda d: [])
     assert render.render(None, tmp_path) == "placeholder"
-    assert "toctree" in (tmp_path / "index.md").read_text()
+    assert "toctree" in (tmp_path / "index.md").read_text(encoding="utf-8")
 
 
 def test_wrong_answer_is_not_a_fast_answer():
@@ -147,8 +147,8 @@ def test_rand_trend_line():
 def test_render_randomization_page(tmp_path, monkeypatch):
     monkeypatch.setattr(render, "load_records", lambda d: [_rand_record()])
     render.render(None, tmp_path)
-    page = (tmp_path / "randomization.md").read_text()
-    index = (tmp_path / "index.md").read_text()
+    page = (tmp_path / "randomization.md").read_text(encoding="utf-8")
+    index = (tmp_path / "index.md").read_text(encoding="utf-8")
     assert "Verilator + z3 5.1.0" in page and "failed: randomize()" in page
     assert "dv-solve is 10" in page and "faster per randomize()" in page
     assert "## Randomization at a glance" in index and "randomization" in index

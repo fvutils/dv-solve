@@ -47,7 +47,7 @@ class _FakeLib:
 def _called_c_functions() -> list[str]:
     """Every C entry invoked as ``self._lib.<name>(`` in the builder wrapper —
     the exact ABI surface ``_wire_argtypes`` must cover."""
-    src = Path(_builder_mod.__file__).read_text()
+    src = Path(_builder_mod.__file__).read_text(encoding="utf-8")
     return sorted(set(re.findall(r"self\._lib\.(\w+)\s*\(", src)))
 
 

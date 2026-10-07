@@ -17,6 +17,9 @@ from pathlib import Path
 
 import pytest
 
+# tests.perf measures child CPU time with the POSIX-only resource module.
+pytest.importorskip("resource")
+
 from tests.formal.soundness.ir import ev
 from tests.perf import vlt_protocol
 from tests.perf.rand_benches import Bench

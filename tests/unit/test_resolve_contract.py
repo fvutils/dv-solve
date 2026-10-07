@@ -11,10 +11,17 @@ against another, and the ABI mismatch surfaces as a crash inside
 ``dvs_solver_compile`` with nothing pointing back at the cause.
 """
 import os
+import re
 
 import pytest
 
 from dv_solve import _resolve
+
+# The loader's search path, which the resolver falls back to.
+LIB_PATH_VAR = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
+
+windows_has_no_sonames = pytest.mark.skipif(
+    os.name == "nt", reason="Windows DLLs carry no soname version suffix")
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +30,8 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("DVS_SOLVER_PATH", raising=False)
     monkeypatch.delenv("ZSP_SOLVER_PATH", raising=False)
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    if os.name == "nt":
+        monkeypatch.setenv("PATH", "")
 
 
 def _lib(d, stem="dv_solve", suffix=""):
@@ -153,7 +162,7 @@ def test_ld_library_path_is_a_fallback_not_an_override(tmp_path, monkeypatch):
     _install(monkeypatch, pkg, root)
     _lib(str(pkg))
     stray = _lib(str(tmp_path / "stray"))
-    monkeypatch.setenv("LD_LIBRARY_PATH", stray)
+    monkeypatch.setenv(LIB_PATH_VAR, stray)
     assert os.path.dirname(_resolve.find_library("dv_solve")) == str(pkg)
 
 
@@ -163,7 +172,7 @@ def test_ld_library_path_still_resolves_when_nothing_else_does(
     _install(monkeypatch, pkg, root)
     os.makedirs(pkg, exist_ok=True)
     stray = _lib(str(tmp_path / "stray"))
-    monkeypatch.setenv("LD_LIBRARY_PATH", stray)
+    monkeypatch.setenv(LIB_PATH_VAR, stray)
     assert os.path.dirname(_resolve.find_library("dv_solve")) == stray
 
 
@@ -210,6 +219,7 @@ def test_source_tree_headers_are_flat(tmp_path, monkeypatch):
 # ------------------------------------------------------- versioned sonames --
 
 
+@windows_has_no_sonames
 def test_versioned_soname_loadable_but_not_linkable(tmp_path, monkeypatch):
     """``libdv_solve.so.1`` can be dlopen()ed but ``-ldv_solve`` will not find
     it. The loader and the linker therefore have to apply different acceptance
@@ -225,6 +235,7 @@ def test_versioned_soname_loadable_but_not_linkable(tmp_path, monkeypatch):
     assert _resolve.find_library("dv_solve", linkable=True) is None
 
 
+@windows_has_no_sonames
 def test_unversioned_preferred_over_versioned(tmp_path, monkeypatch):
     pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
     _install(monkeypatch, pkg, root)
@@ -300,6 +311,7 @@ def _versioned(d, stem="dv_solve", ver=".1"):
     return p
 
 
+@windows_has_no_sonames
 def test_override_versioned_only_is_not_linked_from_the_package(
         tmp_path, monkeypatch):
     """The reproduced split: override holds only ``libdv_solve.so.1``, the
@@ -324,6 +336,7 @@ def test_override_versioned_only_is_not_linked_from_the_package(
     assert str(pkg) not in msg.split("Fixes:")[0]
 
 
+@windows_has_no_sonames
 def test_package_versioned_only_is_not_linked_from_the_checkout(
         tmp_path, monkeypatch):
     """Same split without an override: a wheel carrying only the soname, and
@@ -401,7 +414,8 @@ def test_dpi_lib_is_not_borrowed_from_another_installation(
     _lib(str(root / "build" / "lib"), stem="dv_solve_dpi")
     _lib(str(root / "build" / "lib"))
     assert _resolve.find_library("dv_solve_dpi") is None
-    with pytest.raises(RuntimeError, match="libdv_solve_dpi"):
+    with pytest.raises(RuntimeError,
+                       match=re.escape(_resolve.lib_filename("dv_solve_dpi"))):
         dv_solve.get_dpi_lib()
 
 
@@ -414,7 +428,7 @@ def test_ld_library_path_installation_supplies_no_headers(
     os.makedirs(pkg)
     _headers(str(root / "src" / "c"))
     stray = _lib(str(tmp_path / "stray"))
-    monkeypatch.setenv("LD_LIBRARY_PATH", stray)
+    monkeypatch.setenv(LIB_PATH_VAR, stray)
     assert _resolve.select_installation().kind == "ld_library_path"
     assert _resolve.find_incdirs() is None
 

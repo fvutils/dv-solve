@@ -153,7 +153,8 @@ class Installation(NamedTuple):
         if self.kind == "override":
             return "%s=%s" % (_override_var(), self.root)
         if self.kind == "ld_library_path":
-            return "LD_LIBRARY_PATH entry %s" % self.root
+            var = "PATH" if platform.system() == "Windows" else "LD_LIBRARY_PATH"
+            return "%s entry %s" % (var, self.root)
         return "%s installation at %s" % (self.kind, self.root)
 
 
@@ -561,7 +562,9 @@ def find_smt2_exe() -> Optional[str]:
             if _is_exe(p):
                 return os.path.abspath(p)
     import shutil
-    hit = shutil.which(SMT2_NAME)
+    # The full file name, not the stem: on Windows which() would otherwise
+    # append the PATHEXT spelling (".EXE") rather than the file's own.
+    hit = shutil.which(name)
     return os.path.abspath(hit) if hit else None
 
 
