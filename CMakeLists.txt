@@ -161,6 +161,17 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/dv_solve/__version__.py)
 set_source_files_properties(src/c/smt2/smt2_main.c src/c/smt2/smt2_frontend.c
     PROPERTIES COMPILE_DEFINITIONS "DVS_VERSION=\"${DVS_VERSION}\"")
+# The oracle's run record names the commit the build was configured at.
+execute_process(COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE DVS_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET RESULT_VARIABLE _dvs_git_rc)
+if(NOT _dvs_git_rc EQUAL 0 OR DVS_GIT_COMMIT STREQUAL "")
+    set(DVS_GIT_COMMIT "unknown")
+endif()
+set_source_files_properties(src/c/smt2/smt2_oracle.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "DVS_VERSION=\"${DVS_VERSION}\";DVS_GIT_COMMIT=\"${DVS_GIT_COMMIT}\"")
 
 # ------------------------------------------------------------------ #
 # Source list                                                          #
@@ -516,6 +527,7 @@ set(SMT2_SOURCES
     src/c/smt2/smt2_lexer.c
     src/c/smt2/smt2_parser.c
     src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_oracle.c
     src/c/smt2/smt2_main.c
 )
 

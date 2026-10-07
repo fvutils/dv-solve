@@ -20,6 +20,7 @@
 #include "smt2/smt2_lexer.h"
 #include "smt2/smt2_parser.h"
 #include "smt2/smt2_frontend.h"
+#include "smt2/smt2_oracle.h"
 #include "dvs_thread.h"
 
 /* DVS_VERSION comes from src/dv_solve/__version__.py, through CMake. */
@@ -157,6 +158,51 @@ static int _read_one_sexpr(FILE *f, GrowBuf *g) {
 /* Run modes                                                          */
 /* ------------------------------------------------------------------ */
 
+/* argv, for the oracle's run record. */
+static int    g_argc;
+static char **g_argv;
+
+#ifndef _WIN32
+static double _mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+#endif
+
+/* Dispatch one command; with the oracle on, capture a check-sat's answer on its
+ * way to stdout (unchanged) and hand the command to the oracle. */
+static int _dispatch_checked(Smt2Frontend *fe, Smt2Oracle *orc, const Sexpr *cmd,
+                             const char *text, size_t len) {
+#ifndef _WIN32
+    if (orc && smt2_oracle_is_check(cmd)) {
+        char *ans = NULL;
+        size_t an = 0;
+        FILE *saved = fe->out;
+        FILE *mem = open_memstream(&ans, &an);
+        if (mem) fe->out = mem;
+        double t0 = _mono_ms();
+        int rc = smt2_frontend_dispatch(fe, cmd);
+        double ms = _mono_ms() - t0;
+        if (mem) {
+            fe->out = saved;
+            fclose(mem);
+            if (an) fwrite(ans, 1, an, saved);
+        }
+        fflush(saved);
+        smt2_oracle_after(orc, fe, cmd, text, len, ans, an, ms);
+        free(ans);
+        return rc;
+    }
+#endif
+    int rc = smt2_frontend_dispatch(fe, cmd);
+    if (orc) {
+        fflush(fe->out);
+        smt2_oracle_after(orc, fe, cmd, text, len, NULL, 0, 0.0);
+    }
+    return rc;
+}
+
 static int _run_batch(FILE *f, int show_stats, int verilator_mode) {
     size_t buf_len;
     char *buf = _read_all(f, &buf_len);
@@ -190,13 +236,16 @@ static int _run_batch(FILE *f, int show_stats, int verilator_mode) {
     fe.verilator_mode = verilator_mode != 0;
     fe.vlt_hash_ignore = verilator_mode == 2;
 
+    Smt2Oracle *orc = smt2_oracle_from_env(g_argc, g_argv, verilator_mode != 0,
+                                           verilator_mode == 2, err_fp);
     int exit_code = 0;
     for (;;) {
         sexpr_arena_reset(&arena);
+        size_t at = lex.pos;
         Sexpr *cmd = sexpr_parse(&lex, &arena);
         if (!cmd) break;
 
-        int rc = smt2_frontend_dispatch(&fe, cmd);
+        int rc = _dispatch_checked(&fe, orc, cmd, buf + at, lex.pos - at);
         if (rc == 1) break;                 /* (exit) */
         /* A command error is recorded but does NOT terminate the REPL: staying
          * alive keeps the response stream in sync with the driver (an early exit
@@ -212,6 +261,7 @@ static int _run_batch(FILE *f, int show_stats, int verilator_mode) {
         }
     }
 
+    smt2_oracle_finish(orc);
     smt2_frontend_destroy(&fe);
     sexpr_arena_destroy(&arena);
     free(buf);
@@ -242,6 +292,8 @@ static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
     fe.verilator_mode = verilator_mode != 0;
     fe.vlt_hash_ignore = verilator_mode == 2;
 
+    Smt2Oracle *orc = smt2_oracle_from_env(g_argc, g_argv, verilator_mode != 0,
+                                           verilator_mode == 2, err_fp);
     int exit_code = 0;
     for (;;) {
         int r = _read_one_sexpr(f, &cmd_buf);
@@ -255,7 +307,7 @@ static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
         Sexpr *cmd = sexpr_parse(&lex, &arena);
         if (!cmd) continue;
 
-        int rc = smt2_frontend_dispatch(&fe, cmd);
+        int rc = _dispatch_checked(&fe, orc, cmd, cmd_buf.buf, cmd_buf.len);
         fflush(stdout);
         if (rc == 1) break;                 /* (exit) */
         /* Keep the REPL alive on a command error so the response stream stays
@@ -272,6 +324,7 @@ static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
         }
     }
 
+    smt2_oracle_finish(orc);
     smt2_frontend_destroy(&fe);
     sexpr_arena_destroy(&arena);
     free(cmd_buf.buf);
@@ -323,6 +376,8 @@ static int _run_on_worker_stack(FILE *f, int show_stats, int verilator_mode,
 }
 
 int main(int argc, char **argv) {
+    g_argc = argc;
+    g_argv = argv;
     const char *input_file = NULL;
     int         show_stats = 0;
     int         force_interactive = 0;

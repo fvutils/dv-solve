@@ -364,6 +364,17 @@ typedef struct {
     int                  vlt_hash_pending;  /* a hash was skipped since the last check-sat */
     int                  vlt_enum;          /* session holds UniGen2 enumeration asserts: bitblast */
     const char          *vlt_route;         /* DV_LOG: route of the current check-sat */
+
+    /* Per-command facts for the oracle check (smt2_oracle.c), cleared at the
+     * start of every dispatch. model_reused: this check-sat / check-sat-assuming
+     * re-emitted the previous answer and model instead of solving (verilator
+     * diversity, skipped parity hash). cmd_dropped: this assert was recorded but
+     * not added (--verilator-hash=ignore). last_validate_viol: violations found
+     * by the internal model validation of this check-sat, or -1 if it did not
+     * run. */
+    uint8_t              model_reused;
+    uint8_t              cmd_dropped;
+    int                  last_validate_viol;
     const char          *nb_why;            /* DV_LOG: first needs_bitblast trigger */
 
     /* Verilator-mode identity cache. Verilator re-sends an identical problem
@@ -612,6 +623,20 @@ void smt2_frontend_destroy(Smt2Frontend *fe);
  * @return  0 to continue, 1 on (exit), -1 on fatal error.
  */
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd);
+
+/**
+ * Answer a (get-value ...) command given as text into a malloc'd buffer,
+ * exactly as the command itself would print it, without writing to fe->out.
+ * The caller frees the result. NULL on a parse or allocation failure.
+ */
+char *smt2_frontend_get_value_text(Smt2Frontend *fe, const char *cmd_text,
+                                   size_t cmd_len, size_t *out_len);
+
+/**
+ * The engine that produced the last answer: the verilator-mode route when there
+ * is one, else "bitblast" or "cdcl".
+ */
+const char *smt2_frontend_engine(const Smt2Frontend *fe);
 
 #ifdef __cplusplus
 }

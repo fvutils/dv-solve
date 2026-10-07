@@ -3608,6 +3608,7 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     if (fe->verilator_mode && fe->vlt_hash_ignore && fe->has_result &&
         fe->last_result == DVS_SOLVE_OK && _is_vlt_hash(fe, cmd->list.items[1])) {
         fe->vlt_hash_pending = 1;
+        fe->cmd_dropped = 1;
         return 0;
     }
     fe->vlt_hash_pending = 0;      /* any other assert: solve for real */
@@ -4974,6 +4975,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->vlt_hash_pending = 0;
         fe->vlt_route = "hash-skip";
         if (fe->has_result && fe->last_result == DVS_SOLVE_OK) {
+            fe->model_reused = 1;
             fprintf(fe->out, "sat\n");
             fflush(fe->out);
             return 0;
@@ -5339,6 +5341,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
             for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
                 viol += dvs_solver_validate_model(fe->ctx, fe->aux_problems[i], fe->err);
             }
+            fe->last_validate_viol = viol;
             if (viol > 0) {
                 fprintf(fe->err,
                     "model-validation: %d top-level constraint(s) violated%s\n",
@@ -6552,6 +6555,7 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
          * Only re-solve if there is no valid prior result (a check-sat-assuming
          * arriving without a preceding check-sat). */
         if (fe->has_result) {
+            fe->model_reused = 1;
             switch (fe->last_result) {
             case DVS_SOLVE_OK:      fprintf(fe->out, "sat\n");     break;
             case DVS_SOLVE_UNSAT:   fprintf(fe->out, "unsat\n");   break;
@@ -6874,6 +6878,9 @@ static void _core_record(Smt2Frontend *fe, const Sexpr *cmd, int32_t named) {
 }
 
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
+    fe->model_reused = 0;
+    fe->cmd_dropped = 0;
+    fe->last_validate_viol = -1;
     int record = fe->produce_unsat_cores && cmd && cmd->kind == SEXPR_LIST
               && cmd->list.count > 0 && _core_shapes_assertions(cmd->list.items[0]);
     uint32_t n_named = fe->n_named;
@@ -6972,4 +6979,47 @@ static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     fprintf(fe->err, "(error \"unsupported: %.*s\")\n",
             (int)head->sym.len, head->sym.str);
     return 0;
+}
+
+char *smt2_frontend_get_value_text(Smt2Frontend *fe, const char *cmd_text,
+                                   size_t cmd_len, size_t *out_len) {
+    Smt2Lexer lex;
+    smt2_lexer_init(&lex, cmd_text, cmd_len);
+    SexprArena arena;
+    sexpr_arena_init(&arena, 4096);
+    Sexpr *cmd = sexpr_parse(&lex, &arena);
+    char *buf = NULL;
+    size_t len = 0;
+    if (cmd && cmd->kind == SEXPR_LIST) {
+        FILE *mem = NULL;
+#ifdef _WIN32
+        mem = tmpfile();
+#else
+        mem = open_memstream(&buf, &len);
+#endif
+        if (mem) {
+            FILE *saved = fe->out;
+            fe->out = mem;
+            _cmd_get_value(fe, cmd);
+            fe->out = saved;
+#ifdef _WIN32
+            long n = ftell(mem);
+            buf = (char *)malloc((size_t)(n > 0 ? n : 0) + 1);
+            if (buf) {
+                rewind(mem);
+                len = fread(buf, 1, (size_t)(n > 0 ? n : 0), mem);
+                buf[len] = '\0';
+            }
+#endif
+            fclose(mem);
+        }
+    }
+    sexpr_arena_destroy(&arena);
+    if (out_len) *out_len = buf ? len : 0;
+    return buf;
+}
+
+const char *smt2_frontend_engine(const Smt2Frontend *fe) {
+    if (fe->verilator_mode && fe->vlt_route) return fe->vlt_route;
+    return fe->bb_model_valid ? "bitblast" : "cdcl";
 }
