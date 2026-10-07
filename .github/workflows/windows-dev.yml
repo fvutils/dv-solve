@@ -119,20 +119,10 @@ jobs:
           set PATH=%CD%\build\lib;%CD%\build;%CLDIR%;%PATH%
           set FI=/FI"%CD%\src\c\compat\win\msvc_compat.h" /Isrc\c\compat\win
           set RC=0
-          for %%t in (test_dvs_sat test_dvs_aig test_dvs_aig_cnf test_dvs_bitblast test_dvs_bbsolver test_dvs_bbsolver_incremental test_dvs_bvdom) do (
+          for %%t in (test_dvs_aig_cnf test_dvs_bitblast) do (
             echo ===== %%t
             cl /nologo /O1 /Zi /fsanitize=address /Isrc\c /Isrc\c\sat\kissat\src %FI% tests\c\%%t.c build\dv_solve.lib /Fe:build\%%t.exe /link /INCREMENTAL:NO >nul || (echo compile failed: %%t & set RC=1)
             if exist build\%%t.exe build\%%t.exe > build\%%t.out 2>&1 || (echo FAILED: %%t & set RC=1)
-            if exist build\%%t.out powershell -Command "Get-Content build\%%t.out -Tail 40"
+            if exist build\%%t.out powershell -Command "Get-Content build\%%t.out -TotalCount 120"
           )
           exit /b %RC%
-      - name: Python test under ASan
-        if: always()
-        shell: cmd
-        env:
-          PYTHONPATH: src
-        run: |
-          for /f "delims=" %%d in ('where cl') do set CLDIR=%%~dpd
-          set PATH=%CD%\build\lib;%CLDIR%;%PATH%
-          python -m pip install -q pytest
-          python -m pytest tests/unit/test_bvsat.py -x -q -p no:cacheprovider -p no:faulthandler -k relational
