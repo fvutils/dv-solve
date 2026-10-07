@@ -51,6 +51,19 @@ jobs:
           dumpbin /nologo /dependents build/lib/dv_solve.dll
           dumpbin /nologo /dependents build/lib/dv_solve_dpi.dll
 
+      - name: dv-solve-smt2
+        shell: bash
+        run: |
+          exe=build/bin/dv-solve-smt2.exe
+          dumpbin //nologo //dependents $exe | tee deps.txt
+          if grep -iE "vcruntime|msvcp|ucrtbase|api-ms-win-crt" deps.txt; then
+            echo "::error::dv-solve-smt2.exe needs the DLL C runtime"; exit 1
+          fi
+          $exe --version
+          cd docs/examples/smt2
+          ../../../$exe quickstart.smt2 > out.txt
+          diff quickstart.expected out.txt
+
       - name: CaDiCaL backend C test
         if: matrix.cadical == 'ON'
         shell: cmd
