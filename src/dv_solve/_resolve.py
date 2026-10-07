@@ -283,6 +283,37 @@ def _versioned_in(d: str, stem: str) -> Optional[str]:
     return os.path.join(d, hits[0]) if hits else None
 
 
+_WARNED_STALE = set()
+
+
+def _newest(hits: List[str]) -> str:
+    """The library among several copies of the same name in ONE installation.
+
+    A build tree whose install prefix is the tree itself (ivpm-build, and the
+    recipe in missing_artifact_error) used to hold two: the link output in
+    ``<build>/`` and the installed copy in ``<build>/lib``. A plain ``ninja``
+    refreshed only the first, and preferring ``lib/`` then silently loaded the
+    copy from the last install -- against headers from the live ``src/c``.
+    CMakeLists.txt now links straight into ``<build>/lib``, so a current tree
+    has one copy; an older tree may still have both. The newest copy is the
+    build the user last made, so it wins (preference order breaks ties), with
+    a warning that names the other: it is never silently stale.
+    """
+    best = hits[0]
+    for h in hits[1:]:
+        if os.path.getmtime(h) > os.path.getmtime(best):
+            best = h
+    if best != hits[0] and (best, hits[0]) not in _WARNED_STALE:
+        _WARNED_STALE.add((best, hits[0]))
+        import warnings
+        warnings.warn(
+            "dv-solve: %s is older than %s, in the same build tree; using the "
+            "newer one. Delete the stale copy (or rebuild: the library now "
+            "links into <build>/lib directly)." % (hits[0], best),
+            RuntimeWarning, stacklevel=3)
+    return best
+
+
 def library_in(inst: Installation, stem: str,
                linkable: bool = False) -> Optional[str]:
     """Library *stem* within *inst* only, or ``None``.
@@ -292,10 +323,9 @@ def library_in(inst: Installation, stem: str,
     installation can be linked, the loader opens the same file the linker
     uses.
     """
-    for d in inst.lib_dirs:
-        hit = _unversioned_in(d, stem)
-        if hit:
-            return hit
+    hits = [h for h in (_unversioned_in(d, stem) for d in inst.lib_dirs) if h]
+    if hits:
+        return _newest(hits)
     if linkable:
         return None
     for d in inst.lib_dirs:

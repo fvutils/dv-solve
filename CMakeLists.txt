@@ -303,6 +303,18 @@ target_include_directories(dv_solve_dpi PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
 )
 
+# The shared libraries are linked straight into <build>/lib, the directory
+# `cmake --install` puts them in when the prefix is the build tree (as
+# ivpm-build and the documented recipe configure it). One file, then, not two:
+# with the link output in <build>/ and the installed copy in <build>/lib, a
+# plain `ninja` refreshed the first while dv_solve._resolve, which prefers
+# <build>/lib, kept loading the copy from the last install -- stale, and
+# against headers from the live src/c. Import libraries (.lib) and executables
+# stay where they were.
+set_target_properties(dv_solve dv_solve_debug dv_solve_dpi PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
 target_compile_definitions(dv_solve_dpi PRIVATE)
 
 install(TARGETS dv_solve_dpi

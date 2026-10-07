@@ -41,7 +41,7 @@ def _build_library(build_dir: Path) -> Path:
     )
 
     # Locate the produced .so
-    candidates = list(build_dir.glob("libdv_solve.so*"))
+    candidates = list((build_dir / "lib").glob("libdv_solve.so*"))
     if not candidates:
         raise FileNotFoundError(
             f"libdv_solve.so not found in {build_dir} after build"
@@ -74,7 +74,7 @@ def _build_debug_library(build_dir: Path) -> Path:
         capture_output=True,
     )
 
-    candidates = list(build_dir.glob("libdv_solve_debug.so*"))
+    candidates = list((build_dir / "lib").glob("libdv_solve_debug.so*"))
     if not candidates:
         raise FileNotFoundError(
             f"libdv_solve_debug.so not found in {build_dir} after build"
@@ -124,7 +124,7 @@ def libdvs_dpi(tmp_path_factory):
     except Exception as exc:
         pytest.skip(f"libdv_solve_dpi build failed: {exc}")
 
-    candidates = list(build_dir.glob("libdv_solve_dpi.so*"))
+    candidates = list((build_dir / "lib").glob("libdv_solve_dpi.so*"))
     if not candidates:
         pytest.skip("libdv_solve_dpi.so not found after build")
 

@@ -77,6 +77,38 @@ def test_libdirs_finds_a_built_but_uninstalled_tree(layout):
     assert dv_solve.get_libdirs() == [str(src_root / "build")]
 
 
+def test_newer_link_output_beats_a_stale_installed_copy(layout):
+    """A build tree whose install prefix is the tree itself held two copies:
+    ``build/lib`` from the last ``ninja install`` and ``build/`` from the last
+    ``ninja``. Preferring ``lib/`` blindly loaded the stale one, against the
+    live ``src/c`` headers. The newer copy wins -- loader and linker alike --
+    and the stale one is named in a warning."""
+    import dv_solve.lib as dlib
+    _pkg_dir, src_root = layout
+    name = dv_solve._lib_filename("dv_solve")
+    _touch(src_root / "build" / "lib", name)
+    _touch(src_root / "build", name)
+    old = src_root / "build" / "lib" / name
+    os.utime(old, (1_000_000, 1_000_000))
+    _resolve._WARNED_STALE.clear()
+    with pytest.warns(RuntimeWarning, match="older than"):
+        assert dv_solve.get_libdirs() == [str(src_root / "build")]
+    assert _resolve.find_library("dv_solve") == str(src_root / "build" / name)
+    assert str(dlib._find_library()) == str(src_root / "build" / name)
+
+
+def test_installed_copy_kept_when_not_older(layout, recwarn):
+    """Equal or newer ``build/lib`` (the normal case, now that the library
+    links straight into it) is chosen without a warning."""
+    _pkg_dir, src_root = layout
+    name = dv_solve._lib_filename("dv_solve")
+    _touch(src_root / "build", name)
+    _touch(src_root / "build" / "lib", name)
+    os.utime(src_root / "build" / name, (1_000_000, 1_000_000))
+    assert dv_solve.get_libdirs() == [str(src_root / "build" / "lib")]
+    assert not [w for w in recwarn if "older than" in str(w.message)]
+
+
 def test_libdirs_prefers_the_wheel_to_a_stale_build_tree(layout):
     """With both present the installed library wins: an editable install is the
     only case where a checkout should be consulted, and there the package
