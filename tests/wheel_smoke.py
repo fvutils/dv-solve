@@ -89,26 +89,10 @@ SMT2_PROBLEM = """\
 
 
 def check_smt2():
-    """dv-solve-smt2 is in the environment's scripts dir, on PATH, and works.
-
-    Not on Windows yet: the tool needs POSIX headers, so the Windows wheel
-    ships without it and get_smt2_exe() must say so. Asserting that, rather
-    than skipping, means a port that starts shipping it fails here and gets
-    this check turned on.
-    """
-    if platform.system() == "Windows":
-        try:
-            exe = dv_solve.get_smt2_exe()
-        except RuntimeError as e:
-            print("dv-solve-smt2 not in the Windows wheel, as expected:",
-                  str(e).splitlines()[0])
-            return 0
-        print("FAIL: the Windows wheel now has dv-solve-smt2 (%s); enable the "
-              "check in tests/wheel_smoke.py" % exe)
-        return 1
-
+    """dv-solve-smt2 is in the environment's scripts dir, on PATH, and works."""
     scripts = sysconfig.get_path("scripts")
-    expected = os.path.join(scripts, "dv-solve-smt2")
+    name = "dv-solve-smt2" + (".exe" if platform.system() == "Windows" else "")
+    expected = os.path.join(scripts, name)
     if not os.path.isfile(expected):
         print("FAIL: dv-solve-smt2 not installed in the scripts dir:", expected)
         return 1
@@ -123,7 +107,7 @@ def check_smt2():
         return 1
 
     # On PATH whenever the environment's scripts dir is (an activated venv).
-    on_path = shutil.which("dv-solve-smt2")
+    on_path = shutil.which(name)
     print("on PATH:", on_path)
     if scripts in os.environ.get("PATH", "").split(os.pathsep):
         if on_path is None or (os.path.realpath(on_path)

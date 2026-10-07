@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <sys/stat.h>   /* _S_IFMT/_S_IFDIR before we define S_IS* */
 #include <stdio.h>      /* _getc_nolock / _putc_nolock */
+#include <stdlib.h>     /* getenv / _putenv_s for the setenv shim */
 #include <time.h>       /* struct timespec (C11) for clock_gettime shim */
 
 /* POSIX monotonic clock used by the dv-solve timing helpers (dvs_placement.c,
@@ -98,6 +99,20 @@ static __forceinline int dvs__mul_ovf_u64(uint64_t a, uint64_t b, uint64_t *r) {
 #ifndef getc_unlocked
 #define getc_unlocked(f)    _getc_nolock(f)
 #define putc_unlocked(c, f) _putc_nolock((c), (f))
+#endif
+
+/* ---- POSIX setenv/unsetenv (dv-solve-smt2's --engine) -------------- */
+#ifndef setenv
+static __inline int dvs__setenv(const char *name, const char *value, int overwrite) {
+    if (!overwrite && getenv(name)) return 0;
+    return _putenv_s(name, value) ? -1 : 0;
+}
+/* An empty value removes the variable from the CRT environment. */
+static __inline int dvs__unsetenv(const char *name) {
+    return _putenv_s(name, "") ? -1 : 0;
+}
+#define setenv(n, v, o) dvs__setenv((n), (v), (o))
+#define unsetenv(n)     dvs__unsetenv(n)
 #endif
 
 /* ---- stat() mode test macros MSVC lacks ------------------------------ */

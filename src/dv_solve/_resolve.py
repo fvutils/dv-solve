@@ -579,16 +579,13 @@ def require_smt2_exe() -> str:
 def smt2_missing_error() -> RuntimeError:
     """The error for a missing ``dv-solve-smt2``, naming where it looked."""
     detail = ""
-    if platform.system() == "Windows":
-        detail = ("The Windows wheel does not include it yet; it needs a "
-                  "POSIX system (Linux or macOS).")
-    elif override_root():
+    if override_root():
         detail = "%s is set, so no other location was searched." % _override_var()
     return RuntimeError(
         "dv-solve: %s not found.%s\n"
         "Searched:\n%s\n"
         "Fixes:\n"
-        "  - Install a binary wheel (Linux, macOS):  pip install dv-solve\n"
+        "  - Install a binary wheel:  pip install dv-solve\n"
         "  - Build from source (needs CMake + a C compiler):\n"
         "        cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=build\n"
         "        ninja -C build install\n"

@@ -20,7 +20,7 @@
 #include <string.h>
 #include "dvs_sv.h"
 #include "dvs_i128.h"
-#include "dvs_thread.h"
+#include "dvs_stackinfo.h"
 
 #define SV_POOL_HDR   ((uint32_t)sizeof(dvs_pool_t))
 #define SV_MAX_W      255u      /* node formats hold widths in a uint8_t */

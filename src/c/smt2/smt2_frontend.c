@@ -3,12 +3,15 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <time.h>
+#if !defined(_WIN32)
 #include <sys/resource.h>
+#endif
 #include "smt2/smt2_frontend.h"
 #include "dvs_lcg.h"
 #include "dvs_bbsolver.h"
 #include "dvs_cube.h"
 #include "dvs_i128.h"
+#include "dvs_stackinfo.h"
 
 /* DVS_VERSION comes from src/dv_solve/__version__.py, through CMake. */
 #ifndef DVS_VERSION
@@ -1035,10 +1038,14 @@ static uint32_t _translate_depth_limit(void) {
     if (g_smt2_translate_stack_bytes) {
         stack_bytes = (uint64_t)g_smt2_translate_stack_bytes;
     } else {
+#if defined(_WIN32)
+        stack_bytes = (uint64_t)dvs_stack_size();   /* no RLIMIT_STACK */
+#else
         struct rlimit rl;
         if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY
             && rl.rlim_cur > 0)
             stack_bytes = (uint64_t)rl.rlim_cur;
+#endif
     }
     uint32_t bound;
     if (stack_bytes == 0) {

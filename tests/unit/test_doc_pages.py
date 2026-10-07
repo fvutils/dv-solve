@@ -191,8 +191,9 @@ def test_literalincludes_resolve() -> None:
 # ------------------------------------------------------------------ #
 
 def _smt2_exe() -> str | None:
-    exe = _REPO / "build" / "dv-solve-smt2"
-    return str(exe) if exe.is_file() else shutil.which("dv-solve-smt2")
+    from dv_solve._resolve import smt2_filename
+    exe = _REPO / "build" / smt2_filename()
+    return str(exe) if exe.is_file() else shutil.which(smt2_filename())
 
 
 def _verilator() -> str | None:

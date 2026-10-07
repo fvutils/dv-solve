@@ -6,7 +6,7 @@ the `VERILATOR_SOLVER` environment variable (z3 by default). `dv-solve-smt2`
 can take its place.
 
 You need Verilator 5.x and dv-solve. `pip install dv-solve` puts
-`dv-solve-smt2` on `PATH` on Linux and macOS (see {doc}`install`).
+`dv-solve-smt2` on `PATH` (see {doc}`install`).
 
 ## A class to randomize
 

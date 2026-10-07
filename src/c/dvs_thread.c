@@ -25,12 +25,20 @@ static DWORD WINAPI dvs__thread_trampoline(LPVOID p) {
     return 0;
 }
 
-int dvs_thread_create(dvs_thread_t *t, dvs_thread_fn fn, void *arg) {
+int dvs_thread_create_stack(dvs_thread_t *t, dvs_thread_fn fn, void *arg,
+                            size_t stack_bytes) {
     t->fn = fn;
     t->arg = arg;
     t->ret = NULL;
-    t->handle = CreateThread(NULL, 0, dvs__thread_trampoline, t, 0, NULL);
+    /* Without the flag the size is the initial COMMIT, not the reservation. */
+    t->handle = CreateThread(NULL, stack_bytes, dvs__thread_trampoline, t,
+                             stack_bytes ? STACK_SIZE_PARAM_IS_A_RESERVATION : 0,
+                             NULL);
     return t->handle ? 0 : -1;
+}
+
+int dvs_thread_create(dvs_thread_t *t, dvs_thread_fn fn, void *arg) {
+    return dvs_thread_create_stack(t, fn, arg, 0);
 }
 
 int dvs_thread_join(dvs_thread_t *t, void **retval) {
@@ -60,13 +68,14 @@ unsigned dvs_cpu_count(void) {
     return si.dwNumberOfProcessors ? si.dwNumberOfProcessors : 1u;
 }
 
-uintptr_t dvs_stack_floor(size_t margin) {
-    /* lo is the bottom of the whole reservation; the guard pages above it
-     * are well inside any useful margin. */
-    ULONG_PTR lo = 0, hi = 0;
-    GetCurrentThreadStackLimits(&lo, &hi);
-    if (!lo || hi - lo <= margin) return 0;
-    return (uintptr_t)lo + margin;
+/* lo is the bottom of the whole reservation; the guard pages above it are
+ * well inside any useful margin. */
+static int dvs__stack_bounds(uintptr_t *lo, size_t *size) {
+    ULONG_PTR l = 0, h = 0;
+    GetCurrentThreadStackLimits(&l, &h);
+    *lo = (uintptr_t)l;
+    *size = (size_t)(h - l);
+    return l != 0;
 }
 
 #else
@@ -77,6 +86,18 @@ uintptr_t dvs_stack_floor(size_t margin) {
 
 int dvs_thread_create(dvs_thread_t *t, dvs_thread_fn fn, void *arg) {
     return pthread_create(&t->handle, NULL, fn, arg);
+}
+
+int dvs_thread_create_stack(dvs_thread_t *t, dvs_thread_fn fn, void *arg,
+                            size_t stack_bytes) {
+    pthread_attr_t a;
+    int rc;
+    if (!stack_bytes) return dvs_thread_create(t, fn, arg);
+    if (pthread_attr_init(&a) != 0) return -1;
+    rc = pthread_attr_setstacksize(&a, stack_bytes);
+    if (rc == 0) rc = pthread_create(&t->handle, &a, fn, arg);
+    pthread_attr_destroy(&a);
+    return rc;
 }
 
 int dvs_thread_join(dvs_thread_t *t, void **retval) {
@@ -99,7 +120,7 @@ unsigned dvs_cpu_count(void) {
     return n > 0 ? (unsigned)n : 1u;
 }
 
-uintptr_t dvs_stack_floor(size_t margin) {
+static int dvs__stack_bounds(uintptr_t *lo_out, size_t *size_out) {
     uintptr_t lo = 0;
     size_t size = 0;
 #if defined(__APPLE__)
@@ -115,8 +136,24 @@ uintptr_t dvs_stack_floor(size_t margin) {
     pthread_attr_destroy(&a);
     lo = (uintptr_t)addr;
 #endif
-    if (!lo || size <= margin) return 0;
-    return lo + margin;
+    *lo_out = lo;
+    *size_out = size;
+    return lo != 0;
 }
 
 #endif
+
+/* ------------------------------ Both backends ---------------------------- */
+
+uintptr_t dvs_stack_floor(size_t margin) {
+    uintptr_t lo;
+    size_t size;
+    if (!dvs__stack_bounds(&lo, &size) || size <= margin) return 0;
+    return lo + margin;
+}
+
+size_t dvs_stack_size(void) {
+    uintptr_t lo;
+    size_t size;
+    return dvs__stack_bounds(&lo, &size) ? size : 0;
+}

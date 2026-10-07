@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.14)
+# MSVC_RUNTIME_LIBRARY (dv-solve-smt2 on the static C runtime, below) rather
+# than /MD in the default flags. CMake 3.15+.
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
 project(dv_solve C)
 
 set(CMAKE_C_STANDARD 11)
@@ -113,12 +118,8 @@ if(MSVC)
 endif()
 
 # The dv-solve-smt2 CLI. It ships in the wheel (pip puts it on PATH), so it is
-# built independently of DV_SOLVE_BUILD_TOOLS. It needs POSIX headers
-# (unistd.h, pthread.h, sys/resource.h), so not under MSVC yet.
+# built independently of DV_SOLVE_BUILD_TOOLS.
 option(DVS_BUILD_SMT2 "Build the dv-solve-smt2 SMT-LIB2 command-line tool" ON)
-if(MSVC)
-    set(DVS_BUILD_SMT2 OFF)
-endif()
 
 if(DV_SOLVE_BUILD_TOOLS)
 add_executable(test_kissat_smoke tests/c/test_kissat_smoke.c)
@@ -473,12 +474,31 @@ endif()  # DV_SOLVE_BUILD_TOOLS
 
 if(DVS_BUILD_SMT2)
 
+# On MSVC "self-contained" also means the static C runtime (/MT): pip's
+# Scripts directory holds no VCRUNTIME140.dll or MSVCP140.dll, and delvewheel
+# bundles them only for the package's own DLLs. Every object linked in has to
+# agree on the runtime, so kissat and CaDiCaL get /MT copies for it.
+set(_dvs_smt2_kissat kissat)
+set(_dvs_smt2_cadical cadical)
+set(_dvs_static_crt "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+if(MSVC)
+    dvs_add_kissat(kissat_mt)
+    set_target_properties(kissat_mt PROPERTIES MSVC_RUNTIME_LIBRARY ${_dvs_static_crt})
+    set(_dvs_smt2_kissat kissat_mt)
+    if(DVS_WITH_CADICAL)
+        dvs_add_cadical_msvc(cadical_mt_objs cadical_mt kissat_mt)
+        set_target_properties(cadical_mt_objs cadical_mt PROPERTIES
+            MSVC_RUNTIME_LIBRARY ${_dvs_static_crt})
+        set(_dvs_smt2_cadical cadical_mt)
+    endif()
+endif()
+
 add_library(dv_solve_static STATIC ${DVS_SOURCES})
-target_link_libraries(dv_solve_static PUBLIC kissat Threads::Threads)
+target_link_libraries(dv_solve_static PUBLIC ${_dvs_smt2_kissat} Threads::Threads)
 if(DVS_WITH_CADICAL)
     # PUBLIC rather than dvs_apply_cadical's PRIVATE: a static archive does
     # not carry its dependencies, so they have to reach the executable's link.
-    target_link_libraries(dv_solve_static PUBLIC cadical)
+    target_link_libraries(dv_solve_static PUBLIC ${_dvs_smt2_cadical})
     target_compile_definitions(dv_solve_static PRIVATE DVS_WITH_CADICAL=1)
 endif()
 if(DVS_CONTRADICTION_ANALYSIS)
@@ -488,7 +508,7 @@ endif()
 target_include_directories(dv_solve_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
 )
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT MSVC)
     target_compile_options(dv_solve_static PRIVATE -fsanitize=address -g -O0)
 endif()
 
@@ -500,6 +520,10 @@ set(SMT2_SOURCES
 )
 
 add_executable(dv-solve-smt2 ${SMT2_SOURCES})
+if(MSVC)
+    set_target_properties(dv_solve_static dv-solve-smt2 PROPERTIES
+        MSVC_RUNTIME_LIBRARY ${_dvs_static_crt})
+endif()
 target_link_libraries(dv-solve-smt2 PRIVATE dv_solve_static Threads::Threads)
 if(DVS_WITH_CADICAL)
     # CaDiCaL is C++; link with the C++ driver so libstdc++/libc++ is pulled in.
@@ -508,7 +532,7 @@ endif()
 target_include_directories(dv-solve-smt2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/c
 )
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT MSVC)
     target_compile_options(dv-solve-smt2 PRIVATE -fsanitize=address -g -O0)
     target_link_options(dv-solve-smt2 PRIVATE -fsanitize=address)
 endif()

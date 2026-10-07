@@ -26,8 +26,8 @@ pip install dv-solve
 ```
 
 The wheel holds the Python package, the native libraries, the C header, the
-SystemVerilog packages and, on Linux and macOS, the `dv-solve-smt2`
-executable, which pip puts on `PATH`:
+SystemVerilog packages and the `dv-solve-smt2` executable, which pip puts on
+`PATH`:
 
 ```bash
 dv-solve-smt2 --version

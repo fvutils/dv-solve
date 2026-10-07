@@ -23,7 +23,8 @@
  */
 
 #include <stddef.h>
-#include <stdint.h>
+
+#include "dvs_stackinfo.h"
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -54,6 +55,10 @@ typedef struct { pthread_cond_t c; } dvs_cond_t;
 
 /* Spawn a thread running `fn(arg)`. Returns 0 on success. */
 int  dvs_thread_create(dvs_thread_t *t, dvs_thread_fn fn, void *arg);
+/* As dvs_thread_create, with a stack of `stack_bytes` (reserved address
+ * space: pages are committed only as the thread uses them). */
+int  dvs_thread_create_stack(dvs_thread_t *t, dvs_thread_fn fn, void *arg,
+                             size_t stack_bytes);
 /* Join a thread; if `retval` is non-NULL it receives the thread's return value.
  * Returns 0 on success. */
 int  dvs_thread_join(dvs_thread_t *t, void **retval);
@@ -73,20 +78,6 @@ void dvs_cond_broadcast(dvs_cond_t *c);
 
 /* Number of logical CPUs (>= 1). Best-effort; returns 1 if undeterminable. */
 unsigned dvs_cpu_count(void);
-
-/* The lowest address the calling thread's stack may grow down to while still
- * leaving `margin` bytes free, or 0 if the platform cannot tell. Recursive
- * passes compare the address of a local against it (dvs_stack_exhausted) and
- * refuse the input rather than overflow: a fixed depth limit cannot be right
- * for every stack -- 1 MB on a Windows thread, 512 KB on a macOS secondary
- * thread, whatever the caller gave its own threads. */
-uintptr_t dvs_stack_floor(size_t margin);
-
-/* Nonzero when the caller's stack has reached `floor` (0 never has). */
-static inline int dvs_stack_exhausted(uintptr_t floor) {
-    char here;
-    return floor && (uintptr_t)&here < floor;
-}
 
 #ifdef __cplusplus
 }
