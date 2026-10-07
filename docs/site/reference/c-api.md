@@ -470,3 +470,135 @@ discarded; take a new checkpoint to restore to the same state again.
 
 The pattern for a solve under temporary pins is: checkpoint, pin, solve,
 restore.
+
+## Oracle check
+
+A debug and test mode: every answer of a context is checked by a reference
+SMT solver (z3 by default), run as a child process. A solution
+({c:enumerator}`DVS_SOLVE_OK`) is checked by asking the reference solver
+whether the constraints hold with every variable fixed to dv-solve's value; an
+UNSAT, from a solve or from {c:macro}`DVS_COMPILE_UNSAT`, by letting it solve
+the problem. The problem is translated to SMT-LIB2 independently of
+dv-solve's own elaboration ({c:func}`dvs_problem_write_smt2`). Every answer is
+recorded in a run directory, the same format as `dv-solve-smt2`'s `DV_ORACLE`
+check; `python -m dv_solve.oracle report <dir>` summarises one or many. The
+oracle never changes what dv-solve answers. POSIX only; one thread at a time.
+
+````{c:struct} dvs_oracle_opts_t
+Options for {c:func}`dvs_oracle_create`. Zero-initialize it, then set the
+fields you need.
+
+```{c:member} const char *solver
+`"z3"` (also NULL, the default) or `"bitwuzla"`.
+```
+
+```{c:member} const char *bin
+The solver's executable, or NULL to find it on `PATH`.
+```
+
+```{c:member} const char *command
+Instead of `solver` and `bin`, a whole command line of a solver that reads
+SMT-LIB2 on its standard input.
+```
+
+```{c:member} const char *out_dir
+The run directory: `%t` expands to the UTC time, `%p` to the process id.
+NULL gives `dvs-oracle/%t-%p`.
+```
+
+```{c:member} const char *tag
+Free text recorded in the run's `run.json`.
+```
+
+```{c:member} double timeout_s
+Limit per query, or 0 for 10 seconds. A query the reference solver cannot
+decide in time is recorded as unchecked.
+```
+
+```{c:member} int keep_all
+1 also keeps `transcript.smt2`, every script sent to the reference solver.
+```
+````
+
+```{c:type} dvs_oracle_t
+A reference solver process and the run directory it records into.
+```
+
+```{c:function} dvs_oracle_t *dvs_oracle_create(const dvs_oracle_opts_t *opts, FILE *err)
+Start a reference solver and claim a run directory. `opts` may be NULL for
+the defaults; `err` (NULL: `stderr`) receives setup problems and failed
+checks.
+
+:returns: The oracle, or NULL if the solver could not be started or the run
+  directory created.
+```
+
+```{c:function} void dvs_oracle_destroy(dvs_oracle_t *o)
+Finalise `run.json`, stop the reference solver and free the oracle. Detach or
+destroy every context using it first.
+```
+
+```{c:function} int dvs_solver_set_oracle(dvs_ctx_t *ctx, dvs_oracle_t *o, const char *label)
+Check every answer of `ctx` with `o` from now on; NULL detaches. Attach before
+{c:func}`dvs_solver_compile`, which hands the oracle the problem. One oracle
+may serve many contexts. `label` (may be NULL) names the context in every
+record.
+
+:returns: 0, or −1 if `ctx` is NULL or memory ran out.
+```
+
+```{c:function} int dvs_oracle_last_result(const dvs_oracle_t *o)
+The result of the most recent query: one of the `DVS_ORACLE_RES_*` values.
+```
+
+```{c:macro} DVS_ORACLE_RES_NONE
+Nothing has been checked yet.
+```
+
+```{c:macro} DVS_ORACLE_RES_OK
+The reference solver agrees.
+```
+
+```{c:macro} DVS_ORACLE_RES_BAD_MODEL
+dv-solve's values violate the constraints.
+```
+
+```{c:macro} DVS_ORACLE_RES_BAD_UNSAT
+dv-solve called a satisfiable problem UNSAT.
+```
+
+```{c:macro} DVS_ORACLE_RES_UNCHECKED
+The reference solver could not decide in time.
+```
+
+```{c:macro} DVS_ORACLE_RES_ERROR
+The reference solver failed, or the problem could not be translated.
+```
+
+```{c:macro} DVS_ORACLE_RES_SKIPPED
+Not a sat or unsat answer ({c:enumerator}`DVS_SOLVE_TIMEOUT`).
+```
+
+```{c:struct} dvs_oracle_stats_t
+Totals over every query so far: `queries`, then `ok`, `bad_model`,
+`bad_unsat`, `unchecked`, `error` and `skipped`, and the milliseconds spent by
+dv-solve (`dvs_ms`) and by the reference solver (`oracle_ms`).
+```
+
+```{c:function} void dvs_oracle_get_stats(const dvs_oracle_t *o, dvs_oracle_stats_t *st)
+Fill `st` with the totals so far.
+```
+
+```{c:function} const char *dvs_oracle_run_dir(const dvs_oracle_t *o)
+The run directory, valid until {c:func}`dvs_oracle_destroy`.
+```
+
+```{c:function} int dvs_problem_write_smt2(const dvs_problem_t *p, FILE *out)
+Write `p` as a stand-alone SMT-LIB2 (QF_BV) script: the variables, as
+`v<id>`, with their domains, the hard constraints, and `(check-sat)`. This is
+the translation the oracle check uses, made under the builder's
+SystemVerilog sizing rules by its own reading of them.
+
+:returns: 0; −1 if part of the problem could not be translated (the script
+  says what) or the write failed.
+```

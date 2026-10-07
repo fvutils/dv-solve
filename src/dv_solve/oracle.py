@@ -1,4 +1,16 @@
-"""Reports over dv-solve-smt2 oracle-check run directories (DV_ORACLE).
+"""The oracle check: dv-solve's answers checked by a reference SMT solver.
+
+Two ways in:
+
+* :class:`Oracle` -- the C API's check (``dvs_oracle_create``). Attach it to
+  one :class:`~dv_solve.ctx.SolveCtx` (``SolveCtx(problem, oracle=o)``) or to
+  every context created afterwards (:func:`set_default_oracle`). Each
+  ``solve()`` is checked: a solution by asking z3 whether the constraints hold
+  with every variable fixed to dv-solve's value, an UNSAT by letting z3 solve
+  the problem. See docs/api_oracle_plan.md.
+* ``DV_ORACLE`` -- the same check for dv-solve-smt2 (docs/oracle_check_plan.md).
+
+Both record into a run directory, which this module also reports on:
 
     python -m dv_solve.oracle report <root>... [--out DIR] [--allow-truncated]
     python -m dv_solve.oracle extract <run-dir> <q> [-o FILE]
@@ -19,14 +31,205 @@ See docs/oracle_check_plan.md.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import sys
+import weakref
 from collections import Counter, defaultdict
 from pathlib import Path
 
 CLASSES = ["ok", "bad-model", "bad-unsat", "gap", "unchecked", "oracle-error", "skipped"]
 P0 = ("bad-model", "bad-unsat")
+
+
+# ----------------------------------------------------------------------- #
+# The API oracle                                                           #
+# ----------------------------------------------------------------------- #
+
+class OracleMismatch(AssertionError):
+    """dv-solve and the reference solver disagree: dv-solve's values violate
+    the constraints (bad-model), or it called a satisfiable problem UNSAT
+    (bad-unsat). The repro is in the run directory's ``fail/``."""
+
+
+class _OracleOpts(ctypes.Structure):
+    _fields_ = [
+        ("solver", ctypes.c_char_p),
+        ("bin", ctypes.c_char_p),
+        ("command", ctypes.c_char_p),
+        ("out_dir", ctypes.c_char_p),
+        ("tag", ctypes.c_char_p),
+        ("timeout_s", ctypes.c_double),
+        ("keep_all", ctypes.c_int),
+    ]
+
+
+class _OracleStats(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_uint64) for n in
+                ("queries", "ok", "bad_model", "bad_unsat", "unchecked", "error", "skipped")] + [
+        ("dvs_ms", ctypes.c_double),
+        ("oracle_ms", ctypes.c_double),
+    ]
+
+
+def _b(s):
+    return None if s is None else os.fsencode(s)
+
+
+class Oracle:
+    """A reference solver process checking dv-solve's answers.
+
+    Args:
+        solver: ``"z3"`` (default) or ``"bitwuzla"``.
+        bin: The solver's executable (default: found on ``PATH``).
+        command: Instead of ``solver``/``bin``, a whole command line of a
+            solver that reads SMT-LIB2 on stdin.
+        out_dir: The run directory; ``%t`` expands to the UTC time, ``%p`` to
+            the pid (default ``dvs-oracle/%t-%p``).
+        tag: Free text recorded in ``run.json``.
+        timeout_s: Per-query limit (default 10 s); a query the reference
+            solver cannot decide in time is recorded ``unchecked``.
+        keep_all: Also keep ``transcript.smt2``, every script sent.
+        raise_on_fail: Raise :class:`OracleMismatch` from the ``solve()`` (or
+            constructor, for a compile-time UNSAT) whose answer was wrong.
+
+    Raises:
+        RuntimeError: the reference solver could not be started, or the
+            library has no oracle (too old, or Windows).
+    """
+
+    RESULTS = {-1: "none", 0: "ok", 1: "bad-model", 2: "bad-unsat", 3: "gap",
+               4: "unchecked", 5: "oracle-error", 6: "skipped"}
+
+    def __init__(self, solver="z3", bin=None, command=None, out_dir=None,
+                 tag=None, timeout_s=0.0, keep_all=False, raise_on_fail=False):
+        from .lib import _load_lib, _library_not_found_error
+        lib = _load_lib()
+        if lib is None:
+            raise _library_not_found_error()
+        if not hasattr(lib, "dvs_oracle_create"):
+            raise RuntimeError("this dv-solve library has no oracle check "
+                               "(dvs_oracle_create); rebuild it")
+        self._lib = lib
+        opts = _OracleOpts(solver=_b(solver), bin=_b(bin), command=_b(command),
+                           out_dir=_b(out_dir), tag=_b(tag),
+                           timeout_s=float(timeout_s), keep_all=1 if keep_all else 0)
+        self._o = lib.dvs_oracle_create(ctypes.byref(opts), None)
+        if not self._o:
+            raise RuntimeError("could not start the oracle check (see stderr)")
+        self.raise_on_fail = raise_on_fail
+        self._ctxs = weakref.WeakSet()
+        self._run_dir = os.fsdecode(lib.dvs_oracle_run_dir(self._o))
+
+    # -- attaching -------------------------------------------------------- #
+
+    def _attach(self, ctx, raw_ctx, label=None):
+        if self._o is None:
+            raise RuntimeError("the oracle is closed")
+        if self._lib.dvs_solver_set_oracle(raw_ctx, self._o, _b(label)) != 0:
+            raise MemoryError("dvs_solver_set_oracle")
+        self._ctxs.add(ctx)
+
+    def _detach(self, ctx, raw_ctx):
+        self._lib.dvs_solver_set_oracle(raw_ctx, None, None)
+        self._ctxs.discard(ctx)
+
+    def _after(self):
+        """Raise for a wrong answer, when asked to."""
+        if not self.raise_on_fail:
+            return
+        res = self.last_result
+        if res in P0:
+            raise OracleMismatch(
+                f"dv-solve oracle: {res} -- see {self._run_dir}/queries.jsonl "
+                f"and {self._run_dir}/fail/")
+
+    # -- results ---------------------------------------------------------- #
+
+    @property
+    def run_dir(self) -> str:
+        return self._run_dir
+
+    @property
+    def last_result(self) -> str:
+        """The class of the most recent query: ok, bad-model, bad-unsat,
+        unchecked, oracle-error, skipped, or none."""
+        if self._o is None:
+            return "none"
+        return self.RESULTS.get(self._lib.dvs_oracle_last_result(self._o), "?")
+
+    def stats(self) -> dict:
+        """Totals so far."""
+        st = _OracleStats()
+        if self._o is not None:
+            self._lib.dvs_oracle_get_stats(self._o, ctypes.byref(st))
+        return {n: getattr(st, n) for n, _ in _OracleStats._fields_}
+
+    def close(self) -> None:
+        """Detach every context, finalise run.json and stop the reference
+        solver. Also done at garbage collection."""
+        if self._o is None:
+            return
+        for ctx in list(self._ctxs):
+            ctx._detach_oracle()
+        self._lib.dvs_oracle_destroy(self._o)
+        self._o = None
+        global _DEFAULT
+        if _DEFAULT is self:
+            _DEFAULT = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def problem_smt2(problem) -> str:
+    """The problem as a stand-alone SMT-LIB2 script -- the oracle's own
+    translation (``dvs_problem_write_smt2``). POSIX only."""
+    import tempfile
+    from .lib import _load_lib
+    lib = _load_lib()
+    libc = ctypes.CDLL(None)
+    libc.fopen.restype = ctypes.c_void_p
+    libc.fopen.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    libc.fclose.argtypes = [ctypes.c_void_p]
+    lib.dvs_problem_write_smt2.restype = ctypes.c_int
+    lib.dvs_problem_write_smt2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    sp = getattr(problem, "_sp", None)
+    if sp is None:
+        sp = ctypes.cast(problem, ctypes.c_void_p).value
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "p.smt2")
+        f = libc.fopen(os.fsencode(path), b"w")
+        lib.dvs_problem_write_smt2(sp, f)
+        libc.fclose(f)
+        with open(path) as fh:
+            return fh.read()
+
+
+_DEFAULT = None
+
+
+def set_default_oracle(oracle):
+    """Attach ``oracle`` to every :class:`~dv_solve.ctx.SolveCtx` created from
+    now on (``None`` stops). Returns the previous default."""
+    global _DEFAULT
+    prev = _DEFAULT
+    _DEFAULT = oracle
+    return prev
+
+
+def get_default_oracle():
+    return _DEFAULT
 
 
 def find_runs(roots):

@@ -169,7 +169,7 @@ execute_process(COMMAND git rev-parse --short HEAD
 if(NOT _dvs_git_rc EQUAL 0 OR DVS_GIT_COMMIT STREQUAL "")
     set(DVS_GIT_COMMIT "unknown")
 endif()
-set_source_files_properties(src/c/smt2/smt2_oracle.c
+set_source_files_properties(src/c/dvs_oracle_core.c
     PROPERTIES COMPILE_DEFINITIONS
     "DVS_VERSION=\"${DVS_VERSION}\";DVS_GIT_COMMIT=\"${DVS_GIT_COMMIT}\"")
 
@@ -213,6 +213,9 @@ set(DVS_SOURCES
     src/c/dvs_arena.c
     src/c/dvs_bvdom.c
     src/c/dvs_bvbounds.c
+    src/c/dvs_oracle_core.c
+    src/c/dvs_smt2_emit.c
+    src/c/dvs_oracle.c
 )
 
 # The CaDiCaL backend translation unit (pure C over the ccadical.h C API) is
@@ -302,6 +305,18 @@ dvs_apply_cadical(dv_solve_dpi)
 target_include_directories(dv_solve_dpi PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
 )
+
+# The shared libraries are linked straight into <build>/lib, the directory
+# `cmake --install` puts them in when the prefix is the build tree (as
+# ivpm-build and the documented recipe configure it). One file, then, not two:
+# with the link output in <build>/ and the installed copy in <build>/lib, a
+# plain `ninja` refreshed the first while dv_solve._resolve, which prefers
+# <build>/lib, kept loading the copy from the last install -- stale, and
+# against headers from the live src/c. Import libraries (.lib) and executables
+# stay where they were.
+set_target_properties(dv_solve dv_solve_debug dv_solve_dpi PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 target_compile_definitions(dv_solve_dpi PRIVATE)
 

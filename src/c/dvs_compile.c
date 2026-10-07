@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "dvs_ctx.h"
+#include "dvs_oracle_hooks.h"
 #include "dvs_diffcycle.h"
 #include "dvs_propagator.h"
 #include "dvs_problem.h"
@@ -3661,7 +3662,7 @@ dvs_problem_t *dvs_sc_problem;   /* the step checker validates models against it
 int dvs_sc_uncompiled;           /* and needs to know if compile left some out */
 #endif
 
-int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 #ifdef DVS_STEP_CHECK
     dvs_sc_problem = sp;
 #endif
@@ -3673,6 +3674,14 @@ int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 #ifdef DVS_STEP_CHECK
     dvs_sc_uncompiled = rc > 0;
 #endif
+    return rc;
+}
+
+int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    if (!ctx || !ctx->oracle) return _solver_compile(ctx, sp);
+    double t0 = dvs_oracle_clock_ms();
+    int rc = _solver_compile(ctx, sp);
+    dvs_oracle_on_compile(ctx, sp, rc, dvs_oracle_clock_ms() - t0);
     return rc;
 }
 
@@ -4224,12 +4233,18 @@ static int _ctx_var_type(void *ud, uint32_t vid, uint16_t *w, uint8_t *sgn) {
     return 0;
 }
 
-int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
+static int _solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
     int err = 0;
     dvs_problem_t *esp = dvs_sv_elaborate(aux_sp, _ctx_var_type, ctx, &err);
     if (err) return _elab_error_code(err);
     int rc = _solver_add_constraint_body(ctx, esp);
     dvs_sv_release(aux_sp, esp);
+    return rc;
+}
+
+int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
+    int rc = _solver_add_constraint(ctx, aux_sp);
+    if (ctx && ctx->oracle) dvs_oracle_on_add(ctx, aux_sp, rc);
     return rc;
 }
 

@@ -20,7 +20,7 @@ from .base import BenchResult, RESULTS_DIR, get_bench_config
 
 # Locate libdv_solve.so
 _SOLVER_PKG = Path(__file__).parent.parent.parent.parent  # packages/zuspec-solver
-_BUILD_DIR = _SOLVER_PKG / "build"
+_BUILD_DIR = _SOLVER_PKG / "build" / "lib"   # where CMake links the library
 _SRC_DIR = _SOLVER_PKG / "src" / "c"
 
 

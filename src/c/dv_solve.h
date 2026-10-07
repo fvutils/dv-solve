@@ -400,6 +400,104 @@ void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp);
  */
 int dvs_solver_validate_model(dvs_ctx_t *ctx, dvs_problem_t *p, FILE *err);
 
+/* ------------------------------------------------------------------ */
+/* Oracle check                                                        */
+/* ------------------------------------------------------------------ */
+/*
+ * A debug/test mode that checks every answer of a context against a
+ * reference SMT solver (z3 by default), run as a child process: a solution
+ * (DVS_SOLVE_OK) by asking the reference solver whether the problem holds with
+ * every variable fixed to dv-solve's value; an UNSAT (from a solve, or from
+ * compile) by letting it solve the problem. The problem is translated to
+ * SMT-LIB2 independently of dv-solve's own elaboration (see
+ * dvs_problem_write_smt2). Each answer is recorded in a run directory, the
+ * same format as dv-solve-smt2's DV_ORACLE check; summarise one or many with
+ * `python -m dv_solve.oracle report <dir>`. The oracle never changes what
+ * dv-solve answers. POSIX only; not thread-safe. See docs/api_oracle_plan.md.
+ */
+
+/** A reference solver process and the run directory it records into. */
+typedef struct dvs_oracle_s dvs_oracle_t;
+
+/** Options for dvs_oracle_create(). Zero-initialize, then set what you need. */
+typedef struct {
+    const char *solver;    /* "z3" (NULL: the default) or "bitwuzla"         */
+    const char *bin;       /* the solver's executable; NULL: found on PATH   */
+    const char *command;   /* instead of solver/bin: a whole command line of a
+                            * solver reading SMT-LIB2 on stdin              */
+    const char *out_dir;   /* the run directory; %t expands to the UTC time,
+                            * %p to the pid. NULL: "dvs-oracle/%t-%p"       */
+    const char *tag;       /* free text recorded in run.json                 */
+    double      timeout_s; /* per query; 0: 10 seconds                       */
+    int         keep_all;  /* 1: also keep transcript.smt2, every script sent */
+} dvs_oracle_opts_t;
+
+/** Per-query results, as dvs_oracle_last_result() returns them. */
+#define DVS_ORACLE_RES_NONE       (-1) /* nothing checked yet              */
+#define DVS_ORACLE_RES_OK            0 /* the reference solver agrees      */
+#define DVS_ORACLE_RES_BAD_MODEL     1 /* dv-solve's values violate the
+                                        * constraints                      */
+#define DVS_ORACLE_RES_BAD_UNSAT     2 /* dv-solve said UNSAT; it is not   */
+#define DVS_ORACLE_RES_UNCHECKED     4 /* the reference solver could not
+                                        * decide in time                   */
+#define DVS_ORACLE_RES_ERROR         5 /* the reference solver failed, or
+                                        * the problem could not be
+                                        * translated                       */
+#define DVS_ORACLE_RES_SKIPPED       6 /* not a sat/unsat answer (TIMEOUT) */
+
+/** Totals over every query so far. */
+typedef struct {
+    uint64_t queries;
+    uint64_t ok, bad_model, bad_unsat, unchecked, error, skipped;
+    double   dvs_ms;       /* time dv-solve spent on the checked calls       */
+    double   oracle_ms;    /* time the reference solver spent                */
+} dvs_oracle_stats_t;
+
+/**
+ * Start a reference solver and claim a run directory.
+ *
+ * @param opts  Options, or NULL for the defaults.
+ * @param err   Where to report setup problems and failed checks; NULL for
+ *              stderr.
+ * @return  The oracle, or NULL if the solver could not be started or the run
+ *          directory created (the reason is reported on `err`).
+ */
+dvs_oracle_t *dvs_oracle_create(const dvs_oracle_opts_t *opts, FILE *err);
+
+/** Finalise run.json, stop the reference solver and free the oracle. Detach
+ *  (or destroy) every context using it first. */
+void dvs_oracle_destroy(dvs_oracle_t *o);
+
+/**
+ * Check every answer of `ctx` with `o` from now on; NULL detaches. Attach
+ * before dvs_solver_compile(): the oracle takes the problem from it. One
+ * oracle may serve many contexts.
+ *
+ * @param label  Names the context in every record (e.g. the fields being
+ *               randomized), or NULL.
+ * @return  0, or -1 if `ctx` is NULL or memory ran out.
+ */
+int dvs_solver_set_oracle(dvs_ctx_t *ctx, dvs_oracle_t *o, const char *label);
+
+/** The result of the most recent query (DVS_ORACLE_RES_*). */
+int dvs_oracle_last_result(const dvs_oracle_t *o);
+
+/** Totals so far. */
+void dvs_oracle_get_stats(const dvs_oracle_t *o, dvs_oracle_stats_t *st);
+
+/** The run directory. Valid until dvs_oracle_destroy(). */
+const char *dvs_oracle_run_dir(const dvs_oracle_t *o);
+
+/**
+ * Write problem `p` as a stand-alone SMT-LIB2 (QF_BV) script: the variables
+ * (as v<id>) with their domains, the hard constraints, and (check-sat). This
+ * is the translation the oracle uses.
+ *
+ * @return  0; -1 if part of the problem could not be translated (the script
+ *          says what) or the write failed.
+ */
+int dvs_problem_write_smt2(const dvs_problem_t *p, FILE *out);
+
 #ifdef __cplusplus
 }
 #endif

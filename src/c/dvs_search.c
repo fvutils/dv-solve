@@ -6,6 +6,7 @@
 #include <time.h>
 #include "dvs_search.h"
 #include "dvs_ctx.h"
+#include "dvs_oracle_hooks.h"
 #include "dvs_propagator.h"
 #include "dvs_trail.h"
 #include "dvs_shave.h"
@@ -1305,7 +1306,17 @@ static void _refine_readd_softs(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
 
 static dvs_result_t _solver_solve_relax(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts);
 
+static dvs_result_t _solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts);
+
 dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
+    if (!ctx || !ctx->oracle) return _solver_solve(ctx, opts);
+    double t0 = dvs_oracle_clock_ms();
+    dvs_result_t r = _solver_solve(ctx, opts);
+    dvs_oracle_on_solve(ctx, opts, r, dvs_oracle_clock_ms() - t0);
+    return r;
+}
+
+static dvs_result_t _solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     dvs_result_t r = _solver_solve_relax(ctx, opts);
     /* The propagation deadline belongs to this solve only: a later pin or
      * incremental add must not abort on it. */
@@ -1470,7 +1481,14 @@ static void _reset_in_scope(dvs_ctx_t *ctx) {
     }
 }
 
+static void _solver_reset(dvs_ctx_t *ctx);
+
 void dvs_solver_reset(dvs_ctx_t *ctx) {
+    _solver_reset(ctx);
+    if (ctx && ctx->oracle) dvs_oracle_on_reset(ctx);
+}
+
+static void _solver_reset(dvs_ctx_t *ctx) {
     if (!ctx || !ctx->initial_vars || ctx->initial_n_vars == 0) return;
     if (ctx->n_checkpoints > 0 && ctx->prop_refs) {
         _reset_in_scope(ctx);
@@ -1553,7 +1571,15 @@ void dvs_solver_reset(dvs_ctx_t *ctx) {
 /* dvs_solver_pin_var                                                      */
 /* ------------------------------------------------------------------ */
 
+static int _solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
+
 int dvs_solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
+    int rc = _solver_pin_var(ctx, var_id, value);
+    if (ctx && ctx->oracle) dvs_oracle_on_pin(ctx, var_id, value, rc);
+    return rc;
+}
+
+static int _solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx || var_id >= ctx->n_vars) return -1;
     var_id = _alias_root(ctx, var_id);
     if (ctx->n_checkpoints > 0 &&
@@ -1717,7 +1743,15 @@ static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     return 0;
 }
 
+static int _solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
+
 int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
+    int rc = _solver_exclude_value(ctx, var_id, value);
+    if (ctx && ctx->oracle) dvs_oracle_on_exclude(ctx, var_id, value, rc);
+    return rc;
+}
+
+static int _solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx || var_id >= ctx->n_vars) return -1;
     var_id = _alias_root(ctx, var_id);
     if (!ctx->var_holes_head) return -1;

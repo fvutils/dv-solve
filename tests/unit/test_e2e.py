@@ -43,7 +43,7 @@ def _build_lib(build_dir: Path) -> Path:
         ["cmake", "--build", str(build_dir), "--parallel"],
         check=True, capture_output=True,
     )
-    hits = sorted(build_dir.glob("libdv_solve.so*"), key=lambda p: len(p.name))
+    hits = sorted((build_dir / "lib").glob("libdv_solve.so*"), key=lambda p: len(p.name))
     if not hits:
         raise FileNotFoundError("libdv_solve.so not found after build")
     return hits[0]
