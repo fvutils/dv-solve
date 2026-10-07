@@ -23,7 +23,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parents[1]
-LOCK = json.loads((_HERE / "tools.lock.json").read_text())
+LOCK = json.loads((_HERE / "tools.lock.json").read_text(encoding="utf-8"))
 # Developer checkouts get these from ivpm (ivpm.yaml); same bundles, older layout.
 _LOCAL = {"bitwuzla": _REPO / "packages/verilator-bin/bin/bitwuzla",
           "verilator": _REPO / "packages/verilator-bin/bin/verilator",

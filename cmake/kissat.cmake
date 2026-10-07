@@ -37,59 +37,65 @@ set(KISSAT_EXCLUDED
 )
 list(REMOVE_ITEM KISSAT_ALL_SRCS ${KISSAT_EXCLUDED})
 
-add_library(kissat STATIC ${KISSAT_ALL_SRCS})
-
-target_include_directories(kissat PUBLIC ${KISSAT_SRC})
-# build.h is included as "build.h"; expose its directory privately to the
-# kissat sources so other code can't accidentally pick it up.
-target_include_directories(kissat PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/kissat_gen)
-# dv-solve fork: kissat sources can #include "dvs_alloc.h" for the optional
-# allocator routing. The include must be PRIVATE — upstream Kissat must not
-# acquire dv-solve as a transitive dependency.
-target_include_directories(kissat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
-
-# Compile flags mirroring kissat's default release configuration:
-#   NDEBUG    - production assertions off
-#   QUIET     - omit verbose output
-#   NPROOFS   - omit DRAT proof tracing
-# We deliberately do NOT define COMPACT yet; that's a future tuning knob.
-target_compile_definitions(kissat PRIVATE NDEBUG QUIET NPROOFS)
-
 # Public C headers the dv-solve / kissat sources expect on Windows live here.
 set(DVS_WIN_COMPAT ${CMAKE_CURRENT_SOURCE_DIR}/src/c/compat/win)
 
-if(MSVC)
-    # MSVC rejects the GCC/Clang flags above. Force-include the builtins/stat
-    # shim into every kissat TU, put the POSIX shim headers on the include
-    # path, and compile the Win32 backings for getrusage/gettimeofday/sysconf.
-    target_sources(kissat PRIVATE ${DVS_WIN_COMPAT}/win_compat.c)
-    target_include_directories(kissat PRIVATE ${DVS_WIN_COMPAT})
-    target_compile_options(kissat PRIVATE
-        /O2
-        /FI${DVS_WIN_COMPAT}/msvc_compat.h
-        /wd4244 /wd4267 /wd4146   # narrowing/sign-conversion noise from kissat
-    )
-    target_compile_definitions(kissat PRIVATE
-        _CRT_SECURE_NO_WARNINGS
-        _CRT_NONSTDC_NO_WARNINGS
-        WIN32_LEAN_AND_MEAN)
-    # GetProcessMemoryInfo lives in psapi.
-    target_link_libraries(kissat PRIVATE psapi)
-else()
-    # Kissat is C99 with GNU extensions in places; -std=c99 matches their default.
-    target_compile_options(kissat PRIVATE
-        -std=c99
-        -W -Wall
-        -O3
-        -fPIC
-        -Wno-unused-parameter
-        -Wno-unused-function
-        -Wno-unused-variable
-        -Wno-unused-but-set-variable
-    )
-    # Kissat uses sqrt/log10 — link libm publicly so consumers pick it up too.
-    # (Windows folds the math routines into the CRT; there is no separate -lm.)
-    target_link_libraries(kissat PUBLIC m)
-endif()
+# One kissat library target. A function so the MSVC build can make a second
+# copy against the static C runtime for dv-solve-smt2 (CMakeLists.txt).
+function(dvs_add_kissat name)
+    add_library(${name} STATIC ${KISSAT_ALL_SRCS})
 
-set_target_properties(kissat PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(${name} PUBLIC ${KISSAT_SRC})
+    # build.h is included as "build.h"; expose its directory privately to the
+    # kissat sources so other code can't accidentally pick it up.
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/kissat_gen)
+    # dv-solve fork: kissat sources can #include "dvs_alloc.h" for the optional
+    # allocator routing. The include must be PRIVATE — upstream Kissat must not
+    # acquire dv-solve as a transitive dependency.
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+
+    # Compile flags mirroring kissat's default release configuration:
+    #   NDEBUG    - production assertions off
+    #   QUIET     - omit verbose output
+    #   NPROOFS   - omit DRAT proof tracing
+    # We deliberately do NOT define COMPACT yet; that's a future tuning knob.
+    target_compile_definitions(${name} PRIVATE NDEBUG QUIET NPROOFS)
+
+    if(MSVC)
+        # MSVC rejects the GCC/Clang flags above. Force-include the builtins/stat
+        # shim into every kissat TU, put the POSIX shim headers on the include
+        # path, and compile the Win32 backings for getrusage/gettimeofday/sysconf.
+        target_sources(${name} PRIVATE ${DVS_WIN_COMPAT}/win_compat.c)
+        target_include_directories(${name} PRIVATE ${DVS_WIN_COMPAT})
+        target_compile_options(${name} PRIVATE
+            /O2
+            /FI${DVS_WIN_COMPAT}/msvc_compat.h
+            /wd4244 /wd4267 /wd4146   # narrowing/sign-conversion noise from kissat
+        )
+        target_compile_definitions(${name} PRIVATE
+            _CRT_SECURE_NO_WARNINGS
+            _CRT_NONSTDC_NO_WARNINGS
+            WIN32_LEAN_AND_MEAN)
+        # GetProcessMemoryInfo lives in psapi.
+        target_link_libraries(${name} PRIVATE psapi)
+    else()
+        # Kissat is C99 with GNU extensions in places; -std=c99 matches their default.
+        target_compile_options(${name} PRIVATE
+            -std=c99
+            -W -Wall
+            -O3
+            -fPIC
+            -Wno-unused-parameter
+            -Wno-unused-function
+            -Wno-unused-variable
+            -Wno-unused-but-set-variable
+        )
+        # Kissat uses sqrt/log10 — link libm publicly so consumers pick it up too.
+        # (Windows folds the math routines into the CRT; there is no separate -lm.)
+        target_link_libraries(${name} PUBLIC m)
+    endif()
+
+    set_target_properties(${name} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endfunction()
+
+dvs_add_kissat(kissat)

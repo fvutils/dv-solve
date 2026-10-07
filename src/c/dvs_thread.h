@@ -24,6 +24,8 @@
 
 #include <stddef.h>
 
+#include "dvs_stackinfo.h"
+
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
@@ -53,6 +55,10 @@ typedef struct { pthread_cond_t c; } dvs_cond_t;
 
 /* Spawn a thread running `fn(arg)`. Returns 0 on success. */
 int  dvs_thread_create(dvs_thread_t *t, dvs_thread_fn fn, void *arg);
+/* As dvs_thread_create, with a stack of `stack_bytes` (reserved address
+ * space: pages are committed only as the thread uses them). */
+int  dvs_thread_create_stack(dvs_thread_t *t, dvs_thread_fn fn, void *arg,
+                             size_t stack_bytes);
 /* Join a thread; if `retval` is non-NULL it receives the thread's return value.
  * Returns 0 on success. */
 int  dvs_thread_join(dvs_thread_t *t, void **retval);

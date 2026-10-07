@@ -13,10 +13,14 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <pthread.h>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 #include "smt2/smt2_lexer.h"
 #include "smt2/smt2_parser.h"
 #include "smt2/smt2_frontend.h"
+#include "dvs_thread.h"
 
 /* DVS_VERSION comes from src/dv_solve/__version__.py, through CMake. */
 #ifndef DVS_VERSION
@@ -276,7 +280,7 @@ static int _run_interactive(FILE *f, int show_stats, int verilator_mode) {
 
 /* B12: the SMT2 expression translator recurses one C frame per nesting level
  * (~8.6 KB each), so deeply-nested input can overflow the default ~8 MB stack
- * and SIGSEGV. We run the solve on a pthread with an explicit large stack (a
+ * and SIGSEGV. We run the solve on a thread with an explicit large stack (a
  * reliably-reserved region, unlike runtime setrlimit raises which Linux may
  * refuse to honour). The frontend's depth guard is sized from this same value
  * (g_smt2_translate_stack_bytes) so it bails to `unknown` just under the true
@@ -305,17 +309,12 @@ static void *_smt2_worker(void *p) {
 static int _run_on_worker_stack(FILE *f, int show_stats, int verilator_mode,
                                 int interactive) {
     Smt2WorkerArgs args = { f, show_stats, verilator_mode, interactive, 2 };
-    pthread_attr_t attr;
-    pthread_t      tid;
-    if (pthread_attr_init(&attr) == 0) {
-        if (pthread_attr_setstacksize(&attr, SMT2_WORKER_STACK_BYTES) == 0 &&
-            pthread_create(&tid, &attr, _smt2_worker, &args) == 0) {
-            g_smt2_translate_stack_bytes = SMT2_WORKER_STACK_BYTES;
-            pthread_join(tid, NULL);
-            pthread_attr_destroy(&attr);
-            return args.rc;
-        }
-        pthread_attr_destroy(&attr);
+    dvs_thread_t   tid;
+    if (dvs_thread_create_stack(&tid, _smt2_worker, &args,
+                                SMT2_WORKER_STACK_BYTES) == 0) {
+        g_smt2_translate_stack_bytes = SMT2_WORKER_STACK_BYTES;
+        dvs_thread_join(&tid, NULL);
+        return args.rc;
     }
     /* Fallback: run inline; guard sizes itself from RLIMIT_STACK (0 = unset). */
     g_smt2_translate_stack_bytes = 0;
@@ -331,6 +330,12 @@ int main(int argc, char **argv) {
     int         no_incremental = 0;
     int         verilator_mode = 0;
     int         hash_ignore = 0;
+
+#if defined(_WIN32)
+    /* Replies end in "\n" as on POSIX: a text-mode stdout would turn each into
+     * "\r\n", which a peer parsing the SMT-LIB2 stream does not expect. */
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {

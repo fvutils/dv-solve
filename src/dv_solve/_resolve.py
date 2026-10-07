@@ -153,7 +153,8 @@ class Installation(NamedTuple):
         if self.kind == "override":
             return "%s=%s" % (_override_var(), self.root)
         if self.kind == "ld_library_path":
-            return "LD_LIBRARY_PATH entry %s" % self.root
+            var = "PATH" if platform.system() == "Windows" else "LD_LIBRARY_PATH"
+            return "%s entry %s" % (var, self.root)
         return "%s installation at %s" % (self.kind, self.root)
 
 
@@ -561,7 +562,9 @@ def find_smt2_exe() -> Optional[str]:
             if _is_exe(p):
                 return os.path.abspath(p)
     import shutil
-    hit = shutil.which(SMT2_NAME)
+    # The full file name, not the stem: on Windows which() would otherwise
+    # append the PATHEXT spelling (".EXE") rather than the file's own.
+    hit = shutil.which(name)
     return os.path.abspath(hit) if hit else None
 
 
@@ -576,16 +579,13 @@ def require_smt2_exe() -> str:
 def smt2_missing_error() -> RuntimeError:
     """The error for a missing ``dv-solve-smt2``, naming where it looked."""
     detail = ""
-    if platform.system() == "Windows":
-        detail = ("The Windows wheel does not include it yet; it needs a "
-                  "POSIX system (Linux or macOS).")
-    elif override_root():
+    if override_root():
         detail = "%s is set, so no other location was searched." % _override_var()
     return RuntimeError(
         "dv-solve: %s not found.%s\n"
         "Searched:\n%s\n"
         "Fixes:\n"
-        "  - Install a binary wheel (Linux, macOS):  pip install dv-solve\n"
+        "  - Install a binary wheel:  pip install dv-solve\n"
         "  - Build from source (needs CMake + a C compiler):\n"
         "        cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=build\n"
         "        ninja -C build install\n"

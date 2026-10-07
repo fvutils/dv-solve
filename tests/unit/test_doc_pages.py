@@ -53,7 +53,7 @@ class Block:
 
 def _parse(page: Path) -> list:
     rel = page.relative_to(_SITE).as_posix()
-    lines = page.read_text().splitlines()
+    lines = page.read_text(encoding="utf-8").splitlines()
     blocks, i = [], 0
     while i < len(lines):
         m = re.match(r"^(`{3,})\s*(\{[\w:-]+\}|[\w-]*)\s*(.*)$", lines[i])
@@ -179,7 +179,7 @@ def test_literalincludes_resolve() -> None:
         path = (_SITE / b.page).parent / b.arg
         assert path.is_file(), f"{b.page}:{b.line}: {b.arg} does not exist"
         assert _EXAMPLES in path.resolve().parents, f"{b.page}:{b.line}: include outside docs/examples"
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for opt in ("start-after", "end-before"):
             if opt in b.options:
                 assert b.options[opt] in text, f"{b.page}:{b.line}: {opt} marker missing"
@@ -191,8 +191,9 @@ def test_literalincludes_resolve() -> None:
 # ------------------------------------------------------------------ #
 
 def _smt2_exe() -> str | None:
-    exe = _REPO / "build" / "dv-solve-smt2"
-    return str(exe) if exe.is_file() else shutil.which("dv-solve-smt2")
+    from dv_solve._resolve import smt2_filename
+    exe = _REPO / "build" / smt2_filename()
+    return str(exe) if exe.is_file() else shutil.which(smt2_filename())
 
 
 def _verilator() -> str | None:
@@ -220,6 +221,8 @@ def shell_env() -> dict:
 
 
 def _sh(script: str, cwd: Path, env: dict, timeout: int = 900) -> subprocess.CompletedProcess:
+    if os.name == "nt":
+        pytest.skip("the page shows POSIX shell commands")
     return subprocess.run(["bash", "-e", "-c", script], cwd=cwd, env=env,
                           capture_output=True, text=True, timeout=timeout)
 
@@ -288,7 +291,7 @@ def test_quickstart_smt2_command(shell_env: dict) -> None:
     _need(_smt2_exe(), "dv-solve-smt2")
     b = _block("getting-started/quickstart-smt2.md", "dv-solve-smt2 quickstart.smt2")
     r = _sh(b.text, _EXAMPLES / "smt2", shell_env, timeout=60)
-    assert r.stdout == (_EXAMPLES / "smt2" / "quickstart.expected").read_text(), r.stdout + r.stderr
+    assert r.stdout == (_EXAMPLES / "smt2" / "quickstart.expected").read_text(encoding="utf-8"), r.stdout + r.stderr
 
 
 def test_quickstart_smt2_session(shell_env: dict) -> None:
@@ -456,6 +459,8 @@ def test_packaging_link_line(shell_env: dict, tmp_path: Path) -> None:
 
 def test_c_api_output(shell_env: dict, tmp_path: Path) -> None:
     """Build packet.c as strict C99 and run it; the page shows its output."""
+    if os.name == "nt":
+        pytest.skip("the page's compile line is POSIX (-Wl,-rpath)")
     cc = shutil.which("cc") or shutil.which("gcc")
     if cc is None:
         pytest.skip("no C compiler")
@@ -489,7 +494,7 @@ def test_cli_usage() -> None:
 
 def _c_decls() -> dict:
     """The C declarations on the C API page, by directive."""
-    text = (_SITE / "reference" / "c-api.md").read_text()
+    text = (_SITE / "reference" / "c-api.md").read_text(encoding="utf-8")
     out = {}
     for kind, sig in re.findall(r"^`{3,}\{c:(\w+)\}\s*(.+)$", text, re.M):
         out.setdefault(kind, []).append(sig.strip())
@@ -497,7 +502,7 @@ def _c_decls() -> dict:
 
 
 def _header_text() -> str:
-    text = (_REPO / "src" / "c" / "dv_solve.h").read_text()
+    text = (_REPO / "src" / "c" / "dv_solve.h").read_text(encoding="utf-8")
     return re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
 
 
@@ -513,7 +518,7 @@ def test_c_api_matches_header(tmp_path: Path) -> None:
     if cc is None:
         pytest.skip("no C compiler")
     decls = _c_decls()
-    text = (_SITE / "reference" / "c-api.md").read_text()
+    text = (_SITE / "reference" / "c-api.md").read_text(encoding="utf-8")
     src = [_block("reference/c-api.md", '#include "dv_solve.h"').text,
            "#include <stddef.h>"]
     for sig in decls["function"]:
@@ -545,7 +550,7 @@ def test_c_api_matches_header(tmp_path: Path) -> None:
 def test_c_api_documents_whole_header() -> None:
     """Every function, type, macro and enumerator in dv_solve.h is on the page."""
     hdr = _header_text()
-    page = (_SITE / "reference" / "c-api.md").read_text()
+    page = (_SITE / "reference" / "c-api.md").read_text(encoding="utf-8")
     documented = {re.search(r"(\w+)\s*\(", s).group(1) for s in _c_decls()["function"]}
     declared = set(re.findall(r"^[\w ]+?\**\s*\b(dvs_\w+)\s*\(", hdr, re.M))
     assert declared == documented, (sorted(declared - documented), sorted(documented - declared))
@@ -562,14 +567,14 @@ def test_c_api_documents_whole_header() -> None:
 
 
 def _sv_decls(path: Path) -> set:
-    text = re.sub(r"//.*", "", path.read_text())
+    text = re.sub(r"//.*", "", path.read_text(encoding="utf-8"))
     decls = re.findall(r"(?:import \"DPI-C\"\s+)?(?<!\w)((?:pure\s+)?(?:virtual\s+)?(?:local\s+)?"
                        r"(?:function|class)\b[^;]*;)", text)
     return {re.sub(r"\(\s+", "(", re.sub(r"\s+\)", ")", " ".join(d.split()))) for d in decls}
 
 
 def test_sv_api_matches_packages() -> None:
-    page_text = (_SITE / "reference" / "sv-api.md").read_text()
+    page_text = (_SITE / "reference" / "sv-api.md").read_text(encoding="utf-8")
     shown = {" ".join(b.text.split()) for b in _parse(_SITE / "reference" / "sv-api.md")
              if b.kind == "systemverilog"}
     shown |= {" ".join(s.split()) for s in re.findall(r"^`((?:pure |virtual )*function [^`]+;)`",
@@ -592,14 +597,14 @@ _SITE_URL = "https://dvkit.org/fvutils/dv-solve/"
 
 
 def test_readme_quickstart(shell_env: dict) -> None:
-    code = re.search(r"^```python\n(.*?)^```", _README.read_text(), re.M | re.S).group(1)
+    code = re.search(r"^```python\n(.*?)^```", _README.read_text(encoding="utf-8"), re.M | re.S).group(1)
     r = subprocess.run([sys.executable, "-c", code], env=shell_env,
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and "x = " in r.stdout, r.stdout + r.stderr
 
 
 def test_readme_links_reach_pages() -> None:
-    links = re.findall(re.escape(_SITE_URL) + r"([\w/.-]*)", _README.read_text())
+    links = re.findall(re.escape(_SITE_URL) + r"([\w/.-]*)", _README.read_text(encoding="utf-8"))
     assert links
     for path in links:
         if path:

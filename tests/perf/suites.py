@@ -22,7 +22,7 @@ def load(name: str) -> dict:
 
     A randomization suite (`"kind": "rand"`) lists benchmarks defined in
     tests/perf/rand_benches.py instead of fixture files; see load_rand()."""
-    spec = json.loads((_HERE / "suites" / f"{name}.json").read_text())
+    spec = json.loads((_HERE / "suites" / f"{name}.json").read_text(encoding="utf-8"))
     if spec.get("kind") == "rand":
         return load_rand(spec)
     fixtures = []

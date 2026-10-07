@@ -74,7 +74,7 @@ def test_doc_smt2_example_output(example: Path, smt2_exe: str) -> None:
     proc = subprocess.run([smt2_exe, str(example)], capture_output=True,
                           text=True, timeout=60)
     assert proc.returncode in (0, 1), proc.stdout + proc.stderr
-    assert proc.stdout == example.with_suffix(".expected").read_text()
+    assert proc.stdout == example.with_suffix(".expected").read_text(encoding="utf-8")
 
 
 # The Verilator, DPI and C examples are built and run by test_doc_pages.py,

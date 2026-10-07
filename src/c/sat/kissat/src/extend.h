@@ -1,6 +1,7 @@
 #ifndef _extend_h_INCLUDED
 #define _extend_h_INCLUDED
 
+#include "bitfield.h"
 #include "stack.h"
 #include "utilities.h"
 
@@ -8,7 +9,7 @@ typedef struct extension extension;
 
 struct extension {
   signed int lit : 31;
-  bool blocking : 1;
+  KISSAT_BOOL_BITFIELD blocking : 1;
 };
 
 // clang-format off

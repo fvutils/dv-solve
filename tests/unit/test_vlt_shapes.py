@@ -47,7 +47,7 @@ def _run(body: str, get: str, tmp_path: Path, seeds=(1,)):
                        env={"DV_LOG": str(log), "PATH": "/usr/bin:/bin"})
     verdicts = [l for l in r.stdout.split() if l in ("sat", "unsat", "unknown")]
     vals = [(n, int(v, 2)) for n, v in _VAL.findall(r.stdout)]
-    times = [l for l in (log.read_text() if log.exists() else "").splitlines()
+    times = [l for l in (log.read_text(encoding="utf-8") if log.exists() else "").splitlines()
              if l.startswith("vlt-time")]
     return verdicts, vals, times, r.stdout
 
@@ -179,4 +179,4 @@ def test_smod_compared_with_zero_exhaustive(tmp_path):
                        env={"DV_LOG": str(log), "PATH": "/usr/bin:/bin"})
     got = [l for l in r.stdout.split() if l in ("sat", "unsat", "unknown")]
     assert got == want
-    assert "bitblast" not in log.read_text()
+    assert "bitblast" not in log.read_text(encoding="utf-8")

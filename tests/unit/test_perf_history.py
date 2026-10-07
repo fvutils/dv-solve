@@ -49,10 +49,10 @@ def test_consolidate_is_idempotent_and_sorted(tmp_path):
     recs = [_rec("20261004T050000Z", commit="b" * 40), _rec("20261003T050000Z")]
     recs = [(_art(r), r) for r in recs]
     s1 = consolidate.consolidate(recs, tmp_path)
-    text = (tmp_path / "2026.jsonl").read_text()
+    text = (tmp_path / "2026.jsonl").read_text(encoding="utf-8")
     s2 = consolidate.consolidate(list(reversed(recs)), tmp_path)
     assert s1["lines"] == 2 and s2["lines"] == 0
-    assert (tmp_path / "2026.jsonl").read_text() == text
+    assert (tmp_path / "2026.jsonl").read_text(encoding="utf-8") == text
     utcs = [json.loads(l)["utc"] for l in text.splitlines()]
     assert utcs == sorted(utcs)
     assert (tmp_path / "machines" / "m00000.json").exists()
@@ -61,7 +61,7 @@ def test_consolidate_is_idempotent_and_sorted(tmp_path):
 def test_invalid_and_noisy_runs_are_kept_with_reason(tmp_path):
     bad = _rec("20261003T050000Z", valid=False, noisy=True)
     s = consolidate.consolidate([(_art(bad), bad)], tmp_path)
-    line = json.loads((tmp_path / "2026.jsonl").read_text())
+    line = json.loads((tmp_path / "2026.jsonl").read_text(encoding="utf-8"))
     assert s["invalid"] == 1 and s["noisy"] == 1
     assert line["valid"] is False and line["noisy"] is True and line["reason"]
 

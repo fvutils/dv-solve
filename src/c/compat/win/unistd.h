@@ -33,6 +33,9 @@ typedef long long ssize_t;   /* matches SSIZE_T on x64 */
 /* sysconf() names we answer (see win_compat.c). */
 #define _SC_PAGESIZE         1
 #define _SC_NPROCESSORS_ONLN 2
+#ifdef __cplusplus
+extern "C"
+#endif
 long sysconf(int name);
 
 #endif /* _MSC_VER */

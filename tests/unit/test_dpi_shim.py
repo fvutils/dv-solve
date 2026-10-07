@@ -102,10 +102,16 @@ def _build_2var_b64(lib):
 # Load the DPI library
 @pytest.fixture(scope="session")
 def libdpi(tmp_path_factory):
-    """Build and load libdv_solve_dpi.so."""
+    """The DPI shim: the one the resolver selects, else a fresh build."""
     import shutil
     import subprocess
     from pathlib import Path
+
+    from dv_solve import _resolve
+
+    found = _resolve.find_library("dv_solve_dpi")
+    if found:
+        return ctypes.CDLL(found)
 
     pkg_dir = Path(__file__).parent.parent.parent
 
@@ -122,9 +128,10 @@ def libdpi(tmp_path_factory):
         check=True, capture_output=True,
     )
 
-    candidates = list(build_dir.glob("libdv_solve_dpi.so*"))
+    candidates = [p for pat in _resolve.lib_patterns("dv_solve_dpi")
+                  for p in build_dir.rglob(pat)]
     if not candidates:
-        pytest.skip("libdv_solve_dpi.so not built")
+        pytest.skip("the DPI shim was not built")
     candidates.sort(key=lambda p: len(p.name))
     return ctypes.CDLL(str(candidates[0]))
 

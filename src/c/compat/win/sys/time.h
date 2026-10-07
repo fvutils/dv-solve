@@ -16,6 +16,9 @@ struct timeval {
 };
 #endif
 
+#ifdef __cplusplus
+extern "C"
+#endif
 int gettimeofday(struct timeval *tp, void *tzp);
 
 #endif /* _MSC_VER */

@@ -29,7 +29,7 @@ _REPO = Path(__file__).resolve().parents[2]
 
 def test_solve_opts_matches_header() -> None:
     """The Python options struct has every field of dvs_solve_opts_t."""
-    hdr = (_REPO / "src" / "c" / "dv_solve.h").read_text()
+    hdr = (_REPO / "src" / "c" / "dv_solve.h").read_text(encoding="utf-8")
     body = re.search(r"typedef struct \{([^}]*)\}\s*dvs_solve_opts_t;", hdr).group(1)
     body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
     c_fields = re.findall(r"(\w+)\s*(?:\[\d+\])?\s*;", body)

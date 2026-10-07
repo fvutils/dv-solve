@@ -1,6 +1,7 @@
 #ifndef _watch_h_INCLUDED
 #define _watch_h_INCLUDED
 
+#include "bitfield.h"
 #include "keatures.h"
 #include "reference.h"
 #include "stack.h"
@@ -15,23 +16,25 @@ typedef struct binary_tagged_literal binary_watch;
 typedef struct binary_tagged_literal blocking_watch;
 typedef struct binary_tagged_reference large_watch;
 
+/* dv-solve fork: KISSAT_BOOL_BITFIELD, see bitfield.h. */
+
 struct binary_tagged_literal {
 #ifdef KISSAT_IS_BIG_ENDIAN
-  bool binary : 1;
+  KISSAT_BOOL_BITFIELD binary : 1;
   unsigned lit : 31;
 #else
   unsigned lit : 31;
-  bool binary : 1;
+  KISSAT_BOOL_BITFIELD binary : 1;
 #endif
 };
 
 struct binary_tagged_reference {
 #ifdef KISSAT_IS_BIG_ENDIAN
-  bool binary : 1;
+  KISSAT_BOOL_BITFIELD binary : 1;
   unsigned ref : 31;
 #else
   unsigned ref : 31;
-  bool binary : 1;
+  KISSAT_BOOL_BITFIELD binary : 1;
 #endif
 };
 
@@ -42,6 +45,11 @@ union watch {
   large_watch large;
   unsigned raw;
 };
+
+/* dv-solve fork: kissat asserts this (substitute.c, watch.h) but only with
+ * assertions on, and release builds define NDEBUG. Check it at compile time
+ * so a compiler with another bitfield layout fails the build instead. */
+typedef char kissat_watch_is_one_word[sizeof (watch) == sizeof (unsigned) ? 1 : -1];
 
 typedef vector watches;
 

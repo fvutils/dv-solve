@@ -38,11 +38,6 @@ if(NOT EXISTS ${CADICAL_SRC}/ccadical.cpp)
         "or configure with -DDVS_WITH_CADICAL=OFF for the pure-C build.")
 endif()
 
-if(MSVC)
-    message(FATAL_ERROR "cadical.cmake: MSVC path not implemented "
-        "(DVS_WITH_CADICAL should be OFF on MSVC).")
-endif()
-
 # Library sources: every src/*.cpp plus src/*.c (kitten.c = embedded
 # kitten/citten sub-solver), minus the two application mains.
 file(GLOB CADICAL_ALL_SRCS ${CADICAL_SRC}/*.cpp ${CADICAL_SRC}/*.c)
@@ -63,6 +58,62 @@ target_compile_definitions(cadical_objs PRIVATE NBUILD NDEBUG)
 # that matters for portability: closefrom() exists only in glibc >= 2.34 (not
 # manylinux_2_28) and is absent on macOS. Without it, file.cpp needs
 # -DNCLOSEFROM to use its own close() loop instead.
+if(MSVC)
+    # CaDiCaL targets MinGW on Windows, not MSVC: its own _WIN32 branches cover
+    # the process and signal code, but it still includes <unistd.h>,
+    # <sys/time.h> and <sys/resource.h> and uses GCC builtins unguarded. The
+    # same shims that build kissat supply those (cmake/kissat.cmake). The
+    # rename header replaces the ELF/Mach-O symbol localization below; see it.
+    #
+    # A function so dv-solve-smt2 can have a second copy against the static C
+    # runtime (CMakeLists.txt): `objs` and `lib` are the target names to make,
+    # `kissat_lib` the kissat built for the same runtime.
+    set(DVS_CADICAL_CMAKE_DIR ${CMAKE_CURRENT_LIST_DIR})
+    function(dvs_add_cadical_msvc objs lib kissat_lib)
+        if(NOT objs STREQUAL "cadical_objs")
+            add_library(${objs} OBJECT ${CADICAL_ALL_SRCS})
+            target_include_directories(${objs} PUBLIC ${CADICAL_SRC})
+            target_compile_features(${objs} PRIVATE cxx_std_17)
+            target_compile_definitions(${objs} PRIVATE NBUILD NDEBUG)
+        endif()
+        target_include_directories(${objs} PRIVATE ${DVS_WIN_COMPAT})
+        target_compile_options(${objs} PRIVATE
+            /O2 /EHsc
+            /FI${DVS_WIN_COMPAT}/msvc_compat.h
+            /FI${DVS_CADICAL_CMAKE_DIR}/cadical_msvc_rename.h
+            /wd4244 /wd4267 /wd4146 /wd4996)
+        # NOMINMAX: resources.cpp includes <windows.h>, whose min/max macros
+        # break std::min/std::max. NCLOSEFROM: there is no closefrom().
+        target_compile_definitions(${objs} PRIVATE
+            NCLOSEFROM NOMINMAX WIN32_LEAN_AND_MEAN
+            _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
+
+        add_library(${lib} STATIC $<TARGET_OBJECTS:${objs}>)
+        set_target_properties(${lib} PROPERTIES LINKER_LANGUAGE CXX)
+        target_include_directories(${lib} PUBLIC ${CADICAL_SRC})
+        # The shims' getrusage/sysconf/gettimeofday are implemented in
+        # kissat's win_compat.c, and resources.cpp's Win32 branch needs psapi.
+        target_link_libraries(${lib} PUBLIC ${kissat_lib} psapi)
+
+        # A C name the rename header misses would not necessarily fail the
+        # link: CaDiCaL's references could bind to kissat's definition
+        # instead. List the library's external symbols and fail on any C name
+        # left un-renamed.
+        find_package(Python3 COMPONENTS Interpreter)
+        if(Python3_FOUND)
+            add_custom_command(TARGET ${lib} POST_BUILD
+                COMMAND ${Python3_EXECUTABLE}
+                        ${DVS_CADICAL_CMAKE_DIR}/check_cadical_symbols.py
+                        $<TARGET_FILE:${lib}>
+                VERBATIM)
+        else()
+            message(WARNING "Python not found: CaDiCaL symbol check skipped")
+        endif()
+    endfunction()
+    dvs_add_cadical_msvc(cadical_objs cadical kissat)
+    return()
+endif()
+
 include(CheckCXXSourceCompiles)
 check_cxx_source_compiles("
 extern \"C\" {

@@ -69,9 +69,8 @@ jobs:
         # requirements itself. On Linux cibuildwheel copies the project
         # directory, packages/ included, into the manylinux container.
         # pipx rather than pip: the macOS runners' python3 is Homebrew's, which
-        # refuses pip installs (PEP 668). Skipped on Windows: MSVC builds force
-        # DVS_WITH_CADICAL=OFF.
-        if: runner.os != 'Windows'
+        # refuses pip installs (PEP 668). Windows included: MSVC builds CaDiCaL
+        # too (cmake/cadical.cmake).
         run: pipx run ivpm update -d use -a --py-skip-install
 
       - name: Build wheels

@@ -26,6 +26,9 @@ from collections import Counter
 
 import pytest
 
+# tests.perf measures child CPU time with the POSIX-only resource module.
+pytest.importorskip("resource")
+
 from tests.perf import tools, vlt_protocol
 from tests.perf.rand_benches import Bench
 
@@ -103,7 +106,7 @@ def _real(tmp_path, sv: str, n: int) -> tuple:
     rows = [tuple(int(x) for x in ln.split()[1:]) for ln in out.stdout.splitlines()
             if ln.startswith("V ")]
     assert "FAIL" not in out.stdout
-    return log.read_text(), rows
+    return log.read_text(encoding="utf-8"), rows
 
 
 _HASH = re.compile(r"\(assert \(= #b[01] \(bvxor((?: \(\(_ extract \d+ \d+\) [\w.]+\))+)\)\)\)")

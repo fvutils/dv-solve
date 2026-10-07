@@ -77,7 +77,7 @@ def _run(script: str, tmp_path: Path):
                        env={"DV_LOG": str(log), "PATH": "/usr/bin:/bin"})
     verdicts = [l for l in r.stdout.split() if l in ("sat", "unsat", "unknown")]
     vals = [int(v, 2) for _n, v in _VAL.findall(r.stdout)]
-    return verdicts, vals, log.read_text() if log.exists() else ""
+    return verdicts, vals, log.read_text(encoding="utf-8") if log.exists() else ""
 
 
 @_needs_exe

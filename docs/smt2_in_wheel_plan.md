@@ -180,13 +180,19 @@ release and a version-matching rule, all for about 1 MB.
 - [ ] Optional end-to-end check: run the Verilator quickstart example
   against the installed binary in a job that already has Verilator.
 
-### P5 — Windows port (separate, later)
+### P5 — Windows port (branch `feat/windows-cadical`)
 
-- [ ] Replace `unistd.h`, `pthread.h` and `sys/resource.h` uses in
+- [x] Replace `unistd.h`, `pthread.h` and `sys/resource.h` uses in
   `smt2_main.c` and `smt2_frontend.c` with portable code, or with small
-  `#ifdef _WIN32` shims.
-- [ ] Turn the tool on for MSVC. P1–P4 then pick it up with no layout
+  `#ifdef _WIN32` shims. The large-stack worker uses
+  `dvs_thread_create_stack`; the depth guard sizes itself from
+  `dvs_stack_size()` where there is no `RLIMIT_STACK`; `setenv`/`unsetenv`
+  come from `msvc_compat.h`; stdout is binary, so replies end in `\n`.
+- [x] Turn the tool on for MSVC. P1–P4 then pick it up with no layout
   changes, which is the reason for D4.
+- [x] Link it against the static C runtime (`/MT`), with `/MT` copies of
+  kissat and CaDiCaL: pip's `Scripts\` has no `VCRUNTIME140.dll`, and
+  delvewheel bundles the runtime only for the package's DLLs.
 
 ### P6 — Docs and release
 

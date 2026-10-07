@@ -131,7 +131,7 @@ def physical_cores() -> list:
     seen, cores = set(), []
     for cpu in sorted(os.sched_getaffinity(0)):
         sib = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")
-        key = sib.read_text().strip() if sib.exists() else str(cpu)
+        key = sib.read_text(encoding="utf-8").strip() if sib.exists() else str(cpu)
         if key not in seen:
             seen.add(key)
             cores.append(cpu)

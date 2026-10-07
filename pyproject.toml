@@ -129,3 +129,15 @@ manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64"
 manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
 before-all = "dnf -y install cmake"
 
+[tool.cibuildwheel.windows]
+# With CaDiCaL (C++), the DLLs import MSVCP140.dll, the C++ runtime, which
+# Python does not ship: without it a machine lacking the Visual C++
+# Redistributable cannot load the library. delvewheel copies it into the
+# wheel (dv_solve.libs/) and patches dv_solve/__init__.py to add that
+# directory to the DLL search path. --analyze-existing: the DLLs are package
+# data loaded through ctypes, not extension modules, which delvewheel would
+# otherwise not inspect. --no-mangle-all keeps the name MSVCP140.dll, so that
+# where the process already has the runtime loaded -- a simulator loading
+# dv_solve_dpi.dll, for one -- that copy satisfies the import.
+before-build = "pip install delvewheel"
+repair-wheel-command = "delvewheel repair --analyze-existing --no-mangle-all -w {dest_dir} {wheel}"

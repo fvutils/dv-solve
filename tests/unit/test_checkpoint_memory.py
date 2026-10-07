@@ -13,6 +13,7 @@ The backing allocator here counts what the context's block allocator asks
 for, so the test needs no process-memory measurement.
 """
 import ctypes
+import os
 
 from dv_solve import ctx as ctx_mod
 from dv_solve.builder import SolveProblemBuilder
@@ -32,7 +33,9 @@ _ALLOC_FN = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.POINTER(_Alloc), ctypes.c_s
 _RELEASE_FN = ctypes.CFUNCTYPE(None, ctypes.POINTER(_Alloc), ctypes.c_void_p, ctypes.c_size_t)
 _Alloc._fields_ = [("alloc", _ALLOC_FN), ("release", _RELEASE_FN)]
 
-_libc = ctypes.CDLL(None)
+# The C runtime's malloc/free (ucrtbase on Windows, where CDLL(None) is
+# not the process's own symbols).
+_libc = ctypes.CDLL("ucrtbase") if os.name == "nt" else ctypes.CDLL(None)
 _libc.malloc.restype = ctypes.c_void_p
 _libc.malloc.argtypes = [ctypes.c_size_t]
 _libc.free.restype = None

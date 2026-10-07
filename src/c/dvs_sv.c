@@ -20,10 +20,14 @@
 #include <string.h>
 #include "dvs_sv.h"
 #include "dvs_i128.h"
+#include "dvs_stackinfo.h"
 
 #define SV_POOL_HDR   ((uint32_t)sizeof(dvs_pool_t))
 #define SV_MAX_W      255u      /* node formats hold widths in a uint8_t */
 #define SV_MAX_DEPTH  20000
+/* Stack left free below the deepest recursion: room for the calls a level
+ * makes (memo growth, pool appends, malloc) after its own check. */
+#define SV_STACK_MARGIN (64u * 1024u)
 
 void dvs_sv_const_type(const ExprConst *c, uint16_t *width, uint8_t *is_signed) {
     if (c->width) {
@@ -80,6 +84,7 @@ typedef struct {
     int       oom;             /* err was caused by running out of memory */
     int       unknown_var;     /* err was caused by an undeclared variable */
     int       depth;
+    uintptr_t stack_floor;     /* dvs_stack_floor(); 0 = unknown */
 } SvE;
 
 enum { M_VAL = 0, M_BOOL = 1, M_TYPE = 2 };
@@ -349,7 +354,7 @@ static SvTy _type(SvE *E, dvs_expr_t ref) {
     uint64_t k = _key(ref, 0, 0, M_TYPE);
     uint32_t mv;
     if (_memo_get(E, k, &mv)) { t.w = (uint16_t)(mv >> 8); t.s = (uint8_t)(mv & 1); return t; }
-    if (++E->depth > SV_MAX_DEPTH) { E->err = 1; E->depth--; return t; }
+    if (++E->depth > SV_MAX_DEPTH || dvs_stack_exhausted(E->stack_floor)) { E->err = 1; E->depth--; return t; }
 
     switch (_kind(E, ref)) {
     case EXPR_VAR:
@@ -481,7 +486,7 @@ static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint16_t W, uint8_t S) {
     uint64_t k = _key(ref, W, S, M_VAL);
     uint32_t mv;
     if (_memo_get(E, k, &mv)) return mv;
-    if (++E->depth > SV_MAX_DEPTH) { E->err = 1; E->depth--; return EXPR_NULL; }
+    if (++E->depth > SV_MAX_DEPTH || dvs_stack_exhausted(E->stack_floor)) { E->err = 1; E->depth--; return EXPR_NULL; }
 
     dvs_expr_t out = EXPR_NULL;
     switch (_kind(E, ref)) {
@@ -829,7 +834,7 @@ static dvs_expr_t _bool(SvE *E, dvs_expr_t ref) {
     uint64_t k = _key(ref, 0, 0, M_BOOL);
     uint32_t mv;
     if (_memo_get(E, k, &mv)) return mv;
-    if (++E->depth > SV_MAX_DEPTH) { E->err = 1; E->depth--; return EXPR_NULL; }
+    if (++E->depth > SV_MAX_DEPTH || dvs_stack_exhausted(E->stack_floor)) { E->err = 1; E->depth--; return EXPR_NULL; }
 
     dvs_expr_t out = ref;
     switch (_kind(E, ref)) {
@@ -906,6 +911,7 @@ dvs_problem_t *dvs_sv_elaborate(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
 
     SvE E;
     memset(&E, 0, sizeof(E));
+    E.stack_floor = dvs_stack_floor(SV_STACK_MARGIN);
     E.src = sp;
     E.vfn = fn;
     E.vud = ud;
@@ -995,6 +1001,7 @@ int dvs_sv_elaborate_more(dvs_problem_t **elab, const dvs_problem_t *orig,
     /* 2. Elaborate the new root, appending to the copy in place. */
     SvE E;
     memset(&E, 0, sizeof(E));
+    E.stack_floor = dvs_stack_floor(SV_STACK_MARGIN);
     E.src = d;
     E.dst = d;
     uint32_t max_id = 0;

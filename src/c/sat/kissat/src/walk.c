@@ -1,3 +1,4 @@
+#include "bitfield.h"
 #include "walk.h"
 #include "allocate.h"
 #include "decide.h"
@@ -21,7 +22,7 @@ typedef struct walker walker;
 
 struct tagged {
   unsigned ref : LD_MAX_WALK_REF;
-  bool binary : 1;
+  KISSAT_BOOL_BITFIELD binary : 1;
 };
 
 static inline tagged make_tagged (bool binary, unsigned ref) {

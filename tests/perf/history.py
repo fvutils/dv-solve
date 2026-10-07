@@ -36,7 +36,7 @@ class AccessError(RuntimeError):
 
 def committed_lines_from(p: Path) -> list:
     lines = []
-    for n, text in enumerate(p.read_text().splitlines(), 1):
+    for n, text in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
         if text.strip():
             try:
                 lines.append(json.loads(text))
@@ -186,7 +186,7 @@ def main(argv=None) -> int:
             yes = measured(a.commit, a.kind, a.max_age_days)
             print("measured" if yes else "not measured")
             if os.environ.get("GITHUB_OUTPUT"):
-                with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
                     f.write(f"measured={'true' if yes else 'false'}\n")
             return 0
         pending = unconsolidated(Forgejo().perf_artifacts(), lines)
