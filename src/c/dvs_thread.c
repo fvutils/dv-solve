@@ -7,6 +7,9 @@
  * is identical across both.
  */
 
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#  define _GNU_SOURCE   /* pthread_getattr_np */
+#endif
 #include "dvs_thread.h"
 
 #if defined(_WIN32)
@@ -57,6 +60,15 @@ unsigned dvs_cpu_count(void) {
     return si.dwNumberOfProcessors ? si.dwNumberOfProcessors : 1u;
 }
 
+uintptr_t dvs_stack_floor(size_t margin) {
+    /* lo is the bottom of the whole reservation; the guard pages above it
+     * are well inside any useful margin. */
+    ULONG_PTR lo = 0, hi = 0;
+    GetCurrentThreadStackLimits(&lo, &hi);
+    if (!lo || hi - lo <= margin) return 0;
+    return (uintptr_t)lo + margin;
+}
+
 #else
 
 /* ----------------------------- POSIX backend ---------------------------- */
@@ -85,6 +97,26 @@ void dvs_cond_broadcast(dvs_cond_t *c) { pthread_cond_broadcast(&c->c); }
 unsigned dvs_cpu_count(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (unsigned)n : 1u;
+}
+
+uintptr_t dvs_stack_floor(size_t margin) {
+    uintptr_t lo = 0;
+    size_t size = 0;
+#if defined(__APPLE__)
+    pthread_t self = pthread_self();
+    size = pthread_get_stacksize_np(self);
+    lo = (uintptr_t)pthread_get_stackaddr_np(self) - size;  /* addr is the top */
+#elif defined(__linux__)
+    /* glibc and musl; for the main thread the size follows RLIMIT_STACK. */
+    pthread_attr_t a;
+    void *addr = NULL;
+    if (pthread_getattr_np(pthread_self(), &a) != 0) return 0;
+    if (pthread_attr_getstack(&a, &addr, &size) != 0) size = 0;
+    pthread_attr_destroy(&a);
+    lo = (uintptr_t)addr;
+#endif
+    if (!lo || size <= margin) return 0;
+    return lo + margin;
 }
 
 #endif

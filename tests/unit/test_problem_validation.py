@@ -12,6 +12,8 @@ Each case here used to compile and solve:
 """
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from dv_solve.builder import SolveProblemBuilder
@@ -55,16 +57,44 @@ def test_expression_wider_than_255_bits_is_refused():
         SolveCtx(b.finalize()[0])
 
 
-def test_too_deep_expression_is_refused():
+def _deep_problem(depth):
     b = SolveProblemBuilder()
     b.add_var(0, 8, False, 0, 255)
     gt3 = lambda: b.expr_binary(BIN_GT, b.expr_var(0), b.expr_const(3))
     e = gt3()
-    for _ in range(25000):
+    for _ in range(depth):
         e = b.expr_binary(BIN_AND, e, gt3())
     b.add_constraint(e)
+    return b.finalize()[0]
+
+
+def test_too_deep_expression_is_refused():
     with pytest.raises(CompileUnsupportedError):
-        SolveCtx(b.finalize()[0])
+        SolveCtx(_deep_problem(25000))
+
+
+def test_deep_expression_on_a_small_stack_is_refused_not_a_crash():
+    # Under the depth limit, but too deep for a 512 KB stack (a Windows
+    # thread has 1 MB, a macOS secondary thread 512 KB): compile must notice
+    # the stack running out and refuse, not overflow it.
+    problem = _deep_problem(15000)
+    outcome = []
+
+    def compile_it():
+        try:
+            SolveCtx(problem)
+            outcome.append("compiled")
+        except CompileUnsupportedError:
+            outcome.append("refused")
+
+    old = threading.stack_size(512 * 1024)
+    try:
+        t = threading.Thread(target=compile_it)
+        t.start()
+    finally:
+        threading.stack_size(old)
+    t.join()
+    assert outcome == ["refused"]
 
 
 def test_bitblaster_refuses_undeclared_variable():
