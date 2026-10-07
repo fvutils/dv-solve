@@ -99,10 +99,9 @@ jobs:
   # indistinguishable from a slow queue, so if this label is ever retired too,
   # this job now goes red in 45 minutes instead of hanging for six hours.
   #
-  # Neither this job nor its artifact gates a release: `publish` needs
-  # [gate, build_wheels, build_sdist] and publishes linux-x86_64 only, so a
-  # macOS Intel failure cannot block or corrupt a release. That is why this is
-  # a hygiene fix rather than a release blocker.
+  # This job's wheel is published with the rest, so `publish` needs it: a
+  # macOS Intel failure blocks a release rather than shipping one without it,
+  # and the timeout bounds how long that takes to show.
   build_wheels_macos_intel:
     name: macos-x86_64
     if: github.event_name != 'pull_request'
@@ -184,16 +183,13 @@ jobs:
   # wheels as ARTIFACTS above, which is what makes them reviewable without
   # being publishable.
   #
-  # LINUX x86_64 ONLY, deliberately. The build matrix above produces aarch64,
-  # macOS and Windows wheels too, and they keep uploading as artifacts -- but
-  # the first release of this estate ships one platform, because that is the
-  # only one the pssc dependency chain has been validated end-to-end on
-  # (pssparser itself publishes linux-x86_64 wheels and nothing else, so a
-  # dv-solve macOS wheel would have no pssparser to sit beside). Widen this
-  # glob when pssparser's other platforms land; nothing else here changes.
+  # Every wheel the matrix builds: Linux x86_64 and aarch64 (manylinux_2_28
+  # and _2_34), macOS arm64 and x86_64, Windows AMD64. Each build job is in
+  # `needs`, so a release waits for all of them and a failed platform stops
+  # it rather than shipping a partial set.
   publish:
     name: Publish to PyPI
-    needs: [gate, build_wheels, build_sdist]
+    needs: [gate, build_wheels, build_wheels_macos_intel, build_sdist]
     if: ${{ startsWith(github.ref, 'refs/tags/v') && needs.gate.outputs.authority == 'github' }}
     runs-on: ubuntu-latest
     steps:
@@ -201,7 +197,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: wheels-linux-x86_64-*
+          pattern: wheels-*
           path: dist
           merge-multiple: true
 
