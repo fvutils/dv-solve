@@ -101,6 +101,9 @@ MUTANTS = {
     # A table is taken as affine after checking only part of its truth table.
     "affine-table-lanes": ("src/c/dvs_affine.c",
         "if (e != f[w]) return 0;", "if ((e ^ f[w]) & 0xFFFFull) return 0;"),
+    # An extract index narrowed to 8 bits again (the pre-6.6 node format).
+    "wide-extract-index": ("src/c/dvs_builder.c",
+        "    n->lo_bit  = lo_bit;", "    n->lo_bit  = (uint8_t)lo_bit;"),
     "bvadd-wrap-width": ("src/c/dvs_prop_templates.c",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvadd_64);",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width > 1 ? width - 1 : width, priority, _fire_bvadd_64);"),
@@ -152,7 +155,8 @@ PYTESTS = ["tests/formal/test_lcg_soundness.py", "tests/formal/test_bool_ite_con
            "tests/formal/test_incremental_protocol.py", "tests/formal/soundness/test_regressions.py",
            "tests/unit/test_gated_constraints.py", "tests/unit/test_lcg_builder.py",
            "tests/unit/test_wide_watch.py", "tests/unit/test_lcg_array_select.py",
-           "tests/formal/test_aig_sim.py", "tests/formal/test_affine.py"]
+           "tests/formal/test_aig_sim.py", "tests/formal/test_affine.py",
+           "tests/formal/test_wide_sorts.py"]
 
 
 def _pinned(exe: Path) -> bool:

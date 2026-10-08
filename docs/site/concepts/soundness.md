@@ -36,7 +36,7 @@ Current bit-vector limits that produce `unknown`:
 
 | Construct | Limit |
 |---|---|
-| Bit-vector width, including constants | up to 192 bits |
+| Bit-vector width, including constants | up to 65535 bits; array index and element sorts up to 192 bits |
 | Array indices | arrays are expanded element by element, so an array with a wide index sort (for example 32 bits) that is read at a symbolic index is not supported |
 
 ## Finding out why

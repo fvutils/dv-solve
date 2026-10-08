@@ -191,7 +191,7 @@ static void _bump_n_vars(Smt2Frontend *fe, uint32_t n) {
 }
 
 static int _add_var(Smt2Frontend *fe, const char *name, uint32_t len,
-                    uint32_t var_id, uint8_t width) {
+                    uint32_t var_id, uint16_t width) {
     /* Grow to fit. n_vars may have been bumped past vars_cap by
      * _next_var_id syncing with backend-allocated ctx->n_vars
      * (see _fresh_aux). Loop until the slot at n_vars is valid. */
@@ -210,7 +210,6 @@ static int _add_var(Smt2Frontend *fe, const char *name, uint32_t len,
     v->width    = width;
     v->is_signed = 0;
     v->is_bool  = 0;
-    v->_pad     = 0;
     /* Any >64-bit variable is bitblast-only: the CDCL bounds engine models a
      * variable's domain with an int64 [lo,hi], which cannot represent a wide
      * value. Routing here is central — it covers scalar, aux, array-element,
@@ -354,7 +353,7 @@ static int _is_bool_sort(Smt2Frontend *fe, const Sexpr *sort) {
     return sexpr_is_symbol(_expand_sort(fe, sort), "Bool");
 }
 
-static uint8_t _parse_bitvec_sort(Smt2Frontend *fe, const Sexpr *sort) {
+static uint16_t _parse_bitvec_sort(Smt2Frontend *fe, const Sexpr *sort) {
     sort = _expand_sort(fe, sort);
     if (!sort) return 0;
     if (sort->kind == SEXPR_SYMBOL) {
@@ -368,7 +367,7 @@ static uint8_t _parse_bitvec_sort(Smt2Frontend *fe, const Sexpr *sort) {
     if (sort->list.items[2]->kind != SEXPR_NUMERAL) return 0;
     uint64_t w = sort->list.items[2]->numval;
     if (w == 0 || w > SMT2_MAX_BV_BITS) return 0;
-    return (uint8_t)w;
+    return (uint16_t)w;
 }
 
 /* Upper bound (as an int64) for an *unsigned* bit-vector of `width` bits.
@@ -407,8 +406,8 @@ static int _parse_array_sort_x(Smt2Frontend *fe, const Sexpr *s, Smt2ArraySort *
     if (s->list.count != 3) return 0;
     if (!sexpr_is_symbol(s->list.items[0], "Array")) return 0;
 
-    uint8_t addr_w = _parse_bitvec_sort(fe, s->list.items[1]);
-    if (addr_w == 0) return -1;
+    uint16_t addr_w = _parse_bitvec_sort(fe, s->list.items[1]);
+    if (addr_w == 0 || addr_w > SMT2_MAX_ARRAY_BV_BITS) return -1;
     out->inner_addr = 0;
     out->_pad[0] = 0;
 
@@ -416,18 +415,18 @@ static int _parse_array_sort_x(Smt2Frontend *fe, const Sexpr *s, Smt2ArraySort *
      * keyed by I ++ J (the key holds 128 bits). */
     Smt2ArraySort inner;
     if (nested_ok && _parse_array_sort_x(fe, s->list.items[2], &inner, 0) == 1) {
-        if ((uint32_t)addr_w + inner.addr_width > SMT2_MAX_BV_BITS) return -1;
+        if ((uint32_t)addr_w + inner.addr_width > SMT2_MAX_ARRAY_BV_BITS) return -1;
         out->addr_width = (uint8_t)(addr_w + inner.addr_width);
         out->data_width = inner.data_width;
         out->inner_addr = inner.addr_width;
         return 1;
     }
 
-    uint8_t data_w = _parse_bitvec_sort(fe, s->list.items[2]);
-    if (data_w == 0) return -1;
+    uint16_t data_w = _parse_bitvec_sort(fe, s->list.items[2]);
+    if (data_w == 0 || data_w > SMT2_MAX_ARRAY_BV_BITS) return -1;
 
-    out->addr_width = addr_w;
-    out->data_width = data_w;
+    out->addr_width = (uint8_t)addr_w;
+    out->data_width = (uint8_t)data_w;
     return 1;
 }
 
@@ -536,7 +535,7 @@ static uint32_t _next_var_id(Smt2Frontend *fe) {
 static uint32_t _fresh_aux(Smt2Frontend *fe, uint16_t width) {
     uint32_t var_id = _next_var_id(fe);
     int64_t max_val = _bv_unsigned_hi(width);
-    dvs_expr_t vref = dvs_builder_add_var(fe->builder, var_id, (uint8_t)width, 0, 0, max_val);
+    dvs_expr_t vref = dvs_builder_add_var(fe->builder, var_id, (uint16_t)width, 0, 0, max_val);
     /* Mark aux vars as VAR_AUX so search never decides them: they are
      * fully determined by their defining constraint. With the ITE_value
      * cond back-propagation in place, propagation can pin them on its
@@ -544,7 +543,7 @@ static uint32_t _fresh_aux(Smt2Frontend *fe, uint16_t width) {
     dvs_builder_mark_var_aux(fe->builder, vref);
     char name[SMT2_MAX_NAME];
     snprintf(name, sizeof(name), "__aux%u", var_id);
-    _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint8_t)width);
+    _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint16_t)width);
     /* If _next_var_id skipped past fe->n_vars to dodge backend-internal
      * aux slots, sync fe->n_vars up so the next allocation doesn't
      * collide with the var we just claimed. */
@@ -755,10 +754,10 @@ static dvs_expr_t _sparse_elem(Smt2Frontend *fe, Smt2ArrayValue *arr,
 static uint32_t _fresh_read_var(Smt2Frontend *fe, uint16_t width) {
     uint32_t var_id = _next_var_id(fe);
     int64_t max_val = _bv_unsigned_hi(width);
-    dvs_builder_add_var(fe->builder, var_id, (uint8_t)width, 0, 0, max_val);
+    dvs_builder_add_var(fe->builder, var_id, (uint16_t)width, 0, 0, max_val);
     char name[SMT2_MAX_NAME];
     snprintf(name, sizeof(name), "__rd%u", var_id);
-    _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint8_t)width);
+    _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint16_t)width);
     _bump_n_vars(fe, var_id + 1);
     _builder_touched(fe);
     return var_id;
@@ -798,12 +797,11 @@ static Smt2ArrayValue *_anode_new(Smt2Frontend *fe, uint8_t akind,
  * The builder API types an UNSIZED constant as a SystemVerilog integer
  * literal (32-bit signed), which would widen the context of every operator it
  * meets: `(bvadd x #x03)` over an 8-bit x must wrap at 8 bits. Every
- * BV-valued constant this front end emits is therefore SIZED. Widths are
- * bounded by SMT2_MAX_BV_BITS (128), which fits the node's uint8_t. */
+ * BV-valued constant this front end emits is therefore SIZED. */
 static dvs_expr_t _bv_const(Smt2Frontend *fe, int64_t value, uint16_t width) {
-    if (width == 0 || width > 255)
+    if (width == 0)
         return dvs_builder_expr_const(fe->builder, value, 0);
-    return dvs_builder_expr_const_sized(fe->builder, value, 0, (uint8_t)width);
+    return dvs_builder_expr_const_sized(fe->builder, value, 0, width);
 }
 
 /* Mark a problem this front end finalized as already explicit (dvs_sv.h):
@@ -1284,7 +1282,7 @@ static TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
 
     /* BV/Bool return: look up or create a scalar var. */
     Smt2Var *v = _find_var(fe, mangled, (uint32_t)mlen);
-    uint8_t width = sf->return_width ? sf->return_width : 1;
+    uint16_t width = sf->return_width ? sf->return_width : 1;
     if (!v) {
         uint32_t var_id = _next_var_id(fe);
         int64_t max_val = _bv_unsigned_hi(width);
@@ -1688,7 +1686,7 @@ static TaggedExpr _wide_const(Smt2Frontend *fe, const uint64_t *limbs, uint32_t 
     dvs_expr_t r;
     if (hi_zero) {
         dvs_expr_t lo = _bv_const(fe, (int64_t)v[0], 64);
-        r = dvs_builder_expr_extend(fe->builder, lo, 64, (uint8_t)width, 0);
+        r = dvs_builder_expr_extend(fe->builder, lo, 64, (uint16_t)width, 0);
     } else {
         r = _bv_const(fe, (int64_t)v[nl - 1], (uint16_t)top_w);
         for (uint32_t i = nl - 1; i-- > 0;)
@@ -1904,21 +1902,28 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             inner = _flatten_to_var(fe, inner);
             if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
             dvs_expr_t r = dvs_builder_expr_extend(fe->builder, inner.te.ref,
-                                            (uint8_t)inner.te.width,
-                                            (uint8_t)new_width, sign);
+                                            (uint16_t)inner.te.width,
+                                            new_width, sign);
             return (TaggedExpr){ { r, new_width }, 0, NULL };
         }
 
         if (sexpr_is_symbol(op_sym, "extract")) {
             if (s->list.count != 2 || head->list.count != 4) return TAGGED_NULL;
-            uint8_t hi = (uint8_t)head->list.items[2]->numval;
-            uint8_t lo = (uint8_t)head->list.items[3]->numval;
+            uint64_t hi = head->list.items[2]->numval;
+            uint64_t lo = head->list.items[3]->numval;
 
             TaggedExpr inner = _translate_tagged(fe, s->list.items[1]);
             inner = _flatten_to_var(fe, inner);
             if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
+            if (lo > hi || (inner.te.width && hi >= inner.te.width)) {
+                _term_error(fe, "extract %llu %llu of a %u-bit term",
+                            (unsigned long long)hi, (unsigned long long)lo,
+                            (unsigned)inner.te.width);
+                return TAGGED_NULL;
+            }
 
-            dvs_expr_t r = dvs_builder_expr_extract(fe->builder, inner.te.ref, hi, lo);
+            dvs_expr_t r = dvs_builder_expr_extract(fe->builder, inner.te.ref,
+                                                    (uint16_t)hi, (uint16_t)lo);
             return (TaggedExpr){ { r, (uint16_t)(hi - lo + 1) }, 0, NULL };
         }
 
@@ -2805,7 +2810,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             if (lo.te.ref == EXPR_NULL) return TAGGED_NULL;
             if (_too_wide(fe, (uint64_t)acc.te.width + lo.te.width)) return TAGGED_NULL;
             dvs_expr_t r = dvs_builder_expr_concat(fe->builder, acc.te.ref, lo.te.ref,
-                                            (uint8_t)lo.te.width);
+                                            lo.te.width);
             acc = (TaggedExpr){ { r, (uint16_t)(acc.te.width + lo.te.width) }, 0, NULL };
             if (i + 1 < s->list.count) {
                 acc = _flatten_to_var(fe, acc);
@@ -2829,15 +2834,15 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         TaggedExpr k = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
         if (k.te.ref == EXPR_NULL) return TAGGED_NULL;
         uint16_t w = a.te.width;
-        if (w == 0 || w > 255 || k.te.width != w) {
+        if (w == 0 || k.te.width != w) {
             _term_error(fe, "bvashr operands must share a width");
             return TAGGED_NULL;
         }
         dvs_expr_t as = dvs_builder_expr_sv_cast(fe->builder, a.te.ref,
-                                          (uint8_t)w, (uint8_t)w, 0, 1);
+                                          (uint16_t)w, (uint16_t)w, 0, 1);
         dvs_expr_t sh = dvs_builder_expr_binary(fe->builder, DVS_BIN_ASHR, as, k.te.ref);
         dvs_expr_t r  = dvs_builder_expr_sv_cast(fe->builder, sh,
-                                          (uint8_t)w, (uint8_t)w, 1, 0);
+                                          (uint16_t)w, (uint16_t)w, 1, 0);
         _flag_wide_arith(fe, w);
         return (TaggedExpr){ { r, w }, 0, NULL };
     }
@@ -3051,7 +3056,7 @@ static int _cmd_get_assertions(Smt2Frontend *fe) {
 }
 
 static int _add_sort_fun(Smt2Frontend *fe, const Sexpr *name_s,
-                         uint8_t n_params, uint8_t return_width, int is_bool);
+                         uint8_t n_params, uint16_t return_width, int is_bool);
 
 /* Translate a yosys/SMT-LIB 2.6 single-constructor record datatype into
  * our existing opaque-sort + per-field sort-fun representation.
@@ -3148,7 +3153,7 @@ static int _cmd_declare_datatypes(Smt2Frontend *fe, const Sexpr *cmd) {
             const Sexpr *ftype = field->list.items[1];
 
             int is_bool = _is_bool_sort(fe, ftype);
-            uint8_t bvw = is_bool ? 1 : _parse_bitvec_sort(fe, ftype);
+            uint16_t bvw = is_bool ? 1 : _parse_bitvec_sort(fe, ftype);
             if (bvw == 0) {
                 _input_error(fe, "unsupported: declare-datatypes field '%.*s' "
                         "type (only BitVec and Bool)",
@@ -3250,7 +3255,7 @@ static int _cmd_define_sort(Smt2Frontend *fe, const Sexpr *cmd) {
 }
 
 static int _add_sort_fun(Smt2Frontend *fe, const Sexpr *name_s,
-                         uint8_t n_params, uint8_t return_width, int is_bool) {
+                         uint8_t n_params, uint16_t return_width, int is_bool) {
     if (fe->n_sort_funs >= SMT2_MAX_SORT_FUNS) {
         _input_error(fe, "unsupported: too many sort-typed functions declared");
         return -1;
@@ -3368,7 +3373,7 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
                                        (uint8_t)params->list.count, array_sort);
         }
         int is_bool = _is_bool_sort(fe, sort_s);
-        uint8_t rw = _parse_bitvec_sort(fe, sort_s);
+        uint16_t rw = _parse_bitvec_sort(fe, sort_s);
         if (rw == 0) {
             /* Opaque return sort: treat as width-1 accessor */
             if (_is_opaque_sort(fe, sort_s)) {
@@ -3399,7 +3404,7 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
     }
 
     /* Case 4: standard BV (or Bool) declaration */
-    uint8_t width = _parse_bitvec_sort(fe, sort_s);
+    uint16_t width = _parse_bitvec_sort(fe, sort_s);
     if (width == 0) {
         /* Loud but in-sync: an unsupported sort taints the context so the next
          * (check-sat) is `unknown`, rather than exiting and hanging the driver.
@@ -4592,7 +4597,7 @@ static uint32_t _abs_read_inplace(Smt2Frontend *fe, Smt2ArrayValue *node,
     }
     uint32_t id = fe->problem->n_vars;
     if (fe->n_vars > id) id = fe->n_vars;
-    if (problem_add_var(fe->problem, id, (uint8_t)w, 0, 0,
+    if (problem_add_var(fe->problem, id, (uint16_t)w, 0, 0,
                         _bv_unsigned_hi(w)) == EXPR_NULL)
         return UINT32_MAX;   /* pool slack exhausted -> caller bails to unknown */
     _bump_n_vars(fe, id + 1);

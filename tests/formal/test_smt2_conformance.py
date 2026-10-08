@@ -457,6 +457,6 @@ def test_rewritten_operators_solve(engine, term, want):
 
 def test_too_wide_term_is_unknown_not_a_crash():
     rc, out, _ = _run(_HDR + "(declare-const x (_ BitVec 64))\n"
-                      "(assert (= ((_ sign_extend 192) x) ((_ sign_extend 192) #x0000000000000005)))\n"
+                      "(assert (= ((_ sign_extend 65472) x) ((_ sign_extend 65472) #x0000000000000005)))\n"
                       "(check-sat)\n")
     assert out == ["unknown"] and rc == 2, out

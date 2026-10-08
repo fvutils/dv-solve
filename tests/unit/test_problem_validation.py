@@ -46,13 +46,14 @@ def test_bad_variable_ids_are_refused(decl, refs):
         SolveCtx(_problem(decl, refs))
 
 
-def test_expression_wider_than_255_bits_is_refused():
+def test_expression_wider_than_65535_bits_is_refused():
     b = SolveProblemBuilder()
-    for i in range(4):
+    n = 65536 // 64 + 1
+    for i in range(n):
         b.add_var(i, 64, False, 0, 2**63 - 1)
     e = b.expr_var(0)
-    for i in range(1, 4):
-        e = b.expr_concat(e, b.expr_var(i), 64)       # 256 bits
+    for i in range(1, n):
+        e = b.expr_concat(e, b.expr_var(i), 64)       # 65600 bits
     b.add_constraint(b.expr_binary(BIN_EQ, e, b.expr_const(5)))
     with pytest.raises(CompileUnsupportedError):
         SolveCtx(b.finalize()[0])

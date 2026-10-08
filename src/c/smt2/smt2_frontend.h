@@ -31,7 +31,8 @@ extern size_t g_smt2_translate_stack_bytes;
 /* ------------------------------------------------------------------ */
 
 #define SMT2_MAX_NAME       128
-#define SMT2_MAX_BV_BITS    192   /* widest BitVec sort accepted (>64-bit is bitblast-routed); riscv-dv rv64 vtype is 154 */
+#define SMT2_MAX_BV_BITS  65535   /* widest BitVec sort accepted (>64-bit is bitblast-routed) */
+#define SMT2_MAX_ARRAY_BV_BITS 192 /* widest Array index or element sort */
 #define SMT2_MAX_FUNS      8192   /* yosys-smtbmc emits one per BMC unroll step */
 #define SMT2_MAX_FUN_PARAMS   8
 #define SMT2_MAX_SORTS       16
@@ -77,10 +78,9 @@ extern size_t g_smt2_translate_stack_bytes;
 typedef struct {
     char     name[SMT2_MAX_NAME];
     uint32_t var_id;
-    uint8_t  width;
+    uint16_t width;
     uint8_t  is_signed;
     uint8_t  is_bool;    /* declared Bool: get-value prints true/false */
-    uint8_t  _pad;
 } Smt2Var;
 
 /* One recorded command for get-unsat-core replay: a deep copy of the command
@@ -213,7 +213,7 @@ typedef struct Smt2ArrayEq {
 typedef struct {
     char          name[SMT2_MAX_NAME];
     uint8_t       n_params;
-    uint8_t       return_width;    /* 0 if array return, else BV/Bool width */
+    uint16_t      return_width;    /* 0 if array return, else BV/Bool width */
     uint8_t       is_bool_return;
     uint8_t       is_array_return; /* 1 if return sort is (Array ...) */
     Smt2ArraySort array_sort;      /* valid iff is_array_return */
@@ -239,10 +239,10 @@ typedef struct {
     uint32_t       n_params;
     char           param_names[SMT2_MAX_FUN_PARAMS][SMT2_MAX_NAME];
     /* param_widths[i]: 0 if param is sort-typed (opaque/array), else BV/Bool width */
-    uint8_t        param_widths[SMT2_MAX_FUN_PARAMS];
+    uint16_t       param_widths[SMT2_MAX_FUN_PARAMS];
     uint8_t        param_is_sort[SMT2_MAX_FUN_PARAMS];
     const struct Sexpr *body;   /* lives in persistent arena */
-    uint8_t        return_width; /* 1 for Bool, BV width otherwise; 0 for array return */
+    uint16_t       return_width; /* 1 for Bool, BV width otherwise; 0 for array return */
     uint8_t        is_bool_return;
     uint8_t        is_array_return;
     Smt2ArraySort  array_return_sort;  /* valid iff is_array_return */

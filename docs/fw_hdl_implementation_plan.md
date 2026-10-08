@@ -1,6 +1,6 @@
 # fw-hdl requests: implementation plan
 
-Status: Phases 0–3 done (244dcf2, 094e5cd, fbd25d9, 5179d8e); Phase 4 pieces 4.0, 4.1, 4.5 done 2026-10-08; 4.3 dropped by D5's kill criterion; see §6. D1–D6 recommendations in §5 approved by the owner 2026-10-07.
+Status: Phases 0–3 done (244dcf2, 094e5cd, fbd25d9, 5179d8e); Phase 4 pieces 4.0, 4.1, 4.5 done 2026-10-08 (1d89337); piece 6.6 (sorts up to 65535 bits) done 2026-10-08; 4.3 dropped by D5's kill criterion; see §6. D1–D6 recommendations in §5 approved by the owner 2026-10-07.
 Source: `docs/fw_hdl_requests.md` (R1–R5). Testcases: `tests/formal/test_fw_hdl_requests.py`
 (today on HEAD `022f744`: 12 pass, 30 strict-xfail).
 Related: `docs/shared_learning_core_project.md`, `docs/usecase_benchmark_design.md`,
@@ -557,7 +557,7 @@ Status: ☐ todo · ◐ in progress · ☑ done · ✕ dropped.
 | 5.2 SAT sweeping / FRAIG | codegen | ☐ | | | |
 | 5.3 latency scaling | codegen | ☐ | | | |
 | 6.1–6.5 session features, fw-hdl CI | — | ☐ | | | |
-| 6.6 bit-vector state sorts wider than 192 bits (`write_smt2 -stbv`) | R4, codegen | ☐ | | | found by 0.3: Yosys reads the state only through `extract`, so split it into its fields at `define-sort`/`declare-fun` time |
+| 6.6 bit-vector state sorts wider than 192 bits (`write_smt2 -stbv`) | R4, codegen | ☑ | | | Done by widening rather than splitting: the IR's width fields (constants, extend, cast, extract, concat, variables) and the builder API went from 8 to 16 bits, and the SMT-LIB front end takes sorts up to 65535 bits (arrays stay at 192). Splitting would not have covered `parity_w256`, which shifts and XORs a 256-bit value. All 21 rejected `codegen-equiv` instances and `parity_w256` now parse: `parity_w256` and the 12 addtree/rotl32 instances solve in under 1.5 s; the 9 CRC pipelines time out like the other 12 CRC ones, all because a `define-fun` application is re-expanded at every call (Phase 5). `extract` indices are now checked against the operand width (an error, as for any ill-sorted term). Fuzz `tests/formal/test_wide_sorts.py` (stbv-shaped problems with 193–1500-bit state, verdicts and get-value models checked by z3): 5000 seeds clean; mutant `wide-extract-index` (an 8-bit extract index) caught |
 | 6.7 B83: push/pop before the first declaration | incremental | ☐ | | | honest unknown; strict xfail in the corpus |
 | 7 continuous scorecard | bench | ☐ | | | |
 

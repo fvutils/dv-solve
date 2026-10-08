@@ -23,7 +23,7 @@
 #include "dvs_stackinfo.h"
 
 #define SV_POOL_HDR   ((uint32_t)sizeof(dvs_pool_t))
-#define SV_MAX_W      255u      /* node formats hold widths in a uint8_t */
+#define SV_MAX_W      65535u    /* node formats hold widths in a uint16_t */
 #define SV_MAX_DEPTH  20000
 /* Stack left free below the deepest recursion: room for the calls a level
  * makes (memo growth, pool appends, malloc) after its own check. */
@@ -194,7 +194,7 @@ static dvs_expr_t _mk_const(SvE *E, int64_t v, uint8_t s, uint16_t w) {
     memset(n, 0, sizeof(*n));
     n->kind = EXPR_CONST;
     n->is_signed = s;
-    n->width = (uint8_t)w;
+    n->width = w;
     n->value = v;
     return r;
 }
@@ -237,7 +237,7 @@ static dvs_expr_t _mk_ext(SvE *E, dvs_expr_t x, uint16_t from, uint16_t to,
     if (r == EXPR_NULL) return r;
     ExprExtend *n = (ExprExtend *)_P(E, r);
     n->kind = EXPR_EXTEND; n->sign_extend = sext;
-    n->from_bits = (uint8_t)from; n->to_bits = (uint8_t)to; n->_pad = 0;
+    n->from_bits = from; n->to_bits = to; n->_p8 = 0; n->_p16 = 0;
     n->operand = x;
     return r;
 }
@@ -251,28 +251,27 @@ static dvs_expr_t _mk_cast(SvE *E, dvs_expr_t x, uint16_t from, uint16_t to,
     if (r == EXPR_NULL) return r;
     ExprSvCast *n = (ExprSvCast *)_P(E, r);
     n->kind = EXPR_SV_CAST; n->sign_extend = sext;
-    n->from_bits = (uint8_t)from; n->to_bits = (uint8_t)to;
+    n->from_bits = from; n->to_bits = to; n->_p16 = 0;
     n->dst_signed = dst_s; n->operand = x;
     return r;
 }
 
-static dvs_expr_t _mk_extract(SvE *E, dvs_expr_t x, uint8_t hi, uint8_t lo) {
+static dvs_expr_t _mk_extract(SvE *E, dvs_expr_t x, uint16_t hi, uint16_t lo) {
     if (x == EXPR_NULL) { E->err = 1; return EXPR_NULL; }
     dvs_expr_t r = _alloc(E, sizeof(ExprExtract), _Alignof(ExprExtract));
     if (r == EXPR_NULL) return r;
     ExprExtract *n = (ExprExtract *)_P(E, r);
     n->kind = EXPR_EXTRACT; n->hi_bit = hi; n->lo_bit = lo;
-    n->_pad[0] = n->_pad[1] = 0; n->operand = x;
+    n->operand = x;
     return r;
 }
 
-static dvs_expr_t _mk_concat(SvE *E, dvs_expr_t hi, dvs_expr_t lo, uint8_t lo_w) {
+static dvs_expr_t _mk_concat(SvE *E, dvs_expr_t hi, dvs_expr_t lo, uint16_t lo_w) {
     if (hi == EXPR_NULL || lo == EXPR_NULL) { E->err = 1; return EXPR_NULL; }
     dvs_expr_t r = _alloc(E, sizeof(ExprConcat), _Alignof(ExprConcat));
     if (r == EXPR_NULL) return r;
     ExprConcat *n = (ExprConcat *)_P(E, r);
-    n->kind = EXPR_CONCAT; n->lo_width = lo_w;
-    n->_pad[0] = n->_pad[1] = n->_pad[2] = 0;
+    n->kind = EXPR_CONCAT; n->lo_width = lo_w; n->_p16 = 0;
     n->hi = hi; n->lo = lo;
     return r;
 }
@@ -408,12 +407,15 @@ static SvTy _type(SvE *E, dvs_expr_t ref) {
     }
     case EXPR_EXTRACT: {
         ExprExtract x = *(ExprExtract *)_P(E, ref);
+        if (x.hi_bit < x.lo_bit) { E->err = 1; break; }
         t.w = (uint16_t)(x.hi_bit - x.lo_bit + 1); t.s = 0;
         break;
     }
     case EXPR_CONCAT: {
         ExprConcat x = *(ExprConcat *)_P(E, ref);
-        t.w = (uint16_t)(_type(E, x.hi).w + x.lo_width); t.s = 0;
+        uint32_t cw = (uint32_t)_type(E, x.hi).w + x.lo_width;
+        if (cw > SV_MAX_W) { E->err = 1; break; }   /* a width would wrap */
+        t.w = (uint16_t)cw; t.s = 0;
         break;
     }
     default:
@@ -605,8 +607,8 @@ static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint16_t W, uint8_t S) {
         SvTy vt = _type(E, o);
         dvs_expr_t n;
         if (vt.w > x.to_bits) {
-            if (vt.w > 255) { E->err = 1; break; }
-            n = _mk_extract(E, o, (uint8_t)(x.to_bits - 1), 0);
+            if (vt.w > SV_MAX_W) { E->err = 1; break; }
+            n = _mk_extract(E, o, (uint16_t)(x.to_bits - 1), 0);
             if (x.to_signed)
                 n = _mk_cast(E, n, x.to_bits, x.to_bits, 0, 1);
         } else {

@@ -26,7 +26,7 @@ Any other logic is an error. The logic also selects the solving engine; see
 | `set-option` | `:produce-models`, `:produce-unsat-cores`, `:produce-assertions`, `:print-success`, `:seed`; other options are accepted and ignored |
 | `get-option` | the options above; `unsupported` for any other |
 | `set-info` | accepted and ignored |
-| `declare-const`, `declare-fun` | Bool, `(_ BitVec n)` for n up to 192, arrays of bit-vectors, and functions over them; a name can be declared once per scope |
+| `declare-const`, `declare-fun` | Bool, `(_ BitVec n)` for n up to 65535, arrays of bit-vectors, and functions over them; a name can be declared once per scope |
 | `declare-sort` | arity 0 (opaque sorts) |
 | `declare-datatypes` | single-constructor records whose fields are Bool or bit-vectors |
 | `define-fun`, `define-sort` | yes; like declarations, they are removed by the `pop` of the level they were made in |
@@ -80,9 +80,9 @@ Also supported: `=`, `distinct`, `ite`, `let`, the Boolean connectives,
 arrays (`select`, `store`, `(as const ...)`) and calls to `define-fun`
 definitions.
 
-Not yet supported (a problem that uses them gets `unknown`): `bvnand`, `bvnor`, `bvxnor`, `bvcomp`, `rotate_left` and `rotate_right`.
-
-Bit-vector widths, constants included, up to 192 bits are supported.
+Bit-vector widths, constants included, up to 65535 bits are supported, so
+the single state sort of Yosys `write_smt2 -stbv` output fits whatever the
+design's size. An array's index and element sorts are limited to 192 bits.
 See {doc}`../concepts/soundness` for what happens beyond these limits.
 
 ## Batch and interactive input

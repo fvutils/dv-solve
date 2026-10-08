@@ -293,7 +293,7 @@ static int _is_var_maybe_extend(dvs_problem_t *sp, dvs_expr_t ref,
 /* Look up a variable's declaration in the problem. Returns 0 if `vid` has no
  * VarSpec (an aux the compiler minted, which has no declared signedness here). */
 static int _var_decl(dvs_problem_t *sp, uint32_t vid,
-                     uint8_t *out_width, uint8_t *out_signed) {
+                     uint16_t *out_width, uint8_t *out_signed) {
     for (dvs_expr_t cur = sp->vars_head; cur != EXPR_NULL; ) {
         VarSpec *v = (VarSpec *)dvs_pool_ptr(&sp->pool, cur);
         if (v->var_id == vid) {
@@ -330,7 +330,7 @@ static int _or_leaf_var(dvs_problem_t *sp, dvs_expr_t ref, uint32_t *out_vid) {
     int sign_ext;
     if (!_is_var_maybe_extend(sp, ref, &vid, &inner_w, &sign_ext)) return 0;
     if (inner_w > 0) {
-        uint8_t w, sgn;
+        uint16_t w; uint8_t sgn;
         if (sign_ext) return 0;
         if (!_var_decl(sp, vid, &w, &sgn)) return 0;
         if (sgn) return 0;
@@ -1107,9 +1107,9 @@ static int _compile_binexpr_eq_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
  * Returns the guard var ID, or EXPR_NULL when the shape is too complex
  * for the current materialiser to handle. */
 static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
-                               dvs_expr_t ref, uint8_t width);
+                               dvs_expr_t ref, uint16_t width);
 static uint32_t _const_to_var_like(dvs_ctx_t *ctx, dvs_problem_t *sp,
-                                   dvs_expr_t ref, uint8_t width, uint32_t peer,
+                                   dvs_expr_t ref, uint16_t width, uint32_t peer,
                                    int is_cmp);
 
 /** Create an AUX variable under the SAME tier policy as a declared variable.
@@ -1185,7 +1185,7 @@ static int _is_bool_op(dvs_binop_t op) {
  * A bare constant returns 0 ("no width of its own") so it takes the width of
  * whatever it is combined with rather than forcing everything to 32.
  */
-static uint8_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
+static uint16_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
                             int depth) {
     if (ref == EXPR_NULL || depth > 32) return 0;
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
@@ -1194,20 +1194,20 @@ static uint8_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
         ExprVar *ev = (ExprVar *)dvs_pool_ptr(&sp->pool, ref);
         uint32_t vid = _resolve(ctx, ev->var_id);
         if (vid >= ctx->n_vars_capacity) return 0;
-        return (uint8_t)ctx->vars[vid].width;
+        return ctx->vars[vid].width;
     }
     case EXPR_CONST:
         /* A sized constant has its own width; an unsized one adapts. */
         return ((ExprConst *)dvs_pool_ptr(&sp->pool, ref))->width;
     case EXPR_EXTEND: {
         ExprExtend *ee = (ExprExtend *)dvs_pool_ptr(&sp->pool, ref);
-        return (uint8_t)ee->to_bits;
+        return ee->to_bits;
     }
     case EXPR_SV_CAST:
         return ((ExprSvCast *)dvs_pool_ptr(&sp->pool, ref))->to_bits;
     case EXPR_EXTRACT: {
         ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ref);
-        return (uint8_t)(ex->hi_bit - ex->lo_bit + 1);
+        return (uint16_t)(ex->hi_bit - ex->lo_bit + 1);
     }
     case EXPR_UNARY: {
         ExprUnary *eu = (ExprUnary *)dvs_pool_ptr(&sp->pool, ref);
@@ -1215,8 +1215,8 @@ static uint8_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
     }
     case EXPR_ITE: {
         ExprITE *ei = (ExprITE *)dvs_pool_ptr(&sp->pool, ref);
-        uint8_t tw = _expr_width(ctx, sp, ei->then_e, depth + 1);
-        uint8_t ew = _expr_width(ctx, sp, ei->else_e, depth + 1);
+        uint16_t tw = _expr_width(ctx, sp, ei->then_e, depth + 1);
+        uint16_t ew = _expr_width(ctx, sp, ei->else_e, depth + 1);
         return tw > ew ? tw : ew;
     }
     case EXPR_BINARY: {
@@ -1226,8 +1226,8 @@ static uint8_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
          * the shift amount is unrelated and must not widen it. */
         if (eb->op == DVS_BIN_LSHIFT || eb->op == DVS_BIN_RSHIFT || eb->op == DVS_BIN_ASHR)
             return _expr_width(ctx, sp, eb->lhs, depth + 1);
-        uint8_t lw = _expr_width(ctx, sp, eb->lhs, depth + 1);
-        uint8_t rw = _expr_width(ctx, sp, eb->rhs, depth + 1);
+        uint16_t lw = _expr_width(ctx, sp, eb->lhs, depth + 1);
+        uint16_t rw = _expr_width(ctx, sp, eb->rhs, depth + 1);
         return lw > rw ? lw : rw;
     }
     default:
@@ -1517,7 +1517,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         else
             val_ref = ((ExprInRanges *)dvs_pool_ptr(&sp->pool, ref))->value;
 
-        uint8_t w = _expr_width(ctx, sp, val_ref, 0);
+        uint16_t w = _expr_width(ctx, sp, val_ref, 0);
         if (w == 0) w = 32;
         if (w > 64) return EXPR_NULL;
         uint32_t v_id = _value_to_var(ctx, sp, val_ref, w);
@@ -1646,7 +1646,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
             }
         }
         cmp_vid = _resolve(ctx, cmp_vid);
-        uint8_t cv_w = ctx->vars[cmp_vid].width;
+        uint16_t cv_w = ctx->vars[cmp_vid].width;
 
         /* Compile-time fold of an inequality that is trivially true/false at the
          * var's UNSIGNED range boundary [0, 2^w-1]. Critical for `var >= 0`
@@ -1784,9 +1784,9 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
     switch (eb->op) {
     case DVS_BIN_EQ: case DVS_BIN_NEQ: case DVS_BIN_LT:
     case DVS_BIN_LTE: case DVS_BIN_GT: case DVS_BIN_GTE: {
-        uint8_t lw = _expr_width(ctx, sp, eb->lhs, 0);
-        uint8_t rw = _expr_width(ctx, sp, eb->rhs, 0);
-        uint8_t w = lw > rw ? lw : rw;
+        uint16_t lw = _expr_width(ctx, sp, eb->lhs, 0);
+        uint16_t rw = _expr_width(ctx, sp, eb->rhs, 0);
+        uint16_t w = lw > rw ? lw : rw;
         if (w == 0) w = 32;
         if (w > 64) return EXPR_NULL;   /* tier-2 operands: decline */
         uint32_t a_id = _value_to_var(ctx, sp, eb->lhs, w);
@@ -1808,7 +1808,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
  * Returns the var_id on success, EXPR_NULL on failure.
  * `width` hints the bit-width for new const/result vars (0 → 32). */
 static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
-                               dvs_expr_t ref, uint8_t width) {
+                               dvs_expr_t ref, uint16_t width) {
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
 
@@ -1821,7 +1821,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         if (ec->width) return _const_singleton_var(ctx, sp, ref, ec->width);
         if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
         uint32_t cv_id = ctx->n_vars;
-        uint8_t w = width ? width : 32;
+        uint16_t w = width ? width : 32;
         if (_init_aux_tiered(ctx, &ctx->vars[cv_id], w, VAR_AUX,
                              ec->value, ec->value) != 0)
             return EXPR_NULL;   /* B24 */
@@ -1859,7 +1859,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                                 _is_var(sp, cmp->rhs, &cmp_vid);
                     if (is_vc || is_cv) {
                         cmp_vid = _resolve(ctx, cmp_vid);
-                        uint8_t cv_w = ctx->vars[cmp_vid].width;
+                        uint16_t cv_w = ctx->vars[cmp_vid].width;
                         /* Guard boolean [0,1] — VAR_AUX: determined by propagation */
                         uint32_t gid = ctx->n_vars;
                         _init_tier0(&ctx->vars[gid], 1, VAR_AUX, 0, 1);
@@ -1909,7 +1909,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         /* Create result var for this ITE — VAR_AUX: determined by propagation */
         if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
         uint32_t r_id = ctx->n_vars;
-        uint8_t w = width ? width : 32;
+        uint16_t w = width ? width : 32;
         int64_t max_val = (w >= 64) ? (int64_t)UINT64_MAX
                         : (int64_t)((1ULL << w) - 1);
         if (_init_aux_tiered(ctx, &ctx->vars[r_id], w, VAR_AUX, 0, max_val) != 0)
@@ -1921,7 +1921,8 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
     }
     if (k == EXPR_EXTRACT) {
         ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ref);
-        uint8_t out_w = (uint8_t)(ex->hi_bit - ex->lo_bit + 1);
+        if (ex->hi_bit > 63) return EXPR_NULL;   /* wider than a CDCL var */
+        uint16_t out_w = (uint16_t)(ex->hi_bit - ex->lo_bit + 1);
         uint32_t src_id = _value_to_var(ctx, sp, ex->operand, 0);
         if (src_id == EXPR_NULL) return EXPR_NULL;
         if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
@@ -1950,7 +1951,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         uint8_t dst_signed = (k == EXPR_SV_CAST)
             ? ((ExprSvCast *)dvs_pool_ptr(&sp->pool, ref))->dst_signed
             : src_signed;
-        uint8_t from = ee.from_bits, to = ee.to_bits;
+        uint16_t from = ee.from_bits, to = ee.to_bits;
         if (from == 0 || to == 0 || to > 64 || from > to) return EXPR_NULL;
         uint32_t src_id = _value_to_var(ctx, sp, ee.operand, from);
         if (src_id == EXPR_NULL) return EXPR_NULL;
@@ -2070,7 +2071,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
          * or const, under `==`. Everything else -- nested arithmetic, arithmetic
          * under `<`, arithmetic in an OR leaf -- reached no propagator and the
          * constraint was reported uncompiled. */
-        uint8_t w = width;
+        uint16_t w = width;
         if (w == 0) w = _expr_width(ctx, sp, ref, 0);
         if (w == 0) w = 32;
         if (w > 64) return EXPR_NULL;   /* tier-2 operands: decline, don't guess */
@@ -2087,7 +2088,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                         eb->op == DVS_BIN_ASHR);
         ExprKind lk_b = *(ExprKind *)dvs_pool_ptr(&sp->pool, eb->lhs);
         ExprKind rk_b = *(ExprKind *)dvs_pool_ptr(&sp->pool, eb->rhs);
-        uint8_t b_w = is_shift ? 0 : w;
+        uint16_t b_w = is_shift ? 0 : w;
         uint32_t a_id, b_id;
         if (!is_shift && lk_b == EXPR_CONST && rk_b != EXPR_CONST) {
             b_id = _value_to_var(ctx, sp, eb->rhs, b_w);
@@ -2167,7 +2168,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
  * wrapped to a signed -5). Those decline (EXPR_NULL) exactly as before.
  */
 static uint32_t _const_to_var_like(dvs_ctx_t *ctx, dvs_problem_t *sp,
-                                   dvs_expr_t ref, uint8_t width, uint32_t peer,
+                                   dvs_expr_t ref, uint16_t width, uint32_t peer,
                                    int is_cmp) {
     ExprConst *ec = (ExprConst *)dvs_pool_ptr(&sp->pool, ref);
     if (ec->width) return _const_singleton_var(ctx, sp, ref, ec->width);
@@ -2176,7 +2177,7 @@ static uint32_t _const_to_var_like(dvs_ctx_t *ctx, dvs_problem_t *sp,
     if ((ctx->vars[peer].flags & VAR_SIGNED) || (is_cmp && ec->value < 0))
         flags |= VAR_SIGNED;
     uint32_t cv_id = ctx->n_vars;
-    uint8_t w = width ? width : 32;
+    uint16_t w = width ? width : 32;
     if (_init_aux_tiered(ctx, &ctx->vars[cv_id], w, flags,
                          ec->value, ec->value) != 0) {
         int ok = 0;
@@ -3032,7 +3033,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                 uint32_t r_id = _resolve(ctx, ev->var_id);
                 ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ex_side);
                 uint32_t operand_id;
-                if (_is_var(sp, ex->operand, &operand_id)) {
+                if (ex->hi_bit < 64 && _is_var(sp, ex->operand, &operand_id)) {
                     operand_id = _resolve(ctx, operand_id);
                     if (_var_needs_wide(ctx, r_id) || _var_needs_wide(ctx, operand_id)) {
                         prop_add_bit_slice_64(ctx, r_id, operand_id,
@@ -3069,9 +3070,9 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                  * has a real var to watch on each side. Without this,
                  * a (concat #b0 v27) (very common in yosys output)
                  * silently dropped the binding constraint. */
-                uint8_t r_w = ctx->vars[r_id].width;
-                uint8_t lo_w = cat->lo_width;
-                uint8_t hi_w = (r_w >= lo_w) ? (uint8_t)(r_w - lo_w) : 0;
+                uint16_t r_w = ctx->vars[r_id].width;
+                uint16_t lo_w = cat->lo_width;
+                uint16_t hi_w = (r_w >= lo_w) ? (uint16_t)(r_w - lo_w) : 0;
                 /* Soundness guard: the concat bounds propagator reasons in
                  * signed int64 (`hi << lo_w`, arithmetic `r >> lo_w`, `>= 0`
                  * guards). A full 64-bit result range [0, 2^64-1] lands in the
@@ -3150,7 +3151,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                 /* Fallback: handle ITE with comparison cond or nested ITE
                  * branches by recursively materialising the ITE chain. */
                 {
-                    uint8_t val_w = (uint8_t)(r_id < ctx->n_vars_capacity
+                    uint16_t val_w = (uint8_t)(r_id < ctx->n_vars_capacity
                                               ? ctx->vars[r_id].width : 32);
                     uint32_t ite_var = _value_to_var(ctx, sp, ite_side, val_w);
                     if (ite_var != EXPR_NULL) {
@@ -3495,7 +3496,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                             ite_s = inner->rhs;
                         if (ite_s != EXPR_NULL) {
                             v_id = _resolve(ctx, v_id);
-                            uint8_t val_w = (uint8_t)(v_id < ctx->n_vars_capacity
+                            uint16_t val_w = (uint8_t)(v_id < ctx->n_vars_capacity
                                                       ? ctx->vars[v_id].width : 32);
                             uint32_t ite_var = _value_to_var(ctx, sp, ite_s, val_w);
                             if (ite_var != EXPR_NULL) {
@@ -3529,9 +3530,9 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
         switch (e_gc->op) {
         case DVS_BIN_EQ: case DVS_BIN_NEQ: case DVS_BIN_LT:
         case DVS_BIN_LTE: case DVS_BIN_GT: case DVS_BIN_GTE: {
-            uint8_t lw = _expr_width(ctx, sp, e_gc->lhs, 0);
-            uint8_t rw = _expr_width(ctx, sp, e_gc->rhs, 0);
-            uint8_t w = lw > rw ? lw : rw;
+            uint16_t lw = _expr_width(ctx, sp, e_gc->lhs, 0);
+            uint16_t rw = _expr_width(ctx, sp, e_gc->rhs, 0);
+            uint16_t w = lw > rw ? lw : rw;
             if (w == 0) w = 32;
             if (w > 64) break;   /* tier-2: decline rather than mis-encode */
             /* A constant side is materialised against the OTHER side's

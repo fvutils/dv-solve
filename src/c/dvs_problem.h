@@ -59,8 +59,8 @@ typedef enum {
 typedef struct {
     ExprKind kind;       /* EXPR_CONST                           */
     uint8_t  is_signed;  /* non-zero for signed interpretation   */
-    uint8_t  width;      /* 0 = unsized, else the literal's width */
-    uint8_t  _pad[2];
+    uint8_t  _p8;
+    uint16_t width;      /* 0 = unsized, else the literal's width */
     int64_t  value;      /* bit pattern / signed value           */
 } ExprConst;
 
@@ -130,9 +130,10 @@ typedef struct {
 typedef struct {
     ExprKind kind;        /* EXPR_EXTEND      */
     uint8_t  sign_extend; /* 0=zero, 1=sign   */
-    uint8_t  from_bits;   /* source width     */
-    uint8_t  to_bits;     /* destination width */
-    uint8_t  _pad;
+    uint8_t  _p8;
+    uint16_t from_bits;   /* source width     */
+    uint16_t to_bits;     /* destination width */
+    uint16_t _p16;
     dvs_expr_t  operand;
 } ExprExtend;
 
@@ -147,9 +148,10 @@ typedef struct {
 typedef struct {
     ExprKind kind;        /* EXPR_SV_CAST     */
     uint8_t  sign_extend; /* 0=zero, 1=sign   */
-    uint8_t  from_bits;   /* source width     */
-    uint8_t  to_bits;     /* destination width */
     uint8_t  dst_signed;  /* result signedness */
+    uint16_t from_bits;   /* source width     */
+    uint16_t to_bits;     /* destination width */
+    uint16_t _p16;
     dvs_expr_t  operand;
 } ExprSvCast;
 
@@ -166,18 +168,17 @@ typedef struct {
  * sees it. */
 typedef struct {
     ExprKind kind;        /* EXPR_CAST        */
-    uint8_t  to_bits;     /* result width     */
+    uint16_t to_bits;     /* result width     */
     uint8_t  to_signed;   /* result signedness */
-    uint8_t  _pad[2];
+    uint8_t  _p8;
     dvs_expr_t  operand;
 } ExprCast;
 
 /** Bit-slice extract: result = operand[hi_bit:lo_bit] */
 typedef struct {
     ExprKind kind;     /* EXPR_EXTRACT */
-    uint8_t  hi_bit;
-    uint8_t  lo_bit;
-    uint8_t  _pad[2];
+    uint16_t hi_bit;
+    uint16_t lo_bit;
     dvs_expr_t  operand;
 } ExprExtract;
 
@@ -186,8 +187,8 @@ typedef struct {
  *  lo_width is the bit width of the lo operand. */
 typedef struct {
     ExprKind kind;       /* EXPR_CONCAT  */
-    uint8_t  lo_width;   /* width of lo operand in bits */
-    uint8_t  _pad[3];
+    uint16_t lo_width;   /* width of lo operand in bits */
+    uint16_t _p16;
     dvs_expr_t  hi;
     dvs_expr_t  lo;
 } ExprConcat;
@@ -237,11 +238,11 @@ typedef struct {
 typedef struct {
     dvs_expr_t  next;       /* next VarSpec, or EXPR_NULL */
     uint32_t var_id;     /* 0-based index              */
-    uint8_t  width;      /* bit width (1–64)           */
+    uint16_t width;      /* bit width (1-64 for the CDCL engine; wider
+                          * ones are bit-blasted)       */
     uint8_t  is_signed;  /* non-zero = signed          */
     uint8_t  is_aux;     /* non-zero = compiler-generated aux (never a
                           * search decision; determined by propagation) */
-    uint8_t  _pad;
     int64_t  lo;         /* initial lower bound        */
     int64_t  hi;         /* initial upper bound        */
 } VarSpec;
@@ -381,7 +382,7 @@ void solve_problem_destroy(dvs_problem_t *sp);
 dvs_expr_t expr_const(dvs_problem_t *sp, int64_t value, uint8_t is_signed);
 /** A sized constant of `width` bits (see ExprConst). width 0 == expr_const. */
 dvs_expr_t expr_const_sized(dvs_problem_t *sp, int64_t value, uint8_t is_signed,
-                         uint8_t width);
+                         uint16_t width);
 dvs_expr_t expr_var(dvs_problem_t *sp, uint32_t var_id);
 dvs_expr_t expr_binary(dvs_problem_t *sp, dvs_binop_t op, dvs_expr_t lhs, dvs_expr_t rhs);
 dvs_expr_t expr_unary(dvs_problem_t *sp, dvs_unop_t op, dvs_expr_t operand);
@@ -398,15 +399,15 @@ dvs_expr_t expr_in_set(dvs_problem_t *sp, dvs_expr_t value,
                     uint32_t n_elems, const dvs_expr_t *elems);
 
 dvs_expr_t expr_extend(dvs_problem_t *sp, dvs_expr_t operand,
-                    uint8_t from_bits, uint8_t to_bits, uint8_t sign_extend);
+                    uint16_t from_bits, uint16_t to_bits, uint8_t sign_extend);
 dvs_expr_t expr_extract(dvs_problem_t *sp, dvs_expr_t operand,
-                     uint8_t hi_bit, uint8_t lo_bit);
+                     uint16_t hi_bit, uint16_t lo_bit);
 /** A cast of `operand` to (`to_bits`, `to_signed`); see ExprCast. */
 dvs_expr_t expr_cast(dvs_problem_t *sp, dvs_expr_t operand,
-                  uint8_t to_bits, uint8_t to_signed);
+                  uint16_t to_bits, uint8_t to_signed);
 
 dvs_expr_t expr_concat(dvs_problem_t *sp, dvs_expr_t hi, dvs_expr_t lo,
-                    uint8_t lo_width);
+                    uint16_t lo_width);
 
 /** Build an N-ary sum expression: result == sum of var_ids[].
  *  @param result   dvs_expr_t of the result variable.
@@ -435,7 +436,7 @@ dvs_expr_t expr_array_select(dvs_problem_t *sp, uint32_t base_var_id,
 
 /** Add a variable; returns dvs_expr_t to its VarSpec, or EXPR_NULL. */
 dvs_expr_t problem_add_var(dvs_problem_t *sp, uint32_t var_id,
-                        uint8_t width, uint8_t is_signed,
+                        uint16_t width, uint8_t is_signed,
                         int64_t lo, int64_t hi);
 
 /** Add a constraint; returns dvs_expr_t to its ConstraintSpec, or EXPR_NULL. */

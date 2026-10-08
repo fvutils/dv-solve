@@ -104,7 +104,7 @@ class SolveProblem:
         return self._lib.problem_add_var(
             self._sp,
             ctypes.c_uint32(var_id),
-            ctypes.c_uint8(width),
+            ctypes.c_uint16(width),
             ctypes.c_uint8(1 if is_signed else 0),
             ctypes.c_int64(lo),
             ctypes.c_int64(hi),
@@ -218,8 +218,8 @@ class SolveProblem:
         return self._lib.expr_extend(
             self._sp,
             ctypes.c_uint32(operand),
-            ctypes.c_uint8(from_bits),
-            ctypes.c_uint8(to_bits),
+            ctypes.c_uint16(from_bits),
+            ctypes.c_uint16(to_bits),
             ctypes.c_uint8(1 if sign_extend else 0),
         )
 
@@ -234,7 +234,7 @@ class SolveProblem:
         own signedness, and read as signed or unsigned.
         """
         return self._lib.expr_cast(
-            self._sp, ctypes.c_uint32(operand), ctypes.c_uint8(to_bits),
+            self._sp, ctypes.c_uint32(operand), ctypes.c_uint16(to_bits),
             ctypes.c_uint8(1 if to_signed else 0),
         )
 
@@ -242,8 +242,8 @@ class SolveProblem:
         return self._lib.expr_extract(
             self._sp,
             ctypes.c_uint32(operand),
-            ctypes.c_uint8(hi_bit),
-            ctypes.c_uint8(lo_bit),
+            ctypes.c_uint16(hi_bit),
+            ctypes.c_uint16(lo_bit),
         )
 
     def expr_concat(self, hi: int, lo: int, lo_width: int) -> int:
@@ -251,7 +251,7 @@ class SolveProblem:
             self._sp,
             ctypes.c_uint32(hi),
             ctypes.c_uint32(lo),
-            ctypes.c_uint8(lo_width),
+            ctypes.c_uint16(lo_width),
         )
 
     def add_soft_constraint(self, root: int, priority: int = 0) -> int:

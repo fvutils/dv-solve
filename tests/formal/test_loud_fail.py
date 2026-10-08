@@ -59,7 +59,7 @@ def test_unsupported_sort_yields_unknown():
     """An unsupported sort taints the context the same way."""
     out = _run(
         "(set-logic QF_ABV)"
-        "(declare-fun s () (_ BitVec 200))"  # width > 64: unsupported sort
+        "(declare-fun s () (_ BitVec 65536))"  # wider than the maximum
         "(assert (= s s))"
         "(check-sat)"
         "(exit)\n"
