@@ -121,10 +121,10 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
             x_lo, x_hi = 0, max(0, cw - w)
             y_lo, y_hi = 0, max(0, ch - h)
         lib.dvs_builder_add_var(builder, ctypes.c_uint32(i),
-                            ctypes.c_uint8(32), ctypes.c_uint8(0),
+                            ctypes.c_uint16(32), ctypes.c_uint8(0),
                             ctypes.c_int64(x_lo), ctypes.c_int64(x_hi))
         lib.dvs_builder_add_var(builder, ctypes.c_uint32(n + i),
-                            ctypes.c_uint8(32), ctypes.c_uint8(0),
+                            ctypes.c_uint16(32), ctypes.c_uint8(0),
                             ctypes.c_int64(y_lo), ctypes.c_int64(y_hi))
 
     # Add non-overlap constraints using DisjClause decomposition
@@ -150,10 +150,10 @@ def run_benchmark(bench_path: Path, time_budget_sec: float = 60.0,
         fx, fy, fw, fh = fr["x"], fr["y"], fr["width"], fr["height"]
         # Fixed-position variables (lo == hi)
         lib.dvs_builder_add_var(builder, ctypes.c_uint32(fr_base_x + fi),
-                            ctypes.c_uint8(32), ctypes.c_uint8(0),
+                            ctypes.c_uint16(32), ctypes.c_uint8(0),
                             ctypes.c_int64(fx), ctypes.c_int64(fx))
         lib.dvs_builder_add_var(builder, ctypes.c_uint32(fr_base_y + fi),
-                            ctypes.c_uint8(32), ctypes.c_uint8(0),
+                            ctypes.c_uint16(32), ctypes.c_uint8(0),
                             ctypes.c_int64(fy), ctypes.c_int64(fy))
 
     # ── Symmetry breaking for identical macros ──

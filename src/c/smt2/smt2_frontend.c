@@ -308,28 +308,34 @@ static uint32_t _subst_push(Smt2Frontend *fe, const char *name, uint32_t len,
     return fe->subst_depth;            /* this entry's link: index + 1 */
 }
 
-/* Resolve a symbol in the current environment, innermost binding first.
+/* Resolve a symbol in environment `env`, innermost binding first.
  * Uses stored lengths rather than strlen to support non-null-terminated
  * names (e.g. let-binding names that point into the parser's arena). */
-static Smt2Subst *_subst_lookup_entry(Smt2Frontend *fe, const char *name, uint32_t len) {
-    for (uint32_t k = fe->subst_env; k; k = fe->subst_stack[k - 1].up) {
+static Smt2Subst *_subst_find(Smt2Frontend *fe, uint32_t env, const char *name,
+                              uint32_t len) {
+    for (uint32_t k = env; k; k = fe->subst_stack[k - 1].up) {
         Smt2Subst *e = &fe->subst_stack[k - 1];
         if (e->len == len && memcmp(name, e->name, len) == 0) return e;
     }
     return NULL;
 }
 
-static const Sexpr *_subst_lookup(Smt2Frontend *fe, const char *name, uint32_t len) {
-    Smt2Subst *e = _subst_lookup_entry(fe, name, len);
-    return e ? e->value : NULL;
+static Smt2Subst *_subst_lookup_entry(Smt2Frontend *fe, const char *name, uint32_t len) {
+    return _subst_find(fe, fe->subst_env, name, len);
 }
 
-/* Recursively resolve a symbol-typed Sexpr through subst chains. */
+/* Resolve a symbol-typed Sexpr through define-fun parameters to the argument
+ * it stands for. Each argument is looked up in its caller's environment
+ * (arg_env), as _translate_symbol_tagged translates it: looked up in the
+ * callee's, `(define-fun f ((state S)) .. (g state))` resolved `state` to
+ * itself and looped forever (B84). A let name is returned as is. */
 static const Sexpr *_resolve_sym(Smt2Frontend *fe, const Sexpr *s) {
+    uint32_t env = fe->subst_env;
     while (s && s->kind == SEXPR_SYMBOL) {
-        const Sexpr *next = _subst_lookup(fe, s->sym.str, s->sym.len);
-        if (!next) break;
-        s = next;
+        Smt2Subst *e = _subst_find(fe, env, s->sym.str, s->sym.len);
+        if (!e || !e->value) break;
+        s   = e->value;
+        env = e->arg_env;
     }
     return s;
 }
@@ -658,6 +664,11 @@ static Smt2ArrayVar *_declare_array_const(Smt2Frontend *fe,
     if (!av->value) { fe->n_array_vars--; return NULL; }
     av->value->sort   = sort;
     av->value->n_elems = n_elems;
+    /* No store: left at calloc's 0, the R1 rewrite in _array_select took a
+     * select indexed by var 0 (the first declared) for a store at that index
+     * and returned ref 0, not a node (B85). */
+    av->value->store_idx_varid = UINT32_MAX;
+    av->value->store_val       = EXPR_NULL;
     av->value->elems  = (dvs_expr_t *)malloc(n_elems * sizeof(dvs_expr_t));
     if (!av->value->elems) {
         free(av->value); av->value = NULL;
@@ -1299,6 +1310,112 @@ static TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
 }
 
 /* ------------------------------------------------------------------ */
+/* define-fun application memo                                         */
+/*                                                                     */
+/* A body is translated afresh at each call, its arguments by name.    */
+/* Yosys output nests calls: a cell's function reads the previous      */
+/* cell's function once per bit, so a CRC pipeline expands            */
+/* exponentially. A call whose arguments are all names of global      */
+/* variables or translated let bindings has the same value wherever    */
+/* it is made in one command (a body sees only its parameters and the  */
+/* globals, B78), so its translation is kept and reused.               */
+/* ------------------------------------------------------------------ */
+
+#define SMT2_MEMO_MAX_ARGS 4
+
+typedef struct Smt2FunMemo {
+    const Smt2FunDef *fd;
+    uint64_t          keys[SMT2_MEMO_MAX_ARGS];
+    uint32_t          gen;
+    dvs_expr_t        ref;
+    uint16_t          width;
+    int               leaf_kind;
+} Smt2FunMemo;
+
+/* Forget every memoized application: at each command, and wherever the
+ * builder is rewound or reset (the memoized refs would dangle). */
+static void _fun_memo_clear(Smt2Frontend *fe) {
+    fe->fun_memo_n = 0;
+    if (++fe->fun_memo_gen == 0) {       /* wrapped: no stale entry may match */
+        if (fe->fun_memo) memset(fe->fun_memo, 0, fe->fun_memo_cap * sizeof *fe->fun_memo);
+        fe->fun_memo_gen = 1;
+    }
+}
+
+/* The identity of argument `a`, translated in environment `env`: a global
+ * variable (its id) or a translated let binding (its expression), followed
+ * through define-fun parameters. 0 when it is anything else. */
+static uint64_t _fun_arg_key(Smt2Frontend *fe, const Sexpr *a, uint32_t env) {
+    for (int hops = 0; hops < 256; hops++) {
+        if (!a || a->kind != SEXPR_SYMBOL) return 0;
+        Smt2Subst *e = _subst_find(fe, env, a->sym.str, a->sym.len);
+        if (!e) {
+            /* resolved as _translate_symbol_tagged does; true, false and
+             * 0-ary functions are not keyed */
+            if (_find_fun(fe, a->sym.str, a->sym.len)) return 0;
+            Smt2Var *v = _find_var(fe, a->sym.str, a->sym.len);
+            return v ? ((uint64_t)v->var_id << 2) | 1u : 0;
+        }
+        if (e->has_cache)
+            return e->cached_ref != EXPR_NULL && !e->cached_array
+                 ? ((uint64_t)e->cached_ref << 24) | ((uint64_t)e->cached_width << 8)
+                   | ((uint64_t)(e->cached_leaf_kind & 3) << 2) | 2u
+                 : 0;
+        a = e->value;
+        env = e->arg_env;
+    }
+    return 0;
+}
+
+static uint32_t _fun_memo_hash(const Smt2FunDef *fd, const uint64_t *keys, uint32_t n) {
+    uint64_t h = (uint64_t)(uintptr_t)fd * 0x9E3779B97F4A7C15ull;
+    for (uint32_t i = 0; i < n; i++) h = (h ^ keys[i]) * 0x100000001B3ull;
+    return (uint32_t)(h ^ (h >> 29));
+}
+
+static Smt2FunMemo *_fun_memo_slot(Smt2Frontend *fe, const Smt2FunDef *fd,
+                                   const uint64_t *keys, uint32_t n) {
+    if (!fe->fun_memo_cap) return NULL;
+    uint32_t m = fe->fun_memo_cap - 1;
+    for (uint32_t i = _fun_memo_hash(fd, keys, n) & m;; i = (i + 1) & m) {
+        Smt2FunMemo *e = &fe->fun_memo[i];
+        if (e->gen != fe->fun_memo_gen) return e;
+        if (e->fd == fd && memcmp(e->keys, keys, n * sizeof keys[0]) == 0) return e;
+    }
+}
+
+static void _fun_memo_put(Smt2Frontend *fe, const Smt2FunDef *fd,
+                          const uint64_t *keys, uint32_t n, TaggedExpr r) {
+    if ((fe->fun_memo_n + 1) * 2 > fe->fun_memo_cap) {
+        uint32_t cap = fe->fun_memo_cap ? fe->fun_memo_cap * 2 : 1024;
+        Smt2FunMemo *old = fe->fun_memo;
+        uint32_t ocap = fe->fun_memo_cap, gen = fe->fun_memo_gen;
+        Smt2FunMemo *t = (Smt2FunMemo *)calloc(cap, sizeof *t);
+        if (!t) return;
+        fe->fun_memo = t;
+        fe->fun_memo_cap = cap;
+        fe->fun_memo_n = 0;
+        fe->fun_memo_gen = 1;
+        for (uint32_t i = 0; i < ocap; i++) {
+            if (old[i].gen != gen) continue;
+            Smt2FunMemo *d = _fun_memo_slot(fe, old[i].fd, old[i].keys, SMT2_MEMO_MAX_ARGS);
+            *d = old[i];
+            d->gen = 1;
+            fe->fun_memo_n++;
+        }
+        free(old);
+    }
+    Smt2FunMemo *e = _fun_memo_slot(fe, fd, keys, n);
+    if (e->gen != fe->fun_memo_gen) fe->fun_memo_n++;
+    e->fd = fd;
+    memcpy(e->keys, keys, sizeof e->keys);
+    e->gen = fe->fun_memo_gen;
+    e->ref = r.te.ref;
+    e->width = r.te.width;
+    e->leaf_kind = r.leaf_kind;
+}
+
+/* ------------------------------------------------------------------ */
 /* define-fun inline expansion                                         */
 /* ------------------------------------------------------------------ */
 
@@ -1312,6 +1429,21 @@ static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
     if (!_subst_reserve(fe, fd->n_params)) {
         fprintf(fe->err, "error: out of memory expanding '%s'\n", fd->name);
         return TAGGED_NULL;
+    }
+
+    uint64_t keys[SMT2_MEMO_MAX_ARGS] = { 0 };
+    static int memo_off = -1;               /* DV_FUN_MEMO=0 turns it off */
+    if (memo_off < 0) {
+        const char *ev = getenv("DV_FUN_MEMO");
+        memo_off = ev && ev[0] == '0';
+    }
+    int memo = !memo_off && !fd->is_array_return && fd->n_params <= SMT2_MEMO_MAX_ARGS;
+    for (uint32_t i = 0; memo && i < fd->n_params; i++)
+        memo = (keys[i] = _fun_arg_key(fe, call->list.items[i + 1], fe->subst_env)) != 0;
+    if (memo) {
+        Smt2FunMemo *e = _fun_memo_slot(fe, fd, keys, SMT2_MEMO_MAX_ARGS);
+        if (e && e->gen == fe->fun_memo_gen)
+            return (TaggedExpr){ { e->ref, e->width }, e->leaf_kind, NULL };
     }
 
     /* Push bindings. Arguments are translated lazily (call-by-name), which is
@@ -1340,6 +1472,8 @@ static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
     fe->subst_depth = saved_depth;
     fe->subst_env   = saved_env;
 
+    if (memo && res.te.ref != EXPR_NULL && !res.array)
+        _fun_memo_put(fe, fd, keys, SMT2_MEMO_MAX_ARGS, res);
     return res;
 }
 
@@ -4315,6 +4449,7 @@ static void _start_cdcl_retention(Smt2Frontend *fe) {
         fe->aux_mark = dvs_builder_mark(fe->builder);
     } else {
         dvs_builder_reset(fe->builder);
+        _fun_memo_clear(fe);
         fe->cdcl_retained = 0;
         fe->bb_inc = 0;
         memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
@@ -4328,6 +4463,7 @@ static void _aux_handed_off(Smt2Frontend *fe) {
         fe->aux_mark = dvs_builder_mark(fe->builder);
     } else {
         dvs_builder_reset(fe->builder);
+        _fun_memo_clear(fe);
         fe->cdcl_retained = 0;
         fe->bb_inc = 0;
         memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
@@ -6878,6 +7014,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->aux_mark = fe->push_bmark[fe->push_depth - n];
         } else {
             dvs_builder_reset(fe->builder);
+            _fun_memo_clear(fe);
             fe->cdcl_retained = 0;
             memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
         }
@@ -6887,6 +7024,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
         /* No compiled context: the scopes live only in the builder, which
          * the bitblast path finalizes from. Rewind it to the outermost
          * popped push, and make the next check-sat re-finalize (B63). */
+        _fun_memo_clear(fe);
         if (dvs_builder_rewind(fe->builder, &fe->push_bmark[fe->push_depth - n]) != 0)
             SMT2_TAINT(fe, "pop could not rewind the assertion set");
         if (fe->problem) fe->problem_dirty = 1;
@@ -7282,6 +7420,7 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     free(fe->vars);
     free(fe->funs);
     free(fe->subst_stack);
+    free(fe->fun_memo);
     free(fe->sort_aliases);
     free(fe->checked);
     free(fe->decl_hist);
@@ -7361,6 +7500,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     free(fe->vars);
     free(fe->funs);          /* re-zeroed by the memset below; realloc'd on next define-fun */
     free(fe->subst_stack);   /* re-zeroed by the memset below; realloc'd on next let */
+    free(fe->fun_memo);
     free(fe->sort_aliases);
     for (uint32_t i = 0; i < fe->n_array_vars; i++) {
         if (fe->array_vars[i].value && !fe->array_vars[i].value->is_abstract) {
@@ -7607,6 +7747,7 @@ static int _check_sat_checked(Smt2Frontend *fe, const Sexpr *cmd,
 static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     /* Reset per-command transient allocations from prior command */
     _cmd_alloc_reset(fe);
+    _fun_memo_clear(fe);
 
     if (!cmd) return 0;
     if (cmd->kind != SEXPR_LIST) {

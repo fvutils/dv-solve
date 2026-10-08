@@ -27,7 +27,7 @@ def _setup(lib: ctypes.CDLL):
     lib.solve_problem_init.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
     lib.problem_add_var.restype  = ctypes.c_uint32
     lib.problem_add_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
-                                    ctypes.c_uint8, ctypes.c_uint8,
+                                    ctypes.c_uint16, ctypes.c_uint8,
                                     ctypes.c_int64, ctypes.c_int64]
     lib.problem_add_constraint.restype  = ctypes.c_uint32
     lib.problem_add_constraint.argtypes = [ctypes.c_void_p, ctypes.c_uint32]

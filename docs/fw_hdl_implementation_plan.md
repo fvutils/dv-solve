@@ -1,6 +1,6 @@
 # fw-hdl requests: implementation plan
 
-Status: Phases 0–3 done (244dcf2, 094e5cd, fbd25d9, 5179d8e); Phase 4 pieces 4.0, 4.1, 4.5 done 2026-10-08 (1d89337); piece 6.6 (sorts up to 65535 bits) done 2026-10-08; 4.3 dropped by D5's kill criterion; see §6. D1–D6 recommendations in §5 approved by the owner 2026-10-07.
+Status: Phases 0–3 done (244dcf2, 094e5cd, fbd25d9, 5179d8e); Phase 4 pieces 4.0, 4.1, 4.5 done 2026-10-08 (1d89337); piece 6.6 (sorts up to 65535 bits) done 2026-10-08 (e2cc080); piece 5.0 (define-fun memo, `codegen-equiv` 60/60) done 2026-10-08; 4.3 dropped by D5's kill criterion; see §6. D1–D6 recommendations in §5 approved by the owner 2026-10-07.
 Source: `docs/fw_hdl_requests.md` (R1–R5). Testcases: `tests/formal/test_fw_hdl_requests.py`
 (today on HEAD `022f744`: 12 pass, 30 strict-xfail).
 Related: `docs/shared_learning_core_project.md`, `docs/usecase_benchmark_design.md`,
@@ -311,6 +311,7 @@ multiplier-bound).
 
 | Piece | What | Size | Acceptance |
 |---|---|---|---|
+| 5.0 | **define-fun application memo**: a call whose arguments are all names (constants, `let` bindings) is translated once per command and reused, keyed by the function and the arguments' identities. Yosys output calls each cell's function from the next cell's many times, so a CRC pipeline otherwise expands exponentially in the front end, before any solver runs | S | every `codegen-equiv` instance parses in linear time |
 | 5.1 | Structural hashing across the two sides of a miter, after word-level normalization of Yosys idioms (`-stbv` state slicing, `ite`-encoded muxes, `bvcomp`) | M | AIG shrinks on `codegen-equiv` |
 | 5.2 | **SAT sweeping / FRAIG**: random simulation (reuse 3.3) proposes candidate node equivalences, incremental SAT proves them, and the proven ones are merged bottom-up. This is ABC's core equivalence lever. Gate it on the miter shape, so kissat sweep stays off for the easy band (the existing hammer) | L | `codegen-equiv` within 2× of ABC `&cec`; beats every SMT competitor |
 | 5.3 | Latency scaling: unrolled depth 1–16 with state reuse; evaluate incremental BMC-style deepening (`push`/`pop`) against monolithic | M | scaling exponent reported; picks the default mode |
@@ -553,6 +554,7 @@ Status: ☐ todo · ◐ in progress · ☑ done · ✕ dropped.
 | 4.3 Gauss–Jordan during search | R3 | ✕ | | | D5 kill criterion: the 3 lost `mixed-proof` instances (fnv1a, multiplier-bound) time out on CryptoMiniSat with Gauss too. Phase 5 instead |
 | 4.4 shared-core interface | R3 | ✕ | | | only needed with 4.3 |
 | 4.5 widen fuzzer op mix | soundness | ☑ | | | `tests/formal/test_affine.py`: XOR-heavy generator (shifts, rotations, masks, CRC steps, constant tables, muxes, some nonlinear ops; widths 1–32) vs z3 and vs SAT (`DV_SIM_CHECK`); 40k seeds clean after the seed-5705 fix; mutants `affine-xor-match` and `affine-table-lanes` caught at the default 1000 seeds. Nightly hook: piece 7 |
+| 5.0 define-fun application memo | codegen | ☑ | | | `_apply_fun_def` in `smt2_frontend.c`; cleared at every command and wherever the builder is reset or rewound; `DV_FUN_MEMO=0` turns it off. Sound because a body sees only its parameters and the globals (B78). `codegen-equiv` 60/60, 0 wrong, 3.9 s in total (was 39/60: 21 CRC pipelines timed out in the front end); fwhdl-core 364/373 at a 60 s budget, the 9 losses all fnv1a/fmix/fletcher (multiplier-bound). A compound argument is not keyed (arguments are passed by name); passing bit-vector arguments by value would cover it, if a design needs it. Fuzz `tests/formal/test_fun_memo.py` (`MEMO_N`): calls nested through parameters, lets and globals from one name pool, the same call text under two bindings of a name; pinned values and free verdicts checked by z3; 400 seeds clean; kills key mutants (let ref ignored, var id ignored, parameter followed in the wrong environment); mutant `fun-memo-let-key`. Reviewing it found B84 (a hang: Yosys `declare-sort` state passed on through nested functions) and the fuzzer found B85 (a select indexed by the first declared variable read a non-node) |
 | 5.1 miter strash + normalization | codegen | ☐ | | | |
 | 5.2 SAT sweeping / FRAIG | codegen | ☐ | | | |
 | 5.3 latency scaling | codegen | ☐ | | | |

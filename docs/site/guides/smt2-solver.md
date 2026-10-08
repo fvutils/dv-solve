@@ -29,7 +29,7 @@ Any other logic is an error. The logic also selects the solving engine; see
 | `declare-const`, `declare-fun` | Bool, `(_ BitVec n)` for n up to 65535, arrays of bit-vectors, and functions over them; a name can be declared once per scope |
 | `declare-sort` | arity 0 (opaque sorts) |
 | `declare-datatypes` | single-constructor records whose fields are Bool or bit-vectors |
-| `define-fun`, `define-sort` | yes; like declarations, they are removed by the `pop` of the level they were made in |
+| `define-fun`, `define-sort` | yes; like declarations, they are removed by the `pop` of the level they were made in. A call whose arguments are all names (constants, `let` names) is expanded once per command and reused, so Yosys output, where each cell's function calls the previous one's many times, stays linear in size; `DV_FUN_MEMO=0` turns that off |
 | `assert` | yes |
 | `get-assertions` | the assertions in scope, as written; needs `:produce-assertions` in `--mode=verilator` |
 | `check-sat` | yes |

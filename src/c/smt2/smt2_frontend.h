@@ -515,6 +515,14 @@ typedef struct {
     uint32_t             subst_depth;
     uint32_t             subst_env;    /* innermost visible binding, index + 1; 0 = none */
 
+    /* define-fun applications already translated in this command, keyed by
+     * the function and its arguments' identities (_apply_fun_def). An entry
+     * is live while its gen equals fun_memo_gen. */
+    struct Smt2FunMemo  *fun_memo;
+    uint32_t             fun_memo_cap;
+    uint32_t             fun_memo_n;
+    uint32_t             fun_memo_gen;
+
     /* Operators lowered by rewriting into supported ones (_translate_rewrite):
      * each template, keyed by its text and parsed once into persistent_arena.
      * Kept across a soft reset, like the arena. */

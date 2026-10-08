@@ -1017,7 +1017,9 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width) 
         S->had_unsupported = 1;
         return dvs_bb_value_u64(S->bb, 1, 0);
     default:
-        return err_bv(S, "unknown ExprKind");
+        fprintf(stderr, "[dvs_bbsolver] error: unknown ExprKind %d\n", (int)*kp);
+        S->had_error = 1;
+        { dvs_bv_t e = { NULL, 0 }; return e; }
     }
 
     if (memoize && !S->had_error && ref < S->cache_cap) {
