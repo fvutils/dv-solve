@@ -4,6 +4,10 @@
 : Choose the solving engine: `cdcl` or `bitblast`. Unset means automatic.
   The `--engine` option does the same thing. See {doc}`../concepts/engines`.
 
+`DV_CHECK_MODEL`
+: `1` turns the model check on, `0` turns it off. Unset, it is on, except in
+  `--mode=verilator`. See {doc}`../guides/smt2-solver`.
+
 `DV_LOG`
 : Turn on `dv-solve-smt2`'s warnings and diagnostics. A value containing `/`
   or `.` is a file to append them to (use this under yosys-smtbmc, which reads

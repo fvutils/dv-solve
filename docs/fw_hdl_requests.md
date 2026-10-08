@@ -24,21 +24,23 @@ Build tested: `10e8bdc` (`build/dv-solve-smt2`).
 `tests/formal/test_fw_hdl_requests.py`:
 
 ```
-pytest tests/formal/test_fw_hdl_requests.py                 # 31 pass, 19 strict-xfail (R1 evaluation) on feat/fw-hdl-frontend
+pytest tests/formal/test_fw_hdl_requests.py                 # all pass on feat/fw-hdl-frontend
 python tests/formal/test_fw_hdl_requests.py --bench          # R3 timings
 ```
 
-The R1, R2 and R4 tests are `xfail(strict=True)`: they start passing when the request
-is met, and strict mode fails the run until the marker is removed.
+The tests were `xfail(strict=True)` until each request was met; none is now.
 
 ---
 
 ## R1 (high). `get-value` on terms: echo the term, evaluate it or say you can't
 
-> **Status 2026-10-07:** asks 1 and 2 done (branch `feat/fw-hdl-frontend`): terms are
-> echoed z3-style, and a term that can't be evaluated gets `(error "...")`, never a
-> value. Ask 3 (evaluate `define-fun` applications and the missing operators) is
-> Phase 2 of `docs/fw_hdl_implementation_plan.md`.
+> **Status 2026-10-07: done** (branch `feat/fw-hdl-frontend`). Terms are echoed
+> z3-style, and a term that can't be evaluated gets `(error "...")`, never a value.
+> A new evaluator (`src/c/smt2/smt2_eval.c`) handles `define-fun` applications,
+> `let` and every QF_BV operator at any width; `(get-value ((|main| a)))` gives
+> `#x83DCEFB7`. It is checked against z3 on 240k random terms
+> (`tests/formal/test_eval_fuzz.py`). The same evaluator now re-checks every `sat`
+> model against the assertions as written.
 
 `(get-value (t))` with `t` a term rather than a symbol has two problems:
 

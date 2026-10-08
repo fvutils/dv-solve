@@ -312,8 +312,84 @@ def test_unevaluable_term_never_gets_a_partial_response():
     text = _HDR + """(declare-const a (_ BitVec 4))
 (define-fun f ((x (_ BitVec 4))) (_ BitVec 4) (bvadd x #x1))
 (check-sat)
-(get-value (a (f a)))
+(get-value (a (f a) (bv2nat a)))
 """
     _, out, _ = _run(text)
-    assert out[1].startswith("(error ") and "(f a)" in out[1], out
+    assert out[1].startswith("(error ") and "(bv2nat a)" in out[1], out
+    assert "unknown function 'bv2nat'" in out[1], out
     assert len(out) == 2
+
+
+# ---- reset-assertions (B77) ------------------------------------------------
+
+@pytest.mark.parametrize("mode", ["batch", "interactive"])
+@pytest.mark.parametrize("engine", ["auto", "bitblast", "cdcl"])
+def test_reset_assertions_drops_assertions_keeps_declarations(mode, engine):
+    text = _HDR + """(declare-const x (_ BitVec 4))
+(define-sort Nib () (_ BitVec 4))
+(define-fun inc ((v Nib)) Nib (bvadd v #x1))
+(assert (= x #x1))
+(check-sat)
+(reset-assertions)
+(assert (= (inc x) #x3))
+(check-sat)
+(get-value (x))
+"""
+    rc, out, _ = _run(text, "--engine=" + engine, mode=mode)
+    assert out == ["sat", "sat", "((x #b0010))"], out
+    assert rc == 0
+
+
+def test_reset_assertions_pops_every_level():
+    text = _HDR + """(declare-const x (_ BitVec 4))
+(push 1)
+(declare-const y (_ BitVec 4))
+(assert (= x #x1))
+(push 1)
+(assert false)
+(reset-assertions)
+(assert (= x #x2))
+(check-sat)
+(assert (= y #x0))
+"""
+    rc, out, _ = _run(text)
+    assert out[0] == "sat", out
+    assert "unknown variable 'y'" in out[1], out        # declared inside a level
+    assert rc == 4
+
+
+# ---- model check (fw-hdl plan 2.5) -----------------------------------------
+
+def test_model_check_runs_and_keeps_good_models():
+    text = _HDR + """(declare-const a (_ BitVec 8))
+(declare-const b (_ BitVec 8))
+(declare-const p Bool)
+(define-fun f ((x (_ BitVec 8))) (_ BitVec 8) (bvmul x #x03))
+(assert (let ((s (bvadd a b))) (and (= (f s) #x2d) (bvult a b))))
+(assert (distinct a b #x00))
+(check-sat)
+(push 1)
+(assert (bvugt a #x7f))
+(check-sat)
+(pop 1)
+(check-sat-assuming (p (not p)))
+(check-sat-assuming ((not p)))
+"""
+    for env in ({}, {"DV_CHECK_MODEL": "0"}):
+        rc, out, err = _run(text, env={**env, "DV_LOG": "1"})
+        assert out == ["sat", "sat", "unsat", "sat"], (env, out)
+        assert "answering unknown" not in err, err
+
+
+def test_model_check_inconclusive_is_not_a_failure():
+    """A term the evaluator cannot evaluate proves nothing: the answer stands."""
+    text = """(set-logic QF_ABV)
+(declare-const a (Array (_ BitVec 32) (_ BitVec 8)))
+(declare-const b (Array (_ BitVec 32) (_ BitVec 8)))
+(assert (= a b))
+(assert (= (select a #x00000001) #x05))
+(check-sat)
+"""
+    rc, out, err = _run(text, env={"DV_LOG": "1"})
+    assert out == ["sat"], out
+    assert "model-check: 1 of 2 inconclusive" in err, err

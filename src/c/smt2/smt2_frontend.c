@@ -8,6 +8,7 @@
 #include <sys/resource.h>
 #endif
 #include "smt2/smt2_frontend.h"
+#include "smt2/smt2_eval.h"
 #include "dvs_lcg.h"
 #include "dvs_bbsolver.h"
 #include "dvs_cube.h"
@@ -3791,6 +3792,34 @@ static int _try_sparse_default(Smt2Frontend *fe, const Sexpr *e) {
     return 0;
 }
 
+/* Whether the model check (2.5) is on: DV_CHECK_MODEL=0/1, else on except in
+ * Verilator mode, whose per-randomize() loop is the latency-critical path.
+ * Decided once per session. */
+static int _check_models_on(Smt2Frontend *fe) {
+    if (!fe->check_models) {
+        const char *e = getenv("DV_CHECK_MODEL");
+        int on = e ? atoi(e) != 0 : !fe->verilator_mode;
+        fe->check_models = on ? 1 : -1;
+    }
+    return fe->check_models > 0;
+}
+
+/* Keep an assertion as written, for the model check. A copy that cannot be
+ * made switches the check off for the session rather than check a subset. */
+static void _record_checked(Smt2Frontend *fe, const Sexpr *t) {
+    if (!_check_models_on(fe)) return;
+    if (fe->n_checked == fe->checked_cap) {
+        uint32_t cap = fe->checked_cap ? fe->checked_cap * 2 : 64;
+        const Sexpr **g = (const Sexpr **)realloc((void *)fe->checked, cap * sizeof(*g));
+        if (!g) { fe->check_models = -1; return; }
+        fe->checked = g;
+        fe->checked_cap = cap;
+    }
+    const Sexpr *copy = _sexpr_deep_copy(&fe->persistent_arena, t);
+    if (!copy) { fe->check_models = -1; return; }
+    fe->checked[fe->n_checked++] = copy;
+}
+
 static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 2) {
         _input_error(fe, "assert requires exactly one expression");
@@ -3805,6 +3834,7 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
         return 0;
     }
     fe->vlt_hash_pending = 0;      /* any other assert: solve for real */
+    _record_checked(fe, cmd->list.items[1]);
     if (fe->verilator_mode && !fe->vlt_enum && _is_vlt_enum(fe, cmd->list.items[1])) fe->vlt_enum = 1;
     _record_named(fe, cmd->list.items[1]);
     if (_try_split_reified_and(fe, cmd->list.items[1])) return 0;
@@ -5835,237 +5865,144 @@ static void _emit_array_store_chain(Smt2Frontend *fe, Smt2ArrayVar *av) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Sexpr → value evaluator for get-value on define-fun macros          */
+/* The model, as smt2_eval.c sees it                                   */
 /*                                                                     */
-/* yosys-smtbmc's cover loop calls (get-value (|UNROLL#N|)) where      */
-/* UNROLL#N is a define-fun body, not a declared variable. We evaluate */
-/* the body directly against the current model. Returns (value, width) */
-/* on success; sets *ok=0 on unsupported/unknown shapes.               */
+/* get-value of anything but a declared name -- a define-fun (yosys-   */
+/* smtbmc's (get-value (|UNROLL#N|))), an expression, a select at a    */
+/* symbolic index -- is evaluated by smt2_eval.c over the model. It    */
+/* reads the model only through these callbacks.                       */
 /* ------------------------------------------------------------------ */
 
-/* The evaluator's value type: 128 bits where the compiler has them, so every
- * accepted width (SMT2_MAX_BV_BITS) folds exactly; otherwise 64 bits. A value
- * wider than EVAL_MAX_W is refused (*ok = 0), never truncated: get-value then
- * emits an honest error placeholder rather than a wrong value. */
-#if defined(DVS_HAVE_INT128)
-typedef unsigned __int128 EvalVal;
-#define EVAL_MAX_W 128
-#else
-typedef uint64_t EvalVal;
-#define EVAL_MAX_W 64
-#endif
-
-typedef struct { EvalVal value; uint16_t width; } EvalRet;
-
-static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok);
-
-static EvalVal _trunc(EvalVal v, uint16_t w) {
-    if (w == 0 || w >= EVAL_MAX_W) return v;
-    return v & (((EvalVal)1 << w) - 1);
+/* Element (f_lo, f_hi) of a declared array -- the flat key of a nested one --
+ * into `nl` limbs. Returns 1, or 2 when no constraint reads the element: its
+ * value is then a seeded random one (a DV solver randomizes free elements). */
+static int _fe_array_elem(Smt2Frontend *fe, const Smt2ArrayVar *av,
+                          uint64_t f_lo, uint64_t f_hi, uint64_t *limbs, uint32_t nl) {
+    for (uint32_t i = 0; i < nl; i++) limbs[i] = 0;
+    uint64_t seed_key = f_lo ^ (f_hi * 0xC2B2AE3D27D4EB4Full);
+    uint32_t name_len = (uint32_t)strlen(av->name);
+    const Smt2ArrayValue *v = av->value;
+    if (v->is_abstract) {
+        int64_t val;
+        if (_abs_base_value(fe, v, f_lo, &val)) { limbs[0] = (uint64_t)val; return 1; }
+        limbs[0] = (uint64_t)_free_elem_value(fe, seed_key, name_len);
+        return 2;
+    }
+    if (v->is_sparse) {
+        uint32_t vid;
+        if (_sparse_find((Smt2ArrayValue *)v, f_lo, f_hi, &vid)) {
+            _fe_get_var_value_wide(fe, vid, limbs, nl);
+            return 1;
+        }
+        if (v->has_default) { limbs[0] = v->default_val; return 1; }
+        limbs[0] = (uint64_t)_free_elem_value(fe, seed_key, name_len);
+        return 2;
+    }
+    if (f_hi == 0 && f_lo < v->n_elems) {
+        /* Look the element var up by name ("arr[k]") rather than via
+         * value->elems[k]: that dvs_expr_t points into the builder arena,
+         * which is reset after compilation, so it is stale here. */
+        char en[SMT2_MAX_NAME + 24];
+        snprintf(en, sizeof(en), "%s[%llu]", av->name, (unsigned long long)f_lo);
+        Smt2Var *ev = _find_var(fe, en, (uint32_t)strlen(en));
+        if (ev) { _fe_get_var_value_wide(fe, ev->var_id, limbs, nl); return 1; }
+    }
+    return 2;
 }
 
-/* Little-endian limbs -> EvalVal (the caller has checked width <= EVAL_MAX_W). */
-static EvalVal _eval_from_limbs(const uint64_t *limbs, uint32_t n_limbs) {
-    EvalVal v = 0;
-    for (uint32_t i = n_limbs; i-- > 0;) {
-#if EVAL_MAX_W > 64
-        v = (v << 64) | (EvalVal)limbs[i];
-#else
-        v = (EvalVal)limbs[i];
-#endif
-    }
-    return v;
+static int _evh_fun(void *ctx, const char *name, uint32_t len, Smt2EvalFun *f) {
+    Smt2FunDef *fd = _find_fun((Smt2Frontend *)ctx, name, len);
+    if (!fd || !fd->body || fd->n_params > SMT2_EVAL_MAX_PARAMS) return 0;
+    f->n_params = fd->n_params;
+    for (uint32_t i = 0; i < fd->n_params; i++) f->param_names[i] = fd->param_names[i];
+    f->body = fd->body;
+    return 1;
 }
 
-static EvalRet _eval_sexpr(Smt2Frontend *fe, const Sexpr *s, int *ok) {
-    EvalRet r = { 0, 0 };
-    if (!*ok || !s) { *ok = 0; return r; }
+static int _evh_scalar(void *ctx, const char *name, uint32_t len, uint32_t *width,
+                       int *is_bool, uint64_t *limbs, uint32_t max_limbs) {
+    Smt2Frontend *fe = (Smt2Frontend *)ctx;
+    Smt2Var *v = _find_var(fe, name, len);
+    if (!v) return 0;
+    uint64_t l[SMT2_BV_MAX_LIMBS];
+    uint32_t w = v->width ? v->width : 1u;
+    uint32_t nl = (w + 63u) / 64u;
+    if (nl > SMT2_BV_MAX_LIMBS) return 0;
+    _fe_get_var_value_wide(fe, v->var_id, l, nl);
+    for (uint32_t i = 0; i < nl && i < max_limbs; i++) limbs[i] = l[i];
+    *width = w;
+    *is_bool = v->is_bool;
+    return 1;
+}
 
-    if (s->kind == SEXPR_BITVEC) {
-        if (s->bv.width > EVAL_MAX_W) { *ok = 0; return r; }
-        if (s->bv.width > 64) {
-            if (!s->bv.limbs) { *ok = 0; return r; }
-            r.value = _eval_from_limbs(s->bv.limbs, (s->bv.width + 63u) / 64u);
-        } else {
-            r.value = s->bv.value;
-        }
-        r.width = (uint16_t)s->bv.width;
-        return r;
-    }
-    if (s->kind == SEXPR_SYMBOL) {
-        if (sexpr_is_symbol(s, "true"))  { r.value = 1; r.width = 1; return r; }
-        if (sexpr_is_symbol(s, "false")) { r.value = 0; r.width = 1; return r; }
-        Smt2FunDef *fd = _find_fun(fe, s->sym.str, s->sym.len);
-        if (fd && fd->n_params == 0) return _eval_sexpr(fe, fd->body, ok);
-        Smt2Var *v = _find_var(fe, s->sym.str, s->sym.len);
-        if (v) {
-            if (v->width > EVAL_MAX_W) { *ok = 0; return r; }
-            if (v->width > 64) {
-                uint64_t limbs[SMT2_BV_MAX_LIMBS];
-                uint32_t nl = (v->width + 63u) / 64u;
-                _fe_get_var_value_wide(fe, v->var_id, limbs, nl);
-                r.value = _trunc(_eval_from_limbs(limbs, nl), v->width);
-            } else {
-                int64_t val = _fe_get_var_value(fe, v->var_id);
-                r.value = _trunc((EvalVal)(uint64_t)val, v->width);
-            }
-            r.width = v->width;
-            return r;
-        }
-        *ok = 0;
-        return r;
-    }
-    if (s->kind == SEXPR_NUMERAL) {
-        r.value = s->numval;
-        r.width = 0; /* width-less; caller widens if used in BV context */
-        return r;
-    }
-    if (s->kind != SEXPR_LIST || s->list.count == 0) { *ok = 0; return r; }
+static const void *_evh_array(void *ctx, const char *name, uint32_t len, uint32_t *index_w,
+                              uint32_t *inner_w, uint32_t *elem_w, int *total) {
+    Smt2ArrayVar *av = _find_array_var((Smt2Frontend *)ctx, name, len);
+    if (!av) return NULL;
+    *index_w = av->sort.addr_width;
+    *inner_w = av->sort.inner_addr;
+    *elem_w = av->sort.data_width;
+    *total = !av->value->is_sparse && !av->value->is_abstract;
+    return av;
+}
 
-    const Sexpr *head = s->list.items[0];
+static int _evh_array_elem(void *ctx, const void *arr, const uint64_t *key,
+                           uint64_t *limbs, uint32_t elem_w) {
+    const Smt2ArrayVar *av = (const Smt2ArrayVar *)arr;
+    uint32_t kw = av->sort.addr_width;
+    if (kw > 128) return 0;   /* keys are at most 128 bits */
+    uint32_t nl = (elem_w + 63u) / 64u;
+    if (nl > SMT2_BV_MAX_LIMBS) return 0;
+    uint64_t l[SMT2_BV_MAX_LIMBS];
+    int rc = _fe_array_elem((Smt2Frontend *)ctx, av, key[0], kw > 64 ? key[1] : 0, l, nl);
+    for (uint32_t i = 0; i < nl; i++) limbs[i] = l[i];
+    return rc;
+}
 
-    /* (_ bvN W) literal */
-    if (sexpr_is_symbol(head, "_") && s->list.count == 3 &&
-        s->list.items[1]->kind == SEXPR_SYMBOL &&
-        s->list.items[2]->kind == SEXPR_NUMERAL) {
-        const Sexpr *bv = s->list.items[1];
-        uint64_t limbs[SMT2_BV_MAX_LIMBS];
-        if (_parse_bv_sym_limbs(bv, limbs, SMT2_BV_MAX_LIMBS)) {
-            uint64_t wn = s->list.items[2]->numval;
-            if (wn > EVAL_MAX_W) { *ok = 0; return r; }  /* never fold truncated */
-            r.width = (uint16_t)wn;
-            r.value = _trunc(_eval_from_limbs(limbs, (EVAL_MAX_W + 63) / 64), r.width);
-            return r;
-        }
-    }
+static void _emit_array_store_chain(Smt2Frontend *fe, Smt2ArrayVar *av);
 
-    /* ((_ extract hi lo) x) */
-    if (head->kind == SEXPR_LIST && head->list.count == 4 &&
-        sexpr_is_symbol(head->list.items[0], "_") &&
-        sexpr_is_symbol(head->list.items[1], "extract") &&
-        head->list.items[2]->kind == SEXPR_NUMERAL &&
-        head->list.items[3]->kind == SEXPR_NUMERAL &&
-        s->list.count == 2) {
-        uint64_t hi = head->list.items[2]->numval;
-        uint64_t lo = head->list.items[3]->numval;
-        EvalRet inner = _eval_sexpr(fe, s->list.items[1], ok);
-        if (!*ok) return r;
-        if (hi < lo || hi >= EVAL_MAX_W) { *ok = 0; return r; }
-        r.width = (uint16_t)(hi - lo + 1);
-        r.value = _trunc(inner.value >> lo, r.width);
-        return r;
-    }
+static int _evh_print_array(void *ctx, FILE *out, const void *arr) {
+    Smt2Frontend *fe = (Smt2Frontend *)ctx;
+    FILE *saved = fe->out;
+    fe->out = out;
+    _emit_array_store_chain(fe, (Smt2ArrayVar *)arr);
+    fe->out = saved;
+    return 1;
+}
 
-    /* ((_ zero_extend n) x), ((_ sign_extend n) x): Verilator indexes an
-     * array this way, and get-values the select. */
-    if (head->kind == SEXPR_LIST && head->list.count == 3 &&
-        sexpr_is_symbol(head->list.items[0], "_") &&
-        (sexpr_is_symbol(head->list.items[1], "zero_extend") ||
-         sexpr_is_symbol(head->list.items[1], "sign_extend")) &&
-        head->list.items[2]->kind == SEXPR_NUMERAL && s->list.count == 2) {
-        uint64_t n = head->list.items[2]->numval;
-        EvalRet inner = _eval_sexpr(fe, s->list.items[1], ok);
-        if (!*ok) return r;
-        if (!inner.width || inner.width + n > EVAL_MAX_W) { *ok = 0; return r; }
-        r.width = (uint16_t)(inner.width + n);
-        r.value = inner.value;
-        if (sexpr_is_symbol(head->list.items[1], "sign_extend") && n &&
-            ((inner.value >> (inner.width - 1)) & 1))
-            r.value |= _trunc(~(EvalVal)0, r.width) & ~_trunc(~(EvalVal)0, inner.width);
-        return r;
-    }
+static uint32_t _evh_uf_arity(void *ctx, const char *name, uint32_t len) {
+    Smt2SortFun *sf = _find_sort_fun((Smt2Frontend *)ctx, name, len);
+    return sf ? sf->n_params : 0;
+}
 
-    if (head->kind != SEXPR_SYMBOL) { *ok = 0; return r; }
+static int _evh_opaque_const(void *ctx, const char *name, uint32_t len) {
+    return _find_sort_const((Smt2Frontend *)ctx, name, len) != NULL;
+}
 
-    /* Variadic logical: and, or */
-    if (sexpr_is_symbol(head, "and")) {
-        r.value = 1; r.width = 1;
-        for (uint32_t i = 1; i < s->list.count; i++) {
-            EvalRet a = _eval_sexpr(fe, s->list.items[i], ok);
-            if (!*ok) return r;
-            if (a.value == 0) { r.value = 0; return r; }
-        }
-        return r;
-    }
-    if (sexpr_is_symbol(head, "or")) {
-        r.value = 0; r.width = 1;
-        for (uint32_t i = 1; i < s->list.count; i++) {
-            EvalRet a = _eval_sexpr(fe, s->list.items[i], ok);
-            if (!*ok) return r;
-            if (a.value != 0) { r.value = 1; return r; }
-        }
-        return r;
-    }
-    if (sexpr_is_symbol(head, "not") && s->list.count == 2) {
-        EvalRet a = _eval_sexpr(fe, s->list.items[1], ok);
-        if (!*ok) return r;
-        r.value = a.value ? 0 : 1; r.width = 1;
-        return r;
-    }
-    if (sexpr_is_symbol(head, "=") && s->list.count == 3) {
-        EvalRet a = _eval_sexpr(fe, s->list.items[1], ok);
-        EvalRet b = _eval_sexpr(fe, s->list.items[2], ok);
-        if (!*ok) return r;
-        r.value = (a.value == b.value) ? 1 : 0; r.width = 1;
-        return r;
-    }
-    if (sexpr_is_symbol(head, "distinct") && s->list.count == 3) {
-        EvalRet a = _eval_sexpr(fe, s->list.items[1], ok);
-        EvalRet b = _eval_sexpr(fe, s->list.items[2], ok);
-        if (!*ok) return r;
-        r.value = (a.value != b.value) ? 1 : 0; r.width = 1;
-        return r;
-    }
-    if (sexpr_is_symbol(head, "ite") && s->list.count == 4) {
-        EvalRet c = _eval_sexpr(fe, s->list.items[1], ok);
-        if (!*ok) return r;
-        return _eval_sexpr(fe, s->list.items[c.value ? 2 : 3], ok);
-    }
-    if (sexpr_is_symbol(head, "bvnot") && s->list.count == 2) {
-        EvalRet a = _eval_sexpr(fe, s->list.items[1], ok);
-        if (!*ok) return r;
-        r.width = a.width;
-        r.value = _trunc(~a.value, r.width);
-        return r;
-    }
-    if (sexpr_is_symbol(head, "concat") && s->list.count > 3) {
-        /* n-ary concat, left-associative (see the translator's). */
-        EvalRet r = _eval_sexpr(fe, s->list.items[1], ok);
-        for (uint32_t i = 2; i < s->list.count && *ok; i++) {
-            EvalRet b = _eval_sexpr(fe, s->list.items[i], ok);
-            /* A result past EVAL_MAX_W cannot be held: refuse, never truncate. */
-            if (!r.width || !b.width || r.width + b.width > EVAL_MAX_W) { *ok = 0; return r; }
-            r.width = r.width + b.width;
-            r.value = _trunc((r.value << b.width) | b.value, r.width);
-        }
-        return r;
-    }
-    if (s->list.count == 3) {
-        EvalRet a = _eval_sexpr(fe, s->list.items[1], ok);
-        EvalRet b = _eval_sexpr(fe, s->list.items[2], ok);
-        if (!*ok) return r;
-        uint16_t w = a.width > b.width ? a.width : b.width;
-        r.width = w;
-        if (sexpr_is_symbol(head, "bvand")) { r.value = _trunc(a.value & b.value, w); return r; }
-        if (sexpr_is_symbol(head, "bvor"))  { r.value = _trunc(a.value | b.value, w); return r; }
-        if (sexpr_is_symbol(head, "bvxor")) { r.value = _trunc(a.value ^ b.value, w); return r; }
-        if (sexpr_is_symbol(head, "bvadd")) { r.value = _trunc(a.value + b.value, w); return r; }
-        if (sexpr_is_symbol(head, "bvsub")) { r.value = _trunc(a.value - b.value, w); return r; }
-        if (sexpr_is_symbol(head, "bvmul")) { r.value = _trunc(a.value * b.value, w); return r; }
-        if (sexpr_is_symbol(head, "bvult")) { r.value = (a.value < b.value) ? 1 : 0; r.width = 1; return r; }
-        if (sexpr_is_symbol(head, "bvule")) { r.value = (a.value <= b.value) ? 1 : 0; r.width = 1; return r; }
-        if (sexpr_is_symbol(head, "bvugt")) { r.value = (a.value > b.value) ? 1 : 0; r.width = 1; return r; }
-        if (sexpr_is_symbol(head, "bvuge")) { r.value = (a.value >= b.value) ? 1 : 0; r.width = 1; return r; }
-        if (sexpr_is_symbol(head, "concat")) {
-            if (!a.width || !b.width || a.width + b.width > EVAL_MAX_W) { *ok = 0; return r; }
-            r.width = a.width + b.width;
-            r.value = _trunc((a.value << b.width) | b.value, r.width);
-            return r;
-        }
-    }
+static const Sexpr *_evh_sort_alias(void *ctx, const char *name, uint32_t len) {
+    Smt2Frontend *fe = (Smt2Frontend *)ctx;
+    for (uint32_t i = 0; i < fe->n_sort_aliases; i++)
+        if (_name_eq(name, len, fe->sort_aliases[i].name)) return fe->sort_aliases[i].def;
+    return NULL;
+}
 
-    *ok = 0;
-    return r;
+static Smt2EvalHost _eval_host(Smt2Frontend *fe) {
+    Smt2EvalHost h;
+    memset(&h, 0, sizeof h);
+    h.ctx = fe;
+    h.fun = _evh_fun;
+    h.scalar = _evh_scalar;
+    h.array = _evh_array;
+    h.array_elem = _evh_array_elem;
+    h.print_array = _evh_print_array;
+    h.uf_arity = _evh_uf_arity;
+    h.opaque_const = _evh_opaque_const;
+    h.sort_alias = _evh_sort_alias;
+    /* The translator budgets 16 KB of stack a level; an evaluation level
+     * takes well under a quarter of that. */
+    uint64_t d = (uint64_t)_translate_depth_limit() * 4u;
+    h.max_depth = d > 4000000u ? 4000000u : (uint32_t)d;
+    return h;
 }
 
 /* Emit a bit-vector value as a flat SMT-LIB binary literal `#b<bits>`.
@@ -6129,18 +6066,6 @@ static void _fprint_sexpr(FILE *out, const Sexpr *s) {
     }
 }
 
-/* Emit an evaluator value of `width` bits; wider than 64 bits spans limbs. */
-static void _emit_eval_value(FILE *out, EvalVal v, unsigned width) {
-    uint64_t limbs[(EVAL_MAX_W + 63) / 64];
-    for (uint32_t i = 0; i < (EVAL_MAX_W + 63) / 64; i++) {
-        limbs[i] = (uint64_t)v;
-#if EVAL_MAX_W > 64
-        v >>= 64;
-#endif
-    }
-    _emit_bv_bin_literal_wide(out, limbs, (EVAL_MAX_W + 63) / 64, width);
-}
-
 /* Print a term the way z3 echoes a get-value key: as written, except that a
  * bit-vector literal is `#x` when its width is a multiple of 4, else `#b`. */
 static void _fprint_term(FILE *out, const Sexpr *s) {
@@ -6166,32 +6091,6 @@ static void _fprint_term(FILE *out, const Sexpr *s) {
         return;
     }
     _fprint_sexpr(out, s);
-}
-
-/* Whether a get-value term has sort Bool, so its value prints as true/false.
- * Syntactic: the operators that return Bool, Bool-declared symbols, and
- * define-funs declared to return Bool. */
-static int _term_is_bool(Smt2Frontend *fe, const Sexpr *s) {
-    if (s->kind == SEXPR_SYMBOL) {
-        if (sexpr_is_symbol(s, "true") || sexpr_is_symbol(s, "false")) return 1;
-        Smt2Var *v = _find_var(fe, s->sym.str, s->sym.len);
-        if (v) return v->is_bool;
-        Smt2FunDef *fd = _find_fun(fe, s->sym.str, s->sym.len);
-        return fd && fd->is_bool_return;
-    }
-    if (s->kind != SEXPR_LIST || s->list.count == 0) return 0;
-    const Sexpr *h = s->list.items[0];
-    if (h->kind != SEXPR_SYMBOL) return 0;
-    static const char *const ops[] = {
-        "=", "distinct", "not", "and", "or", "xor", "=>",
-        "bvult", "bvule", "bvugt", "bvuge", "bvslt", "bvsle", "bvsgt", "bvsge",
-    };
-    for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++)
-        if (sexpr_is_symbol(h, ops[i])) return 1;
-    if (sexpr_is_symbol(h, "ite") && s->list.count == 4)
-        return _term_is_bool(fe, s->list.items[2]);
-    Smt2FunDef *fd = _find_fun(fe, h->sym.str, h->sym.len);
-    return fd && fd->is_bool_return;
 }
 
 static int _get_value_body(Smt2Frontend *fe, const Sexpr *vars_list);
@@ -6229,6 +6128,7 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
     fe->out = real;
     _memout_finish(&m, bad < 0 ? real : NULL);
     if (bad >= 0) {
+        /* _get_value_body left the reason in term_err. */
         Smt2MemOut t;
         if (_memout_open(&t)) {
             _fprint_term(t.f, vars_list->list.items[bad]);
@@ -6236,14 +6136,16 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
             fflush(t.f);
 #ifdef _WIN32
             _memout_finish(&t, NULL);
-            _query_error(fe, "get-value: cannot evaluate this term");
+            _query_error(fe, "get-value: cannot evaluate a term: %s", fe->term_err);
 #else
-            _query_error(fe, "get-value: cannot evaluate '%.80s'", t.buf ? t.buf : "?");
+            _query_error(fe, "get-value: cannot evaluate '%.80s': %s",
+                         t.buf ? t.buf : "?", fe->term_err);
             _memout_finish(&t, NULL);
 #endif
         } else {
-            _query_error(fe, "get-value: cannot evaluate a term");
+            _query_error(fe, "get-value: cannot evaluate a term: %s", fe->term_err);
         }
+        fe->term_err[0] = 0;
     }
     fflush(fe->out);
     return 0;
@@ -6253,6 +6155,8 @@ static int _cmd_get_value(Smt2Frontend *fe, const Sexpr *cmd) {
  * answered, else the index of the first term that could not be evaluated (the
  * output is then incomplete and the caller discards it). */
 static int _get_value_body(Smt2Frontend *fe, const Sexpr *vars_list) {
+    Smt2EvalHost host = _eval_host(fe);
+    Smt2Eval *ev = NULL;            /* created on the first term that needs it */
     fprintf(fe->out, "(");
     int first = 1;
     for (uint32_t i = 0; i < vars_list->list.count; i++) {
@@ -6316,42 +6220,20 @@ static int _get_value_body(Smt2Frontend *fe, const Sexpr *vars_list) {
             if (av && outer_idx && !_const_index(fe, outer_idx, ow, &o_lo, &o_hi)) av = NULL;
             if (av) is_const = _const_index(fe, name_s->list.items[2], iw, &k, &k_hi);
             /* A non-constant index: the element its model value selects. */
-            if (av && !is_const && !outer_idx) {
-                int iok = 1;
-                EvalRet ie = _eval_sexpr(fe, name_s->list.items[2], &iok);
-                if (iok && ie.width <= 64) { k = (uint64_t)ie.value; is_const = 1; idx_evald = 1; }
+            if (av && !is_const && !outer_idx && iw <= 64) {
+                if (!ev) ev = smt2_eval_new(&host);
+                const Smt2Value *iv = ev ? smt2_eval(ev, name_s->list.items[2]) : NULL;
+                if (iv && smt2_value_kind(iv) == SMT2_VAL_BV && smt2_value_width(iv) == iw) {
+                    k = smt2_value_u64(iv);
+                    is_const = 1;
+                    idx_evald = 1;
+                }
             }
             if (av && is_const) {
                 uint64_t f_lo = k, f_hi = k_hi;          /* flat key */
                 if (outer_idx) _key_concat(o_lo, o_hi, k, k_hi, iw, &f_lo, &f_hi);
-                int64_t val = 0;
-                uint32_t elem_vid = UINT32_MAX;   /* element var, for a wide read */
-                uint64_t seed_key = f_lo ^ (f_hi * 0xC2B2AE3D27D4EB4Full);
-                if (av->value->is_abstract) {
-                    if (!_abs_base_value(fe, av->value, f_lo, &val))
-                        val = _free_elem_value(fe, seed_key, arr_s->sym.len);
-                } else if (av->value->is_sparse) {
-                    uint32_t vid;
-                    if (_sparse_find(av->value, f_lo, f_hi, &vid)) {
-                        val = _fe_get_var_value(fe, vid);
-                        elem_vid = vid;
-                    } else if (av->value->has_default) {
-                        val = (int64_t)av->value->default_val;
-                    } else {
-                        val = _free_elem_value(fe, seed_key, arr_s->sym.len);
-                    }
-                } else if (f_hi == 0 && f_lo < av->value->n_elems) {
-                    /* Look the element var up by name ("arr[k]") rather than via
-                     * value->elems[k]: that dvs_expr_t points into the builder
-                     * arena, which is reset after compilation, so it is stale
-                     * here (dereferencing it segfaults). */
-                    char en[SMT2_MAX_NAME + 16];
-                    snprintf(en, sizeof(en), "%.*s[%llu]",
-                             (int)arr_s->sym.len, arr_s->sym.str,
-                             (unsigned long long)f_lo);
-                    Smt2Var *ev = _find_var(fe, en, (uint32_t)strlen(en));
-                    if (ev) { val = _fe_get_var_value(fe, ev->var_id); elem_vid = ev->var_id; }
-                }
+                uint64_t limbs[SMT2_BV_MAX_LIMBS];
+                _fe_array_elem(fe, av, f_lo, f_hi, limbs, (dw + 63u) / 64u);
                 /* Emit ((select name #x<idx>) #b<value>): the key echoes the
                  * select (hex indices padded to their widths -- the form
                  * drivers parse), the value is the element's model. */
@@ -6372,36 +6254,36 @@ static int _get_value_body(Smt2Frontend *fe, const Sexpr *vars_list) {
                     _emit_hex_key(fe->out, k, k_hi, iw);
                     fprintf(fe->out, ") ");
                 }
-                if (dw > 64 && elem_vid != UINT32_MAX) {
-                    uint64_t limbs[SMT2_BV_MAX_LIMBS];
-                    uint32_t nl = (dw + 63u) / 64u;
-                    _fe_get_var_value_wide(fe, elem_vid, limbs, nl);
-                    _emit_bv_bin_literal_wide(fe->out, limbs, nl, (unsigned)dw);
-                } else {
-                    _emit_bv_bin_literal(fe->out, (uint64_t)val, (unsigned)dw);
-                }
+                _emit_bv_bin_literal_wide(fe->out, limbs, (dw + 63u) / 64u, (unsigned)dw);
                 fprintf(fe->out, ")");
                 continue;
             }
         }
 
-        /* Fallback: evaluate as a sub-expression (define-fun macro,
-         * extract, etc.). yosys-smtbmc's cover loop calls e.g.
-         * (get-value (|UNROLL#28|)) where UNROLL#28 is a define-fun. */
-        int ok = 1;
-        EvalRet ev = _eval_sexpr(fe, name_s, &ok);
-        if (!ok) return (int)i;   /* never a placeholder value (fw-hdl R1) */
+        /* Anything else -- a define-fun (yosys-smtbmc's cover loop asks
+         * (get-value (|UNROLL#28|))), an expression -- is evaluated over the
+         * model by smt2_eval.c. */
+        if (!ev) ev = smt2_eval_new(&host);
+        const Smt2Value *val = ev ? smt2_eval(ev, name_s) : NULL;
         /* The key echoes the term (SMT-LIB 2.6 §4.2.6: consumers pair values
          * with terms by it). */
-        fputc('(', fe->out);
-        _fprint_term(fe->out, name_s);
-        fputc(' ', fe->out);
-        if (_term_is_bool(fe, name_s))
-            fputs(ev.value & 1 ? "true" : "false", fe->out);
-        else
-            _emit_eval_value(fe->out, ev.value, ev.width ? ev.width : 1u);
+        if (val) {
+            fputc('(', fe->out);
+            _fprint_term(fe->out, name_s);
+            fputc(' ', fe->out);
+        }
+        if (!val || !smt2_value_print(fe->out, val, &host)) {
+            /* Never a placeholder value (fw-hdl R1): the caller discards the
+             * buffered response and reports the term and this reason. */
+            snprintf(fe->term_err, sizeof fe->term_err, "%s",
+                     !ev ? "out of memory" : !val ? smt2_eval_error(ev)
+                         : "the value cannot be printed");
+            smt2_eval_free(ev);
+            return (int)i;
+        }
         fputc(')', fe->out);
     }
+    smt2_eval_free(ev);
     fprintf(fe->out, ")\n");
     fflush(fe->out);
     return -1;
@@ -6481,6 +6363,10 @@ static int _cmd_get_info(Smt2Frontend *fe, const Sexpr *cmd) {
         if (fe->input_poisoned) {
             fprintf(fe->out, "(:reason-unknown \"input error: ");
             _fprint_smt2_string_body(fe->out, fe->input_err_reason);
+            fprintf(fe->out, "\")\n");
+        } else if (fe->model_check_why[0]) {
+            fprintf(fe->out, "(:reason-unknown \"model check failed: ");
+            _fprint_smt2_string_body(fe->out, fe->model_check_why);
             fprintf(fe->out, "\")\n");
         } else if (fe->incomplete) {
             fprintf(fe->out, "(:reason-unknown \"unsupported: ");
@@ -6571,6 +6457,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->push_n_aux_problems[fe->push_depth] = fe->n_aux_problems;
             fe->push_n_named[fe->push_depth] = fe->n_named;
             fe->push_n_core_hist[fe->push_depth] = fe->n_core_hist;
+            fe->push_n_checked[fe->push_depth] = fe->n_checked;
             fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
             _abs_push_frame(fe, fe->push_depth);
             fe->push_bmark[fe->push_depth] = dvs_builder_mark(fe->builder);
@@ -6597,6 +6484,7 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->push_n_aux_problems[fe->push_depth - 1] = fe->n_aux_problems;
         fe->push_n_named[fe->push_depth - 1] = fe->n_named;
         fe->push_n_core_hist[fe->push_depth - 1] = fe->n_core_hist;
+        fe->push_n_checked[fe->push_depth - 1] = fe->n_checked;
         fe->push_incomplete[fe->push_depth - 1] = (uint8_t)fe->incomplete;
         _abs_push_frame(fe, fe->push_depth - 1);
         fe->push_bmark[fe->push_depth - 1] = dvs_builder_mark(fe->builder);
@@ -6716,6 +6604,8 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
         _truncate_named(fe, fe->push_n_named[fe->push_depth]);
         if (fe->n_core_hist > fe->push_n_core_hist[fe->push_depth])
             fe->n_core_hist = fe->push_n_core_hist[fe->push_depth];
+        if (fe->n_checked > fe->push_n_checked[fe->push_depth])
+            fe->n_checked = fe->push_n_checked[fe->push_depth];
     }
     return 0;
 }
@@ -7028,6 +6918,8 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     free(fe->funs);
     free(fe->subst_stack);
     free(fe->sort_aliases);
+    free(fe->checked);
+    free(fe->decl_hist);
     sexpr_arena_destroy(&fe->persistent_arena);
     /* Free persistent array var allocations (dense elems[] or sparse map).
      * Abstract (DV_ARRAY) values are owned by anodes[] -- freed below -- so skip
@@ -7085,6 +6977,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     uint32_t ctx_buf_scale = fe->ctx_buf_scale;
     void    *shape_tab = fe->shape_tab;
     uint32_t n_input_errors = fe->n_input_errors;   /* drives the exit status */
+    int8_t   check_models = fe->check_models;
     /* Reused allocations (reset in place below rather than freed). */
     dvs_builder_t *builder = fe->builder;
     SexprArena           parena  = fe->persistent_arena;
@@ -7119,6 +7012,8 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     _truncate_named(fe, 0);
     free(fe->named);
     free(fe->core_hist);   /* the copies live in persistent_arena, reset below */
+    free(fe->checked);     /* likewise */
+    free(fe->decl_hist);   /* likewise */
 
     /* Reset the reused allocations to empty (equivalent to a fresh create). */
     dvs_builder_reset(builder);
@@ -7147,6 +7042,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->ctx_buf_scale = ctx_buf_scale;
     fe->shape_tab = shape_tab;
     fe->n_input_errors = n_input_errors;
+    fe->check_models = check_models;
     fe->builder = builder;
     fe->persistent_arena = parena;
 }
@@ -7183,16 +7079,149 @@ static void _core_record(Smt2Frontend *fe, const Sexpr *cmd, int32_t named) {
     fe->n_core_hist++;
 }
 
+static void smt2_frontend_soft_reset(Smt2Frontend *fe);
+
+/* Commands (reset-assertions) keeps: those that declare or define at level 0,
+ * and options. */
+static int _survives_reset_assertions(const Sexpr *head) {
+    static const char *const kinds[] = {
+        "set-logic", "set-option", "set-info", "declare-sort", "define-sort",
+        "declare-const", "declare-fun", "define-fun", "declare-datatypes",
+    };
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
+        if (sexpr_is_symbol(head, kinds[i])) return 1;
+    return 0;
+}
+
+static void _decl_record(Smt2Frontend *fe, const Sexpr *cmd) {
+    if (fe->n_decl_hist == fe->decl_hist_cap) {
+        uint32_t cap = fe->decl_hist_cap ? fe->decl_hist_cap * 2 : 64;
+        const Sexpr **g = (const Sexpr **)realloc((void *)fe->decl_hist, cap * sizeof(*g));
+        if (!g) return;
+        fe->decl_hist = g;
+        fe->decl_hist_cap = cap;
+    }
+    const Sexpr *copy = _sexpr_deep_copy(&fe->persistent_arena, cmd);
+    if (copy) fe->decl_hist[fe->n_decl_hist++] = copy;
+}
+
+/* (reset-assertions): SMT-LIB 2.6 removes every assertion and pops every
+ * level, keeping level-0 declarations, definitions and options. A compiled
+ * constraint cannot be taken back, so this is a (reset) and a replay of those
+ * commands. It used to be a no-op that kept every assertion in force: `x = 1;
+ * reset-assertions; x = 2` answered unsat (B77). Like (reset), it clears an
+ * input-error poison: the replay re-declares only what succeeded. */
+static int _cmd_reset_assertions(Smt2Frontend *fe) {
+    uint32_t n = fe->n_decl_hist;
+    SexprArena tmp;
+    sexpr_arena_init(&tmp, 16384);
+    const Sexpr **cmds = (const Sexpr **)malloc((n ? n : 1) * sizeof(*cmds));
+    if (!cmds) {
+        sexpr_arena_destroy(&tmp);
+        _input_error(fe, "reset-assertions: out of memory");
+        return 0;
+    }
+    for (uint32_t i = 0; i < n; i++) cmds[i] = _sexpr_deep_copy(&tmp, fe->decl_hist[i]);
+    smt2_frontend_soft_reset(fe);
+    Smt2MemOut m;
+    int quiet = _memout_open(&m);
+    FILE *real = fe->out;
+    if (quiet) fe->out = m.f;
+    for (uint32_t i = 0; i < n; i++)
+        if (cmds[i]) smt2_frontend_dispatch(fe, cmds[i]);
+    fe->out = real;
+    if (quiet) _memout_finish(&m, NULL);
+    free((void *)cmds);
+    sexpr_arena_destroy(&tmp);
+    return 0;
+}
+
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     fe->model_reused = 0;
     fe->cmd_dropped = 0;
     fe->last_validate_viol = -1;
     int record = fe->produce_unsat_cores && cmd && cmd->kind == SEXPR_LIST
               && cmd->list.count > 0 && _core_shapes_assertions(cmd->list.items[0]);
+    int keep = cmd && cmd->kind == SEXPR_LIST && cmd->list.count > 0
+            && fe->push_depth == 0 && _survives_reset_assertions(cmd->list.items[0]);
     uint32_t n_named = fe->n_named;
+    uint32_t n_errors = fe->n_input_errors;
     int rc = _dispatch(fe, cmd);
     if (record && rc == 0)
         _core_record(fe, cmd, fe->n_named > n_named ? (int32_t)fe->n_named - 1 : -1);
+    if (keep && rc == 0 && fe->n_input_errors == n_errors)
+        _decl_record(fe, cmd);
+    return rc;
+}
+
+/* The model check (plan 2.5). Evaluate every assertion in scope -- and a
+ * check-sat-assuming's assumptions -- under the model just found, with
+ * smt2_eval.c. Returns -1 when one is false (the model is wrong), else 0. A
+ * term the evaluator cannot evaluate, or whose value rests on an array element
+ * no constraint reads (arbitrary in the model), proves nothing either way and
+ * is counted as inconclusive. */
+static int _model_check(Smt2Frontend *fe, const Sexpr *cmd) {
+    Smt2EvalHost host = _eval_host(fe);
+    Smt2Eval *ev = smt2_eval_new(&host);
+    if (!ev) return 0;
+    const Sexpr *assumps = NULL;
+    if (!fe->verilator_mode && sexpr_is_command(cmd, "check-sat-assuming")
+            && cmd->list.count == 2 && cmd->list.items[1]->kind == SEXPR_LIST)
+        assumps = cmd->list.items[1];   /* Verilator mode ignores them, by design */
+    uint32_t n = fe->n_checked + (assumps ? assumps->list.count : 0);
+    uint32_t inconclusive = 0;
+    int bad = 0;
+    for (uint32_t i = 0; i < n && !bad; i++) {
+        const Sexpr *t = i < fe->n_checked ? fe->checked[i]
+                                           : assumps->list.items[i - fe->n_checked];
+        const Smt2Value *v = smt2_eval(ev, t);
+        if (!v || smt2_value_kind(v) != SMT2_VAL_BOOL) {
+            inconclusive++;
+            if (fe->print_stats || getenv("DV_LOG"))
+                fprintf(fe->err, "model-check: %s %u not evaluated: %s\n",
+                        i < fe->n_checked ? "assertion" : "assumption",
+                        i < fe->n_checked ? i + 1 : i - fe->n_checked + 1,
+                        v ? "not Bool" : smt2_eval_error(ev));
+            continue;
+        }
+        if (smt2_value_u64(v)) continue;
+        if (smt2_value_arbitrary(v)) { inconclusive++; continue; }
+        bad = 1;
+        if (i < fe->n_checked)
+            snprintf(fe->model_check_why, sizeof fe->model_check_why,
+                     "assertion %u is false under the model", i + 1);
+        else
+            snprintf(fe->model_check_why, sizeof fe->model_check_why,
+                     "assumption %u is false under the model", i - fe->n_checked + 1);
+    }
+    smt2_eval_free(ev);
+    if (bad)
+        fprintf(fe->err, "model-check: %s; answering unknown\n", fe->model_check_why);
+    if (inconclusive && (fe->print_stats || getenv("DV_LOG")))
+        fprintf(fe->err, "model-check: %u of %u inconclusive\n", inconclusive, n);
+    return bad ? -1 : 0;
+}
+
+/* check-sat / check-sat-assuming with the model check: the answer is held back
+ * until the model has been checked, so a wrong `sat` never reaches the driver. */
+static int _check_sat_checked(Smt2Frontend *fe, const Sexpr *cmd,
+                              int (*run)(Smt2Frontend *, const Sexpr *)) {
+    fe->model_check_why[0] = '\0';
+    Smt2MemOut m;
+    if (!_check_models_on(fe) || !_memout_open(&m)) return run(fe, cmd);
+    FILE *real = fe->out;
+    fe->out = m.f;
+    int rc = run(fe, cmd);
+    fe->out = real;
+    if (rc == 0 && fe->has_result && fe->last_result == DVS_SOLVE_OK && !fe->model_reused
+            && _model_check(fe, cmd) < 0) {
+        _memout_finish(&m, NULL);
+        fe->last_result = DVS_SOLVE_TIMEOUT;
+        fprintf(real, "unknown\n");
+    } else {
+        _memout_finish(&m, real);
+    }
+    fflush(real);
     return rc;
 }
 
@@ -7235,9 +7264,9 @@ static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     if (sexpr_is_symbol(head, "assert"))
         return _cmd_assert(fe, cmd);
     if (sexpr_is_symbol(head, "check-sat"))
-        return _cmd_check_sat(fe, cmd);
+        return _check_sat_checked(fe, cmd, _cmd_check_sat);
     if (sexpr_is_symbol(head, "check-sat-assuming"))
-        return _cmd_check_sat_assuming(fe, cmd);
+        return _check_sat_checked(fe, cmd, _cmd_check_sat_assuming);
     if (sexpr_is_symbol(head, "get-unsat-assumptions"))
         return _cmd_get_unsat_assumptions(fe, cmd);
     if (sexpr_is_symbol(head, "get-value"))
@@ -7261,22 +7290,8 @@ static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
         _input_error(fe, "unsupported command 'declare-datatype'");
         return 0;
     }
-    if (sexpr_is_symbol(head, "reset-assertions")) {
-        /* No-op: dropping individual asserted constraints from a compiled
-         * solver isn't currently supported (would require constraint-level
-         * tracking that wasn't part of the Phase-5 IR). For sby/yosys flows
-         * this is typically issued at session boundaries where the next
-         * (check-sat) re-asserts everything anyway, so a silent no-op is
-         * sound for those use cases. If a (check-sat) follows and the
-         * cached result is stale, _cmd_check_sat resets via dvs_solver_reset. */
-        _end_assumptions(fe);
-        if (fe->has_result) {
-            dvs_solver_reset(fe->ctx);
-            fe->has_result = 0;
-        }
-        fe->incomplete = 0;
-        return 0;
-    }
+    if (sexpr_is_symbol(head, "reset-assertions"))
+        return _cmd_reset_assertions(fe);
     if (sexpr_is_symbol(head, "reset")) {
         /* SMT-LIB2 (reset): restore the solver to its immediately-post-startup
          * state -- clear all declarations, asserts, define-funs, the logic, and

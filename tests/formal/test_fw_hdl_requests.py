@@ -1,9 +1,7 @@
 """Testcases behind docs/fw_hdl_requests.md (from fw-hdl, 2026-10-03).
 
-R2 (malformed input), R4 (define-sort) and R5 (Bool values) are met, and so
-is the echo half of R1. R1's evaluation half (terms the evaluator does not
-cover yet) is strict-xfail: it starts passing when the request is met, and
-strict mode then fails the run until the marker is removed.
+R1 (get-value on terms), R2 (malformed input), R4 (define-sort) and R5 (Bool
+values) are met.
 
 R3 (engine routing) is a timing question. The tests here only pin the
 verdicts, on both engines. The timings come from
@@ -63,17 +61,10 @@ _GV = [
     (9, "(= a #x5)", 1),
 ]
 
-# Not evaluated yet (Phase 2 of docs/fw_hdl_implementation_plan.md): the
-# response is an `(error ...)`, never a placeholder value.
-_NOT_EVALUATED = {3, 4, 5, 6, 7, 8}
-
 
 @pytest.mark.parametrize("engine", ["auto", "bitblast", "cdcl"])
 @pytest.mark.parametrize("idx,term,value", [
-    pytest.param(i, t, v, id=f"q{i}",
-                 marks=[pytest.mark.xfail(strict=True, reason="R1")]
-                 if i in _NOT_EVALUATED else [])
-    for i, t, v in _GV])
+    pytest.param(i, t, v, id=f"q{i}") for i, t, v in _GV])
 def test_get_value_term(engine, idx, term, value):
     args = [] if engine == "auto" else [f"--engine={engine}"]
     out = _run("get_value_terms.smt2", *args)
@@ -85,7 +76,6 @@ def test_get_value_term(engine, idx, term, value):
         assert got_val in ("true", "false"), f"Bool term printed as a bit-vector: {got_val}"
 
 
-@pytest.mark.xfail(strict=True, reason="R1: the case that hit fw-hdl")
 def test_crc32_counterexample_value():
     """The counterexample's output, via the design's own function."""
     out = _run("crc32_counterexample.smt2")
@@ -107,11 +97,15 @@ def test_unbalanced_parens_reported(name):
         f"exit {p.returncode} reads as sat (0) or unsat (1)"
 
 
-@pytest.mark.parametrize("idx", sorted(_NOT_EVALUATED))
-def test_unevaluable_term_is_an_error(idx):
+def test_unevaluable_term_is_an_error():
     """R1.1: a term we cannot evaluate gets an (error ...), never a value."""
-    out = _run("get_value_terms.smt2")
-    assert out[1 + idx].startswith("(error "), out[1 + idx]
+    p = subprocess.run([str(_EXE)], capture_output=True, text=True, timeout=30, input=(
+        "(set-logic QF_BV)(declare-const a (_ BitVec 4))(assert (= a #x5))(check-sat)"
+        "(get-value (a (bv2nat a)))"))
+    out = p.stdout.splitlines()
+    assert out[0] == "sat"
+    assert out[1].startswith("(error ") and "bv2nat" in out[1], out[1:]
+    assert len(out) == 2, "partial response before the error"
 
 
 # ---- R5: Bool values -----------------------------------------------------

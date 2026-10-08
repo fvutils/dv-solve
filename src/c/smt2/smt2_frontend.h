@@ -328,6 +328,23 @@ typedef struct {
     uint32_t             n_core_hist;
     uint32_t             core_hist_cap;
     uint32_t             core_hist_at_check; /* n_core_hist at the last check-sat */
+    /* Model check (docs/fw_hdl_implementation_plan.md 2.5): every assertion as
+     * written, deep-copied into persistent_arena and scoped by push/pop, is
+     * evaluated by smt2_eval.c under each `sat` model. The evaluator shares no
+     * code with the translator, so a false assertion is a translation bug: the
+     * answer becomes `unknown`. check_models: 0 undecided (DV_CHECK_MODEL, else
+     * on except in Verilator mode), 1 on, -1 off. */
+    /* Level-0 declarations, definitions and options, deep-copied into
+     * persistent_arena: (reset-assertions) is a (reset) followed by their
+     * replay, since a compiled constraint cannot be taken back. */
+    const Sexpr        **decl_hist;
+    uint32_t             n_decl_hist;
+    uint32_t             decl_hist_cap;
+    int8_t               check_models;
+    const Sexpr        **checked;
+    uint32_t             n_checked;
+    uint32_t             checked_cap;
+    char                 model_check_why[200];  /* set when the check said unknown */
     uint8_t              core_replayable;    /* last unsat came from a plain check-sat */
     dvs_block_alloc_t   *block_alloc;
     void                *ctx_buf;      /* raw buffer for dvs_ctx_t */
@@ -510,6 +527,7 @@ typedef struct {
     uint32_t             push_n_aux_problems[32];
     uint32_t             push_n_named[32];
     uint32_t             push_n_core_hist[32];
+    uint32_t             push_n_checked[32];
     dvs_builder_mark_t   push_bmark[32];     /* builder position at each push */
     uint8_t              push_incomplete[32];  /* `incomplete` at each push */
     uint32_t             push_n_anodes[32];    /* abstract-array state at each push */

@@ -452,6 +452,7 @@ add_executable(bench_inproc
     src/c/smt2/smt2_lexer.c
     src/c/smt2/smt2_parser.c
     src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_eval.c
 )
 target_link_libraries(bench_inproc PRIVATE dv_solve)
 target_include_directories(bench_inproc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -464,6 +465,7 @@ add_executable(bench_vlt_replay
     src/c/smt2/smt2_lexer.c
     src/c/smt2/smt2_parser.c
     src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_eval.c
 )
 target_link_libraries(bench_vlt_replay PRIVATE dv_solve)
 target_include_directories(bench_vlt_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -477,6 +479,7 @@ add_executable(test_smt2_frontend
     src/c/smt2/smt2_lexer.c
     src/c/smt2/smt2_parser.c
     src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_eval.c
 )
 target_link_libraries(test_smt2_frontend PRIVATE dv_solve)
 target_include_directories(test_smt2_frontend PRIVATE
@@ -542,6 +545,7 @@ set(SMT2_SOURCES
     src/c/smt2/smt2_lexer.c
     src/c/smt2/smt2_parser.c
     src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_eval.c
     src/c/smt2/smt2_oracle.c
     src/c/smt2/smt2_main.c
 )

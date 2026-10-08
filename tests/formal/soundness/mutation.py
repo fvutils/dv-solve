@@ -84,6 +84,11 @@ MUTANTS = {
     "frontend-compiled-flag": ("src/c/smt2/smt2_frontend.c",
         "        if (rc >= 0) {\n            /* rc > 0 (some constraints left uncompiled;",
         "        if (rc == 0) {\n            /* rc > 0 (some constraints left uncompiled;"),
+    # A translator mis-lowering: the compiled problem is self-consistent, so
+    # only the model check (smt2_eval.c, fw-hdl plan 2.5) sees the wrong sat.
+    "smt2-bvxor-as-bvor": ("src/c/smt2/smt2_frontend.c",
+        '    BINOP_CASE("bvxor", DVS_BIN_BXOR)',
+        '    BINOP_CASE("bvxor", DVS_BIN_BOR)'),
     "bvadd-wrap-width": ("src/c/dvs_prop_templates.c",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvadd_64);",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width > 1 ? width - 1 : width, priority, _fire_bvadd_64);"),

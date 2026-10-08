@@ -38,14 +38,14 @@ Any other logic is an error. The logic also selects the solving engine; see
 | `get-info` | `:name`, `:version`, `:authors` |
 | `push`, `pop` | yes, including nested scopes |
 | `reset` | yes |
-| `reset-assertions` | accepted; see below |
+| `reset-assertions` | yes |
 | `echo` | yes |
 | `exit` | yes |
 
 Not supported: `get-proof`, `get-assignment`,
 `declare-datatype` (singular), and datatypes with more than one constructor.
-An unsupported command writes an error to the diagnostic stream and produces
-no response on standard output; the session carries on.
+An unsupported command is answered with an `(error ...)`; see
+[Errors](#errors).
 
 `get-unsat-core` lists the `:named` assertions in an unsatisfiable set. With
 `:produce-unsat-cores` set to `true` the list is minimal: removing any one of
@@ -54,8 +54,8 @@ each name in turn, which takes up to 10 seconds; if it runs out of time, the
 list is still unsatisfiable but may not be minimal. Without the option, and
 after `check-sat-assuming`, the list is every named assertion in scope.
 
-`reset-assertions` is accepted but has no effect. Use `push`/`pop` to retract
-assertions, or `reset` to start again.
+`reset-assertions` removes every assertion and pops every `push` level. It
+keeps the declarations, definitions and options made outside any level.
 
 ## Expressions
 
@@ -94,9 +94,22 @@ pipe needs. `--batch` and `--interactive` override the default.
 :lines: 2-
 ```
 
-Bool values print as `true` and `false`. `get-value` accepts terms as well as
-names, and echoes each term as written (bit-vector literals in `#x` form when
-their width is a multiple of 4).
+Bool values print as `true` and `false`. `get-value` accepts any term, not
+only names: calls to `define-fun` definitions, `let`, every bit-vector
+operator (including `bvnand`, `bvnor`, `bvxnor`, `bvcomp`, the rotations and
+the overflow predicates such as `bvuaddo`), and arrays. Each term is echoed as
+written, with bit-vector literals in `#x` form when their width is a multiple
+of 4.
+
+## Model check
+
+Before `check-sat` answers `sat`, dv-solve evaluates every assertion in scope,
+as written, under the model it found. The evaluator is separate from the code
+that translates assertions for the solving engines, so a translation error
+cannot hide from it. If an assertion is false under the model, the answer is
+`unknown` and `(get-info :reason-unknown)` says which assertion. The check is
+on by default, and off in `--mode=verilator`; `DV_CHECK_MODEL` turns it on or
+off (see {doc}`../reference/environment`).
 
 ## Errors
 

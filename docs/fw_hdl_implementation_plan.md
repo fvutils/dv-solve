@@ -482,8 +482,8 @@ Status: ☐ todo · ◐ in progress · ☑ done · ✕ dropped.
 | 0.4 fwhdl-core manifest + scorecard | bench | ☐ | | | |
 | 0.5 conformance corpus + parser fuzzer | R1, R2, R4, R5 | ☐ | | | |
 | 0.6 noise band | bench | ☐ | | | |
-| 1.1 error channel policy | R2, R4 | ☑ | | branch feat/fw-hdl-frontend | D1; B76 |
-| 1.2 parser errors | R2 | ☑ | | branch feat/fw-hdl-frontend | F2 = B75 |
+| 1.1 error channel policy | R2, R4 | ☑ | | 094e5cd | D1; B76 |
+| 1.2 parser errors | R2 | ☑ | | 094e5cd | F2 = B75 |
 | 1.3 sticky input-error state | R2 | ☑ | | | D2 |
 | 1.4 exit codes + `--help` | R2 | ☑ | | | D3 |
 | 1.5 unsupported-command audit | R2, R4 | ◐ | | | done for command and term errors (Appendix B); `:print-success` still ignored |
@@ -491,12 +491,12 @@ Status: ☐ todo · ◐ in progress · ☑ done · ✕ dropped.
 | 1.7 Bool printing | R5 / B32 | ☑ | | | check Verilator |
 | 1.8 get-value echo, no placeholders | R1.1, R1.2 | ☑ | | | |
 | 1.9 close-out of R2/R4/R5 | — | ☑ | | | |
-| 2.1 value type | R1.3 | ☐ | | | |
-| 2.2 full operator table | R1.3 | ☐ | | | |
-| 2.3 let / define-fun / memo | R1.3 | ☐ | | | |
-| 2.4 hook-up, remove old evaluator | R1 | ☐ | | | |
-| 2.5 model re-check net | soundness | ☐ | | | |
-| 2.6 evaluator fuzzer vs z3 | soundness | ☐ | | | |
+| 2.1 value type | R1.3 | ☑ | | | `src/c/smt2/smt2_eval.c`: limb vectors of any width, Bool, arrays, sort constants |
+| 2.2 full operator table | R1.3 | ☑ | | | all of QF_BV plus `bvnand/nor/xnor/comp`, rotations, overflow predicates; edge cases in `test_eval_fuzz.py` |
+| 2.3 let / define-fun / memo | R1.3 | ☑ | | | memo on (definition, argument values); 2^400-node tree in ms; depth guard → error |
+| 2.4 hook-up, remove old evaluator | R1 | ☑ | | | `_eval_sexpr` removed; R1 tests pass on all engines |
+| 2.5 model re-check net | soundness | ☑ | | | on by default (off in Verilator mode; `DV_CHECK_MODEL`); catches mutant `smt2-bvxor-as-bvor` on both engines. Cost on the 227 corpus fixtures: total +0.0%, median +0.4%, no answer changed. Re-measure on `quickcheck-trivial` when Phase 0 builds it. Found B77 (`reset-assertions` was a no-op: wrong unsat), fixed |
+| 2.6 evaluator fuzzer vs z3 | soundness | ◐ | | | 10k seeds (240k terms), 0 disagreements; not yet in nightly. z3 is wrong on constant-array equality: oracle expands it |
 | 3.1 miter shape → bitblast | R3 | ☐ | | | |
 | 3.2 CDCL budget + escalate | R3 | ☐ | | | |
 | 3.3 exhaustive bit-parallel simulation | R3 | ☐ | | | D6 |
