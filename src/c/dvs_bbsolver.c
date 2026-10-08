@@ -12,6 +12,7 @@
 #include "dvs_aigsim.h"
 #include "dvs_aig_cnf.h"
 #include "dvs_bitblast.h"
+#include "dvs_bbsum.h"
 #include "dvs_bvdom.h"
 #include "dvs_pool.h"
 #include "dvs_sat.h"
@@ -33,6 +34,18 @@ typedef struct {
     int      bounds_asserted; /* lo<=v<=hi already emitted (incremental reuse) */
 } bb_var_t;
 
+/* A slice substitution: bits [hi:lo] of `var` are defined as `eref`, from a
+ * top-level (= (extract var hi lo) eref). Yosys `-stbv` output relates whole
+ * state vectors this way: each register is a slice of the next state, set
+ * from the current one. Chained per variable through `next`. */
+typedef struct {
+    dvs_expr_t eref;
+    uint32_t   next;
+    uint16_t   hi, lo;
+} bb_slice_t;
+
+#define BB_NO_SLICE UINT32_MAX
+
 /* Memoization cache entry — one per dvs_expr_t byte offset in the pool. */
 typedef struct {
     dvs_bv_t bv;      /* size == 0 marks "not yet bit-blasted" */
@@ -49,6 +62,7 @@ struct dvs_bbsolver_s {
     dvs_sat_t      *sat;
     dvs_aig_cnf_t  *cnf;
     dvs_bitblast_t *bb;
+    dvs_bbsum_t    *sum;     /* word-level sum normalization (piece 5.1) */
 
     uint64_t        seed;    /* from dvs_bbsolver_check; 0 = deterministic */
 
@@ -66,6 +80,20 @@ struct dvs_bbsolver_s {
      * graph that the linear-scan acyclicity check might miss. */
     dvs_expr_t        *subst;       /* size n_vars, or NULL */
     uint8_t        *resolving;   /* size n_vars, or NULL */
+
+    /* Slice substitutions (piece 5.1): slice_head[var_id] starts the var's
+     * chain in slices[], BB_NO_SLICE if none. A var has slices or a whole
+     * substitution, never both; its slices never overlap. */
+    uint32_t       *slice_head;  /* size n_vars, or NULL */
+    bb_slice_t     *slices;
+    uint32_t        n_slices, cap_slices;
+
+    /* Fanout of each expression node (saturating), with zero-extensions,
+     * `concat` of a zero and substituted variables passed through to what
+     * they wrap. A sum used once may be flattened into its user
+     * (dvs_bbsum); one used more often is kept, so it stays shared. */
+    uint8_t        *uses;        /* size uses_cap, or NULL */
+    uint32_t        uses_cap;
 
     /* Bitmap of constraint indices to skip (those consumed by substitution).
      * Indexed by enumeration order of constraints_head walk. */
@@ -312,6 +340,11 @@ static int subst_reaches_var(dvs_bbsolver_t *S,
         if (S->subst[v->var_id] != EXPR_NULL) {
             return subst_reaches_var(S, S->subst[v->var_id], target_var, visited);
         }
+        if (S->slice_head)
+            for (uint32_t i = S->slice_head[v->var_id]; i != BB_NO_SLICE;
+                 i = S->slices[i].next)
+                if (subst_reaches_var(S, S->slices[i].eref, target_var, visited))
+                    return 1;
         return 0;
     }
     case EXPR_BINARY: {
@@ -376,6 +409,7 @@ static int try_record_subst(dvs_bbsolver_t *S, dvs_expr_t vref, dvs_expr_t eref)
     ExprVar *v = (ExprVar *)vk;
     if (v->var_id >= S->n_vars) return 0;
     if (S->subst[v->var_id] != EXPR_NULL) return 0;
+    if (S->slice_head && S->slice_head[v->var_id] != BB_NO_SLICE) return 0;
     /* `v == e` DEFINES v only when e is no wider than v (v then equals e
      * extended by e's own signedness). A wider e makes it a comparison in e's
      * width -- v is extended, e's high bits must match -- not a definition. */
@@ -385,6 +419,59 @@ static int try_record_subst(dvs_bbsolver_t *S, dvs_expr_t vref, dvs_expr_t eref)
     memset(S->resolving, 0, S->n_vars);
     if (subst_reaches_var(S, eref, v->var_id, S->resolving)) return 0;
     S->subst[v->var_id] = eref;
+    S->n_substs++;
+    return 1;
+}
+
+/* `ref`, looking through whole substitutions, as (extract var hi lo) of an
+ * unsubstituted variable. */
+static int as_var_slice(dvs_bbsolver_t *S, dvs_expr_t ref,
+                        uint32_t *var, uint16_t *hi, uint16_t *lo) {
+    for (int guard = 0; guard < 64 && ref != EXPR_NULL; guard++) {
+        ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+        if (!kp) return 0;
+        if (*kp == EXPR_VAR) {
+            uint32_t id = ((ExprVar *)kp)->var_id;
+            if (id >= S->n_vars || S->subst[id] == EXPR_NULL) return 0;
+            ref = S->subst[id];
+            continue;
+        }
+        if (*kp != EXPR_EXTRACT) return 0;
+        const ExprExtract *x = (const ExprExtract *)kp;
+        ExprKind *ok = (ExprKind *)POOL_PTR(S->problem, x->operand);
+        if (!ok || *ok != EXPR_VAR) return 0;
+        uint32_t id = ((ExprVar *)ok)->var_id;
+        if (id >= S->n_vars || !S->vars[id].defined) return 0;
+        if (S->subst[id] != EXPR_NULL) return 0;
+        if (x->hi_bit < x->lo_bit || x->hi_bit >= S->vars[id].width) return 0;
+        *var = id; *hi = x->hi_bit; *lo = x->lo_bit;
+        return 1;
+    }
+    return 0;
+}
+
+/* Attempt to register a slice substitution: `sref` is (extract var hi lo)
+ * and bits [hi:lo] of var := eref. The same gates as a whole substitution
+ * (no wider than the slice, no cycle through the substitution graph), and
+ * the var's slices must not overlap. */
+static int try_record_slice(dvs_bbsolver_t *S, dvs_expr_t sref, dvs_expr_t eref) {
+    if (!S->slice_head) return 0;
+    uint32_t id; uint16_t hi, lo;
+    if (!as_var_slice(S, sref, &id, &hi, &lo)) return 0;
+    if (bb_self_width(S, eref, 0) > (uint32_t)(hi - lo + 1)) return 0;
+    for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
+        if (!(hi < S->slices[i].lo || lo > S->slices[i].hi)) return 0;
+    memset(S->resolving, 0, S->n_vars);
+    if (subst_reaches_var(S, eref, id, S->resolving)) return 0;
+    if (S->n_slices == S->cap_slices) {
+        uint32_t c = S->cap_slices ? 2 * S->cap_slices : 64;
+        bb_slice_t *p = (bb_slice_t *)realloc(S->slices, c * sizeof(*p));
+        if (!p) return 0;
+        S->slices = p; S->cap_slices = c;
+    }
+    bb_slice_t *sl = &S->slices[S->n_slices];
+    sl->eref = eref; sl->hi = hi; sl->lo = lo; sl->next = S->slice_head[id];
+    S->slice_head[id] = S->n_slices++;
     S->n_substs++;
     return 1;
 }
@@ -430,6 +517,8 @@ static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
             if (b->op == DVS_BIN_EQ) {
                 if (try_record_subst(S, b->lhs, b->rhs)) continue;  /* consumed */
                 if (try_record_subst(S, b->rhs, b->lhs)) continue;  /* consumed */
+                if (try_record_slice(S, b->lhs, b->rhs)) continue;  /* consumed */
+                if (try_record_slice(S, b->rhs, b->lhs)) continue;  /* consumed */
             }
         }
         all_consumed = 0;   /* this leaf was not consumable as a substitution */
@@ -437,6 +526,147 @@ static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
     #undef CS_PUSH
     free(stk);
     return all_consumed;
+}
+
+/* Is `ref` a node that only widens what it wraps with zeros? Returns the
+ * wrapped node, or EXPR_NULL. A substituted variable counts: its uses are
+ * uses of its definition. */
+static dvs_expr_t fanout_inner(dvs_bbsolver_t *S, dvs_expr_t ref) {
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp) return EXPR_NULL;
+    switch (*kp) {
+    case EXPR_EXTEND: {
+        const ExprExtend *e = (const ExprExtend *)kp;
+        return (!e->sign_extend && e->to_bits >= e->from_bits) ? e->operand : EXPR_NULL;
+    }
+    case EXPR_CONCAT: {
+        const ExprConcat *c = (const ExprConcat *)kp;
+        ExprKind *hk = (ExprKind *)POOL_PTR(S->problem, c->hi);
+        return (hk && *hk == EXPR_CONST && ((const ExprConst *)hk)->value == 0)
+            ? c->lo : EXPR_NULL;
+    }
+    case EXPR_VAR: {
+        uint32_t id = ((const ExprVar *)kp)->var_id;
+        return (S->subst && id < S->n_vars) ? S->subst[id] : EXPR_NULL;
+    }
+    default:
+        return EXPR_NULL;
+    }
+}
+
+/* Count the fanout of every node reachable from the constraints that are
+ * still encoded (see S->uses). Iterative: the DAG can be deep. */
+static void count_fanout(dvs_bbsolver_t *S) {
+    uint32_t cap = S->cache_cap;
+    if (!cap || getenv("DV_BB_SUM_NO_FANOUT")) return;
+    S->uses = (uint8_t *)calloc(cap, 1);
+    uint8_t *seen = (uint8_t *)calloc(cap, 1);
+    dvs_expr_t *stk = NULL;
+    size_t n = 0, scap = 0;
+    if (!S->uses || !seen) goto fail;
+    S->uses_cap = cap;
+    #define FO_EDGE(C) do {                                                    \
+        dvs_expr_t c_ = (C);                                                   \
+        for (int g_ = 0; g_ < 64 && c_ != EXPR_NULL; g_++) {                   \
+            if (c_ >= cap) break;                                              \
+            if (S->uses[c_] < 255) S->uses[c_]++;                              \
+            dvs_expr_t in_ = fanout_inner(S, c_);                              \
+            if (in_ != EXPR_NULL) { c_ = in_; continue; }                      \
+            if (!seen[c_]) {                                                   \
+                seen[c_] = 1;                                                  \
+                if (n == scap) { size_t nc_ = scap ? 2 * scap : 256;           \
+                    dvs_expr_t *t_ = (dvs_expr_t *)realloc(stk, nc_ * sizeof(*t_)); \
+                    if (!t_) goto fail;                                        \
+                    stk = t_; scap = nc_; }                                    \
+                stk[n++] = c_;                                                 \
+            }                                                                  \
+            break;                                                             \
+        }                                                                      \
+    } while (0)
+    uint32_t idx = 0;
+    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL; idx++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        if (!(S->constraint_skip && S->constraint_skip[idx])) FO_EDGE(cs->root);
+        cur = cs->next;
+    }
+    while (n > 0) {
+        dvs_expr_t r = stk[--n];
+        ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, r);
+        if (!kp) continue;
+        switch (*kp) {
+        case EXPR_BINARY:
+            FO_EDGE(((ExprBinary *)kp)->lhs);
+            FO_EDGE(((ExprBinary *)kp)->rhs);
+            break;
+        case EXPR_UNARY:   FO_EDGE(((ExprUnary *)kp)->operand); break;
+        case EXPR_EXTEND:  FO_EDGE(((ExprExtend *)kp)->operand); break;
+        case EXPR_SV_CAST: FO_EDGE(((ExprSvCast *)kp)->operand); break;
+        case EXPR_EXTRACT: {
+            /* An extract of a sliced variable reads only the slices it
+             * overlaps (Yosys reads each register out of the state). */
+            const ExprExtract *x = (const ExprExtract *)kp;
+            ExprKind *ok = (ExprKind *)POOL_PTR(S->problem, x->operand);
+            uint32_t id = (ok && *ok == EXPR_VAR) ? ((ExprVar *)ok)->var_id : UINT32_MAX;
+            if (S->slice_head && id < S->n_vars && S->slice_head[id] != BB_NO_SLICE) {
+                for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
+                    if (!(x->hi_bit < S->slices[i].lo || x->lo_bit > S->slices[i].hi))
+                        FO_EDGE(S->slices[i].eref);
+            } else {
+                FO_EDGE(x->operand);
+            }
+            break;
+        }
+        case EXPR_CONCAT:
+            FO_EDGE(((ExprConcat *)kp)->hi);
+            FO_EDGE(((ExprConcat *)kp)->lo);
+            break;
+        case EXPR_ITE:
+            FO_EDGE(((ExprITE *)kp)->cond);
+            FO_EDGE(((ExprITE *)kp)->then_e);
+            FO_EDGE(((ExprITE *)kp)->else_e);
+            break;
+        case EXPR_IN_RANGE:
+            FO_EDGE(((ExprInRange *)kp)->value);
+            FO_EDGE(((ExprInRange *)kp)->lo);
+            FO_EDGE(((ExprInRange *)kp)->hi);
+            break;
+        case EXPR_IN_SET: {
+            ExprInSet *iset = (ExprInSet *)kp;
+            FO_EDGE(iset->value);
+            dvs_expr_t *el = expr_in_set_elems(S->problem, r);
+            for (uint32_t i = 0; i < iset->n_elems; i++) FO_EDGE(el[i]);
+            break;
+        }
+        case EXPR_IN_RANGES: {
+            ExprInRanges *irs = (ExprInRanges *)kp;
+            FO_EDGE(irs->value);
+            dvs_expr_t *los = expr_in_ranges_los(S->problem, r);
+            dvs_expr_t *his = expr_in_ranges_his(S->problem, r);
+            for (uint32_t i = 0; i < irs->n_ranges; i++) { FO_EDGE(los[i]); FO_EDGE(his[i]); }
+            break;
+        }
+        case EXPR_VAR: {
+            /* A sliced variable: every use of it may read every slice. */
+            uint32_t id = ((ExprVar *)kp)->var_id;
+            if (S->slice_head && id < S->n_vars)
+                for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
+                    FO_EDGE(S->slices[i].eref);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    #undef FO_EDGE
+    free(stk);
+    free(seen);
+    return;
+fail:
+    free(stk);
+    free(seen);
+    free(S->uses);
+    S->uses = NULL;
+    S->uses_cap = 0;
 }
 
 /* Pre-pass: scan all top-level constraints, populate S->subst, mark
@@ -456,6 +686,11 @@ static void run_subst_pass(dvs_bbsolver_t *S) {
     S->constraint_skip = (uint8_t *)xalloc(S->alloc, n * sizeof(uint8_t));
     if (!S->subst || !S->resolving || !S->constraint_skip) return;
     for (uint32_t i = 0; i < S->n_vars; i++) S->subst[i] = EXPR_NULL;
+    if (getenv("DV_BB_NO_SLICE") == NULL) {
+        S->slice_head = (uint32_t *)malloc(S->n_vars * sizeof(uint32_t));
+        if (S->slice_head)
+            for (uint32_t i = 0; i < S->n_vars; i++) S->slice_head[i] = BB_NO_SLICE;
+    }
     memset(S->resolving, 0, S->n_vars);
     memset(S->constraint_skip, 0, n);
 
@@ -507,6 +742,8 @@ static dvs_bv_t bv_for_var(dvs_bbsolver_t *S, uint32_t var_id) {
             }
             /* fall through on error to allocate fresh */
         }
+        int sliced = S->slice_head && S->slice_head[var_id] != BB_NO_SLICE
+                     && !S->resolving[var_id];
 
         /* Bit-fix folding is a 64-bit-domain optimization: the [lo,hi] range and
          * the fixed/unknown masks are uint64. For width > 64 it cannot represent
@@ -527,6 +764,29 @@ static dvs_bv_t bv_for_var(dvs_bbsolver_t *S, uint32_t var_id) {
             v->bv = dvs_bb_constant_dom(S->bb, v->width, d.lo, unknown_mask);
         } else {
             v->bv = dvs_bb_constant(S->bb, v->width);
+        }
+        if (sliced) {
+            /* Replace each substituted slice's fresh bits by its expression's.
+             * MSB first: bit `hi` is at index width-1-hi. */
+            S->resolving[var_id] = 1;
+            dvs_aig_node_t *bits =
+                (dvs_aig_node_t *)malloc(v->width * sizeof(dvs_aig_node_t));
+            if (!bits) { S->resolving[var_id] = 0; S->had_error = 1; return v->bv; }
+            memcpy(bits, v->bv.bits, v->width * sizeof(dvs_aig_node_t));
+            for (uint32_t i = S->slice_head[var_id]; i != BB_NO_SLICE;
+                 i = S->slices[i].next) {
+                const bb_slice_t *sl = &S->slices[i];
+                uint16_t sw = (uint16_t)(sl->hi - sl->lo + 1);
+                dvs_bv_t e = bb_expr(S, sl->eref, sw);
+                if (S->had_error) break;
+                if (e.size < sw)      e = ext_ref(S, e, sl->eref, sw);
+                else if (e.size > sw) e = dvs_bb_extract(S->bb, e, sw - 1, 0);
+                memcpy(bits + (v->width - 1 - sl->hi), e.bits,
+                       sw * sizeof(dvs_aig_node_t));
+            }
+            S->resolving[var_id] = 0;
+            if (!S->had_error) v->bv = dvs_bb_value_bits(S->bb, v->width, bits);
+            free(bits);
         }
         v->bv_built = 1;
     }
@@ -756,7 +1016,9 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
         switch (b->op) {
-        case DVS_BIN_ADD:  return dvs_bb_add(S->bb, l, r);
+        case DVS_BIN_ADD:
+            return dvs_bbsum_add(S->sum, S->bb, l, r,
+                                 S->uses && ref < S->uses_cap && S->uses[ref] <= 1);
         case DVS_BIN_SUB:  return dvs_bb_sub(S->bb, l, r);
         case DVS_BIN_MUL:  return dvs_bb_mul(S->bb, l, r);
         case DVS_BIN_BAND: return dvs_bb_and(S->bb, l, r);
@@ -1145,6 +1407,7 @@ static dvs_bbsolver_t *bbsolver_new_ex(dvs_alloc_t *alloc, dvs_problem_t *proble
     S->sat = bb_new_sat(alloc, prefer_cadical);
     S->cnf = dvs_aig_cnf_new(alloc, S->aig, S->sat);
     S->bb  = dvs_bitblast_new(alloc, S->aig);
+    S->sum = dvs_bbsum_new(alloc);
     if (!S->aig || !S->sat || !S->cnf || !S->bb) {
         dvs_bbsolver_free(S);
         return NULL;
@@ -1202,6 +1465,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     if (!S) return;
     if (S->orig_problem) dvs_sv_release(S->orig_problem, S->problem);
     if (S->bb)  dvs_bitblast_free(S->bb);
+    dvs_bbsum_free(S->sum);
     if (S->cnf) dvs_aig_cnf_free(S->cnf);
     if (S->sat) dvs_sat_free(S->sat);
     if (S->aig) dvs_aig_free(S->aig);
@@ -1209,6 +1473,9 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     xfree(S->alloc, S->cache, S->cache_cap * sizeof(bb_cache_entry_t));
     xfree(S->alloc, S->subst, S->n_vars * sizeof(dvs_expr_t));
     xfree(S->alloc, S->resolving, S->n_vars * sizeof(uint8_t));
+    free(S->slice_head);
+    free(S->uses);
+    free(S->slices);
     xfree(S->alloc, S->constraint_skip, S->n_constraints * sizeof(uint8_t));
     xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(dvs_aig_node_t));
     free(S->node_val);
@@ -1537,6 +1804,7 @@ static int _bb_encode(dvs_bbsolver_t *S) {
     int subst_enabled = getenv("DV_BB_NO_SUBST") == NULL;
 
     if (subst_enabled) run_subst_pass(S);
+    count_fanout(S);
     /* run_subst_pass uses S->resolving as a scratch visited bitmap
      * during cycle detection. Reset it before the bit-blast path
      * starts using it as the recursion guard in bv_for_var. */
@@ -1602,7 +1870,8 @@ static int _bb_encode(dvs_bbsolver_t *S) {
      * — and thus readback — reflects the substitution. */
     if (S->subst) {
         for (uint32_t i = 0; i < S->n_vars; i++) {
-            if (S->vars[i].defined && S->subst[i] != EXPR_NULL) {
+            if (S->vars[i].defined && (S->subst[i] != EXPR_NULL ||
+                (S->slice_head && S->slice_head[i] != BB_NO_SLICE))) {
                 /* A substituted var's bv is a *computed* expression (AND/XOR
                  * gates), unlike a normal var whose bits are AIG inputs (always
                  * readable). Its gate bits are only recoverable if encoded into
@@ -2040,12 +2309,15 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
         double enc_ms = (t1.tv_sec - t0.tv_sec) * 1000.0
                       + (t1.tv_nsec - t0.tv_nsec) / 1e6;
         fprintf(stderr,
-                "[bb-encode] bb=%.2fms ands=%llu vars=%llu clauses=%llu substs=%llu\n",
+                "[bb-encode] bb=%.2fms ands=%llu vars=%llu clauses=%llu substs=%llu"
+                " slices=%u sums=%llu/%llu\n",
                 enc_ms,
                 (unsigned long long)dvs_aig_num_ands(S->aig),
                 (unsigned long long)dvs_aig_cnf_num_vars(S->cnf),
                 (unsigned long long)dvs_aig_cnf_num_clauses(S->cnf),
-                (unsigned long long)S->n_substs);
+                (unsigned long long)S->n_substs, S->n_slices,
+                (unsigned long long)dvs_bbsum_num_flattened(S->sum),
+                (unsigned long long)dvs_bbsum_num_adds(S->sum));
         fflush(stderr);
     }
 
@@ -2381,6 +2653,15 @@ static void bb_grow_vars(dvs_bbsolver_t *S) {
             for (uint32_t i = old; i < need; i++) ns[i] = EXPR_NULL;
             xfree(S->alloc, S->subst, old * sizeof(dvs_expr_t));
             S->subst = ns;
+        }
+    }
+    if (S->slice_head) {
+        uint32_t *nh = (uint32_t *)realloc(S->slice_head, need * sizeof(uint32_t));
+        if (nh) {
+            for (uint32_t i = old; i < need; i++) nh[i] = BB_NO_SLICE;
+            S->slice_head = nh;
+        } else {
+            return;   /* OOM: leave n_vars as-is so every index stays in range */
         }
     }
     if (S->resolving) {

@@ -53,6 +53,27 @@ is still a proof, and a candidate model is accepted only after the real
 circuit is simulated on it. Otherwise the problem goes on to simulation and
 SAT. `DV_AFFINE=0` turns this off.
 
+## Sums and pipeline registers
+
+An equivalence check between an implementation and its specification is
+easy when both sides turn into the same gates, because the bit-blaster shares
+identical gates. Two rewrites make that happen more often:
+
+- **Sums.** Yosys builds an adder tree as a balanced tree whose widths grow by
+  one bit per level, while a specification usually adds the same terms in a
+  chain at the final width. Both are the same integer sum. The bit-blaster
+  flattens a sum that feeds only one addition into that addition's terms,
+  when this keeps the value (the inner sum cannot overflow, or the outer
+  addition is no wider), sorts the terms and adds them in that order. Both
+  sides then build the same adder. `DV_BB_SUM=0` turns this off.
+- **Pipeline registers.** In Yosys `write_smt2 -stbv` output each register is
+  a slice of the state vector, set by an assertion
+  `(= ((_ extract hi lo) next_state) value)`. The bit-blaster uses `value`'s
+  bits for those bits of the state, so an unrolled pipeline becomes one
+  combinational circuit. This is done only when no slice is set twice and no
+  value depends on its own state bits; otherwise the assertion is kept as a
+  constraint. `DV_BB_NO_SLICE=1` turns this off.
+
 ## Simulation before SAT
 
 Before it calls the SAT solver, the bit-blaster simulates the circuit on 512

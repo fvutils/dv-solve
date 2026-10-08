@@ -107,6 +107,12 @@ MUTANTS = {
     # A define-fun memo key that ignores which let binding an argument names.
     "fun-memo-let-key": ("src/c/smt2/smt2_frontend.c",
         "? ((uint64_t)e->cached_ref << 24) |", "? ((uint64_t)0 << 24) |"),
+    "bbsum-no-wrap-check": ("src/c/dvs_bbsum.c",
+        "if (ent[k] && !(ent[k]->single && (ent[k]->exact || w <= ent[k]->width)))",
+        "if (ent[k] && !(ent[k]->single))"),
+    "slice-overlap": ("src/c/dvs_bbsolver.c",
+        "        if (!(hi < S->slices[i].lo || lo > S->slices[i].hi)) return 0;",
+        "        if (0) return 0;"),
     "bvadd-wrap-width": ("src/c/dvs_prop_templates.c",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvadd_64);",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width > 1 ? width - 1 : width, priority, _fire_bvadd_64);"),
@@ -159,7 +165,8 @@ PYTESTS = ["tests/formal/test_lcg_soundness.py", "tests/formal/test_bool_ite_con
            "tests/unit/test_gated_constraints.py", "tests/unit/test_lcg_builder.py",
            "tests/unit/test_wide_watch.py", "tests/unit/test_lcg_array_select.py",
            "tests/formal/test_aig_sim.py", "tests/formal/test_affine.py",
-           "tests/formal/test_wide_sorts.py", "tests/formal/test_fun_memo.py"]
+           "tests/formal/test_wide_sorts.py", "tests/formal/test_fun_memo.py",
+           "tests/formal/test_sum_norm.py"]
 
 
 def _pinned(exe: Path) -> bool:
