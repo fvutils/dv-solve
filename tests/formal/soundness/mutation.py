@@ -89,6 +89,10 @@ MUTANTS = {
     "smt2-bvxor-as-bvor": ("src/c/smt2/smt2_frontend.c",
         '    BINOP_CASE("bvxor", DVS_BIN_BXOR)',
         '    BINOP_CASE("bvxor", DVS_BIN_BOR)'),
+    # The exhaustive sweep answers unsat with no SAT call (fw-hdl plan 3.3), so
+    # a wrong lane pattern skips assignments: a wrong unsat.
+    "aigsim-lane-pattern": ("src/c/dvs_aigsim.c",
+        "0xF0F0F0F0F0F0F0F0ull", "0xF0F0F0F0F0F0F0F1ull"),
     "bvadd-wrap-width": ("src/c/dvs_prop_templates.c",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvadd_64);",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width > 1 ? width - 1 : width, priority, _fire_bvadd_64);"),
@@ -139,7 +143,8 @@ def _apply(src_root: Path, name: str) -> bool:
 PYTESTS = ["tests/formal/test_lcg_soundness.py", "tests/formal/test_bool_ite_constraint.py",
            "tests/formal/test_incremental_protocol.py", "tests/formal/soundness/test_regressions.py",
            "tests/unit/test_gated_constraints.py", "tests/unit/test_lcg_builder.py",
-           "tests/unit/test_wide_watch.py", "tests/unit/test_lcg_array_select.py"]
+           "tests/unit/test_wide_watch.py", "tests/unit/test_lcg_array_select.py",
+           "tests/formal/test_aig_sim.py"]
 
 
 def _pinned(exe: Path) -> bool:

@@ -1,6 +1,6 @@
 # fw-hdl requests: implementation plan
 
-Status: Phases 1 and 2 done (094e5cd, fbd25d9); Phase 0 (benchmarks) built 2026-10-08, see §6. D1–D6 recommendations in §5 approved by the owner 2026-10-07.
+Status: Phases 0, 1 and 2 done (244dcf2, 094e5cd, fbd25d9); Phase 3 (routing, simulation) done 2026-10-08, uncommitted; see §6. D1–D6 recommendations in §5 approved by the owner 2026-10-07.
 Source: `docs/fw_hdl_requests.md` (R1–R5). Testcases: `tests/formal/test_fw_hdl_requests.py`
 (today on HEAD `022f744`: 12 pass, 30 strict-xfail).
 Related: `docs/shared_learning_core_project.md`, `docs/usecase_benchmark_design.md`,
@@ -278,6 +278,14 @@ Estimate: about 2.5 weeks. 2.4 closes R1. `test_crc32_counterexample_value` pass
 Estimate: about 1.5 weeks. After Phase 3 we match or beat z3 on affine2/3, but boolector
 still wins affine3 by about 3–50×, depending on the 3.3 threshold.
 
+**Result (2026-10-08, `docs/fwhdl_scorecard_phase3.md`):** the claim now holds on
+`quickcheck-trivial` (PAR-2 0.22 s vs boolector 1.77) and `inverse` (0.09 vs 0.20);
+`refute` ties yices (0.07 s, VBS gap 1.32). Overall 310 solved (309 before), PAR-2
+8265 s (9493), VBS gap 4.08 (4.87). Left: `affine-proof` (20 lost, Phase 4),
+`codegen-equiv` (30 lost: piece 6.6 and Phase 5), `mixed-proof` (3 lost). The
+Phase 0 commit had also left three test expectations stale (an ill-sorted `=`,
+`bvnand` as the "unsupported" operator); fixed with this phase.
+
 ### Phase 4: XOR / affine reasoning (R3 long term: beat boolector)
 
 | Piece | What | Size | Acceptance |
@@ -527,11 +535,11 @@ Status: ☐ todo · ◐ in progress · ☑ done · ✕ dropped.
 | 2.4 hook-up, remove old evaluator | R1 | ☑ | | | `_eval_sexpr` removed; R1 tests pass on all engines |
 | 2.5 model re-check net | soundness | ☑ | | | on by default (off in Verilator mode; `DV_CHECK_MODEL`); catches mutant `smt2-bvxor-as-bvor` on both engines. Cost on the 227 corpus fixtures: total +0.0%, median +0.4%, no answer changed. Re-measure on `quickcheck-trivial` when Phase 0 builds it. Found B77 (`reset-assertions` was a no-op: wrong unsat), fixed |
 | 2.6 evaluator fuzzer vs z3 | soundness | ☑ | | | 10k seeds (240k terms), 0 disagreements; in nightly (3000 seeds). z3 is wrong on constant-array equality: oracle expands it. `test_translation_matches_eval` fuzzes the translator against the evaluator (found B78) |
-| 3.1 miter shape → bitblast | R3 | ☐ | | | |
-| 3.2 CDCL budget + escalate | R3 | ☐ | | | |
-| 3.3 exhaustive bit-parallel simulation | R3 | ☐ | | | D6 |
-| 3.4 random-simulation pre-pass | R3 | ☐ | | | |
-| 3.5 R3 close-out, bench gate | R3 | ☐ | | | |
+| 3.1 miter shape → bitblast | R3 | ☑ | | | `src/c/dvs_shape.c` counts operator classes on the problem DAG; one-shot QF_BV goes to bit-blast when it multiplies/divides or bit+arith ≥ 3 × orderings (`_qfbv_route`, `qfbv-route:` under `DV_LOG`). The front end binds every `let`/`define-fun` through an equality, so a top-level miter is not visible and equalities carry no signal; orderings do. All fwhdl-core circuits route to bit-blast except 8 saturating adds; on sat-core only 5 tier1 problems with a multiplier move, and they tie |
+| 3.2 CDCL budget + escalate | R3 | ☑ | | | 20 ms (`DV_QFBV_CDCL_MS`) where escalation can take the whole problem; CDCL answers every tier1/fwhdl problem it can in < 15 ms. sat-core: no answer changed, no category slower beyond noise |
+| 3.3 exhaustive bit-parallel simulation | R3 | ☑ | | | `src/c/dvs_aigsim.c`: dense cone, 512 lanes per pass, ~3e9 gate-words/s. Inline when ≤ 1.5e6 work (≈0.5 ms; a 22-input BMC step lost 1.5 ms to SAT at a 50 ms bound), raced against SAT on a thread up to 6e9 (≈2 s). affine2 0.24 ms; affine3 0.08–0.11 s wall (was 13.8 s; z3 0.88, boolector 0.07). `test_aig_sim.py`: 5000 seeds vs z3 and vs SAT (`DV_SIM_CHECK`), 0 disagreements; mutant `aigsim-lane-pattern` caught |
+| 3.4 random-simulation pre-pass | R3 | ☑ | | | 512 random vectors when the sweep is too big; model checked on a scalar re-simulation, then the diversity flip-check starts from it. refute PAR-2 30.2 → 0.07 s (yices 0.07) |
+| 3.5 R3 close-out, bench gate | R3 | ◐ | | | R3 status in `fw_hdl_requests.md`; `test_crc32_routes_to_bitblast`, `test_crc32_affine2_by_simulation` pin the route. The category gate in CI is piece 7 |
 | 4.0 confirm XOR hypothesis | R3 | ☐ | | | |
 | 4.1 affine analysis + Gauss | R3 | ☐ | | | |
 | 4.2 XOR-aware encoding | R3 | ☐ | | | |

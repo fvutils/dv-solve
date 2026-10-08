@@ -123,6 +123,13 @@ int dvs_bbsolver_resolve_raw(dvs_bbsolver_t *bb);
  *  filled from the seed. */
 void dvs_bbsolver_set_diversify(dvs_bbsolver_t *bb, int on);
 
+/** Enable or disable (default) bit-parallel simulation before SAT: an
+ *  exhaustive sweep of the assertions' input cone when it is small, which
+ *  decides the problem, else a few hundred random assignments, which can find
+ *  a model (dvs_aigsim.h). The model it finds is the first in sweep order, so
+ *  leave it off where model diversity matters. */
+void dvs_bbsolver_set_presim(dvs_bbsolver_t *bb, int on);
+
 /** Point a live solver at `problem`, a re-finalized superset of the problem
  *  it was built over: every expression and variable of the old problem must
  *  sit at the same offset with the same content (the builder's append-only

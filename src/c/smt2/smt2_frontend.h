@@ -621,6 +621,12 @@ typedef struct {
     void                *shape_tab;       /* Smt2ShapeCost[]: per-shape engine choice, kept across (reset) */
     uint8_t              shape_route;     /* engine the shape routing chose for this check-sat: 1 CDCL, 2 bitblast */
     uint8_t              shape_bb;        /* this check-sat goes to bitblast by its shape */
+    /* One-shot QF_BV routing (docs/fw_hdl_implementation_plan.md 3.1, 3.2):
+     * qfbv_bb sends this check-sat to bitblast by the problem's operator mix;
+     * qfbv_why says why (DV_LOG). Otherwise CDCL runs under a short budget and
+     * escalates to bitblast. */
+    uint8_t              qfbv_bb;
+    const char          *qfbv_why;
 
     /* Array variable table (persistent: element vars survive commands) */
     Smt2ArrayVar         array_vars[SMT2_MAX_ARRAY_VARS];

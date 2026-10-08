@@ -3,9 +3,10 @@
 R1 (get-value on terms), R2 (malformed input), R4 (define-sort) and R5 (Bool
 values) are met.
 
-R3 (engine routing) is a timing question. The tests here only pin the
-verdicts, on both engines. The timings come from
-``python tests/formal/test_fw_hdl_requests.py --bench``.
+R3 (engine routing) is a timing question. The tests here pin the verdicts on
+every engine and the route the default takes; the timings come from
+``python tests/formal/test_fw_hdl_requests.py --bench``, and the fwhdl-core
+suite measures the whole workload (``python -m tests.perf.scorecard``).
 """
 from __future__ import annotations
 
@@ -135,6 +136,27 @@ def test_crc32_verdicts(engine, name):
         assert out == ["unsat"]
     else:
         assert out[0] == "sat" and _value(_pair(out[1])[1]) == 0x31
+
+
+@pytest.mark.parametrize("name", ["crc32_affine2.smt2", "crc32_affine3.smt2",
+                                  "crc32_counterexample.smt2", "crc32_inverse.smt2"])
+def test_crc32_routes_to_bitblast(name):
+    """R3: the default route sends these circuits to the bit-blaster, not CDCL
+    (docs/fw_hdl_implementation_plan.md, piece 3.1)."""
+    import os
+    p = subprocess.run([str(_EXE), str(_DIR / name)], capture_output=True, text=True,
+                       timeout=120, env=dict(os.environ, DV_LOG="1"))
+    assert re.search(r"^qfbv-route: bitblast ", p.stderr, re.M), p.stderr
+
+
+def test_crc32_affine2_by_simulation():
+    """R3: crc32_affine2 has 16 input bits, so the exhaustive sweep proves it
+    with no SAT call (piece 3.3)."""
+    import os
+    p = subprocess.run([str(_EXE), str(_DIR / "crc32_affine2.smt2")], capture_output=True,
+                       text=True, timeout=120, env=dict(os.environ, DV_LOG="1"))
+    assert p.stdout.split() == ["unsat"]
+    assert re.search(r"^bb-sim: exhaustive inputs=16 .* -> unsat", p.stderr, re.M), p.stderr
 
 
 # ---- R3 benchmark (not a test) ------------------------------------------

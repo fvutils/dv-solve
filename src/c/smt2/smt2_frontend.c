@@ -12,6 +12,7 @@
 #include "dvs_lcg.h"
 #include "dvs_bbsolver.h"
 #include "dvs_cube.h"
+#include "dvs_shape.h"
 
 
 /* ------------------------------------------------------------------ */
@@ -5136,6 +5137,13 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
         fe->cache_valid = 0;
         return -1;
     }
+    /* Simulation first (plan pieces 3.3, 3.4), except in Verilator mode, where
+     * the model it finds -- the first in sweep order -- would cost diversity.
+     * DV_SIM=0 turns it off. */
+    if (!fe->verilator_mode) {
+        const char *sim = getenv("DV_SIM");
+        dvs_bbsolver_set_presim(fe->bb_solver, !(sim && *sim == '0'));
+    }
     int rc = dvs_bbsolver_check(fe->bb_solver, fe->seed);
     fe->bb_model_valid = (rc == DVS_BB_SAT);
     if (fe->verilator_mode && (rc == DVS_BB_SAT || rc == DVS_BB_UNSAT)) {
@@ -5344,6 +5352,7 @@ static int _engine_is_bitblast(Smt2Frontend *fe) {
      * return a wrong model here. This overrides the env, deliberately. */
     if (fe->needs_bitblast) return 1;
     if (fe->shape_bb) return 1;   /* this check-sat's shape belongs to bitblast */
+    if (fe->qfbv_bb) return 1;    /* one-shot QF_BV routed by its operator mix */
     const char *e = getenv("DV_ENGINE");
     if (e) {
         if (strcmp(e, "bitblast") == 0 || strcmp(e, "bb") == 0) return 1;
@@ -5404,6 +5413,44 @@ static void _end_assumptions(Smt2Frontend *fe) {
     uint32_t cp = fe->assump_cp1 - 1;
     fe->assump_cp1 = 0;
     if (fe->ctx) dvs_solver_restore(fe->ctx, cp);
+}
+
+/* One-shot QF_BV routing (docs/fw_hdl_implementation_plan.md, piece 3.1).
+ * CDCL is built for randomization: ranges, orderings and a few equalities over
+ * a handful of variables, where it answers in milliseconds and samples near
+ * uniformly. On circuits -- XOR/AND/shift networks, multipliers, miters
+ * asserting two circuits differ -- it stalls until its budget runs out, while
+ * bit-blast answers in milliseconds (fwhdl-core baseline, plan section 1.3).
+ * Returns why this problem goes to bitblast, or NULL to keep CDCL. */
+static const char *_qfbv_route(const dvs_shape_t *sh) {
+    if (sh->n_mul)                                    return "multiplier";
+    /* The front end binds every let and define-fun to a variable through an
+     * equality, so equalities say nothing about the shape; orderings do.
+     * Randomization is mostly orderings, circuits mostly bit operations. */
+    if ((uint64_t)sh->n_bit + sh->n_arith >= 3ull * sh->n_cmp) return "bit-level";
+    return NULL;
+}
+
+/* Pick the engine for a one-shot QF_BV check-sat (sets fe->qfbv_bb). */
+static void _route_qfbv(Smt2Frontend *fe) {
+    fe->qfbv_bb  = 0;
+    fe->qfbv_why = NULL;
+    if (fe->verilator_mode || fe->needs_bitblast || fe->compiled || fe->ctx
+            || getenv("DV_ENGINE") || getenv("DV_NO_BITBLAST")
+            || _engine_is_bitblast(fe))
+        return;
+    if (_ensure_problem(fe) != 0 || !fe->problem) return;
+    dvs_shape_t sh;
+    if (dvs_shape_compute(fe->problem, &sh) != 0) return;
+    fe->qfbv_why = _qfbv_route(&sh);
+    fe->qfbv_bb  = fe->qfbv_why != NULL;
+    if (getenv("DV_LOG"))
+        fprintf(fe->err, "qfbv-route: %s (%s) cons=%u nodes=%u vars=%u bit=%u arith=%u "
+                         "mul=%u cmp=%u eq=%u bool=%u other=%u%s\n",
+                fe->qfbv_bb ? "bitblast" : "cdcl", fe->qfbv_why ? fe->qfbv_why : "randomization",
+                sh.n_constraints, sh.n_nodes, sh.n_vars, sh.n_bit, sh.n_arith, sh.n_mul,
+                sh.n_cmp, sh.n_eq, sh.n_bool, sh.n_other,
+                sh.truncated ? " truncated" : "");
 }
 
 static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd);
@@ -5634,6 +5681,8 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->vlt_route = rbuf;
     }
 
+    _route_qfbv(fe);
+
     if (_engine_is_cube(fe)) {
         int prc = _ensure_problem(fe);
         if (prc < 0) {
@@ -5818,6 +5867,20 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
      * on every instance it can actually solve (measured 0.8-2 ms across the 37
      * captured Verilator transcripts), so the bound costs no coverage. */
     if (cdcl_probing) opts.time_limit_ms = 50;
+
+    /* One-shot QF_BV (plan piece 3.2): a randomization-shaped problem CDCL
+     * cannot finish quickly goes to bitblast, which is decision-complete, after
+     * a short budget rather than CDCL's 10 s default. CDCL answers every such
+     * problem it can in under 15 ms (tier1, fwhdl-core). Only where the
+     * escalation below can take the whole problem; otherwise CDCL keeps its
+     * full budget. DV_QFBV_CDCL_MS sets the budget, 0 the old behaviour. */
+    if (!fe->verilator_mode && !route_cdcl && !getenv("DV_ENGINE") && !getenv("DV_NO_BITBLAST")
+            && !getenv("DV_CDCL_TIME_LIMIT")
+            && (fe->n_aux_problems == 0 || (fe->cdcl_retained && !fe->has_aux))) {
+        const char *ev = getenv("DV_QFBV_CDCL_MS");
+        uint32_t ms = ev && *ev ? (uint32_t)atoi(ev) : 20;
+        if (ms) opts.time_limit_ms = ms;
+    }
 
     uint32_t ticks0 = fe->ctx->prop_ticks;
     fe->last_result = dvs_solver_solve(fe->ctx, &opts);

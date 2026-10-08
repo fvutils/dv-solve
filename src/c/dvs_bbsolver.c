@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "dvs_aig.h"
+#include "dvs_aigsim.h"
 #include "dvs_aig_cnf.h"
 #include "dvs_bitblast.h"
 #include "dvs_bvdom.h"
@@ -111,6 +112,11 @@ struct dvs_bbsolver_s {
     int             no_memo;
     /* Skip the post-solve flip-check (dvs_bbsolver_set_diversify). */
     int             no_diversify;
+    /* Simulate before SAT (dvs_bbsolver_set_presim). */
+    int             presim;
+    /* An assertion could not be recorded in assert_nodes (out of memory), so
+     * the list is not the whole problem: no simulation verdicts. */
+    int             asserts_lost;
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -130,7 +136,7 @@ static void assert_top(dvs_bbsolver_t *S, dvs_aig_node_t node) {
         uint32_t nc = S->asserts_cap ? S->asserts_cap * 2 : 64;
         dvs_aig_node_t *na = (dvs_aig_node_t *)xalloc(S->alloc,
                                                       nc * sizeof(dvs_aig_node_t));
-        if (!na) return;   /* out of memory: skip recording (flip-check no-ops) */
+        if (!na) { S->asserts_lost = 1; return; }   /* flip-check and presim no-op */
         if (S->assert_nodes) {
             memcpy(na, S->assert_nodes, S->n_asserts * sizeof(dvs_aig_node_t));
             xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(dvs_aig_node_t));
@@ -1304,6 +1310,9 @@ static void _diversify(dvs_bbsolver_t *S) {
     dvs_aig_node_t *L = (dvs_aig_node_t *)malloc((size_t)(N + 1) * sizeof(dvs_aig_node_t));
     dvs_aig_node_t *R = (dvs_aig_node_t *)malloc((size_t)(N + 1) * sizeof(dvs_aig_node_t));
     if (!nv || !L || !R) { free(nv); free(L); free(R); return; }
+    /* The model to start from: a simulation's (node_val), else the SAT solver's. */
+    int8_t *base_nv = S->node_val;
+    S->node_val = NULL;
 
     /* Cache AND children (0 = input/const) and build the initial valuation in
      * topological (ascending id) order -- children always have a smaller id. */
@@ -1314,9 +1323,11 @@ static void _diversify(dvs_bbsolver_t *S) {
             nv[id] = (int8_t)(_lit_val(nv, L[id]) & _lit_val(nv, R[id]));
         } else {
             L[id] = 0; R[id] = 0;
-            nv[id] = (int8_t)(dvs_aig_cnf_value(S->cnf, (dvs_aig_node_t)id) == 1);
+            nv[id] = base_nv ? base_nv[id]
+                             : (int8_t)(dvs_aig_cnf_value(S->cnf, (dvs_aig_node_t)id) == 1);
         }
     }
+    free(base_nv);
 
     /* Build the fanout index (CSR): fo_adj[fo_off[c]..fo_off[c+1]) lists the AND
      * nodes that reference node c as a child. Constants (|child| <= 1, i.e.
@@ -1833,6 +1844,150 @@ static int bb_run_portfolio(dvs_bbsolver_t *S, uint32_t n_port, uint64_t seed,
     return result;
 }
 
+/* Bit-parallel simulation (docs/fw_hdl_implementation_plan.md, pieces 3.3,
+ * 3.4; dvs_aigsim.h) around the SAT solve:
+ *
+ *  - an exhaustive sweep of the assertions' input cone decides the problem
+ *    outright when it costs at most DV_SIM_MAX_WORK 64-lane gate evaluations
+ *    (default 1.5e6, about 0.5 ms at ~3e9 a second; decision D6). Bigger
+ *    sweeps race SAT instead: a 22-input BMC step swept in 2.5 ms where SAT
+ *    needs 1 ms (tier2 fsm_onehot_bmc_d1);
+ *  - otherwise a few hundred random assignments look for a cheap model;
+ *  - otherwise, when the sweep costs at most DV_SIM_RACE_WORK (default 6e9,
+ *    about 2 s), it runs on a second thread beside SAT and the first verdict
+ *    wins. Parity-heavy proofs (CRC, affine maps) defeat CDCL but not a sweep.
+ *
+ * Every verdict is exact. DV_SIM_CHECK=1 confirms each simulation verdict with
+ * SAT and aborts on a disagreement (the fuzz tests set it). */
+typedef struct {
+    dvs_aigsim_t *sim;
+    dvs_sat_t    *sat;
+    volatile int  stop;       /* SAT finished: the sweep gives up      */
+    volatile int  sat_stop;   /* the sweep finished: SAT gives up      */
+    int           verdict;
+} bb_sweep_arg;
+
+static void *bb_sweep_worker(void *arg) {
+    bb_sweep_arg *w = (bb_sweep_arg *)arg;
+    w->verdict = dvs_aigsim_exhaustive(w->sim, &w->stop);
+    if (w->verdict != DVS_AIGSIM_UNDECIDED) {
+        w->sat_stop = 1;            /* CaDiCaL polls the terminate callback */
+        dvs_sat_interrupt(w->sat);  /* kissat needs the explicit poke       */
+    }
+    return NULL;
+}
+
+static int bb_sweep_terminate(void *state) {
+    return *(volatile int *)state;
+}
+
+static uint64_t _env_u64(const char *name, uint64_t dflt) {
+    const char *e = getenv(name);
+    return e && *e ? strtoull(e, NULL, 10) : dflt;
+}
+
+static double _ms_since(const struct timespec *t0) {
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    return (t1.tv_sec - t0->tv_sec) * 1000.0 + (t1.tv_nsec - t0->tv_nsec) / 1e6;
+}
+
+/* A simulation verdict as a bit-blast result; installs the model on SAT. */
+static int _sim_result(dvs_bbsolver_t *S, dvs_aigsim_t *sim, int r) {
+    if (r == DVS_AIGSIM_UNSAT) return DVS_BB_UNSAT;
+    if (r != DVS_AIGSIM_SAT) return DVS_BB_UNKNOWN;
+    int8_t *nv = dvs_aigsim_model(sim);
+    if (!nv) return DVS_BB_UNKNOWN;
+    free(S->node_val);
+    S->node_val = nv;
+    return DVS_BB_SAT;
+}
+
+static void _sim_check(dvs_bbsolver_t *S, int verdict) {
+    if (!getenv("DV_SIM_CHECK") || verdict == DVS_BB_UNKNOWN) return;
+    int sat = dvs_sat_solve(S->sat);
+    if ((sat == DVS_BB_SAT || sat == DVS_BB_UNSAT) && sat != verdict) {
+        fprintf(stderr, "bb-sim: MISMATCH simulation %s, SAT %s\n",
+                verdict == DVS_BB_SAT ? "sat" : "unsat", sat == DVS_BB_SAT ? "sat" : "unsat");
+        abort();
+    }
+}
+
+/* Simulation, then SAT. Returns the DVS_BB_* verdict. */
+static int _solve_with_sim(dvs_bbsolver_t *S) {
+    if (!S->presim || S->asserts_lost || !S->n_asserts) return dvs_sat_solve(S->sat);
+    int log = getenv("DV_LOG") != NULL;
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
+    if (!sim) return dvs_sat_solve(S->sat);
+    uint64_t work = dvs_aigsim_exhaustive_work(sim);
+    uint64_t per_pass = (uint64_t)dvs_aigsim_gates(sim) + S->n_asserts;
+    const char *how;
+    int r = DVS_AIGSIM_UNDECIDED, rc;
+
+    if (work <= _env_u64("DV_SIM_MAX_WORK", 1500000ull)) {
+        how = "exhaustive";
+        r = dvs_aigsim_exhaustive(sim, NULL);
+    } else {
+        how = "random";
+        uint64_t blocks = 1000000ull / (per_pass ? per_pass : 1);
+        r = dvs_aigsim_random(sim, (uint32_t)(blocks < 8 ? blocks : 8), S->seed);
+    }
+    rc = _sim_result(S, sim, r);
+    if (rc != DVS_BB_UNKNOWN) {
+        if (log)
+            fprintf(stderr, "bb-sim: %s inputs=%u gates=%u vectors=%llu -> %s in %.2f ms\n",
+                    how, dvs_aigsim_inputs(sim), dvs_aigsim_gates(sim),
+                    (unsigned long long)dvs_aigsim_vectors(sim),
+                    rc == DVS_BB_SAT ? "sat" : "unsat", _ms_since(&t0));
+        dvs_aigsim_free(sim);
+        _sim_check(S, rc);
+        return rc;
+    }
+
+    /* Race the sweep against SAT. */
+    dvs_thread_t th;
+    bb_sweep_arg arg = { sim, S->sat, 0, 0, DVS_AIGSIM_UNDECIDED };
+    int raced = work <= _env_u64("DV_SIM_RACE_WORK", 6000000000ull)
+             && dvs_thread_create(&th, bb_sweep_worker, &arg) == 0;
+    if (raced) dvs_sat_set_terminate(S->sat, (void *)&arg.sat_stop, bb_sweep_terminate);
+    rc = dvs_sat_solve(S->sat);
+    const char *winner = "sat-solver";
+    if (raced) {
+        arg.stop = 1;
+        dvs_thread_join(&th, NULL);
+        dvs_sat_set_terminate(S->sat, NULL, NULL);
+        if (arg.verdict != DVS_AIGSIM_UNDECIDED) {
+            int sr = arg.verdict == DVS_AIGSIM_SAT ? DVS_BB_SAT : DVS_BB_UNSAT;
+            if (rc == DVS_BB_SAT || rc == DVS_BB_UNSAT) {
+                /* Both finished. They must agree; SAT's model is installed. */
+                if (sr != rc) {
+                    fprintf(stderr, "bb-sim: MISMATCH sweep %s, SAT %s\n",
+                            sr == DVS_BB_SAT ? "sat" : "unsat", rc == DVS_BB_SAT ? "sat" : "unsat");
+                    if (getenv("DV_SIM_CHECK")) abort();
+                    rc = DVS_BB_UNKNOWN;
+                }
+            } else {
+                winner = "sweep";
+                rc = _sim_result(S, sim, arg.verdict);
+            }
+        }
+    }
+    if (log)
+        fprintf(stderr, "bb-sim: %s inputs=%u gates=%u work=%llu%s -> %s by %s in %.2f ms\n",
+                how, dvs_aigsim_inputs(sim), dvs_aigsim_gates(sim), (unsigned long long)work,
+                raced ? " raced" : "",
+                rc == DVS_BB_SAT ? "sat" : rc == DVS_BB_UNSAT ? "unsat" : "unknown",
+                winner, _ms_since(&t0));
+    dvs_aigsim_free(sim);
+    return rc;
+}
+
+void dvs_bbsolver_set_presim(dvs_bbsolver_t *S, int on) {
+    if (S) S->presim = on;
+}
+
 int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || !S->problem) return DVS_BB_ERROR;
 
@@ -1911,7 +2066,10 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
         dvs_sat_set_light_search(S->sat, ncl < thresh);
     }
 
-    int rc = dvs_sat_solve(S->sat);
+    /* A model the simulation finds is installed as node_val. */
+    free(S->node_val);
+    S->node_val = NULL;
+    int rc = _solve_with_sim(S);
     if (stats_enabled) {
         clock_gettime(CLOCK_MONOTONIC, &t2);
         double bb_ms = (t1.tv_sec - t0.tv_sec) * 1000.0
@@ -1928,7 +2086,8 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     }
     S->last_result = rc;
     /* On SAT, diversify the don't-care bits toward seeded-random targets (no-op
-     * for seed 0). Sound: only flips that keep every assertion true are kept. */
+     * for seed 0). Sound: only flips that keep every assertion true are kept.
+     * It starts from the simulation's model when that is the one found. */
     if (rc == DVS_BB_SAT) _diversify(S);
     return rc;
 }

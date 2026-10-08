@@ -129,7 +129,13 @@ query anyway; this time the ignored line was harmless.
 
 ## R3 (medium). Engine routing on unrolled XOR/shift datapaths
 
-> **Status 2026-10-07:** not started; Phases 3–4 of `docs/fw_hdl_implementation_plan.md`.
+> **Status 2026-10-08: routing done** (Phase 3 of `docs/fw_hdl_implementation_plan.md`,
+> branch `feat/fw-hdl-frontend`). The default route sends these circuits to the
+> bit-blaster, which simulates first: `crc32_affine2` is proven by trying all 2^16
+> inputs in 0.24 ms, `crc32_affine3` (2^24) in about 0.1 s by a sweep raced against SAT
+> (z3 0.88 s, boolector 0.07 s). A randomization-shaped problem CDCL can't finish in
+> 20 ms moves to the bit-blaster. Still open: boolector's lead on wider affine proofs,
+> which needs XOR reasoning (Phase 4). Scorecard: `docs/fwhdl_scorecard_phase3.md`.
 
 Proofs over unrolled arithmetic, such as CRCs, hashes, LFSRs and checksums, are the
 main fw-hdl workload. On them, the default route (CDCL) is 3–14× slower than the
