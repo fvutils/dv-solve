@@ -295,30 +295,33 @@ static int _subst_reserve(Smt2Frontend *fe, uint32_t need) {
     return 1;
 }
 
-/* Walk the substitution stack (most recent first) to resolve a symbol.
+/* Push one binding onto the stack, linked into the current environment
+ * (the caller has reserved room). The caller makes it visible by setting
+ * fe->subst_env to the returned link. */
+static uint32_t _subst_push(Smt2Frontend *fe, const char *name, uint32_t len,
+                            uint32_t up) {
+    Smt2Subst *e = &fe->subst_stack[fe->subst_depth++];
+    memset(e, 0, sizeof(*e));
+    e->name = name;
+    e->len  = len;
+    e->up   = up;
+    return fe->subst_depth;            /* this entry's link: index + 1 */
+}
+
+/* Resolve a symbol in the current environment, innermost binding first.
  * Uses stored lengths rather than strlen to support non-null-terminated
  * names (e.g. let-binding names that point into the parser's arena). */
-static const Sexpr *_subst_lookup(Smt2Frontend *fe, const char *name, uint32_t len) {
-    for (int i = (int)fe->subst_depth - 1; i >= 0; i--) {
-        if (fe->subst_stack[i].expanding) continue;   /* skip in-progress binding */
-        if (fe->subst_stack[i].len == len &&
-            memcmp(name, fe->subst_stack[i].name, len) == 0) {
-            return fe->subst_stack[i].value;
-        }
+static Smt2Subst *_subst_lookup_entry(Smt2Frontend *fe, const char *name, uint32_t len) {
+    for (uint32_t k = fe->subst_env; k; k = fe->subst_stack[k - 1].up) {
+        Smt2Subst *e = &fe->subst_stack[k - 1];
+        if (e->len == len && memcmp(name, e->name, len) == 0) return e;
     }
     return NULL;
 }
 
-/* Like _subst_lookup but returns the entry pointer so callers can cache. */
-static Smt2Subst *_subst_lookup_entry(Smt2Frontend *fe, const char *name, uint32_t len) {
-    for (int i = (int)fe->subst_depth - 1; i >= 0; i--) {
-        if (fe->subst_stack[i].expanding) continue;   /* skip in-progress binding */
-        if (fe->subst_stack[i].len == len &&
-            memcmp(name, fe->subst_stack[i].name, len) == 0) {
-            return &fe->subst_stack[i];
-        }
-    }
-    return NULL;
+static const Sexpr *_subst_lookup(Smt2Frontend *fe, const char *name, uint32_t len) {
+    Smt2Subst *e = _subst_lookup_entry(fe, name, len);
+    return e ? e->value : NULL;
 }
 
 /* Recursively resolve a symbol-typed Sexpr through subst chains. */
@@ -1316,24 +1319,27 @@ static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
      * required so that sort/record-typed arguments -- e.g. a yosys state
      * instance passed to `(define-fun pred ((s S)) ...)` and used inside the
      * body only as `(accessor s)` -- are substituted textually rather than
-     * translated bare (a bare record has no expression form). Hygiene against
-     * self-referential arguments is handled by the `expanding` guard set in
-     * _translate_symbol_tagged (see Smt2Subst.expanding). */
-    uint32_t saved_depth = fe->subst_depth;
+     * translated bare (a bare record has no expression form).
+     *
+     * Scoping is lexical (B78): the body sees only its parameters and the
+     * globals, never the caller's let names, and each argument is translated
+     * in the caller's environment (arg_env), never under the body's lets. */
+    uint32_t saved_depth = fe->subst_depth, saved_env = fe->subst_env;
+    uint32_t env = 0;
     for (uint32_t i = 0; i < fd->n_params; i++) {
-        Smt2Subst *s = &fe->subst_stack[fe->subst_depth++];
-        s->name      = fd->param_names[i];
-        s->len       = (uint32_t)strlen(fd->param_names[i]);
-        s->value     = call->list.items[i + 1];
-        s->has_cache = 0;
-        s->expanding = 0;
+        env = _subst_push(fe, fd->param_names[i], (uint32_t)strlen(fd->param_names[i]), env);
+        Smt2Subst *s = &fe->subst_stack[env - 1];
+        s->value   = call->list.items[i + 1];
+        s->arg_env = saved_env;
     }
 
     /* Translate body */
+    fe->subst_env = env;
     TaggedExpr res = _translate_tagged(fe, fd->body);
 
     /* Pop bindings */
     fe->subst_depth = saved_depth;
+    fe->subst_env   = saved_env;
 
     return res;
 }
@@ -1386,13 +1392,12 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return (TaggedExpr){ { sub_entry->cached_ref, sub_entry->cached_width },
                                  sub_entry->cached_leaf_kind, sub_entry->cached_array };
         }
-        /* define-fun parameter: lazily translate the argument expression.
-         * Mark this entry as expanding so a self-referential argument (an
-         * inner symbol with the same name as this parameter) resolves past it
-         * to the outer/global binding instead of recursing infinitely. */
-        sub_entry->expanding = 1;
+        /* define-fun parameter: lazily translate the argument expression,
+         * in the caller's environment at the call (B78). */
+        uint32_t saved_env = fe->subst_env;
+        fe->subst_env = sub_entry->arg_env;
         TaggedExpr r = _translate_tagged(fe, sub_entry->value);
-        sub_entry->expanding = 0;
+        fe->subst_env = saved_env;
         return r;
     }
 
@@ -1408,7 +1413,12 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
     /* Zero-arg define-fun? */
     Smt2FunDef *fd = _find_fun(fe, s->sym.str, s->sym.len);
     if (fd && fd->n_params == 0) {
-        return _translate_tagged(fe, fd->body);
+        /* the body sees only globals, not the caller's let names (B78) */
+        uint32_t saved_env = fe->subst_env;
+        fe->subst_env = 0;
+        TaggedExpr r = _translate_tagged(fe, fd->body);
+        fe->subst_env = saved_env;
+        return r;
     }
 
     /* BV/Bool variable */
@@ -1572,6 +1582,35 @@ static TaggedExpr _smod_is_zero(Smt2Frontend *fe, const Sexpr *smod) {
  * flip folded into a plain const (the builder does not fold), so _bool_to_var
  * sees a clean var-vs-const inequality (it reifies var-vs-const, not var-vs-var).
  * A signed compare of two vars stays var-vs-var -> uncompiled -> sound `unknown`. */
+/* Operands of `op` that SMT-LIB requires to have one sort: an ill-sorted term
+ * is an input error (z3: "Sorts (_ BitVec 4) and (_ BitVec 8) are
+ * incompatible"), never a silent truncation. A bare numeral (width 64 here)
+ * and an internal width-0 term are left alone. */
+static int _same_width(Smt2Frontend *fe, const char *op, const Sexpr *sa, TaggedExpr a,
+                       const Sexpr *sb, TaggedExpr b) {
+    if (a.te.ref == EXPR_NULL || b.te.ref == EXPR_NULL || a.array || b.array) return 1;
+    if (!a.te.width || !b.te.width || a.te.width == b.te.width) return 1;
+    if ((sa && sa->kind == SEXPR_NUMERAL) || (sb && sb->kind == SEXPR_NUMERAL)) return 1;
+    _term_error(fe, "%s: sorts (_ BitVec %u) and (_ BitVec %u) are incompatible",
+                op, (unsigned)a.te.width, (unsigned)b.te.width);
+    return 0;
+}
+
+/* A term wider than any sort we accept, built by an extension, concat or
+ * repeat: the engines' widths are narrower than that, and wrapped (crash on
+ * sign_extend to 256 bits), so it is an honest unknown. */
+static int _too_wide(Smt2Frontend *fe, uint64_t w) {
+    if (w <= SMT2_MAX_BV_BITS) return 0;
+    fprintf(fe->err, "error: a %llu-bit term is wider than the %u-bit maximum\n",
+            (unsigned long long)w, (unsigned)SMT2_MAX_BV_BITS);
+    SMT2_TAINT(fe, "term wider than the maximum bit-vector width");
+    return 1;
+}
+
+static int _rewrite_text(const char *op, size_t oplen, uint32_t w, uint64_t k,
+                         char *buf, size_t n);
+static TaggedExpr _translate_rewrite(Smt2Frontend *fe, const Sexpr *s, const char *text);
+
 static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
                                         dvs_binop_t binop) {
     if (s->list.count != 3) return TAGGED_NULL;
@@ -1579,10 +1618,18 @@ static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
     if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
     TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
     if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
+    if (!_same_width(fe, "signed compare", s->list.items[1], a, s->list.items[2], b))
+        return TAGGED_NULL;
     if (_same_var(fe, a.te.ref, b.te.ref))
         return _bool_lit(fe, binop == DVS_BIN_LTE || binop == DVS_BIN_GTE);
     uint16_t sw = a.te.width ? a.te.width : b.te.width;
-    if (sw == 0 || sw > 64) {
+    if (sw > 64) {                 /* the same identity, as an SMT-LIB rewrite */
+        const Sexpr *h = s->list.items[0];
+        char text[512];
+        _rewrite_text(h->sym.str, h->sym.len, sw, 0, text, sizeof text);
+        return _translate_rewrite(fe, s, text);
+    }
+    if (sw == 0) {
         fprintf(fe->err, "error: signed compare of width %u unsupported\n",
                 (unsigned)sw);
         return TAGGED_NULL;
@@ -1650,6 +1697,134 @@ static TaggedExpr _wide_const(Smt2Frontend *fe, const uint64_t *limbs, uint32_t 
     return (TaggedExpr){ { r, (uint16_t)width }, 0, NULL };
 }
 
+/* ------------------------------------------------------------------ */
+/* Operators lowered by rewriting                                      */
+/* ------------------------------------------------------------------ */
+
+/* The SMT-LIB definition of an operator the translator has no lowering of
+ * its own for, written with operators it has, for operand width w (and index
+ * k of rotate_left/rotate_right): a term over ?0 and ?1, the operands. Returns
+ * the arity, or 0 when `op` is not one of these. */
+static int _rewrite_text(const char *op, size_t oplen, uint32_t w, uint64_t k,
+                         char *buf, size_t n) {
+#define IS(name) (oplen == sizeof(name) - 1 && memcmp(op, name, oplen) == 0)
+    char min[64];                         /* the most negative value, 1 then w-1 zeros */
+    if (w <= 1) snprintf(min, sizeof min, "#b1");
+    else        snprintf(min, sizeof min, "(concat #b1 (_ bv0 %u))", w - 1);
+    if (IS("bvnand"))  { snprintf(buf, n, "(bvnot (bvand ?0 ?1))"); return 2; }
+    if (IS("bvnor"))   { snprintf(buf, n, "(bvnot (bvor ?0 ?1))"); return 2; }
+    if (IS("bvxnor"))  { snprintf(buf, n, "(bvnot (bvxor ?0 ?1))"); return 2; }
+    if (IS("bvcomp"))  { snprintf(buf, n, "(ite (= ?0 ?1) #b1 #b0)"); return 2; }
+    if (IS("bvredor")) { snprintf(buf, n, "(ite (= ?0 (_ bv0 %u)) #b0 #b1)", w); return 1; }
+    if (IS("bvredand")) {
+        snprintf(buf, n, "(ite (= (bvnot ?0) (_ bv0 %u)) #b1 #b0)", w); return 1;
+    }
+    if (IS("bvnego"))  { snprintf(buf, n, "(= ?0 %s)", min); return 1; }
+    if (IS("bvusubo")) { snprintf(buf, n, "(bvult ?0 ?1)"); return 2; }
+    if (IS("bvuaddo")) {
+        snprintf(buf, n, "(= ((_ extract %u %u) (bvadd ((_ zero_extend 1) ?0) "
+                 "((_ zero_extend 1) ?1))) #b1)", w, w);
+        return 2;
+    }
+    if (IS("bvsaddo") || IS("bvssubo")) {
+        snprintf(buf, n, "(let ((s (%s ((_ sign_extend 1) ?0) ((_ sign_extend 1) ?1)))) "
+                 "(distinct ((_ extract %u %u) s) ((_ extract %u %u) s)))",
+                 IS("bvsaddo") ? "bvadd" : "bvsub", w, w, w - 1, w - 1);
+        return 2;
+    }
+    if (IS("bvumulo")) {
+        snprintf(buf, n, "(distinct ((_ extract %u %u) (bvmul ((_ zero_extend %u) ?0) "
+                 "((_ zero_extend %u) ?1))) (_ bv0 %u))", 2 * w - 1, w, w, w, w);
+        return 2;
+    }
+    if (IS("bvsmulo")) {
+        snprintf(buf, n, "(let ((p (bvmul ((_ sign_extend %u) ?0) ((_ sign_extend %u) ?1)))) "
+                 "(distinct p ((_ sign_extend %u) ((_ extract %u 0) p))))", w, w, w, w - 1);
+        return 2;
+    }
+    if (IS("bvsdivo")) {
+        snprintf(buf, n, "(and (= ?0 %s) (= ?1 (bvnot (_ bv0 %u))))", min, w);
+        return 2;
+    }
+    if (IS("rotate_left") || IS("rotate_right")) {
+        uint64_t r = w ? k % w : 0;
+        if (IS("rotate_right") && r) r = w - r;           /* as a left rotation */
+        if (!r) snprintf(buf, n, "?0");
+        else    snprintf(buf, n, "(let ((a ?0)) (concat ((_ extract %u 0) a) "
+                         "((_ extract %u %u) a)))", (unsigned)(w - r - 1), w - 1,
+                         (unsigned)(w - r));
+        return 1;
+    }
+    /* signed compares wider than 64 bits: the MSB-flip identity */
+    if (IS("bvslt") || IS("bvsle") || IS("bvsgt") || IS("bvsge")) {
+        snprintf(buf, n, "(bvu%.2s (bvxor ?0 %s) (bvxor ?1 %s))", op + 3, min, min);
+        return 2;
+    }
+#undef IS
+    return 0;
+}
+
+/* Translate `s`, an application of an operator _rewrite_text defines, as
+ * that definition: like a define-fun call, the operands are bound to ?0 and
+ * ?1 and translated in the caller's environment. */
+static TaggedExpr _translate_rewrite(Smt2Frontend *fe, const Sexpr *s, const char *text) {
+    static const char *const params[2] = { "?0", "?1" };
+    const Sexpr *body = NULL;
+    for (uint32_t i = 0; i < fe->n_rewrites && !body; i++)
+        if (strcmp(fe->rewrites[i].text, text) == 0) body = fe->rewrites[i].body;
+    if (!body) {
+        size_t len = strlen(text);
+        char *t = (char *)sexpr_arena_alloc(&fe->persistent_arena, len + 1, 1);
+        if (!t) return TAGGED_NULL;
+        memcpy(t, text, len + 1);
+        Smt2Lexer lex;
+        smt2_lexer_init(&lex, t, len);
+        body = sexpr_parse(&lex, &fe->persistent_arena);
+        if (!body) {
+            fprintf(fe->err, "internal error: rewrite '%s' does not parse\n", t);
+            SMT2_TAINT(fe, "internal error in an operator rewrite");
+            return TAGGED_NULL;
+        }
+        if (fe->n_rewrites < SMT2_MAX_REWRITES) {
+            fe->rewrites[fe->n_rewrites].text = t;
+            fe->rewrites[fe->n_rewrites++].body = body;
+        }
+    }
+    uint32_t n = s->list.count - 1;
+    if (n > 2 || !_subst_reserve(fe, n)) return TAGGED_NULL;
+    uint32_t saved_depth = fe->subst_depth, saved_env = fe->subst_env, env = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        env = _subst_push(fe, params[i], 2, env);
+        fe->subst_stack[env - 1].value   = s->list.items[i + 1];
+        fe->subst_stack[env - 1].arg_env = saved_env;
+    }
+    fe->subst_env = env;
+    TaggedExpr r = _translate_tagged(fe, body);
+    fe->subst_depth = saved_depth;
+    fe->subst_env   = saved_env;
+    return r;
+}
+
+/* An operator _rewrite_text defines (indexed: k is its index): check the
+ * arity, find the operand width, translate the definition. NULL `handled`
+ * result: not one of them. */
+static TaggedExpr _try_rewrite(Smt2Frontend *fe, const Sexpr *s, const char *op,
+                               size_t oplen, uint64_t k, int *handled) {
+    char text[512];
+    int arity = _rewrite_text(op, oplen, 1, k, text, sizeof text);
+    *handled = arity > 0;
+    if (!arity) return TAGGED_NULL;
+    if (s->list.count != (uint32_t)arity + 1) {
+        _term_error(fe, "arity mismatch for '%.*s' (expected %d, got %u)",
+                    (int)oplen, op, arity, s->list.count - 1);
+        return TAGGED_NULL;
+    }
+    TaggedExpr a = _translate_tagged(fe, s->list.items[1]);   /* for its width */
+    if (a.te.ref == EXPR_NULL || a.array) return TAGGED_NULL;
+    _rewrite_text(op, oplen, a.te.width, k, text, sizeof text);
+    return _translate_rewrite(fe, s, text);
+}
+
 static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     if (s->list.count == 0) return TAGGED_NULL;
 
@@ -1702,6 +1877,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
             TaggedExpr inner = _translate_tagged(fe, s->list.items[1]);
             if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
+            if (_too_wide(fe, (uint64_t)inner.te.width + ext_n)) return TAGGED_NULL;
             uint16_t new_width = inner.te.width + (uint16_t)ext_n;
 
             /* The native CDCL compile of `r == sign_extend(a)` bounds a wide
@@ -1753,12 +1929,20 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             TaggedExpr inner = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
             if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
             uint16_t w = inner.te.width;
+            if (_too_wide(fe, (uint64_t)w * rep_n)) return TAGGED_NULL;
             dvs_expr_t acc = inner.te.ref;              /* N==1 is the identity */
             for (uint64_t i = 1; i < rep_n; i++)
                 acc = dvs_builder_expr_concat(fe->builder, acc, inner.te.ref, w);
             return (TaggedExpr){ { acc, (uint16_t)(w * rep_n) }, 0, NULL };
         }
 
+        if (op_sym->kind == SEXPR_SYMBOL && head->list.count == 3 &&
+            head->list.items[2]->kind == SEXPR_NUMERAL) {
+            int handled;
+            TaggedExpr r = _try_rewrite(fe, s, op_sym->sym.str, op_sym->sym.len,
+                                        head->list.items[2]->numval, &handled);
+            if (handled) return r;
+        }
         fprintf(fe->err, "error: unsupported indexed operator\n");
         return TAGGED_NULL;
     }
@@ -1778,7 +1962,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
         TaggedExpr val_te = _translate_tagged(fe, s->list.items[1]);
         if (val_te.te.ref == EXPR_NULL || val_te.array != NULL) {
-            _term_error(fe, "(as const ...) value must be a BV");
+            if (val_te.array) _term_error(fe, "(as const ...) value must be a BV");   /* else: already reported */
             return TAGGED_NULL;
         }
 
@@ -1821,7 +2005,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return TAGGED_NULL;
         }
         uint32_t n = binds->list.count;
-        uint32_t saved = fe->subst_depth;
+        uint32_t saved = fe->subst_depth, saved_env = fe->subst_env;
 
         /* Phase 1: evaluate ALL value expressions in the current (outer) scope
          * before any binding takes effect — true parallel SMT-LIB2 semantics.
@@ -1850,21 +2034,17 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         /* Reserve after phase 1 (nested translations may have grown the stack),
          * then push all bindings now that every value is evaluated. */
         if (!_subst_reserve(fe, n)) goto let_oom;
+        uint32_t env = saved_env;
         for (uint32_t i = 0; i < n; i++) {
-            Smt2Subst *e        = &fe->subst_stack[fe->subst_depth++];
-            e->name             = let_names[i]->sym.str;
-            e->len              = let_names[i]->sym.len;
-            e->value            = NULL; /* not used; has_cache=1 takes precedence */
+            env = _subst_push(fe, let_names[i]->sym.str, let_names[i]->sym.len, env);
+            Smt2Subst *e        = &fe->subst_stack[env - 1];
             e->cached_ref       = let_vals[i].te.ref;
             e->cached_width     = let_vals[i].te.width;
             e->cached_leaf_kind = let_vals[i].leaf_kind;
             e->cached_array     = let_vals[i].array;
             e->has_cache        = 1;
-            e->expanding        = 0;   /* subst_stack is now heap (realloc'd, not
-                                        * zero-init) — must clear explicitly or a
-                                        * garbage `expanding` byte hides this binding
-                                        * from _subst_lookup ("unknown variable"). */
         }
+        fe->subst_env = env;
         /* Values are copied into the subst stack; release the temp buffers
          * BEFORE the (possibly very deep) phase-2 recursion. */
         if (let_heap) { free(let_vals); free(let_names); }
@@ -1873,16 +2053,19 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         {
             TaggedExpr res = _translate_tagged(fe, body);
             fe->subst_depth = saved;
+            fe->subst_env   = saved_env;
             return res;
         }
     let_bad:
         if (let_heap) { free(let_vals); free(let_names); }
         _term_error(fe, "malformed let binding");
         fe->subst_depth = saved;
+        fe->subst_env   = saved_env;
         return TAGGED_NULL;
     let_oom:
         fprintf(fe->err, "error: out of memory in let (%u bindings)\n", n);
         fe->subst_depth = saved;
+        fe->subst_env   = saved_env;
         return TAGGED_NULL;
     }
 
@@ -1912,14 +2095,14 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
         TaggedExpr arr_te = _translate_tagged(fe, s->list.items[1]);
         if (arr_te.array == NULL) {
-            _term_error(fe, "select: first argument is not an array");
+            if (arr_te.te.ref != EXPR_NULL) _term_error(fe, "select: first argument is not an array");   /* else: already reported */
             return TAGGED_NULL;
         }
         Smt2ArrayValue *arr = arr_te.array;
 
         TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
         if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
-            _term_error(fe, "select: index must be a BV");
+            if (idx_te.array) _term_error(fe, "select: index must be a BV");   /* else: already reported */
             return TAGGED_NULL;
         }
 
@@ -2005,7 +2188,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
         TaggedExpr arr_te = _translate_tagged(fe, s->list.items[1]);
         if (arr_te.array == NULL) {
-            _term_error(fe, "store: first argument is not an array");
+            if (arr_te.te.ref != EXPR_NULL) _term_error(fe, "store: first argument is not an array");   /* else: already reported */
             return TAGGED_NULL;
         }
         Smt2ArrayValue *arr = arr_te.array;
@@ -2021,12 +2204,12 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (arr->is_abstract) {
             TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
             if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
-                _term_error(fe, "store: index must be a BV");
+                if (idx_te.array) _term_error(fe, "store: index must be a BV");   /* else: already reported */
                 return TAGGED_NULL;
             }
             TaggedExpr val_te = _translate_tagged(fe, s->list.items[3]);
             if (val_te.te.ref == EXPR_NULL || val_te.array != NULL) {
-                _term_error(fe, "store: value must be a BV");
+                if (val_te.array) _term_error(fe, "store: value must be a BV");   /* else: already reported */
                 return TAGGED_NULL;
             }
             idx_te = _flatten_to_var(fe, idx_te);
@@ -2048,13 +2231,13 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
         TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
         if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
-            _term_error(fe, "store: index must be a BV");
+            if (idx_te.array) _term_error(fe, "store: index must be a BV");   /* else: already reported */
             return TAGGED_NULL;
         }
 
         TaggedExpr val_te = _translate_tagged(fe, s->list.items[3]);
         if (val_te.te.ref == EXPR_NULL || val_te.array != NULL) {
-            _term_error(fe, "store: value must be a BV");
+            if (val_te.array) _term_error(fe, "store: value must be a BV");   /* else: already reported */
             return TAGGED_NULL;
         }
 
@@ -2119,6 +2302,12 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             for (uint32_t i = 1; i < s->list.count; i++) {
                 TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
                 if (b.te.ref == EXPR_NULL || b.array != NULL) return TAGGED_NULL;
+                if (w && b.te.width && b.te.width != w
+                        && s->list.items[i]->kind != SEXPR_NUMERAL) {
+                    _term_error(fe, "%s: sorts (_ BitVec %u) and (_ BitVec %u) are incompatible",
+                                is_band ? "bvand" : "bvor", (unsigned)w, (unsigned)b.te.width);
+                    return TAGGED_NULL;
+                }
                 if (!w) w = b.te.width;
                 uint64_t v, ones = w >= 64 ? ~0ull : ((1ull << w) - 1);
                 if (b.te.width == w && _lit_value(fe, b, &v)) {
@@ -2153,6 +2342,8 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         for (uint32_t _i = 2; _i < s->list.count; _i++) { \
             TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[_i])); \
             if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
+            if (!_same_width(fe, name, s->list.items[1], a, s->list.items[_i], b)) \
+                return TAGGED_NULL; \
             /* Re-flatten the accumulator each round. Without this, from the 2nd \
              * operand on the left side is a raw composed node, and the CDCL \
              * compile only links var-var / const-var operands -- so an n-ary op \
@@ -2176,6 +2367,8 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (a.te.ref == EXPR_NULL) return TAGGED_NULL; \
         TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2])); \
         if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
+        if (!_same_width(fe, name, s->list.items[1], a, s->list.items[2], b)) \
+            return TAGGED_NULL; \
         if (_same_var(fe, a.te.ref, b.te.ref)) \
             return _bool_lit(fe, binop == DVS_BIN_LTE || binop == DVS_BIN_GTE); \
         dvs_expr_t r = dvs_builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
@@ -2197,6 +2390,9 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
             TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
             if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
+            if (!_same_width(fe, is_urem ? "bvurem" : "bvudiv", s->list.items[1], a,
+                             s->list.items[2], b))
+                return TAGGED_NULL;
             uint16_t w = a.te.width ? a.te.width : b.te.width;
             _flag_wide_arith(fe, w);
             dvs_expr_t q = _udivrem_expr(fe, a.te.ref, b.te.ref, w, is_urem);
@@ -2349,11 +2545,14 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
             return (TaggedExpr){ { result, 1 }, 0, NULL };
         }
         if (a.array != NULL || b.array != NULL) {
-            _term_error(fe, "type mismatch in equality (array vs scalar)");
+            /* a side that failed to translate has already been reported */
+            if (a.te.ref != EXPR_NULL || b.te.ref != EXPR_NULL)
+                _term_error(fe, "type mismatch in equality (array vs scalar)");
             return TAGGED_NULL;
         }
 
         /* BV/Bool equality */
+        if (!_same_width(fe, "=", s->list.items[1], a, s->list.items[2], b)) return TAGGED_NULL;
         uint64_t av, bv;
         if (_lit_value(fe, a, &av) && _lit_value(fe, b, &bv) && a.te.width == b.te.width)
             return _bool_lit(fe, av == bv);
@@ -2374,6 +2573,11 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         for (uint32_t i = 0; i < n; i++) {
             args[i] = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[i + 1]));
             if (args[i].te.ref == EXPR_NULL) { free(args); return TAGGED_NULL; }
+            if (i && !_same_width(fe, "distinct", s->list.items[1], args[0],
+                                  s->list.items[i + 1], args[i])) {
+                free(args);
+                return TAGGED_NULL;
+            }
         }
         dvs_expr_t result = EXPR_NULL;
         for (uint32_t i = 0; i < n; i++) {
@@ -2578,6 +2782,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         }
 
         /* BV ite */
+        if (!_same_width(fe, "ite", s->list.items[2], t, s->list.items[3], e)) return TAGGED_NULL;
         t = _flatten_to_var(fe, t);
         if (t.te.ref == EXPR_NULL) return TAGGED_NULL;
         e = _flatten_to_var(fe, e);
@@ -2597,6 +2802,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         for (uint32_t i = 2; i < s->list.count; i++) {
             TaggedExpr lo = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[i]));
             if (lo.te.ref == EXPR_NULL) return TAGGED_NULL;
+            if (_too_wide(fe, (uint64_t)acc.te.width + lo.te.width)) return TAGGED_NULL;
             dvs_expr_t r = dvs_builder_expr_concat(fe->builder, acc.te.ref, lo.te.ref,
                                             (uint8_t)lo.te.width);
             acc = (TaggedExpr){ { r, (uint16_t)(acc.te.width + lo.te.width) }, 0, NULL };
@@ -2644,6 +2850,12 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         return TAGGED_NULL;
     }
 
+    {
+        int handled;
+        TaggedExpr r = _try_rewrite(fe, s, op, oplen, 0, &handled);
+        if (handled) return r;
+    }
+
     fprintf(fe->err, "error: unsupported operation '%.*s'\n",
             (int)oplen, op);
     return TAGGED_NULL;
@@ -2689,6 +2901,7 @@ static const Sexpr *_sexpr_deep_copy(SexprArena *arena, const Sexpr *src) {
     switch (src->kind) {
     case SEXPR_SYMBOL:
     case SEXPR_KEYWORD:
+    case SEXPR_DECIMAL:
     case SEXPR_STRING: {
         char *s = (char *)sexpr_arena_alloc(arena, src->sym.len, 1);
         if (!s) return NULL;
@@ -2742,6 +2955,10 @@ static int _cmd_set_logic(Smt2Frontend *fe, const Sexpr *cmd) {
         return -1;
     }
     const Sexpr *l = cmd->list.items[1];
+    if (fe->logic != SMT2_LOGIC_UNSET) {
+        _input_error(fe, "the logic has already been set");
+        return -1;
+    }
     if (sexpr_is_symbol(l, "QF_BV"))    { fe->logic = SMT2_LOGIC_QF_BV;    return 0; }
     if (sexpr_is_symbol(l, "QF_UFBV"))  { fe->logic = SMT2_LOGIC_QF_UFBV;  return 0; }
     if (sexpr_is_symbol(l, "QF_ABV"))   { fe->logic = SMT2_LOGIC_QF_ABV;   return 0; }
@@ -2774,6 +2991,61 @@ static int _cmd_set_option(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->produce_unsat_cores = sexpr_is_symbol(val, "true");
         return 0;
     }
+    if (sexpr_is_keyword(key, ":print-success")) {
+        fe->print_success = sexpr_is_symbol(val, "true");
+        return 0;
+    }
+    if (sexpr_is_keyword(key, ":produce-assertions")) {
+        /* only from here on: assertions made before are not kept */
+        fe->produce_assertions = sexpr_is_symbol(val, "true") && fe->n_checked == 0;
+        return 0;
+    }
+    return 0;
+}
+
+/* (get-option :key): the options this front end keeps; `unsupported` for the
+ * rest, as SMT-LIB prescribes. */
+static int _cmd_get_option(Smt2Frontend *fe, const Sexpr *cmd) {
+    if (cmd->list.count != 2 || cmd->list.items[1]->kind != SEXPR_KEYWORD) {
+        _query_error(fe, "get-option expects one keyword");
+        return 0;
+    }
+    const Sexpr *k = cmd->list.items[1];
+    if (sexpr_is_keyword(k, ":produce-models"))
+        fprintf(fe->out, "%s\n", fe->produce_models ? "true" : "false");
+    else if (sexpr_is_keyword(k, ":produce-unsat-cores"))
+        fprintf(fe->out, "%s\n", fe->produce_unsat_cores ? "true" : "false");
+    else if (sexpr_is_keyword(k, ":print-success"))
+        fprintf(fe->out, "%s\n", fe->print_success ? "true" : "false");
+    else if (sexpr_is_keyword(k, ":produce-assertions"))
+        fprintf(fe->out, "%s\n", fe->produce_assertions ? "true" : "false");
+    else if (sexpr_is_keyword(k, ":random-seed") || sexpr_is_keyword(k, ":seed"))
+        fprintf(fe->out, "%llu\n", (unsigned long long)fe->given_seed);
+    else
+        fprintf(fe->out, "unsupported\n");
+    fflush(fe->out);
+    return 0;
+}
+
+static void _fprint_sexpr(FILE *out, const Sexpr *s);
+static int _check_models_on(Smt2Frontend *fe);
+
+/* (get-assertions): the assertions in scope, as written. They are kept for the
+ * model check, which is off in --mode=verilator; :produce-assertions keeps
+ * them anyway. */
+static int _cmd_get_assertions(Smt2Frontend *fe) {
+    if (!(_check_models_on(fe) || fe->produce_assertions)) {
+        _query_error(fe, "get-assertions: assertions are not kept; "
+                         "use (set-option :produce-assertions true) first");
+        return 0;
+    }
+    fprintf(fe->out, "(");
+    for (uint32_t i = 0; i < fe->n_checked; i++) {
+        fprintf(fe->out, "\n  ");
+        _fprint_sexpr(fe->out, fe->checked[i]);
+    }
+    fprintf(fe->out, "%s)\n", fe->n_checked ? "\n" : "");
+    fflush(fe->out);
     return 0;
 }
 
@@ -3034,6 +3306,13 @@ static int _add_sort_const(Smt2Frontend *fe, const Sexpr *name_s,
 
 static uint64_t _fp_mix(uint64_t h, const uint8_t *d, size_t n);
 
+/* A name visible as a constant, array or function (scoped by push/pop). */
+static int _declared(Smt2Frontend *fe, const Sexpr *name) {
+    return _find_var(fe, name->sym.str, name->sym.len) != NULL
+        || _find_array_var(fe, name->sym.str, name->sym.len) != NULL
+        || _find_fun(fe, name->sym.str, name->sym.len) != NULL;
+}
+
 static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
     Sexpr *name_s;
     Sexpr *sort_s;
@@ -3063,6 +3342,10 @@ static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
 
     if (name_s->kind != SEXPR_SYMBOL) {
         _input_error(fe, "expected symbol for variable name");
+        return -1;
+    }
+    if (_declared(fe, name_s)) {
+        _input_error(fe, "'%.*s' is already declared", (int)name_s->sym.len, name_s->sym.str);
         return -1;
     }
     fe->shape_fp = _fp_mix(fe->shape_fp ^ 0x51u, (const uint8_t *)name_s->sym.str,
@@ -3153,6 +3436,10 @@ static int _cmd_define_fun(Smt2Frontend *fe, const Sexpr *cmd) {
 
     if (name_s->kind != SEXPR_SYMBOL || params_s->kind != SEXPR_LIST) {
         _input_error(fe, "malformed define-fun");
+        return -1;
+    }
+    if (_declared(fe, name_s)) {
+        _input_error(fe, "'%.*s' is already declared", (int)name_s->sym.len, name_s->sym.str);
         return -1;
     }
     if (fe->n_funs >= SMT2_MAX_FUNS) {
@@ -3807,16 +4094,16 @@ static int _check_models_on(Smt2Frontend *fe) {
 /* Keep an assertion as written, for the model check. A copy that cannot be
  * made switches the check off for the session rather than check a subset. */
 static void _record_checked(Smt2Frontend *fe, const Sexpr *t) {
-    if (!_check_models_on(fe)) return;
+    if (!_check_models_on(fe) && !fe->produce_assertions) return;
     if (fe->n_checked == fe->checked_cap) {
         uint32_t cap = fe->checked_cap ? fe->checked_cap * 2 : 64;
         const Sexpr **g = (const Sexpr **)realloc((void *)fe->checked, cap * sizeof(*g));
-        if (!g) { fe->check_models = -1; return; }
+        if (!g) { fe->check_models = -1; fe->produce_assertions = 0; return; }
         fe->checked = g;
         fe->checked_cap = cap;
     }
     const Sexpr *copy = _sexpr_deep_copy(&fe->persistent_arena, t);
-    if (!copy) { fe->check_models = -1; return; }
+    if (!copy) { fe->check_models = -1; fe->produce_assertions = 0; return; }
     fe->checked[fe->n_checked++] = copy;
 }
 
@@ -6041,7 +6328,7 @@ static void _emit_hex_key(FILE *out, uint64_t lo, uint64_t hi, uint32_t width) {
 /* Print a term back as SMT-LIB, for echoing a get-value key. */
 static void _fprint_sexpr(FILE *out, const Sexpr *s) {
     switch (s->kind) {
-    case SEXPR_SYMBOL: case SEXPR_KEYWORD:
+    case SEXPR_SYMBOL: case SEXPR_KEYWORD: case SEXPR_DECIMAL:
         fprintf(out, "%.*s", (int)s->sym.len, s->sym.str); break;
     case SEXPR_STRING:
         fprintf(out, "\"%.*s\"", (int)s->sym.len, s->sym.str); break;
@@ -6458,6 +6745,8 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->push_n_named[fe->push_depth] = fe->n_named;
             fe->push_n_core_hist[fe->push_depth] = fe->n_core_hist;
             fe->push_n_checked[fe->push_depth] = fe->n_checked;
+            fe->push_n_funs[fe->push_depth] = fe->n_funs;
+            fe->push_n_sort_aliases[fe->push_depth] = fe->n_sort_aliases;
             fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
             _abs_push_frame(fe, fe->push_depth);
             fe->push_bmark[fe->push_depth] = dvs_builder_mark(fe->builder);
@@ -6485,6 +6774,8 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->push_n_named[fe->push_depth - 1] = fe->n_named;
         fe->push_n_core_hist[fe->push_depth - 1] = fe->n_core_hist;
         fe->push_n_checked[fe->push_depth - 1] = fe->n_checked;
+        fe->push_n_funs[fe->push_depth - 1] = fe->n_funs;
+        fe->push_n_sort_aliases[fe->push_depth - 1] = fe->n_sort_aliases;
         fe->push_incomplete[fe->push_depth - 1] = (uint8_t)fe->incomplete;
         _abs_push_frame(fe, fe->push_depth - 1);
         fe->push_bmark[fe->push_depth - 1] = dvs_builder_mark(fe->builder);
@@ -6606,6 +6897,12 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->n_core_hist = fe->push_n_core_hist[fe->push_depth];
         if (fe->n_checked > fe->push_n_checked[fe->push_depth])
             fe->n_checked = fe->push_n_checked[fe->push_depth];
+        /* Definitions made in the popped scope go with it (B82: a stale one
+         * shadowed a later redefinition -> wrong unsat). */
+        if (fe->n_funs > fe->push_n_funs[fe->push_depth])
+            fe->n_funs = fe->push_n_funs[fe->push_depth];
+        if (fe->n_sort_aliases > fe->push_n_sort_aliases[fe->push_depth])
+            fe->n_sort_aliases = fe->push_n_sort_aliases[fe->push_depth];
     }
     return 0;
 }
@@ -6978,6 +7275,10 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     void    *shape_tab = fe->shape_tab;
     uint32_t n_input_errors = fe->n_input_errors;   /* drives the exit status */
     int8_t   check_models = fe->check_models;
+    /* operator rewrites: parsed into persistent_arena, which is kept */
+    uint32_t n_rewrites = fe->n_rewrites;
+    __typeof__(fe->rewrites[0]) rewrites[SMT2_MAX_REWRITES];
+    memcpy(rewrites, fe->rewrites, n_rewrites * sizeof rewrites[0]);
     /* Reused allocations (reset in place below rather than freed). */
     dvs_builder_t *builder = fe->builder;
     SexprArena           parena  = fe->persistent_arena;
@@ -7043,6 +7344,8 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->shape_tab = shape_tab;
     fe->n_input_errors = n_input_errors;
     fe->check_models = check_models;
+    fe->n_rewrites = n_rewrites;
+    memcpy(fe->rewrites, rewrites, n_rewrites * sizeof rewrites[0]);
     fe->builder = builder;
     fe->persistent_arena = parena;
 }
@@ -7136,6 +7439,8 @@ static int _cmd_reset_assertions(Smt2Frontend *fe) {
     return 0;
 }
 
+static int _silent_command(const Sexpr *head);
+
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     fe->model_reused = 0;
     fe->cmd_dropped = 0;
@@ -7147,6 +7452,12 @@ int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     uint32_t n_named = fe->n_named;
     uint32_t n_errors = fe->n_input_errors;
     int rc = _dispatch(fe, cmd);
+    if (fe->print_success && rc >= 0 && fe->n_input_errors == n_errors && cmd
+            && cmd->kind == SEXPR_LIST && cmd->list.count > 0
+            && _silent_command(cmd->list.items[0])) {
+        fprintf(fe->out, "success\n");
+        fflush(fe->out);
+    }
     if (record && rc == 0)
         _core_record(fe, cmd, fe->n_named > n_named ? (int32_t)fe->n_named - 1 : -1);
     if (keep && rc == 0 && fe->n_input_errors == n_errors)
@@ -7305,8 +7616,28 @@ static int _dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     }
     if (sexpr_is_symbol(head, "exit"))
         return 1;
+    if (sexpr_is_symbol(head, "get-option"))
+        return _cmd_get_option(fe, cmd);
+    if (sexpr_is_symbol(head, "get-assertions"))
+        return _cmd_get_assertions(fe);
 
+    /* A query changes no assertion, so not answering it poisons nothing. */
+    if (head->sym.len > 4 && memcmp(head->sym.str, "get-", 4) == 0) {
+        _query_error(fe, "unsupported command '%.*s'", (int)head->sym.len, head->sym.str);
+        return 0;
+    }
     _input_error(fe, "unsupported command '%.*s'", (int)head->sym.len, head->sym.str);
+    return 0;
+}
+
+/* Commands whose only response is `success` under :print-success. */
+static int _silent_command(const Sexpr *head) {
+    static const char *const names[] = {
+        "set-logic", "set-option", "set-info", "declare-sort", "define-sort",
+        "declare-const", "declare-fun", "define-fun", "declare-datatypes", "assert",
+        "push", "pop", "reset", "reset-assertions", "exit", NULL };
+    for (int i = 0; names[i]; i++)
+        if (sexpr_is_symbol(head, names[i])) return 1;
     return 0;
 }
 

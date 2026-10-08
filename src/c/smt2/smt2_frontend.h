@@ -38,6 +38,7 @@ extern size_t g_smt2_translate_stack_bytes;
 #define SMT2_MAX_SORT_FUNS  256
 #define SMT2_MAX_SORT_CONSTS 256
 #define SMT2_MAX_SUBST       64
+#define SMT2_MAX_REWRITES    96
 #define SMT2_MAX_ASSUMPS    256   /* assumption literals recorded per check-sat-assuming */
 
 /* Array expansion limits */
@@ -260,13 +261,14 @@ typedef struct {
     Smt2ArrayValue     *cached_array;
     int                 cached_leaf_kind;
     uint8_t             has_cache;       /* 0 for define-fun params, 1 for let bindings */
-    /* Set while this define-fun parameter's argument is being lazily
-     * translated. Lookups skip an entry that is currently expanding so a
-     * self-referential argument (e.g. param `b` bound to `(bvult a b)` where
-     * `b` is also a global) resolves the inner `b` to the outer/global binding
-     * instead of re-entering this parameter and recursing until the C stack
-     * overflows (SIGSEGV). */
-    uint8_t             expanding;
+    /* Scoping (B78). Entries form linked environments, not one flat scope:
+     * `up` is the enclosing binding (index + 1; 0 = none, only globals
+     * beyond). A define-fun body starts a fresh environment holding just its
+     * parameters, and a parameter's argument is translated in `arg_env`, the
+     * caller's environment at the call, so neither side's names capture the
+     * other's. */
+    uint32_t            up;
+    uint32_t            arg_env;
 } Smt2Subst;
 
 /* ------------------------------------------------------------------ */
@@ -324,6 +326,8 @@ typedef struct {
      * named assertions the contradiction does not need. Off by default, so the
      * Verilator randomize() loop never pays for the copies. */
     int                  produce_unsat_cores;
+    uint8_t              print_success;       /* :print-success: "success" after a silent command */
+    uint8_t              produce_assertions;  /* :produce-assertions: keep them for get-assertions */
     Smt2CoreCmd         *core_hist;
     uint32_t             n_core_hist;
     uint32_t             core_hist_cap;
@@ -509,6 +513,14 @@ typedef struct {
     Smt2Subst           *subst_stack;
     uint32_t             subst_cap;
     uint32_t             subst_depth;
+    uint32_t             subst_env;    /* innermost visible binding, index + 1; 0 = none */
+
+    /* Operators lowered by rewriting into supported ones (_translate_rewrite):
+     * each template, keyed by its text and parsed once into persistent_arena.
+     * Kept across a soft reset, like the arena. */
+    struct { const char *text; const struct Sexpr *body; }
+                         rewrites[SMT2_MAX_REWRITES];
+    uint32_t             n_rewrites;
 
     /* Assumption literals from the most recent check-sat-assuming, recorded so
      * (get-unsat-assumptions) can answer. When the last check-sat-assuming was
@@ -528,6 +540,8 @@ typedef struct {
     uint32_t             push_n_named[32];
     uint32_t             push_n_core_hist[32];
     uint32_t             push_n_checked[32];
+    uint32_t             push_n_funs[32];          /* define-fun is scoped too (B82) */
+    uint32_t             push_n_sort_aliases[32];  /* and define-sort */
     dvs_builder_mark_t   push_bmark[32];     /* builder position at each push */
     uint8_t              push_incomplete[32];  /* `incomplete` at each push */
     uint32_t             push_n_anodes[32];    /* abstract-array state at each push */

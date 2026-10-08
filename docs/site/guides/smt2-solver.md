@@ -22,14 +22,16 @@ Any other logic is an error. The logic also selects the solving engine; see
 
 | Command | Support |
 |---|---|
-| `set-logic` | the logics above |
-| `set-option` | `:produce-models`, `:produce-unsat-cores`, `:seed`; other options are accepted and ignored |
+| `set-logic` | the logics above; once per session, or again after `reset` |
+| `set-option` | `:produce-models`, `:produce-unsat-cores`, `:produce-assertions`, `:print-success`, `:seed`; other options are accepted and ignored |
+| `get-option` | the options above; `unsupported` for any other |
 | `set-info` | accepted and ignored |
-| `declare-const`, `declare-fun` | Bool, `(_ BitVec n)` for n up to 192, arrays of bit-vectors, and functions over them |
+| `declare-const`, `declare-fun` | Bool, `(_ BitVec n)` for n up to 192, arrays of bit-vectors, and functions over them; a name can be declared once per scope |
 | `declare-sort` | arity 0 (opaque sorts) |
 | `declare-datatypes` | single-constructor records whose fields are Bool or bit-vectors |
-| `define-fun` | yes |
+| `define-fun`, `define-sort` | yes; like declarations, they are removed by the `pop` of the level they were made in |
 | `assert` | yes |
+| `get-assertions` | the assertions in scope, as written; needs `:produce-assertions` in `--mode=verilator` |
 | `check-sat` | yes |
 | `check-sat-assuming` | yes |
 | `get-value`, `get-model` | after `sat` |
@@ -45,7 +47,11 @@ Any other logic is an error. The logic also selects the solving engine; see
 Not supported: `get-proof`, `get-assignment`,
 `declare-datatype` (singular), and datatypes with more than one constructor.
 An unsupported command is answered with an `(error ...)`; see
-[Errors](#errors).
+[Errors](#errors). An unsupported query (a `get-` command) changes nothing, so
+later `check-sat` commands still answer.
+
+With `(set-option :print-success true)`, every command that has no other
+response answers `success`.
 
 `get-unsat-core` lists the `:named` assertions in an unsatisfiable set. With
 `:produce-unsat-cores` set to `true` the list is minimal: removing any one of
@@ -64,9 +70,10 @@ Supported bit-vector operators:
 | Kind | Operators |
 |---|---|
 | arithmetic | `bvadd`, `bvsub`, `bvmul`, `bvneg`, `bvudiv`, `bvurem`, `bvsdiv`, `bvsrem`, `bvsmod` |
-| bitwise | `bvand`, `bvor`, `bvxor`, `bvnot` |
-| shifts | `bvshl`, `bvlshr`, `bvashr` |
-| comparison | `bvult`, `bvule`, `bvugt`, `bvuge`, `bvslt`, `bvsle`, `bvsgt`, `bvsge` |
+| bitwise | `bvand`, `bvor`, `bvxor`, `bvnot`, `bvnand`, `bvnor`, `bvxnor`, `bvredor`, `bvredand` |
+| shifts | `bvshl`, `bvlshr`, `bvashr`, `rotate_left`, `rotate_right` |
+| comparison | `bvult`, `bvule`, `bvugt`, `bvuge`, `bvslt`, `bvsle`, `bvsgt`, `bvsge`, `bvcomp` |
+| overflow | `bvnego`, `bvuaddo`, `bvsaddo`, `bvumulo`, `bvsmulo`, `bvusubo`, `bvssubo`, `bvsdivo` (`bvumulo` and `bvsmulo` up to 96 bits) |
 | structure | `concat`, `extract`, `zero_extend`, `sign_extend`, `repeat` |
 
 Also supported: `=`, `distinct`, `ite`, `let`, the Boolean connectives,

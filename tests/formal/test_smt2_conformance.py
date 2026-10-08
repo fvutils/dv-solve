@@ -393,3 +393,70 @@ def test_model_check_inconclusive_is_not_a_failure():
     rc, out, err = _run(text, env={"DV_LOG": "1"})
     assert out == ["sat"], out
     assert "model-check: 1 of 2 inconclusive" in err, err
+
+
+# ---- define-fun scoping (B78) ------------------------------------------------
+
+_F = "(define-fun f ((p (_ BitVec 4))) (_ BitVec 4) (let ((t #x0)) (bvadd p t)))\n"
+
+
+@pytest.mark.parametrize("engine", ["auto", "bitblast", "cdcl"])
+@pytest.mark.parametrize("body,want", [
+    # the callee's let must not capture the caller's argument
+    (_F + "(assert (let ((t x)) (not (= (f t) x))))", "unsat"),
+    (_F + "(assert (let ((t x)) (= (f t) x)))(assert (= x #x5))", "sat"),
+    # nor a caller's let a global the body uses
+    ("(define-fun g () (_ BitVec 4) (bvadd x #x1))\n"
+     "(assert (let ((x #x0)) (= g #x1)))(assert (= x #x5))", "unsat"),
+    # an argument naming the parameter itself, and a nested call
+    ("(define-fun h ((x (_ BitVec 4))) (_ BitVec 4) (bvadd x #x1))\n"
+     "(assert (= (h (h x)) #x7))(assert (= x #x5))", "sat"),
+    (_F + "(define-fun k ((t (_ BitVec 4))) (_ BitVec 4) (let ((p #x3)) (f (bvadd t p))))\n"
+     "(assert (let ((p x) (t #x1)) (= (k p) (bvadd x #x3))))(assert (= x #x2))", "sat"),
+])
+def test_define_fun_scoping(engine, body, want):
+    """Without the model check, so a wrong sat shows as one."""
+    text = _HDR + "(declare-const x (_ BitVec 4))\n" + body + "\n(check-sat)\n"
+    rc, out, _ = _run(text, f"--engine={engine}", env={"DV_CHECK_MODEL": "0"})
+    assert out == [want], out
+
+
+# ---- decimals (B79) and standard operators -------------------------------------
+
+def test_smt_lib_version_decimal_is_accepted():
+    rc, out, _ = _run("(set-info :smt-lib-version 2.6)\n" + _HDR +
+                      "(declare-const x (_ BitVec 4))(assert (= x #x3))(check-sat)\n")
+    assert out == ["sat"] and rc == 0, out
+
+
+@pytest.mark.parametrize("bad", ["2.", "2.5a"])
+def test_malformed_decimal_is_an_error(bad):
+    rc, out, _ = _run(f"(set-info :x {bad})\n(check-sat)\n")
+    assert _errors(out) and out[-1] == "unknown" and rc == 4, out
+
+
+@pytest.mark.parametrize("engine", ["auto", "bitblast", "cdcl"])
+@pytest.mark.parametrize("term,want", [
+    ("(bvnand #xf0 #x3c)", "#xcf"), ("(bvnor #xf0 #x0c)", "#x03"),
+    ("(bvxnor #xf0 #x3c)", "#x33"), ("(bvcomp #x12 #x12)", "#b1"),
+    ("(bvredor #x00)", "#b0"), ("(bvredand #xff)", "#b1"),
+    ("((_ rotate_left 3) #x81)", "#x0c"), ("((_ rotate_right 9) #x81)", "#xc0"),
+    ("(ite (bvuaddo #xf0 #x10) #b1 #b0)", "#b1"), ("(ite (bvsaddo #x7f #x01) #b1 #b0)", "#b1"),
+    ("(ite (bvumulo #x10 #x10) #b1 #b0)", "#b1"), ("(ite (bvsmulo #x08 #x0f) #b1 #b0)", "#b0"),
+    ("(ite (bvusubo #x01 #x02) #b1 #b0)", "#b1"), ("(ite (bvssubo #x80 #x01) #b1 #b0)", "#b1"),
+    ("(ite (bvsdivo #x80 #xff) #b1 #b0)", "#b1"), ("(ite (bvnego #x80) #b1 #b0)", "#b1"),
+])
+def test_rewritten_operators_solve(engine, term, want):
+    """Operators lowered by their SMT-LIB definition: the solver must agree."""
+    w = (len(want) - 2) * (4 if want.startswith("#x") else 1)
+    text = (_HDR + f"(declare-const y (_ BitVec {w}))(assert (= y {term}))\n"
+            f"(check-sat)\n(push 1)(assert (distinct y {want}))(check-sat)(pop 1)\n")
+    rc, out, _ = _run(text, f"--engine={engine}")
+    assert out == ["sat", "unsat"], out
+
+
+def test_too_wide_term_is_unknown_not_a_crash():
+    rc, out, _ = _run(_HDR + "(declare-const x (_ BitVec 64))\n"
+                      "(assert (= ((_ sign_extend 192) x) ((_ sign_extend 192) #x0000000000000005)))\n"
+                      "(check-sat)\n")
+    assert out == ["unknown"] and rc == 2, out

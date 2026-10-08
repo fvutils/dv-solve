@@ -20,12 +20,13 @@ typedef enum {
     SEXPR_KEYWORD,
     SEXPR_STRING,
     SEXPR_LIST,
+    SEXPR_DECIMAL,      /* text in `sym`; only attribute values use it */
 } SexprKind;
 
 typedef struct Sexpr {
     SexprKind kind;
     union {
-        struct { const char *str; uint32_t len; }        sym;   /* SYMBOL/KEYWORD/STRING */
+        struct { const char *str; uint32_t len; }        sym;   /* SYMBOL/KEYWORD/STRING/DECIMAL */
         uint64_t                                         numval;/* NUMERAL */
         /* BITVEC: `value` is the low 64 bits. A literal wider than 64 bits
          * also carries its full value in `limbs` (little-endian, ceil(width/64)

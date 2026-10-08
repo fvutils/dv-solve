@@ -1,6 +1,6 @@
 # fw-hdl requests: implementation plan
 
-Status: plan for review, 2026-10-07. Nothing implemented yet. D1–D6 recommendations in §5 approved by the owner 2026-10-07.
+Status: Phases 1 and 2 done (094e5cd, fbd25d9); Phase 0 (benchmarks) built 2026-10-08, see §6. D1–D6 recommendations in §5 approved by the owner 2026-10-07.
 Source: `docs/fw_hdl_requests.md` (R1–R5). Testcases: `tests/formal/test_fw_hdl_requests.py`
 (today on HEAD `022f744`: 12 pass, 30 strict-xfail).
 Related: `docs/shared_learning_core_project.md`, `docs/usecase_benchmark_design.md`,
@@ -61,6 +61,36 @@ What the numbers say:
   by confirming it (piece 4.0).
 - z3 has improved since the request was written (affine3 24 s → 0.88 s on z3 5.1).
   bitwuzla still times out on affine3. The bar is boolector at about 0.07 s.
+
+### 1.3 Baseline on `fwhdl-core` (Phase 0, 2026-10-08)
+
+Full numbers: `docs/fwhdl_scorecard_baseline.md` (commit `fbd25d9`, 60 s budget, all
+five competitors, 12 runs in parallel on the development machine, so timings are
+indicative). dv-solve is **not** the most capable solver on any category yet:
+
+| | dv-solve solved | best competitor | PAR-2 dv-solve / best single | what loses |
+|---|---|---|---|---|
+| all (377) | 309 | 355 (boolector) | 9493 / 2831 s | everything below |
+| affine-proof | 81 / 108 | 97 (boolector) | 3983 / 1416 | 20 instances a competitor proves: wide CRC, parity, Gray, xorshift (Phase 4: XOR reasoning) |
+| codegen-equiv | 30 / 60 | 60 (boolector) | 3601 / 4.5 | 21 `unknown`: state sorts wider than 192 bits (piece 6.6); 9 timeouts on CRC pipelines, `sat` variants included (Phase 5) |
+| quickcheck-trivial | 101 / 101 | 101 | 204 / 1.8 | 20 tiny proofs take ~10 s each: QF_BV stays on CDCL, which stalls until its budget and escalates (Phase 3) |
+| refute, inverse | all | all | 30 / 0.07, 133 / 0.2 | the same routing cost |
+| mixed-proof | 35 / 46 | 38 (bitwuzla) | 1517 / 1008 | fmix/FNV at 20–32 bits: multiplier-heavy, every solver struggles |
+
+What it says:
+
+- **Routing (Phase 3) is the biggest single lever.** The bit-blast arm alone matches the
+  best competitor on `refute`, `inverse` and `quickcheck-trivial` (PAR-2 0.07, 0.08,
+  2.9 s); on `affine-proof` at 1 s it proves 55, against 20 for the default route
+  (boolector 79, z3 60).
+- **Start-up is not the problem**: 1.5 ms (yices 1.0, boolector 1.1, z3 4.0); median on
+  the trivial family 3.8 ms, 1.7 ms on bit-blast.
+- **The suite found six front-end bugs on its first day** (B78–B83 in
+  `docs/solver_bug_backlog.md`), two of them wrong answers on the default path
+  (`define-fun` scoping), and one wrong `sat` in yices 2.6.5.
+- Scaling: dv-solve's slope along `crc_loop` knobs is the flattest of all solvers where
+  it solves (CDCL's cost is its budget, not the size); `fmix_inverse` is the steepest
+  (11.7 vs 6.7 for bitwuzla).
 
 ---
 
@@ -476,17 +506,17 @@ Status: ☐ todo · ◐ in progress · ☑ done · ✕ dropped.
 
 | Piece | Request | Status | Owner | PR / commit | Notes |
 |---|---|---|---|---|---|
-| 0.1 tools lock (boolector, cvc5, yices2, ABC) | bench | ☐ | | | |
-| 0.2 generators: affine/mixed/refute/inverse/trivial | bench | ☐ | | | |
-| 0.3 codegen-equiv generator (Yosys -stbv) | bench, R4 | ☐ | | | |
-| 0.4 fwhdl-core manifest + scorecard | bench | ☐ | | | |
-| 0.5 conformance corpus + parser fuzzer | R1, R2, R4, R5 | ☐ | | | |
-| 0.6 noise band | bench | ☐ | | | |
+| 0.1 tools lock (boolector, cvc5, yices2, ABC) | bench | ☑ | | | `tools.lock.json`: cvc5 1.4.1 (static release), yices 2.6.5 (PyPI wheel), yosys 0.69 + yosys-abc; `python -m tests.perf.tools fetch` unpacks to `perf-builds/tools` and checks every version. ABC is pinned but not yet an arm (see 0.3) |
+| 0.2 generators: affine/mixed/refute/inverse/trivial | bench | ☑ | | | `tests/formal/gen_fwhdl.py`: 313 instances, 24 families, self-checked by evaluation; `tests/formal/fwhdl_consensus.py` runs the 5 competitors. One competitor bug found (yices wrong sat, `KNOWN_WRONG`) |
+| 0.3 codegen-equiv generator (Yosys -stbv) | bench, R4 | ◐ | | | `tests/formal/gen_codegen_equiv.py`: 6 designs × latencies × {ok, early, late} = 60, all confirmed by ≥ 2 solvers. ABC ceiling arm not built yet. 7 of 20 designs have a state sort wider than 192 bits: dv-solve rejects them (new piece 6.6) |
+| 0.4 fwhdl-core manifest + scorecard | bench | ☑ | | | `tests/perf/suites/fwhdl-core.json` (373 + 4 captured), dev/held split from the index (`collect --split`), cvc5/yices arms; `python -m tests.perf.scorecard`. Baseline: `docs/fwhdl_scorecard_baseline.md` |
+| 0.5 conformance corpus + parser fuzzer | R1, R2, R4, R5 | ☑ | | | `tests/formal/conformance/` (56 cases) + `test_conformance_corpus.py`; `test_parser_fuzz.py` (1000 seeds clean). Found B79–B83 (below) |
+| 0.6 noise band | bench | ◐ | | | `python -m tests.perf.noise` (`tests/perf/history/noise/`): 10 runs of the dev split on the development machine, 10 s budget. Category PAR-2 moves ≤ 0.1 % (timeout penalties dominate it), so the 5 % gate stands; per-instance CPU time varies 2.0 % median, 12.8 % p95, so per-instance claims need > 13 %. The CI runner still to measure |
 | 1.1 error channel policy | R2, R4 | ☑ | | 094e5cd | D1; B76 |
 | 1.2 parser errors | R2 | ☑ | | 094e5cd | F2 = B75 |
 | 1.3 sticky input-error state | R2 | ☑ | | | D2 |
 | 1.4 exit codes + `--help` | R2 | ☑ | | | D3 |
-| 1.5 unsupported-command audit | R2, R4 | ◐ | | | done for command and term errors (Appendix B); `:print-success` still ignored |
+| 1.5 unsupported-command audit | R2, R4 | ☑ | | | Appendix B; `:print-success`, `get-option`, `get-assertions` added; unknown `get-*` queries no longer poison; redeclaration, second `set-logic`, ill-sorted operands are errors (2026-10-08) |
 | 1.6 define-sort | R4 | ☑ | | | |
 | 1.7 Bool printing | R5 / B32 | ☑ | | | check Verilator |
 | 1.8 get-value echo, no placeholders | R1.1, R1.2 | ☑ | | | |
@@ -496,7 +526,7 @@ Status: ☐ todo · ◐ in progress · ☑ done · ✕ dropped.
 | 2.3 let / define-fun / memo | R1.3 | ☑ | | | memo on (definition, argument values); 2^400-node tree in ms; depth guard → error |
 | 2.4 hook-up, remove old evaluator | R1 | ☑ | | | `_eval_sexpr` removed; R1 tests pass on all engines |
 | 2.5 model re-check net | soundness | ☑ | | | on by default (off in Verilator mode; `DV_CHECK_MODEL`); catches mutant `smt2-bvxor-as-bvor` on both engines. Cost on the 227 corpus fixtures: total +0.0%, median +0.4%, no answer changed. Re-measure on `quickcheck-trivial` when Phase 0 builds it. Found B77 (`reset-assertions` was a no-op: wrong unsat), fixed |
-| 2.6 evaluator fuzzer vs z3 | soundness | ◐ | | | 10k seeds (240k terms), 0 disagreements; not yet in nightly. z3 is wrong on constant-array equality: oracle expands it |
+| 2.6 evaluator fuzzer vs z3 | soundness | ☑ | | | 10k seeds (240k terms), 0 disagreements; in nightly (3000 seeds). z3 is wrong on constant-array equality: oracle expands it. `test_translation_matches_eval` fuzzes the translator against the evaluator (found B78) |
 | 3.1 miter shape → bitblast | R3 | ☐ | | | |
 | 3.2 CDCL budget + escalate | R3 | ☐ | | | |
 | 3.3 exhaustive bit-parallel simulation | R3 | ☐ | | | D6 |
@@ -512,6 +542,8 @@ Status: ☐ todo · ◐ in progress · ☑ done · ✕ dropped.
 | 5.2 SAT sweeping / FRAIG | codegen | ☐ | | | |
 | 5.3 latency scaling | codegen | ☐ | | | |
 | 6.1–6.5 session features, fw-hdl CI | — | ☐ | | | |
+| 6.6 bit-vector state sorts wider than 192 bits (`write_smt2 -stbv`) | R4, codegen | ☐ | | | found by 0.3: Yosys reads the state only through `extract`, so split it into its fields at `define-sort`/`declare-fun` time |
+| 6.7 B83: push/pop before the first declaration | incremental | ☐ | | | honest unknown; strict xfail in the corpus |
 | 7 continuous scorecard | bench | ☐ | | | |
 
 ## Appendix A: reproduction commands

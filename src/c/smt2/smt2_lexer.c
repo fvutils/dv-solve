@@ -80,6 +80,19 @@ static Smt2Token _lex_numeral(Smt2Lexer *lex) {
         val = val * 10 + d;
         _advance(lex);
     }
+    /* A decimal, `2.6` (as in `:smt-lib-version 2.6`): numeral '.' digits. */
+    if (_peek_char(lex) == '.') {
+        _advance(lex);
+        int digits = 0;
+        while (!_at_end(lex) && isdigit((unsigned char)_peek_char(lex))) {
+            _advance(lex);
+            digits++;
+        }
+        int bad = !digits || !_is_delimiter(_peek_char(lex));
+        while (!_is_delimiter(_peek_char(lex))) _advance(lex);
+        uint32_t dlen = (uint32_t)(lex->buf + lex->pos - start);
+        return _make_token(bad ? TOK_ERROR : TOK_DECIMAL, start, dlen);
+    }
     /* `12ab` is not a numeral followed by a symbol: no symbol starts with a
      * digit, so it is one malformed token. */
     if (!_is_delimiter(_peek_char(lex))) {
@@ -320,6 +333,7 @@ const char *smt2_token_kind_name(Smt2TokenKind kind) {
     case TOK_BITVEC_LIT: return "BITVEC_LIT";
     case TOK_STRING:     return "STRING";
     case TOK_KEYWORD:    return "KEYWORD";
+    case TOK_DECIMAL:    return "DECIMAL";
     case TOK_EOF:        return "EOF";
     case TOK_ERROR:      return "ERROR";
     }

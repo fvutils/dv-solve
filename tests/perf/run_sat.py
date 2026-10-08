@@ -42,17 +42,22 @@ class Arm:
         return not self.logics or logic in self.logics
 
 
-def make_arms(head: Path, anchor: Path, tools: dict) -> list:
-    """tools: {"z3": path, "bitwuzla": path, "boolector": path}."""
+def ref_arm(name: str, path) -> Arm:
+    """A reference solver's arm: how each pinned solver reads an SMT-LIB file."""
+    argv = {"z3": [str(path), "-smt2"], "bitwuzla": [str(path)],
+            "boolector": [str(path), "--smt2"], "cvc5": [str(path)],
+            "yices": [str(path)]}[name]
+    # boolector cannot parse the yosys-smtbmc declare-sort dialect
+    return Arm(name, "ref", argv, logics=("QF_BV",) if name == "boolector" else ())
+
+
+def make_arms(head: Path, anchor: Path, tools: dict, refs=REFERENCES) -> list:
+    """tools: {name: path} for every name in refs."""
     arms = [Arm("dv-smt2", "head", [str(head)]),
             Arm("dv-smt2-bb", "head", [str(head)], {"DV_ENGINE": "bitblast"})]
     if anchor:
         arms.append(Arm("dv-smt2", "anchor", [str(anchor)]))
-    arms += [Arm("z3", "ref", [str(tools["z3"]), "-smt2"]),
-             Arm("bitwuzla", "ref", [str(tools["bitwuzla"])]),
-             # boolector cannot parse the yosys-smtbmc declare-sort dialect
-             Arm("boolector", "ref", [str(tools["boolector"]), "--smt2"], logics=("QF_BV",))]
-    return arms
+    return arms + [ref_arm(n, tools[n]) for n in refs]
 
 
 def _limits():

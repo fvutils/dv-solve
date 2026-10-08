@@ -44,8 +44,13 @@ _OVF = ["bvuaddo", "bvsaddo", "bvumulo", "bvsmulo", "bvusubo", "bvssubo", "bvsdi
 
 
 class _Gen:
-    def __init__(self, seed: int):
+    def __init__(self, seed: int, let_pool: int = 0):
+        """let_pool > 0: let names come from a pool of that many names, shared
+        by function bodies and the terms that call them (B78: a callee's let
+        must not capture the caller's argument, nor a caller's let a name the
+        body uses)."""
         self.r = random.Random(seed)
+        self.let_pool = let_pool
         self.vars: dict[int, list[str]] = {}
         self.bools: list[str] = []
         self.funs: list[tuple[str, int, int]] = []   # name, param width, arity
@@ -134,7 +139,9 @@ class _Gen:
         inner = dict(env)
         for _ in range(r.randrange(1, 3)):
             # Reuse a name sometimes: let shadows.
-            if env and r.random() < 0.3:
+            if self.let_pool:
+                name = "?t%d" % r.randrange(self.let_pool)
+            elif env and r.random() < 0.3:
                 name = r.choice(list(env))
             else:
                 self.n_let += 1
@@ -359,6 +366,31 @@ def test_eval_matches_z3(seed):
     for t, v, verdict in zip(terms, vals, z3[1:]):
         assert verdict == "unsat", "term %s = %s is wrong (z3: %s)\nscript:\n%s" % (
             t, v, verdict, script)
+
+
+@pytest.mark.parametrize("seed", range(_N))
+def test_translation_matches_eval(seed):
+    """The solver's translation against the evaluator: with the constants
+    pinned, every term equals its get-value value, so (not (= term value))
+    must not be sat. Let names come from a small shared pool, so callee and
+    caller lets collide (B78). A sat is checked with z3, to tell a
+    translation bug from an evaluator bug."""
+    g = _Gen(10_000 + seed, let_pool=3)
+    script, terms = g.script()
+    dv = _run([str(_EXE)], script + "(get-value (%s))\n" % " ".join(terms))
+    assert "(error" not in dv, "dv-solve refused a term:\n%s\n%s" % (script, dv)
+    vals = _raw_values(dv, len(terms))
+    checks = "".join("(push 1)(assert (not (= %s %s)))(check-sat)(pop 1)\n" % (t, v)
+                     for t, v in zip(terms, vals))
+    got = _run([str(_EXE)], script + checks).split()
+    assert got[0] == "sat" and len(got) == len(terms) + 1, got
+    for t, v, verdict in zip(terms, vals, got[1:]):
+        if verdict != "sat":
+            continue
+        z3 = _run([_Z3, "-in"], script + "(assert (not (= %s %s)))(check-sat)\n"
+                  % (_oracle_term(t), v)).split()
+        raise AssertionError("translation of %s disagrees with its value %s (z3 says the "
+                             "negation is %s)\nscript:\n%s" % (t, v, z3[-1], script))
 
 
 # ---- edge cases, by hand from the SMT-LIB definitions ----------------------

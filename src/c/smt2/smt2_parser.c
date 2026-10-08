@@ -197,10 +197,11 @@ static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
         }
         return s;
     }
-    case TOK_KEYWORD: {
+    case TOK_KEYWORD:
+    case TOK_DECIMAL: {
         Sexpr *s = _alloc_sexpr(arena);
         if (!s) { _perr_oom(lex); return NULL; }
-        s->kind    = SEXPR_KEYWORD;
+        s->kind    = tok.kind == TOK_KEYWORD ? SEXPR_KEYWORD : SEXPR_DECIMAL;
         s->sym.str = tok.start;
         s->sym.len = tok.length;
         return s;

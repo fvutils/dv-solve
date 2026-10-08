@@ -9,6 +9,19 @@
  "yosys-bin": {
   "url": "https://github.com/edapack/yosys-bin/releases/download/v0.69.35518581703/yosys-bin-manylinux_2_28_x86_64-0.69.35518581703.tar.gz",
   "sha256": "073b928c7c9676699e92a15c7f6cd911bff27d55cf128f9fa0e647e843578742",
-  "provides": {"boolector": ["yosys/bin/boolector", "3.2.4"]}
+  "provides": {"boolector": ["yosys/bin/boolector", "3.2.4"],
+               "yosys": ["yosys/bin/yosys", "0.69"],
+               "yosys-abc": ["yosys/bin/yosys-abc", "1.01"]}
+ },
+ "cvc5": {
+  "url": "https://github.com/cvc5/cvc5/releases/download/cvc5-1.4.1/cvc5-Linux-x86_64-static.zip",
+  "sha256": "2f8efe58fe27ba7bccbb504533f690b9312d69da14192712460e4a19231f02a1",
+  "provides": {"cvc5": ["cvc5-Linux-x86_64-static/bin/cvc5", "1.4.1"]}
+ },
+ "yices": {
+  "_comment": "the PyPI wheel is a zip of static yices binaries",
+  "url": "https://files.pythonhosted.org/packages/28/5c/85c81dcb3d772345a9bea5deb40d7ba4b24c8ab2423e7bd7175db9239aaa/yices_solver-2.6.5.post24-py3-none-manylinux_2_28_x86_64.whl",
+  "sha256": "d0a7c8fad531fe3a2cd1616bab1b73bd1619604f0bf8fa2d55236e092c2f4219",
+  "provides": {"yices": ["yices_solver-2.6.5.post24.data/data/bin/yices-smt2", "2.6.5"]}
  }
 }

@@ -20,6 +20,7 @@ typedef enum {
     TOK_BITVEC_LIT,  /* #b0101, #xFF                          */
     TOK_STRING,      /* "..."                                 */
     TOK_KEYWORD,     /* :produce-models, :seed                */
+    TOK_DECIMAL,     /* 2.6                                   */
     TOK_EOF,
     TOK_ERROR,
 } Smt2TokenKind;

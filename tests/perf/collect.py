@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import builds, calib, run_rand, run_sat, schema, suites, tools
 
-SUITES = ("calib", "sat-core", "rand-core", "app-riscv-dv-core")
+SUITES = ("calib", "sat-core", "fwhdl-core", "rand-core", "app-riscv-dv-core")
 NOISY_LOAD = 4.0             # host 1-min load above this marks the run noisy
 
 
@@ -47,13 +47,25 @@ def _dv_version():
         return None
 
 
+def _refs(name: str) -> tuple:
+    """The reference solvers a SAT suite runs (its `references`, else the default)."""
+    spec = json.loads((suites._HERE / "suites" / f"{name}.json").read_text(encoding="utf-8"))
+    return tuple(spec.get("references", run_sat.REFERENCES))
+
+
 def _sat(rec: dict, name: str, a) -> None:
-    spec = suites.load(name)
+    spec = suites.load(name, getattr(a, "split", None))
+    if getattr(a, "budget", None):
+        spec["budget_s"] = a.budget
+    if getattr(a, "reps", None):
+        spec["reps"] = a.reps
     head = builds.head_bin(a.head_bin)
     anchor = _anchor(rec, a)
-    paths = {n: tools.path(n) for n in ("z3", "bitwuzla", "boolector")}
-    arms = run_sat.make_arms(head, anchor, paths)
+    refs = _refs(name)
+    paths = {n: tools.path(n) for n in refs}
+    arms = run_sat.make_arms(head, anchor, paths, refs)
     res = run_sat.run_suite(spec, arms, a.workers)
+    name = spec["suite"]
     rec["manifests"][name] = suites.manifest_record(spec)
     rec["sat"] += res["rows"]
     rec["sat_floor"][name] = res["floor"]
@@ -128,8 +140,10 @@ def collect(kind: str, suite_names: list, a=None) -> dict:
         for n in suite_names:
             if n.startswith("app-"):
                 need.add("z3")
+            elif n.startswith("rand-"):
+                need.update(("z3", "bitwuzla"))
             elif n != "calib":
-                need.update(("z3", "bitwuzla", "boolector"))
+                need.update(_refs(n))
         if need:
             rec["tools"].update(tools.check(sorted(need)))
         for n in suite_names:
@@ -165,6 +179,10 @@ def main(argv=None) -> int:
     ap.add_argument("--riscv-dv-repo", help="local riscv-dv git repo holding the pinned "
                     "commit (default: clone the suite's URL)")
     ap.add_argument("--workers", type=int, default=0, help="0: a quarter of the physical cores")
+    ap.add_argument("--split", choices=("all", "dev", "held"),
+                    help="for a suite with an index (fwhdl-core): which split to run")
+    ap.add_argument("--budget", type=float, help="override the suites' budget_s")
+    ap.add_argument("--reps", type=int, help="override the suites' reps")
     ap.add_argument("--rand-workers", type=int, default=1,
                     help="randomization runs one at a time by default: z3's CPU time "
                          "doubles beside parallel neighbours, dv-solve's barely moves, "
