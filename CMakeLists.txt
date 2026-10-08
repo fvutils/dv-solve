@@ -213,6 +213,7 @@ set(DVS_SOURCES
     src/c/dvs_aigsim.c
     src/c/dvs_affine.c
     src/c/dvs_bbsum.c
+    src/c/dvs_bbword.c
     src/c/dvs_thread.c
     src/c/dvs_arena.c
     src/c/dvs_bvdom.c

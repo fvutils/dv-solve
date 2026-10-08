@@ -13,6 +13,7 @@
 #include "dvs_aig_cnf.h"
 #include "dvs_bitblast.h"
 #include "dvs_bbsum.h"
+#include "dvs_bbword.h"
 #include "dvs_bvdom.h"
 #include "dvs_pool.h"
 #include "dvs_sat.h"
@@ -63,6 +64,7 @@ struct dvs_bbsolver_s {
     dvs_aig_cnf_t  *cnf;
     dvs_bitblast_t *bb;
     dvs_bbsum_t    *sum;     /* word-level sum normalization (piece 5.1) */
+    dvs_bbword_t   *word;    /* word-level facts: inverses, residues (5.4) */
 
     uint64_t        seed;    /* from dvs_bbsolver_check; 0 = deterministic */
 
@@ -868,6 +870,60 @@ static dvs_bv_t bb_shift(dvs_bbsolver_t *S, int shl, dvs_bv_t l, dvs_bv_t r) {
     return shl ? dvs_bb_shl(S->bb, l, r) : dvs_bb_shr(S->bb, l, r);
 }
 
+/* Bit offsets (from the LSB) where `ref`, placed at `off`, is a concat of
+ * two parts; appended to cuts[*n], at most `cap`. */
+static void bb_concat_cuts(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t off,
+                           uint32_t *cuts, uint32_t *n, uint32_t cap, int depth) {
+    if (ref == EXPR_NULL || depth > 64 || *n >= cap) return;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (kp && *kp == EXPR_VAR) {               /* through a substituted var */
+        uint32_t id = ((const ExprVar *)kp)->var_id;
+        if (S->subst && id < S->n_vars && S->subst[id] != EXPR_NULL)
+            bb_concat_cuts(S, S->subst[id], off, cuts, n, cap, depth + 1);
+        return;
+    }
+    if (!kp || *kp != EXPR_CONCAT) return;
+    const ExprConcat *c = (const ExprConcat *)kp;
+    cuts[(*n)++] = off + c->lo_width;
+    bb_concat_cuts(S, c->lo, off, cuts, n, cap, depth + 1);
+    bb_concat_cuts(S, c->hi, off + c->lo_width, cuts, n, cap, depth + 1);
+}
+
+static int bb_cut_cmp(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* l == r through the word-level facts (dvs_bbword), one concat part at a
+ * time: each side's concat structure splits the comparison so a part such
+ * as a reduced checksum byte meets its counterpart. */
+static dvs_bv_t bb_word_eq(dvs_bbsolver_t *S, dvs_expr_t lref, dvs_expr_t rref,
+                           dvs_bv_t l, dvs_bv_t r) {
+    enum { MAX_CUTS = 64 };
+    uint32_t cuts[2 * MAX_CUTS + 2], n = 0;
+    bb_concat_cuts(S, lref, 0, cuts, &n, MAX_CUTS, 0);
+    bb_concat_cuts(S, rref, 0, cuts + n, &n, n + MAX_CUTS, 0);
+    if (n == 0) return dvs_bbword_eq(S->word, S->bb, l, r);
+    qsort(cuts, n, sizeof(uint32_t), bb_cut_cmp);
+    uint64_t before = dvs_bbword_num_decided(S->word) + dvs_bbword_num_peeled(S->word);
+    dvs_bv_t all = dvs_bb_value_u64(S->bb, 1, 1);
+    uint32_t lo = 0;
+    for (uint32_t i = 0; i <= n; i++) {
+        uint32_t hi = i < n ? cuts[i] : l.size;
+        if (hi <= lo || hi > l.size) continue;
+        dvs_bv_t part = dvs_bbword_eq(S->word, S->bb,
+                                      dvs_bb_extract(S->bb, l, hi - 1, lo),
+                                      dvs_bb_extract(S->bb, r, hi - 1, lo));
+        all = dvs_bb_and(S->bb, all, part);
+        lo = hi;
+    }
+    /* Nothing known about any part: compare whole, so the gates are as before
+     * (the parts' gates are left unused). */
+    if (dvs_bbword_num_decided(S->word) + dvs_bbword_num_peeled(S->word) == before)
+        return dvs_bb_eq(S->bb, l, r);
+    return all;
+}
+
 static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref,
                           uint16_t hint) {
     /* Comparison / logical ops always produce 1-bit; arithmetic / bitwise
@@ -949,7 +1005,7 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
         uint16_t w = max_w(l.size, r.size);
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
-        dvs_bv_t eq = dvs_bb_eq(S->bb, l, r);
+        dvs_bv_t eq = bb_word_eq(S, b->lhs, b->rhs, l, r);
         if (b->op == DVS_BIN_NEQ) eq = dvs_bb_not(S->bb, eq);
         return eq;
     }
@@ -993,8 +1049,11 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
         if (S->had_error) return l;
         dvs_bv_t r = bb_expr(S, b->rhs, l.size);
         if (S->had_error) return r;
-        if (!arith)
-            return bb_shift(S, b->op == DVS_BIN_LSHIFT, l, r);
+        if (!arith) {
+            dvs_bv_t sh = bb_shift(S, b->op == DVS_BIN_LSHIFT, l, r);
+            if (b->op != DVS_BIN_LSHIFT) dvs_bbword_note_shr(S->word, l, r, sh);
+            return sh;
+        }
         /* Arithmetic shift: ~(~x >> s) when x is negative, x >> s otherwise
          * -- which also gives all sign bits for s >= width. */
         dvs_bv_t neg = dvs_bb_not(S->bb, bb_shift(S, 0, dvs_bb_not(S->bb, l), r));
@@ -1016,14 +1075,17 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
         switch (b->op) {
-        case DVS_BIN_ADD:
-            return dvs_bbsum_add(S->sum, S->bb, l, r,
+        case DVS_BIN_ADD: {
+            dvs_bv_t sum = dvs_bbsum_add(S->sum, S->bb, l, r,
                                  S->uses && ref < S->uses_cap && S->uses[ref] <= 1);
+            dvs_bbword_note_add(S->word, l, r, sum);
+            return sum;
+        }
         case DVS_BIN_SUB:  return dvs_bb_sub(S->bb, l, r);
-        case DVS_BIN_MUL:  return dvs_bb_mul(S->bb, l, r);
+        case DVS_BIN_MUL:  return dvs_bbword_mul(S->word, S->bb, l, r);
         case DVS_BIN_BAND: return dvs_bb_and(S->bb, l, r);
         case DVS_BIN_BOR:  return dvs_bb_or (S->bb, l, r);
-        case DVS_BIN_BXOR: return dvs_bb_xor(S->bb, l, r);
+        case DVS_BIN_BXOR: return dvs_bbword_xor(S->word, S->bb, l, r);
         default: break;
         }
         return err_bv(S, "unreachable arith");
@@ -1045,9 +1107,12 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
         if (hint > w) w = hint;
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
-        if (!sgn)
-            return (b->op == DVS_BIN_DIV) ? dvs_bb_udiv(S->bb, l, r)
-                                      : dvs_bb_urem(S->bb, l, r);
+        if (!sgn) {
+            if (b->op == DVS_BIN_DIV) return dvs_bb_udiv(S->bb, l, r);
+            dvs_bv_t m = dvs_bb_urem(S->bb, l, r);
+            dvs_bbword_note_urem(S->word, l, r, m);
+            return m;
+        }
         /* Signed: truncate toward zero. Divide the magnitudes; the quotient
          * is negative when the signs differ, the remainder takes the
          * dividend's sign. MIN / -1 wraps to MIN, its remainder is 0. */
@@ -1193,8 +1258,11 @@ static dvs_bv_t bb_extend(dvs_bbsolver_t *S, const ExprExtend *e) {
     } else if (op.size < e->from_bits) {
         op = ext_ref(S, op, e->operand, e->from_bits);
     }
-    if (e->to_bits < e->from_bits)
-        return dvs_bb_extract(S->bb, op, e->to_bits - 1, 0);
+    if (e->to_bits < e->from_bits) {
+        dvs_bv_t lo = dvs_bb_extract(S->bb, op, e->to_bits - 1, 0);
+        dvs_bbword_note_extract(S->word, op, e->to_bits - 1, 0, lo);
+        return lo;
+    }
     uint32_t n = (uint32_t)e->to_bits - (uint32_t)e->from_bits;
     if (n == 0) return op;
     return e->sign_extend ? dvs_bb_sign_ext(S->bb, op, n)
@@ -1209,7 +1277,9 @@ static dvs_bv_t bb_extract(dvs_bbsolver_t *S, const ExprExtract *e) {
         /* zero-extend operand up to hi_bit+1 bits */
         op = zext_to(S, op, e->hi_bit + 1);
     }
-    return dvs_bb_extract(S->bb, op, e->hi_bit, e->lo_bit);
+    dvs_bv_t x = dvs_bb_extract(S->bb, op, e->hi_bit, e->lo_bit);
+    dvs_bbword_note_extract(S->word, op, e->hi_bit, e->lo_bit, x);
+    return x;
 }
 
 static dvs_bv_t bb_concat(dvs_bbsolver_t *S, const ExprConcat *e) {
@@ -1408,6 +1478,7 @@ static dvs_bbsolver_t *bbsolver_new_ex(dvs_alloc_t *alloc, dvs_problem_t *proble
     S->cnf = dvs_aig_cnf_new(alloc, S->aig, S->sat);
     S->bb  = dvs_bitblast_new(alloc, S->aig);
     S->sum = dvs_bbsum_new(alloc);
+    S->word = dvs_bbword_new(alloc);
     if (!S->aig || !S->sat || !S->cnf || !S->bb) {
         dvs_bbsolver_free(S);
         return NULL;
@@ -1466,6 +1537,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     if (S->orig_problem) dvs_sv_release(S->orig_problem, S->problem);
     if (S->bb)  dvs_bitblast_free(S->bb);
     dvs_bbsum_free(S->sum);
+    dvs_bbword_free(S->word);
     if (S->cnf) dvs_aig_cnf_free(S->cnf);
     if (S->sat) dvs_sat_free(S->sat);
     if (S->aig) dvs_aig_free(S->aig);
@@ -2310,14 +2382,17 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
                       + (t1.tv_nsec - t0.tv_nsec) / 1e6;
         fprintf(stderr,
                 "[bb-encode] bb=%.2fms ands=%llu vars=%llu clauses=%llu substs=%llu"
-                " slices=%u sums=%llu/%llu\n",
+                " slices=%u sums=%llu/%llu word=%llu/%llu/%llu\n",
                 enc_ms,
                 (unsigned long long)dvs_aig_num_ands(S->aig),
                 (unsigned long long)dvs_aig_cnf_num_vars(S->cnf),
                 (unsigned long long)dvs_aig_cnf_num_clauses(S->cnf),
                 (unsigned long long)S->n_substs, S->n_slices,
                 (unsigned long long)dvs_bbsum_num_flattened(S->sum),
-                (unsigned long long)dvs_bbsum_num_adds(S->sum));
+                (unsigned long long)dvs_bbsum_num_adds(S->sum),
+                (unsigned long long)dvs_bbword_num_cancelled(S->word),
+                (unsigned long long)dvs_bbword_num_peeled(S->word),
+                (unsigned long long)dvs_bbword_num_decided(S->word));
         fflush(stderr);
     }
 
