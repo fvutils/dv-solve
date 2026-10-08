@@ -151,12 +151,24 @@ def test_crc32_routes_to_bitblast(name):
 
 def test_crc32_affine2_by_simulation():
     """R3: crc32_affine2 has 16 input bits, so the exhaustive sweep proves it
-    with no SAT call (piece 3.3)."""
+    with no SAT call (piece 3.3). Affine analysis, which runs first, is off."""
     import os
     p = subprocess.run([str(_EXE), str(_DIR / "crc32_affine2.smt2")], capture_output=True,
-                       text=True, timeout=120, env=dict(os.environ, DV_LOG="1"))
+                       text=True, timeout=120, env=dict(os.environ, DV_LOG="1", DV_AFFINE="0"))
     assert p.stdout.split() == ["unsat"]
     assert re.search(r"^bb-sim: exhaustive inputs=16 .* -> unsat", p.stderr, re.M), p.stderr
+
+
+@pytest.mark.parametrize("name", ["crc32_affine2.smt2", "crc32_affine3.smt2",
+                                  "gen/affine-proof/crc_table_w32_bytes4_k3.smt2"])
+def test_crc32_by_affine_analysis(name):
+    """R3: a CRC miter is affine over GF(2), so Gaussian elimination proves it
+    before simulation or SAT (piece 4.1); table-driven CRCs too."""
+    import os
+    p = subprocess.run([str(_EXE), str(_DIR / name)], capture_output=True,
+                       text=True, timeout=120, env=dict(os.environ, DV_LOG="1"))
+    assert p.stdout.split() == ["unsat"]
+    assert re.search(r"^bb-affine: .* -> unsat", p.stderr, re.M), p.stderr
 
 
 # ---- R3 benchmark (not a test) ------------------------------------------

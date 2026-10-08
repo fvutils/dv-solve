@@ -1,6 +1,6 @@
 # fw-hdl requests: implementation plan
 
-Status: Phases 0, 1 and 2 done (244dcf2, 094e5cd, fbd25d9); Phase 3 (routing, simulation) done 2026-10-08, uncommitted; see §6. D1–D6 recommendations in §5 approved by the owner 2026-10-07.
+Status: Phases 0–3 done (244dcf2, 094e5cd, fbd25d9, 5179d8e); Phase 4 pieces 4.0, 4.1, 4.5 done 2026-10-08; 4.3 dropped by D5's kill criterion; see §6. D1–D6 recommendations in §5 approved by the owner 2026-10-07.
 Source: `docs/fw_hdl_requests.md` (R1–R5). Testcases: `tests/formal/test_fw_hdl_requests.py`
 (today on HEAD `022f744`: 12 pass, 30 strict-xfail).
 Related: `docs/shared_learning_core_project.md`, `docs/usecase_benchmark_design.md`,
@@ -300,6 +300,13 @@ Phase 0 commit had also left three test expectations stale (an ill-sorted `=`,
 Estimate: 4–6 weeks. **Target:** `affine-proof` VBS gap ≤ 1.0 (we are the virtual
 best), and `mixed-proof` ≤ 1.2.
 
+**Result (2026-10-08, `docs/fwhdl_scorecard_phase4.md`):** `affine-proof` 107 solved
+(boolector 97), all of them within 1 s; PAR-2 120 s (boolector 1412), VBS gap 0.13.
+The one loss is `parity_w256` (256-bit sort, piece 6.6). Overall 337 solved (310 after
+Phase 3), PAR-2 4846 s (8265). `docs/fw_hdl_xor_hypothesis.md` has the 4.0 measurement;
+4.3 was dropped by D5's kill criterion (the lost `mixed-proof` instances are
+multiplier-bound).
+
 ### Phase 5: equivalence / miter strength (`codegen-equiv`)
 
 | Piece | What | Size | Acceptance |
@@ -540,12 +547,12 @@ Status: ☐ todo · ◐ in progress · ☑ done · ✕ dropped.
 | 3.3 exhaustive bit-parallel simulation | R3 | ☑ | | | `src/c/dvs_aigsim.c`: dense cone, 512 lanes per pass, ~3e9 gate-words/s. Inline when ≤ 1.5e6 work (≈0.5 ms; a 22-input BMC step lost 1.5 ms to SAT at a 50 ms bound), raced against SAT on a thread up to 6e9 (≈2 s). affine2 0.24 ms; affine3 0.08–0.11 s wall (was 13.8 s; z3 0.88, boolector 0.07). `test_aig_sim.py`: 5000 seeds vs z3 and vs SAT (`DV_SIM_CHECK`), 0 disagreements; mutant `aigsim-lane-pattern` caught |
 | 3.4 random-simulation pre-pass | R3 | ☑ | | | 512 random vectors when the sweep is too big; model checked on a scalar re-simulation, then the diversity flip-check starts from it. refute PAR-2 30.2 → 0.07 s (yices 0.07) |
 | 3.5 R3 close-out, bench gate | R3 | ◐ | | | R3 status in `fw_hdl_requests.md`; `test_crc32_routes_to_bitblast`, `test_crc32_affine2_by_simulation` pin the route. The category gate in CI is piece 7 |
-| 4.0 confirm XOR hypothesis | R3 | ☐ | | | |
-| 4.1 affine analysis + Gauss | R3 | ☐ | | | |
-| 4.2 XOR-aware encoding | R3 | ☐ | | | |
-| 4.3 Gauss–Jordan during search | R3 | ☐ | | | D5 |
-| 4.4 shared-core interface | R3 | ☐ | | | |
-| 4.5 widen fuzzer op mix | soundness | ☐ | | | |
+| 4.0 confirm XOR hypothesis | R3 | ☑ | | | `docs/fw_hdl_xor_hypothesis.md`: on our own CNF (`DV_DUMP_CNF`), CryptoMiniSat with Gauss proves all 14 lost instances in ≤ 2 s; without Gauss 3; kissat 5, CaDiCaL 1. Confirmed |
+| 4.1 affine analysis + Gauss | R3 | ☑ | | | `src/c/dvs_affine.c`: XOR gates recognized structurally in the AIG, affine forms over inputs plus opaque (non-XOR) gates, Gauss–Jordan; conjuncts are equations or one clause each. unsat from inconsistency or a clause forced false (sound relaxation); sat only after the model passes simulation on the real AIG. Runs before simulation (`bb-affine:` under `DV_LOG`; `DV_AFFINE=0`). 19 of the 20 lost `affine-proof` instances in ≤ 7 ms wall; `parity_w256` needs a 256-bit sort. Then **small tables**: when XORs alone leave opaque gates, a gate read by an XOR or an assertion whose cone, cut at affine nodes (or through smaller tables), has ≤ 8 independent leaves is simulated over all leaf values and kept when its truth table is affine; budget 3 × cone visits. The 12 `crc_table` instances (up to 25 s on SAT) now take ≤ 0.4 ms. Cost on undecided problems: `t_constraint_operators` 2.1 → 5.4 ms (of 45 ms). The fuzzer found one wrong unsat in the table code before commit (seed 5705, pinned): a derived leaf read an inner gate of the cut before it was simulated |
+| 4.2 XOR-aware encoding | R3 | ☐ | | | not needed for `affine-proof` after 4.1; revisit only with a mixed XOR/nonlinear benchmark that 4.1 does not decide |
+| 4.3 Gauss–Jordan during search | R3 | ✕ | | | D5 kill criterion: the 3 lost `mixed-proof` instances (fnv1a, multiplier-bound) time out on CryptoMiniSat with Gauss too. Phase 5 instead |
+| 4.4 shared-core interface | R3 | ✕ | | | only needed with 4.3 |
+| 4.5 widen fuzzer op mix | soundness | ☑ | | | `tests/formal/test_affine.py`: XOR-heavy generator (shifts, rotations, masks, CRC steps, constant tables, muxes, some nonlinear ops; widths 1–32) vs z3 and vs SAT (`DV_SIM_CHECK`); 40k seeds clean after the seed-5705 fix; mutants `affine-xor-match` and `affine-table-lanes` caught at the default 1000 seeds. Nightly hook: piece 7 |
 | 5.1 miter strash + normalization | codegen | ☐ | | | |
 | 5.2 SAT sweeping / FRAIG | codegen | ☐ | | | |
 | 5.3 latency scaling | codegen | ☐ | | | |

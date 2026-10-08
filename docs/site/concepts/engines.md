@@ -40,6 +40,19 @@ operators, such as signed division. When the CDCL engine can't reach an
 answer on SMT-LIB2 input, dv-solve normally retries the problem with the
 bit-blaster rather than report `unknown`.
 
+## XOR reasoning before SAT
+
+CRC, parity, Gray-code and LFSR circuits are built from XORs, and an
+equivalence check between two such circuits is a question about linear
+equations over bits. SAT solvers are very slow on those questions. So the
+bit-blaster first looks for XOR gates in the circuit and, when the assertions
+are made of them, solves the equations directly by Gaussian elimination. That
+proves a CRC miter in well under a millisecond. When the circuit also has
+other logic, the elimination treats those gates as unknowns: a contradiction
+is still a proof, and a candidate model is accepted only after the real
+circuit is simulated on it. Otherwise the problem goes on to simulation and
+SAT. `DV_AFFINE=0` turns this off.
+
 ## Simulation before SAT
 
 Before it calls the SAT solver, the bit-blaster simulates the circuit on 512
@@ -49,7 +62,8 @@ decides the problem without SAT: a model, or a proof that there is none.
 Otherwise it tries a few hundred random inputs, which often find a model
 quickly. If trying every input value would take at most about 2 s, that
 exhaustive search then runs alongside the SAT solver, and whichever finishes
-first answers. Both answers are exact. Simulation is off in `--mode=verilator`.
+first answers. Both answers are exact. XOR reasoning and simulation are off in
+`--mode=verilator`.
 
 ## Choosing an engine yourself
 

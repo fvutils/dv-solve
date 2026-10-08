@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "dvs_aig.h"
+#include "dvs_affine.h"
 #include "dvs_aigsim.h"
 #include "dvs_aig_cnf.h"
 #include "dvs_bitblast.h"
@@ -1919,6 +1920,25 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
     int log = getenv("DV_LOG") != NULL;
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
+    const char *aff_env = getenv("DV_AFFINE");
+    if (!aff_env || strcmp(aff_env, "0") != 0) {
+        dvs_affine_stats_t ast;
+        int8_t *nv = NULL;
+        int ar = dvs_affine_check(S->aig, S->assert_nodes, S->n_asserts,
+                                  _env_u64("DV_AFFINE_MAX_WORK", 0), &nv, &ast);
+        if (log)
+            fprintf(stderr, "bb-affine: gates=%u tables=%u inputs=%u opaque=%u eqs=%u clauses=%u "
+                    "rank=%u -> %s (%s) in %.2f ms\n", ast.xors, ast.tables, ast.inputs, ast.opaque,
+                    ast.equations, ast.clauses, ast.rank,
+                    ar == DVS_AFFINE_SAT ? "sat" : ar == DVS_AFFINE_UNSAT ? "unsat" : "undecided",
+                    ast.why, _ms_since(&t0));
+        if (ar != DVS_AFFINE_UNDECIDED) {
+            int rc = ar == DVS_AFFINE_UNSAT ? DVS_BB_UNSAT : DVS_BB_SAT;
+            if (nv) { free(S->node_val); S->node_val = nv; }
+            _sim_check(S, rc);
+            return rc;
+        }
+    }
     dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
     if (!sim) return dvs_sat_solve(S->sat);
     uint64_t work = dvs_aigsim_exhaustive_work(sim);

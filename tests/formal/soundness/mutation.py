@@ -93,6 +93,14 @@ MUTANTS = {
     # a wrong lane pattern skips assignments: a wrong unsat.
     "aigsim-lane-pattern": ("src/c/dvs_aigsim.c",
         "0xF0F0F0F0F0F0F0F0ull", "0xF0F0F0F0F0F0F0F1ull"),
+    # Affine analysis answers unsat with no SAT call (fw-hdl plan 4.1), so a
+    # loose XOR matcher turns ANDs into XORs: wrong answers.
+    "affine-xor-match": ("src/c/dvs_affine.c",
+        "(v1 == -u1 && v2 == -u2) || (v1 == -u2 && v2 == -u1)",
+        "(v1 == -u1 || v2 == -u2) || (v1 == -u2 && v2 == -u1)"),
+    # A table is taken as affine after checking only part of its truth table.
+    "affine-table-lanes": ("src/c/dvs_affine.c",
+        "if (e != f[w]) return 0;", "if ((e ^ f[w]) & 0xFFFFull) return 0;"),
     "bvadd-wrap-width": ("src/c/dvs_prop_templates.c",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvadd_64);",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width > 1 ? width - 1 : width, priority, _fire_bvadd_64);"),
@@ -144,7 +152,7 @@ PYTESTS = ["tests/formal/test_lcg_soundness.py", "tests/formal/test_bool_ite_con
            "tests/formal/test_incremental_protocol.py", "tests/formal/soundness/test_regressions.py",
            "tests/unit/test_gated_constraints.py", "tests/unit/test_lcg_builder.py",
            "tests/unit/test_wide_watch.py", "tests/unit/test_lcg_array_select.py",
-           "tests/formal/test_aig_sim.py"]
+           "tests/formal/test_aig_sim.py", "tests/formal/test_affine.py"]
 
 
 def _pinned(exe: Path) -> bool:
