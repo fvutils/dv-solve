@@ -37,6 +37,9 @@ typedef struct BuilderBlock {
 struct dvs_builder_s {
     BuilderBlock *first;            /* head of block list              */
     BuilderBlock *current;          /* tail (active block)             */
+    BuilderBlock **blocks;          /* every block, by base_offset     */
+    uint32_t      n_blocks;
+    uint32_t      cap_blocks;
     uint32_t      virtual_used;     /* running total logical offset    */
     uint32_t      block_size;       /* capacity for new blocks         */
     dvs_alloc_t  *alloc;            /* backing allocator (NULL=malloc) */

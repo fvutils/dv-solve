@@ -224,14 +224,67 @@ static int _add_var(Smt2Frontend *fe, const char *name, uint32_t len,
     return 0;
 }
 
+static uint32_t _var_hash(const char *name, uint32_t len) {
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0; i < len; i++) h = (h ^ (uint8_t)name[i]) * 16777619u;
+    return h;
+}
+
+static int _var_index_put(Smt2Frontend *fe, uint32_t slot) {
+    if (2 * (fe->var_idx_used + 1) > fe->var_idx_cap) {
+        uint32_t cap = fe->var_idx_cap ? 2 * fe->var_idx_cap : 1024;
+        uint32_t *t = (uint32_t *)calloc(cap, sizeof(uint32_t));
+        if (!t) return -1;
+        for (uint32_t i = 0; i < fe->var_idx_cap; i++) {
+            uint32_t e = fe->var_idx[i];
+            if (!e) continue;
+            const char *nm = fe->vars[e - 1].name;
+            uint32_t j = _var_hash(nm, (uint32_t)strlen(nm)) & (cap - 1);
+            while (t[j]) j = (j + 1) & (cap - 1);
+            t[j] = e;
+        }
+        free(fe->var_idx);
+        fe->var_idx = t;
+        fe->var_idx_cap = cap;
+    }
+    const char *nm = fe->vars[slot].name;
+    uint32_t j = _var_hash(nm, (uint32_t)strlen(nm)) & (fe->var_idx_cap - 1);
+    while (fe->var_idx[j]) j = (j + 1) & (fe->var_idx_cap - 1);
+    fe->var_idx[j] = slot + 1;
+    fe->var_idx_used++;
+    return 0;
+}
+
+/* The first (lowest) slot named `name`, as a scan of vars[] would find. */
 static Smt2Var *_find_var(Smt2Frontend *fe, const char *name, uint32_t len) {
     uint32_t n = fe->n_vars < fe->vars_cap ? fe->n_vars : fe->vars_cap;
-    for (uint32_t i = 0; i < n; i++) {
-        if (strlen(fe->vars[i].name) == len &&
-            memcmp(fe->vars[i].name, name, len) == 0)
-            return &fe->vars[i];
+    if (len >= SMT2_MAX_NAME) return NULL;     /* stored names are shorter */
+    if (fe->var_idx_n > n) {                   /* popped: rebuild */
+        if (fe->var_idx) memset(fe->var_idx, 0, fe->var_idx_cap * sizeof(uint32_t));
+        fe->var_idx_used = 0;
+        fe->var_idx_n = 0;
     }
-    return NULL;
+    for (; fe->var_idx_n < n; fe->var_idx_n++) {
+        if (!fe->vars[fe->var_idx_n].name[0]) continue;
+        if (_var_index_put(fe, fe->var_idx_n)) {
+            /* Out of memory: scan. */
+            for (uint32_t i = 0; i < n; i++) {
+                if (strlen(fe->vars[i].name) == len &&
+                    memcmp(fe->vars[i].name, name, len) == 0)
+                    return &fe->vars[i];
+            }
+            return NULL;
+        }
+    }
+    if (!fe->var_idx_cap) return NULL;
+    Smt2Var *best = NULL;
+    for (uint32_t j = _var_hash(name, len) & (fe->var_idx_cap - 1); fe->var_idx[j];
+         j = (j + 1) & (fe->var_idx_cap - 1)) {
+        Smt2Var *v = &fe->vars[fe->var_idx[j] - 1];
+        if ((!best || v < best) && v->name[len] == '\0' && memcmp(v->name, name, len) == 0)
+            best = v;
+    }
+    return best;
 }
 
 static int _name_eq(const char *a, uint32_t alen, const char *b) {
@@ -7047,6 +7100,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             dvs_solver_restore(fe->ctx, fe->push_stack[fe->push_depth]);
         }
         fe->n_vars = fe->push_n_vars[fe->push_depth];
+        fe->var_idx_n = UINT32_MAX;     /* the name index rebuilds */
 
         /* Free arrays declared inside the popped scope. The solver-side BV
          * vars are already unwound by dvs_solver_restore via the n_vars rewind;
@@ -7418,6 +7472,7 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     if (fe->block_alloc) dvs_block_alloc_destroy(fe->block_alloc);
     free(fe->ctx_buf);
     free(fe->vars);
+    free(fe->var_idx);
     free(fe->funs);
     free(fe->subst_stack);
     free(fe->fun_memo);
@@ -7498,6 +7553,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     if (fe->block_alloc) dvs_block_alloc_destroy(fe->block_alloc);
     free(fe->ctx_buf);
     free(fe->vars);
+    free(fe->var_idx);
     free(fe->funs);          /* re-zeroed by the memset below; realloc'd on next define-fun */
     free(fe->subst_stack);   /* re-zeroed by the memset below; realloc'd on next let */
     free(fe->fun_memo);
@@ -7723,11 +7779,21 @@ static int _model_check(Smt2Frontend *fe, const Sexpr *cmd) {
 
 /* check-sat / check-sat-assuming with the model check: the answer is held back
  * until the model has been checked, so a wrong `sat` never reaches the driver. */
+/* Record the check-sat just run for the exit status (smt2_main.c). */
+static void _note_answer(Smt2Frontend *fe, int rc) {
+    fe->answered = 1;
+    fe->answered_result = rc == 0 && fe->has_result ? fe->last_result : DVS_SOLVE_TIMEOUT;
+}
+
 static int _check_sat_checked(Smt2Frontend *fe, const Sexpr *cmd,
                               int (*run)(Smt2Frontend *, const Sexpr *)) {
     fe->model_check_why[0] = '\0';
     Smt2MemOut m;
-    if (!_check_models_on(fe) || !_memout_open(&m)) return run(fe, cmd);
+    if (!_check_models_on(fe) || !_memout_open(&m)) {
+        int rc = run(fe, cmd);
+        _note_answer(fe, rc);
+        return rc;
+    }
     FILE *real = fe->out;
     fe->out = m.f;
     int rc = run(fe, cmd);
@@ -7741,6 +7807,7 @@ static int _check_sat_checked(Smt2Frontend *fe, const Sexpr *cmd,
         _memout_finish(&m, real);
     }
     fflush(real);
+    _note_answer(fe, rc);
     return rc;
 }
 

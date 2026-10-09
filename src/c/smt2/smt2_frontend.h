@@ -358,6 +358,12 @@ typedef struct {
     Smt2Var             *vars;
     uint32_t             n_vars;
     uint32_t             vars_cap;
+    /* Name index over vars[0, var_idx_n): open addressing, slot+1 (0 empty).
+     * Caught up lazily by _find_var; var_idx_n > n_vars (a pop) rebuilds it. */
+    uint32_t            *var_idx;
+    uint32_t             var_idx_cap;    /* power of two, or 0 */
+    uint32_t             var_idx_used;
+    uint32_t             var_idx_n;
 
     /* Configuration */
     int                  produce_models;
@@ -461,6 +467,10 @@ typedef struct {
     /* Result of last check-sat */
     dvs_result_t          last_result;
     int                  has_result;   /* 1 after check-sat */
+    /* The last check-sat's answer, for the exit status: kept across the
+     * push/pop/assert that clear has_result. answered = 0 before any. */
+    int                  answered;
+    dvs_result_t         answered_result;
     /* Checkpoint a successful default-mode check-sat-assuming left open, plus
      * one (0: none). It holds the assumption pins while get-value and
      * get-unsat-assumptions read the answer; _end_assumptions restores it

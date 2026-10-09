@@ -269,10 +269,12 @@ static int g_exit_satcomp;
 static int _exit_status(const Smt2Frontend *fe, int internal_error) {
     if (internal_error)     return SMT2_EXIT_INTERNAL;
     if (fe->n_input_errors) return SMT2_EXIT_INPUT_ERROR;
-    int verdict = !fe->has_result                       ? SMT2_EXIT_UNKNOWN
-                : fe->last_result == DVS_SOLVE_OK      ? SMT2_EXIT_SAT
-                : fe->last_result == DVS_SOLVE_UNSAT   ? SMT2_EXIT_UNSAT
-                :                                        SMT2_EXIT_UNKNOWN;
+    /* The last check-sat's answer, even if a later push, pop or assert
+     * discarded its model. */
+    int verdict = !fe->answered                             ? SMT2_EXIT_UNKNOWN
+                : fe->answered_result == DVS_SOLVE_OK      ? SMT2_EXIT_SAT
+                : fe->answered_result == DVS_SOLVE_UNSAT   ? SMT2_EXIT_UNSAT
+                :                                            SMT2_EXIT_UNKNOWN;
     if (g_exit_satcomp)
         return verdict == SMT2_EXIT_SAT ? 10 : verdict == SMT2_EXIT_UNSAT ? 20 : 0;
     return verdict;

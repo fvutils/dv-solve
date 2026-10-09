@@ -172,6 +172,11 @@ _UNKNOWN = _HDR + "(declare-const x Int)\n(check-sat)\n"
     (_SAT, 0, 10), (_UNSAT, 1, 20), (_UNKNOWN, 2, 0),
     (_HDR + "(declare-const a (_ BitVec 4))\n", 2, 0),     # no check-sat
     (_HDR + ")\n(check-sat)\n", 4, 4),
+    # the last check-sat's answer, even when a later command drops its model
+    (_SAT + "(push 1)\n(pop 1)\n", 0, 10),
+    (_UNSAT + "(assert (= a #x2))\n", 1, 20),
+    (_HDR + "(declare-const a (_ BitVec 4))\n(push 1)\n(assert (= a #x1))\n"
+     "(check-sat)\n(pop 1)\n", 0, 10),
 ])
 def test_exit_status(text, rc, satcomp):
     assert _run(text)[0] == rc

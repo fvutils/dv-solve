@@ -82,6 +82,11 @@ struct dvs_bbsolver_s {
      * graph that the linear-scan acyclicity check might miss. */
     dvs_expr_t        *subst;       /* size n_vars, or NULL */
     uint8_t        *resolving;   /* size n_vars, or NULL */
+    /* Visited stamps for subst_reaches_var: var v is visited when
+     * reach_mark[v] == reach_epoch (no clearing per query). */
+    uint32_t       *reach_mark;  /* size reach_cap, or NULL */
+    uint32_t        reach_cap;
+    uint32_t        reach_epoch;
 
     /* Slice substitutions (piece 5.1): slice_head[var_id] starts the var's
      * chain in slices[], BB_NO_SLICE if none. A var has slices or a whole
@@ -320,13 +325,13 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width);
  * a direct reference check (neither RHS mentions the LHS directly), but
  * following subst[y] from the f(y) branch reaches x.
  *
- * `visited` is a S->n_vars bitmap to avoid revisiting (and infinite
+ * `visited` (S->reach_mark, stamped S->reach_epoch) avoids revisiting (and infinite
  * recursion through pre-existing cycles in subst, although those
  * shouldn't exist if every prior insertion was guarded by this check). */
 static int subst_reaches_var(dvs_bbsolver_t *S,
                              dvs_expr_t ref,
                              uint32_t target_var,
-                             uint8_t *visited) {
+                             uint32_t *visited) {
     if (ref == EXPR_NULL) return 0;
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
@@ -336,8 +341,8 @@ static int subst_reaches_var(dvs_bbsolver_t *S,
         ExprVar *v = (ExprVar *)kp;
         if (v->var_id == target_var) return 1;
         if (v->var_id >= S->n_vars) return 0;
-        if (visited[v->var_id]) return 0;
-        visited[v->var_id] = 1;
+        if (visited[v->var_id] == S->reach_epoch) return 0;
+        visited[v->var_id] = S->reach_epoch;
         /* If this variable has its own substitution, look through it. */
         if (S->subst[v->var_id] != EXPR_NULL) {
             return subst_reaches_var(S, S->subst[v->var_id], target_var, visited);
@@ -401,6 +406,24 @@ static int subst_reaches_var(dvs_bbsolver_t *S,
     }
 }
 
+/* Start a subst_reaches_var query: a fresh epoch over n_vars stamps.
+ * Returns S->reach_mark, or NULL when it cannot be allocated. */
+static uint32_t *reach_begin(dvs_bbsolver_t *S) {
+    if (S->reach_cap < S->n_vars) {
+        uint32_t *m = (uint32_t *)calloc(S->n_vars, sizeof(uint32_t));
+        if (!m) return NULL;
+        free(S->reach_mark);
+        S->reach_mark = m;
+        S->reach_cap = S->n_vars;
+        S->reach_epoch = 0;
+    }
+    if (++S->reach_epoch == 0) {
+        memset(S->reach_mark, 0, S->reach_cap * sizeof(uint32_t));
+        S->reach_epoch = 1;
+    }
+    return S->reach_mark;
+}
+
 /* Attempt to register a substitution var(vref) := eref. Returns 1 if
  * a new substitution was recorded. Rejects if eref transitively
  * (through the current subst graph) reaches the var being substituted —
@@ -418,8 +441,8 @@ static int try_record_subst(dvs_bbsolver_t *S, dvs_expr_t vref, dvs_expr_t eref)
     if (bb_self_width(S, eref, 0) > S->vars[v->var_id].width) return 0;
     /* Transitive cycle check: would substituting create a cycle in the
      * subst graph reachable from this var? */
-    memset(S->resolving, 0, S->n_vars);
-    if (subst_reaches_var(S, eref, v->var_id, S->resolving)) return 0;
+    uint32_t *mark = reach_begin(S);
+    if (!mark || subst_reaches_var(S, eref, v->var_id, mark)) return 0;
     S->subst[v->var_id] = eref;
     S->n_substs++;
     return 1;
@@ -463,8 +486,8 @@ static int try_record_slice(dvs_bbsolver_t *S, dvs_expr_t sref, dvs_expr_t eref)
     if (bb_self_width(S, eref, 0) > (uint32_t)(hi - lo + 1)) return 0;
     for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
         if (!(hi < S->slices[i].lo || lo > S->slices[i].hi)) return 0;
-    memset(S->resolving, 0, S->n_vars);
-    if (subst_reaches_var(S, eref, id, S->resolving)) return 0;
+    uint32_t *mark = reach_begin(S);
+    if (!mark || subst_reaches_var(S, eref, id, mark)) return 0;
     if (S->n_slices == S->cap_slices) {
         uint32_t c = S->cap_slices ? 2 * S->cap_slices : 64;
         bb_slice_t *p = (bb_slice_t *)realloc(S->slices, c * sizeof(*p));
@@ -1545,6 +1568,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     xfree(S->alloc, S->cache, S->cache_cap * sizeof(bb_cache_entry_t));
     xfree(S->alloc, S->subst, S->n_vars * sizeof(dvs_expr_t));
     xfree(S->alloc, S->resolving, S->n_vars * sizeof(uint8_t));
+    free(S->reach_mark);
     free(S->slice_head);
     free(S->uses);
     free(S->slices);
@@ -1877,9 +1901,7 @@ static int _bb_encode(dvs_bbsolver_t *S) {
 
     if (subst_enabled) run_subst_pass(S);
     count_fanout(S);
-    /* run_subst_pass uses S->resolving as a scratch visited bitmap
-     * during cycle detection. Reset it before the bit-blast path
-     * starts using it as the recursion guard in bv_for_var. */
+    /* bv_for_var uses S->resolving as its recursion guard; start clear. */
     if (S->resolving) memset(S->resolving, 0, S->n_vars);
 
     /* Encode each constraint as a top-level assertion. Skip constraints

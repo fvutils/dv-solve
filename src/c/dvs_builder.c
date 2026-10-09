@@ -52,6 +52,19 @@ static void _free_blocks(dvs_builder_t *b, BuilderBlock *blk) {
     }
 }
 
+/** Append blk to the block index (blocks are added in offset order). */
+static int _index_block(dvs_builder_t *b, BuilderBlock *blk) {
+    if (b->n_blocks == b->cap_blocks) {
+        uint32_t cap = b->cap_blocks ? 2 * b->cap_blocks : 16;
+        BuilderBlock **nb = (BuilderBlock **)realloc(b->blocks, cap * sizeof(*nb));
+        if (!nb) return -1;
+        b->blocks = nb;
+        b->cap_blocks = cap;
+    }
+    b->blocks[b->n_blocks++] = blk;
+    return 0;
+}
+
 /**
  * Write data into the current block at the given offset within the block.
  * Caller must ensure the space is available.
@@ -89,7 +102,8 @@ dvs_builder_t *dvs_builder_create(uint32_t block_size, dvs_alloc_t *alloc) {
 
     /* Allocate the first block */
     b->first = _new_block(b, block_size);
-    if (!b->first) {
+    if (!b->first || _index_block(b, b->first)) {
+        if (b->first) _free_blocks(b, b->first);
         _release(b, b, sizeof(*b));
         return NULL;
     }
@@ -107,6 +121,7 @@ void dvs_builder_reset(dvs_builder_t *b) {
         b->first->base_offset = 0;
         b->first->used = 0;
     }
+    b->n_blocks         = b->first ? 1 : 0;
     b->current          = b->first;
     b->virtual_used     = 0;
     b->n_vars           = 0;
@@ -126,6 +141,7 @@ void dvs_builder_reset(dvs_builder_t *b) {
 void dvs_builder_destroy(dvs_builder_t *b) {
     if (!b) return;
     _free_blocks(b, b->first);
+    free(b->blocks);
     _release(b, b, sizeof(*b));
 }
 
@@ -154,6 +170,10 @@ dvs_expr_t dvs_builder_alloc(dvs_builder_t *b, uint32_t bytes, uint32_t align) {
 
         BuilderBlock *blk = _new_block(b, cap);
         if (!blk) return EXPR_NULL;
+        if (_index_block(b, blk)) {
+            _free_blocks(b, blk);
+            return EXPR_NULL;
+        }
 
         blk->base_offset = aligned;
         if (b->current)
@@ -189,11 +209,17 @@ uint32_t dvs_builder_virtual_used(const dvs_builder_t *b) {
 void *dvs_builder_ref_ptr(const dvs_builder_t *b, dvs_expr_t ref) {
     if (ref == EXPR_NULL) return NULL;
     uint32_t voff = ref - POOL_HEADER_SZ;
-    for (BuilderBlock *blk = b->first; blk; blk = blk->next) {
-        if (voff >= blk->base_offset &&
-            voff < blk->base_offset + blk->used) {
+    /* Last block whose base_offset <= voff. */
+    uint32_t lo = 0, hi = b->n_blocks;
+    while (hi - lo > 1) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (b->blocks[mid]->base_offset <= voff) lo = mid;
+        else hi = mid;
+    }
+    if (lo < b->n_blocks) {
+        BuilderBlock *blk = b->blocks[lo];
+        if (voff >= blk->base_offset && voff < blk->base_offset + blk->used)
             return _block_ptr_at(blk, voff - blk->base_offset);
-        }
     }
     return NULL;
 }
