@@ -272,6 +272,68 @@ dvs_problem_t *dvs_builder_finalize(dvs_builder_t *b, size_t *out_size) {
     return sp;
 }
 
+/* Copy pool bytes [from, to) from the blocks into the problem's pool region,
+ * zeroing what no block covers. */
+static void _copy_range(dvs_builder_t *b, dvs_problem_t *sp, uint32_t from, uint32_t to) {
+    uint8_t *pool_base = (uint8_t *)&sp->pool + sizeof(dvs_pool_t);
+    memset(pool_base + from, 0, to - from);
+    /* The last block starting at or below `from` (blocks are in offset order). */
+    uint32_t lo = 0, hi = b->n_blocks;
+    while (hi - lo > 1) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (b->blocks[mid]->base_offset <= from) lo = mid; else hi = mid;
+    }
+    for (uint32_t i = lo; i < b->n_blocks; i++) {
+        BuilderBlock *blk = b->blocks[i];
+        if (blk->base_offset >= to) break;
+        uint32_t s = blk->base_offset > from ? blk->base_offset : from;
+        uint32_t e = blk->base_offset + blk->used;
+        if (e > to) e = to;
+        if (e > s)
+            memcpy(pool_base + s, BUILDER_BLOCK_DATA(blk) + (s - blk->base_offset), e - s);
+    }
+}
+
+dvs_problem_t *dvs_builder_finalize_append(dvs_builder_t *b, dvs_problem_t *prev,
+                                           size_t *size) {
+    uint32_t used = b->virtual_used;
+    uint32_t old = prev ? prev->pool.used : 0;
+    if (!prev || b->alloc || old > used || !b->n_blocks) {
+        /* First time (or a custom allocator): a full copy with headroom. */
+        uint32_t extra = used / 2 > 4096 ? used / 2 : 4096;
+        if (b->alloc || !b->n_blocks) return dvs_builder_finalize(b, size);
+        dvs_problem_t *sp = dvs_builder_finalize_reserve(b, size, extra);
+        if (sp) {
+            sp->pool.used = used;
+            if (size) *size = sizeof(dvs_problem_t) + sp->pool.capacity;
+        }
+        return sp;
+    }
+    dvs_problem_t *sp = prev;
+    if (used > prev->pool.capacity) {
+        uint32_t cap = used + (used / 2 > 4096 ? used / 2 : 4096);
+        sp = (dvs_problem_t *)realloc(prev, sizeof(dvs_problem_t) + cap);
+        if (!sp) return NULL;                 /* prev is still valid */
+        sp->pool.capacity = cap;
+    }
+    _copy_range(b, sp, old, used);
+    sp->pool.used        = used;
+    sp->n_vars           = b->n_vars;
+    sp->n_constraints    = b->n_constraints;
+    sp->n_sources        = b->n_sources;
+    sp->vars_head        = b->vars_head;
+    sp->constraints_head = b->constraints_head;
+    sp->sources_head     = b->sources_head;
+    sp->n_alldiffs       = b->n_alldiffs;
+    sp->allDiff_head     = b->allDiff_head;
+    sp->n_softs          = b->n_softs;
+    sp->softs_head       = b->softs_head;
+    sp->n_dists          = b->n_dists;
+    sp->dists_head       = b->dists_head;
+    if (size) *size = sizeof(dvs_problem_t) + sp->pool.capacity;
+    return sp;
+}
+
 dvs_problem_t *dvs_builder_finalize_reserve(dvs_builder_t *b, size_t *out_size,
                                        uint32_t extra_bytes) {
     uint32_t pool_data_size = b->virtual_used;

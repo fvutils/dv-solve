@@ -110,7 +110,10 @@ There is no mode to change in dv-solve; the choice is how fw-hdl drives it.
   one transition per step, ask each depth under `push`/`pop`). It is now faster
   than separate files: 0.79 s against 1.13 s on crc32x16.
 
-The rest of the incremental cost is that each `check-sat` bit-blasts the
-whole assertion set again; SAT itself takes under 1 ms per query. Reusing the
-encoding across queries is piece 6.1, and would bring a 16-depth search close
-to the cost of its deepest query (0.14 s here).
+The rest of the incremental cost was that each `check-sat` bit-blasted the
+whole assertion set again; SAT itself takes under 1 ms per query.
+
+**Update 2026-10-09 (piece 6.1):** a session now keeps one bit-blast instance
+across its `check-sat`s and adds only the new assertions
+(`docs/fw_hdl_property_session.md`). The crc32x16 search takes 0.28 s against
+1.02 s for separate files (0.79 s before), about twice its deepest query.

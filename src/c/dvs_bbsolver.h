@@ -140,6 +140,31 @@ void dvs_bbsolver_set_presim(dvs_bbsolver_t *bb, int on);
 int dvs_bbsolver_rebase(dvs_bbsolver_t *bb, dvs_problem_t *problem);
 
 /**
+ * Session mode (docs/fw_hdl_implementation_plan.md, piece 6.1): one instance
+ * serves every check-sat of an SMT-LIB session, scopes included.
+ *
+ * sess_begin turns a freshly built solver (incremental backend, nothing
+ * encoded yet) into a session; -1 when it cannot. Then, per check-sat:
+ * dvs_bbsolver_rebase onto the current problem, sess_push for each scope
+ * opened since the last check (var_mark: the first variable id the scope
+ * owns), sess_add for the constraints asserted since (oldest first, all at
+ * the current depth) and sess_solve. sess_pop retracts the innermost scope:
+ * its constraints, and its variables, whose ids the caller may reuse.
+ *
+ * Expression offsets must never be reused: the memo cache stays valid across
+ * pops only because the builder does not reclaim its pool.
+ *
+ * sess_add returns 0, DVS_BB_UNKNOWN (unsupported construct) or
+ * DVS_BB_ERROR; after either, the session answers only that, so rebuild.
+ */
+int      dvs_bbsolver_sess_begin(dvs_bbsolver_t *bb);
+int      dvs_bbsolver_sess_push(dvs_bbsolver_t *bb, uint32_t var_mark);
+int      dvs_bbsolver_sess_pop(dvs_bbsolver_t *bb);
+uint32_t dvs_bbsolver_sess_depth(const dvs_bbsolver_t *bb);
+int      dvs_bbsolver_sess_add(dvs_bbsolver_t *bb, const dvs_expr_t *roots, uint32_t n);
+int      dvs_bbsolver_sess_solve(dvs_bbsolver_t *bb, uint64_t seed);
+
+/**
  * Cube-and-conquer support (docs/cube_and_conquer_design.md, dvs_cube.[ch]).
  *
  * These split dvs_bbsolver_check's monolithic "encode then solve" into an

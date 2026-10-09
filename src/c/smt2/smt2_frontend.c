@@ -317,11 +317,57 @@ static Smt2SortConst *_find_sort_const(Smt2Frontend *fe, const char *name, uint3
     return NULL;
 }
 
-static Smt2FunDef *_find_fun(Smt2Frontend *fe, const char *name, uint32_t len) {
-    for (uint32_t i = 0; i < fe->n_funs; i++) {
-        if (_name_eq(name, len, fe->funs[i].name)) return &fe->funs[i];
+static int _fun_index_put(Smt2Frontend *fe, uint32_t slot) {
+    if (2 * (fe->fun_idx_used + 1) > fe->fun_idx_cap) {
+        uint32_t cap = fe->fun_idx_cap ? 2 * fe->fun_idx_cap : 256;
+        uint32_t *t = (uint32_t *)calloc(cap, sizeof(uint32_t));
+        if (!t) return -1;
+        for (uint32_t i = 0; i < fe->fun_idx_cap; i++) {
+            uint32_t e = fe->fun_idx[i];
+            if (!e) continue;
+            const char *nm = fe->funs[e - 1].name;
+            uint32_t j = _var_hash(nm, (uint32_t)strlen(nm)) & (cap - 1);
+            while (t[j]) j = (j + 1) & (cap - 1);
+            t[j] = e;
+        }
+        free(fe->fun_idx);
+        fe->fun_idx = t;
+        fe->fun_idx_cap = cap;
     }
-    return NULL;
+    const char *nm = fe->funs[slot].name;
+    uint32_t j = _var_hash(nm, (uint32_t)strlen(nm)) & (fe->fun_idx_cap - 1);
+    while (fe->fun_idx[j]) j = (j + 1) & (fe->fun_idx_cap - 1);
+    fe->fun_idx[j] = slot + 1;
+    fe->fun_idx_used++;
+    return 0;
+}
+
+/* The first (lowest) slot named `name`, as a scan of funs[] would find. The
+ * index is caught up lazily and rebuilt after a pop, as for _find_var. */
+static Smt2FunDef *_find_fun(Smt2Frontend *fe, const char *name, uint32_t len) {
+    uint32_t n = fe->n_funs;
+    if (len >= SMT2_MAX_NAME) return NULL;     /* stored names are shorter */
+    if (fe->fun_idx_n > n) {
+        if (fe->fun_idx) memset(fe->fun_idx, 0, fe->fun_idx_cap * sizeof(uint32_t));
+        fe->fun_idx_used = 0;
+        fe->fun_idx_n = 0;
+    }
+    for (; fe->fun_idx_n < n; fe->fun_idx_n++) {
+        if (_fun_index_put(fe, fe->fun_idx_n)) {
+            for (uint32_t i = 0; i < n; i++)    /* out of memory: scan */
+                if (_name_eq(name, len, fe->funs[i].name)) return &fe->funs[i];
+            return NULL;
+        }
+    }
+    if (!fe->fun_idx_cap) return NULL;
+    Smt2FunDef *best = NULL;
+    for (uint32_t j = _var_hash(name, len) & (fe->fun_idx_cap - 1); fe->fun_idx[j];
+         j = (j + 1) & (fe->fun_idx_cap - 1)) {
+        Smt2FunDef *f = &fe->funs[fe->fun_idx[j] - 1];
+        if ((!best || f < best) && f->name[len] == '\0' && memcmp(f->name, name, len) == 0)
+            best = f;
+    }
+    return best;
 }
 
 static Smt2ArrayVar *_find_array_var(Smt2Frontend *fe, const char *name, uint32_t len) {
@@ -4402,7 +4448,10 @@ static int _ensure_problem(Smt2Frontend *fe) {
 static void _start_cdcl_retention(Smt2Frontend *fe);
 
 static int _ensure_compiled(Smt2Frontend *fe) {
-    if (fe->ctx) return 0;
+    /* A context that is not compiled is one whose compile proved the
+     * assertions unsat: say so every time, not just the first. Solving it as
+     * if compiled answered a check-sat-assuming `sat`. */
+    if (fe->ctx) return fe->compiled ? 0 : -2;
     /* A prior bit-blast-routed solve may have finalized one already (possible
      * when needs_bitblast flips mid-session); free it before overwriting. */
     if (fe->problem) { free(fe->problem); fe->problem = NULL; }
@@ -4479,6 +4528,7 @@ static int _ensure_compiled(Smt2Frontend *fe) {
             if (fe->ctx_buf_scale < 64) fe->ctx_buf_scale *= 4;
             continue;
         }
+        if (rc == -2) fe->ctx_unsat_depth = fe->push_depth;
         if (rc != -2) {
             /* No usable context (e.g. a variable wider than 64 bits): release
              * it. Leaving it made the next push checkpoint a context that was
@@ -4505,6 +4555,7 @@ static void _start_cdcl_retention(Smt2Frontend *fe) {
         _fun_memo_clear(fe);
         fe->cdcl_retained = 0;
         fe->bb_inc = 0;
+        fe->bb_sess = 0;
         memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
     }
 }
@@ -4519,6 +4570,7 @@ static void _aux_handed_off(Smt2Frontend *fe) {
         _fun_memo_clear(fe);
         fe->cdcl_retained = 0;
         fe->bb_inc = 0;
+        fe->bb_sess = 0;
         memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
     }
     fe->builder_retained = 0;
@@ -4554,6 +4606,7 @@ static int _flush_aux(Smt2Frontend *fe) {
              * solver result is unaffected. */
             free(aux);
             _aux_handed_off(fe);
+            if (rc == -2 && !fe->flush_unsat) fe->flush_unsat = fe->push_depth + 1;
             return rc;
         }
         fe->aux_problems     = grow;
@@ -4561,6 +4614,7 @@ static int _flush_aux(Smt2Frontend *fe) {
     }
     fe->aux_problems[fe->n_aux_problems++] = aux;
     _aux_handed_off(fe);
+    if (rc == -2 && !fe->flush_unsat) fe->flush_unsat = fe->push_depth + 1;
     return rc;
 }
 
@@ -5258,6 +5312,8 @@ static void _free_bb(Smt2Frontend *fe) {
     if (fe->bb_problem) { free(fe->bb_problem); fe->bb_problem = NULL; }
     fe->bb_over_problem = 0;
     fe->bb_inc = 0;
+    fe->bb_sess = 0;
+    fe->bb_sess_assume = 0;
 }
 
 /* Solve `p` with the bit-blast engine. `owned`, if non-NULL, is `p` handed
@@ -5340,6 +5396,7 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
     }
     int rc = dvs_bbsolver_check(fe->bb_solver, fe->seed);
     fe->bb_model_valid = (rc == DVS_BB_SAT);
+    fe->bb_checks++;
     if (fe->verilator_mode && (rc == DVS_BB_SAT || rc == DVS_BB_UNSAT)) {
         fe->cached_fp = fp;
         fe->cache_valid = 1;
@@ -5368,7 +5425,9 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
  * only while retention lasts (_start_cdcl_retention); otherwise unless it was
  * reset beside an unrebuildable fe->problem (_ensure_problem's -2). */
 static int _builder_is_full(const Smt2Frontend *fe) {
-    if (fe->ctx || fe->compiled) return fe->cdcl_retained;
+    /* (A context whose compile proved unsat is not compiled; _ensure_compiled
+     * kept the builder for it.) */
+    if (fe->compiled) return fe->cdcl_retained;
     return !fe->problem || fe->builder_retained;
 }
 
@@ -5469,6 +5528,140 @@ static int _check_sat_enum(Smt2Frontend *fe) {
     }
     fflush(fe->out);
     return 1;
+}
+
+/* One bit-blast instance for a whole session (plan piece 6.1). A session that
+ * keeps asserting -- a BMC unroll, a latency search -- re-blasted every
+ * assertion at every check-sat: quadratic in its length. Instead keep one
+ * CaDiCaL instance, add only the constraints asserted since the last
+ * check-sat, and mirror the push stack with selector scopes (pop retracts).
+ * check-sat-assuming adds one more scope for its assumptions.
+ *
+ * A lone check-sat at the top level stays one-shot: kissat and the
+ * whole-problem passes. The session starts at the first check-sat inside a
+ * push, the second check-sat overall, or a check-sat-assuming.
+ * DV_BB_SESSION=0 turns it off. */
+static int _session_ok(Smt2Frontend *fe) {
+    dvs_builder_t *b = fe->builder;
+    /* The builder must hold every assertion in scope: after a CDCL compile
+     * that is retention (the parts handed to CDCL stay in it too). */
+    if (fe->verilator_mode || !b || !_builder_is_full(fe)) return 0;
+    if (b->n_sources || b->n_alldiffs || b->n_softs || b->n_dists) return 0;
+    const char *env = getenv("DV_BB_SESSION");
+    if (env && *env == '0') return 0;
+    return dvs_sat_has_cadical();
+}
+
+/* Bring the session up to date with the builder: every constraint added, at
+ * the depth of its scope. Returns 0, or -1 to leave the query to the regular
+ * path (the session is dropped). */
+static int _session_sync(Smt2Frontend *fe) {
+    dvs_builder_t *b = fe->builder;
+    size_t sz = 0;
+    if (fe->bb_sess && (!fe->bb_solver || b->n_constraints < fe->bb_sess_ncons))
+        _free_bb(fe);
+    /* The session's problem grows in place: a full finalize copied the whole
+     * pool at every check-sat. */
+    dvs_problem_t *np = _explicit(dvs_builder_finalize_append(
+                            b, fe->bb_sess ? fe->bb_problem : NULL, &sz));
+    if (!np) { if (fe->bb_sess) _free_bb(fe); return -1; }
+    if (fe->bb_sess) {
+        fe->bb_problem = np;                  /* realloc'd (or not) from it */
+        if (dvs_bbsolver_rebase(fe->bb_solver, np) != 0) { _free_bb(fe); return -1; }
+    } else {
+        _free_bb(fe);
+        fe->bb_problem = np;
+        fe->bb_solver = dvs_bbsolver_new_backend(NULL, np, /*prefer_cadical=*/1);
+        if (!fe->bb_solver || !dvs_bbsolver_is_incremental(fe->bb_solver)
+                || dvs_bbsolver_sess_begin(fe->bb_solver) != 0) {
+            _free_bb(fe);
+            return -1;
+        }
+        const char *sim = getenv("DV_SIM");
+        dvs_bbsolver_set_presim(fe->bb_solver, !(sim && *sim == '0'));
+        fe->bb_sess = 1;
+        fe->bb_sess_ncons = 0;
+    }
+
+    /* The new constraints lead the newest-first list; take them oldest first. */
+    uint32_t j0 = fe->bb_sess_ncons, k = b->n_constraints - j0;
+    dvs_expr_t *roots = (dvs_expr_t *)malloc((k ? k : 1) * sizeof(dvs_expr_t));
+    if (!roots) { _free_bb(fe); return -1; }
+    dvs_expr_t cur = np->constraints_head;
+    for (uint32_t i = 0; i < k && cur != EXPR_NULL; i++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(np, cur);
+        roots[k - 1 - i] = cs->root;
+        cur = cs->next;
+    }
+    /* Constraint j belongs to every scope whose push came before it: add
+     * each run at its depth, opening scopes as their marks are passed. */
+    uint32_t d = dvs_bbsolver_sess_depth(fe->bb_solver), start = 0;
+    int arc = 0;
+    for (uint32_t i = 0; arc == 0; i++) {
+        int end = (i == k);
+        uint32_t j = j0 + i;
+        if (end || (d < fe->push_depth && fe->push_bmark[d].n_constraints <= j)) {
+            if (i > start)
+                arc = dvs_bbsolver_sess_add(fe->bb_solver, roots + start, i - start);
+            start = i;
+            while (arc == 0 && d < fe->push_depth
+                   && (end || fe->push_bmark[d].n_constraints <= j)) {
+                if (dvs_bbsolver_sess_push(fe->bb_solver, fe->push_n_vars[d]) != 0)
+                    arc = DVS_BB_ERROR;
+                else
+                    d++;
+            }
+        }
+        if (end) break;
+    }
+    free(roots);
+    if (arc != 0) { _free_bb(fe); return -1; }
+    fe->bb_sess_ncons = b->n_constraints;
+    return 0;
+}
+
+/* Solve the session and answer. Returns 1, or 0 to leave the query to the
+ * regular path (the session is dropped). */
+static int _session_answer(Smt2Frontend *fe, uint32_t added) {
+    int rc = dvs_bbsolver_sess_solve(fe->bb_solver, fe->seed);
+    if (getenv("DV_LOG"))
+        fprintf(fe->err, "bb-session: check %u depth %u added %u constraints -> %s\n",
+                fe->bb_checks + 1, dvs_bbsolver_sess_depth(fe->bb_solver), added,
+                rc == DVS_BB_SAT ? "sat" : rc == DVS_BB_UNSAT ? "unsat" : "unknown");
+    if (rc != DVS_BB_SAT && rc != DVS_BB_UNSAT) { _free_bb(fe); return 0; }
+    fe->bb_checks++;
+    fe->cache_valid = 0;
+    fe->bb_model_valid = (rc == DVS_BB_SAT);
+    fprintf(fe->out, rc == DVS_BB_SAT ? "sat\n" : "unsat\n");
+    fe->last_result = rc == DVS_BB_SAT ? DVS_SOLVE_OK : DVS_SOLVE_UNSAT;
+    fe->has_result = 1;
+    fflush(fe->out);
+    return 1;
+}
+
+/* check-sat on the session. Returns 1 when it answered, 0 to leave the query
+ * to the regular path. */
+static int _check_sat_session(Smt2Frontend *fe) {
+    if (!_session_ok(fe)) return 0;
+    if (!fe->bb_sess && fe->push_depth == 0 && fe->bb_checks == 0) return 0;
+    uint32_t before = fe->bb_sess ? fe->bb_sess_ncons : 0;
+    if (_session_sync(fe) != 0) return 0;
+    return _session_answer(fe, fe->bb_sess_ncons - before);
+}
+
+/* check-sat-assuming on the session: the assumptions go in a scope of their
+ * own, which stays open (so get-value can read the model) until the next
+ * command that changes the assertion stack (_end_assumptions). The literals
+ * are already validated and recorded. Returns 1 when it answered, 0 to leave
+ * the query to the regular path. */
+static int _check_sat_assuming_session(Smt2Frontend *fe, const dvs_expr_t *lits,
+                                       uint32_t n) {
+    if (!_session_ok(fe)) return 0;
+    if (_session_sync(fe) != 0) return 0;
+    if (dvs_bbsolver_sess_push(fe->bb_solver, fe->n_vars) != 0) { _free_bb(fe); return 0; }
+    fe->bb_sess_assume = 1;
+    if (dvs_bbsolver_sess_add(fe->bb_solver, lits, n) != 0) { _free_bb(fe); return 0; }
+    return _session_answer(fe, n);
 }
 
 /* True when the cube-and-conquer engine is explicitly selected
@@ -5603,6 +5796,12 @@ static void _emit_bv_bin_literal_wide(FILE *out, const uint64_t *limbs,
  * found p still pinned by an earlier (check-sat-assuming (p)) -- a wrong
  * `unsat` -- and a later push numbered its checkpoint past the leaked one. */
 static void _end_assumptions(Smt2Frontend *fe) {
+    if (fe->bb_sess_assume) {
+        /* The bit-blast session's assumption scope (_check_sat_assuming_session). */
+        fe->bb_sess_assume = 0;
+        fe->bb_model_valid = 0;
+        if (fe->bb_sess && dvs_bbsolver_sess_pop(fe->bb_solver) != 0) _free_bb(fe);
+    }
     if (!fe->assump_cp1) return;
     uint32_t cp = fe->assump_cp1 - 1;
     fe->assump_cp1 = 0;
@@ -5896,6 +6095,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
         if (fe->verilator_mode && fe->vlt_enum && !getenv("DV_VLT_ENUM_SCRATCH")
                 && _check_sat_enum(fe))
             return 0;
+        if (_check_sat_session(fe)) return 0;
         int prc = _ensure_problem(fe);
         if (prc == -2 && fe->cdcl_retained) {
             /* fe->problem predates asserts made after a CDCL compile, and
@@ -5934,6 +6134,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
             fprintf(fe->err, "cdcl-compile-failed (rc=%d): escalating to bitblast\n", crc);
         fe->vlt_route = "bitblast/compile-failed";
         if (cdcl_probing) fe->cdcl_route = 2;
+        if (_check_sat_session(fe)) return 0;
         return _check_sat_bitblast(fe);
     }
     if (crc < 0) {
@@ -5968,6 +6169,11 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
         return 0;
     }
     if (frc < 0) {
+        /* The context missed part of the assertion set; it was handed off all
+         * the same, so a later check-sat would solve without it. Bit-blast
+         * from here on (B87). */
+        fe->needs_bitblast = 1;
+        if (!fe->nb_why) fe->nb_why = "flush-failed";
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
         return -1;
@@ -6966,8 +7172,12 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         n = (uint32_t)cmd->list.items[1]->numval;
     }
     /* Abstract arrays solve from the builder (_check_sat_array), so their
-     * scopes live there: no CDCL context, the frame only marks the builder. */
-    int crc = (fe->n_anodes > 0 && !fe->compiled) ? -1 : _ensure_compiled(fe);
+     * scopes live there: no CDCL context, the frame only marks the builder.
+     * Likewise a problem that must bit-blast: every check-sat goes there, and
+     * compiling (or failing to, for >64-bit variables) at every push cost a
+     * finalize plus a compile of the whole problem each time. */
+    int crc = ((fe->n_anodes > 0 || fe->needs_bitblast) && !fe->compiled)
+              ? -1 : _ensure_compiled(fe);
     /* Compile-time UNSAT, or the assertions since the last push conflicting as
      * they reach the context: the scope pushed from is unsat. Failing the push
      * on the latter made the next pop drop the scope holding the conflicting
@@ -6977,9 +7187,22 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
      * takes it all back. */
     int dead = (crc == -2);
     if (crc >= 0) {
+        /* Flush into a context at its root, as check-sat does: one still
+         * holding the last model met `x` against x's model value as a
+         * conflict, and called the scope unsat. */
+        if (fe->has_result) { dvs_solver_reset(fe->ctx); fe->has_result = 0; }
         int frc = _flush_aux(fe);
         if (frc == -2) dead = 1;
-        else if (frc < 0) return -1;
+        else if (frc < 0) {
+            /* The context cannot take the assertions (e.g. a variable wider
+             * than 64 bits declared after the compile), so it no longer stands
+             * for the assertion set: bit-blast from here on, and keep the
+             * scope. Returning here dropped it, and the next pop removed the
+             * enclosing scope with its assertions -- a wrong `sat` (B87). */
+            fe->needs_bitblast = 1;
+            if (!fe->nb_why) fe->nb_why = "flush-failed";
+            crc = -1;
+        }
     }
     if (dead || crc < 0) {
         /* No CDCL context (e.g. variables wider than 64 bits: bitblast only).
@@ -7055,6 +7278,30 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count == 2 && cmd->list.items[1]->kind == SEXPR_NUMERAL) {
         n = (uint32_t)cmd->list.items[1]->numval;
     }
+    if (fe->flush_unsat && n <= fe->push_depth && fe->push_depth - n < fe->flush_unsat - 1)
+        fe->flush_unsat = 0;
+    if (fe->ctx && !fe->compiled && n <= fe->push_depth
+            && fe->push_depth - n < fe->ctx_unsat_depth) {
+        /* The compile that proved unsat ran inside a scope being popped, so
+         * its verdict goes with it. The builder still holds every assertion
+         * (_ensure_compiled keeps it), so the next use compiles afresh. */
+        dvs_solver_destroy(fe->ctx); fe->ctx = NULL;
+        dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
+        free(fe->ctx_buf); fe->ctx_buf = NULL;
+        if (fe->problem) fe->problem_dirty = 1;
+    }
+    if (fe->bb_sess && n <= fe->push_depth) {
+        /* The bit-blast session retracts the popped scopes itself. */
+        uint32_t t = fe->push_depth - n;
+        int had = dvs_bbsolver_sess_depth(fe->bb_solver) > t;
+        while (fe->bb_sess && dvs_bbsolver_sess_depth(fe->bb_solver) > t)
+            if (dvs_bbsolver_sess_pop(fe->bb_solver) != 0) _free_bb(fe);
+        if (fe->bb_sess && fe->bb_sess_ncons > fe->push_bmark[t].n_constraints) {
+            if (had) fe->bb_sess_ncons = fe->push_bmark[t].n_constraints;
+            else     _free_bb(fe);       /* constraints past a mark with no scope */
+        }
+        fe->bb_model_valid = 0;
+    }
     if (fe->compiled) {
         if (fe->cdcl_retained && n <= fe->push_depth &&
             dvs_builder_rewind(fe->builder, &fe->push_bmark[fe->push_depth - n]) == 0) {
@@ -7069,6 +7316,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             dvs_builder_reset(fe->builder);
             _fun_memo_clear(fe);
             fe->cdcl_retained = 0;
+            fe->bb_sess = 0;
             memset(&fe->aux_mark, 0, sizeof(fe->aux_mark));
         }
         fe->has_aux = 0;
@@ -7078,8 +7326,10 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
          * the bitblast path finalizes from. Rewind it to the outermost
          * popped push, and make the next check-sat re-finalize (B63). */
         _fun_memo_clear(fe);
-        if (dvs_builder_rewind(fe->builder, &fe->push_bmark[fe->push_depth - n]) != 0)
+        if (dvs_builder_rewind(fe->builder, &fe->push_bmark[fe->push_depth - n]) != 0) {
             SMT2_TAINT(fe, "pop could not rewind the assertion set");
+            fe->bb_sess = 0;
+        }
         if (fe->problem) fe->problem_dirty = 1;
         fe->has_result = 0;
     }
@@ -7159,8 +7409,10 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->n_checked = fe->push_n_checked[fe->push_depth];
         /* Definitions made in the popped scope go with it (B82: a stale one
          * shadowed a later redefinition -> wrong unsat). */
-        if (fe->n_funs > fe->push_n_funs[fe->push_depth])
+        if (fe->n_funs > fe->push_n_funs[fe->push_depth]) {
             fe->n_funs = fe->push_n_funs[fe->push_depth];
+            fe->fun_idx_n = UINT32_MAX;     /* the name index rebuilds */
+        }
         if (fe->n_sort_aliases > fe->push_n_sort_aliases[fe->push_depth])
             fe->n_sort_aliases = fe->push_n_sort_aliases[fe->push_depth];
     }
@@ -7264,6 +7516,45 @@ static int _cmd_get_unsat_core(Smt2Frontend *fe, const Sexpr *cmd) {
     return 0;
 }
 
+/* check-sat-assuming on the bit-blast session: each literal `p` / `(not p)`
+ * of a declared Bool becomes the constraint p == 1 / p == 0 in the
+ * assumption scope. Returns 1 when it answered (literals recorded for
+ * get-unsat-assumptions), 0 to leave the query to the CDCL path, which also
+ * reports malformed literals. */
+static int _check_sat_assuming_bb(Smt2Frontend *fe, const Sexpr *ls) {
+    dvs_expr_t *roots = (dvs_expr_t *)malloc((ls->list.count + 1) * sizeof(dvs_expr_t));
+    if (!roots) return 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < ls->list.count; i++) {
+        const Sexpr *lit = ls->list.items[i];
+        int positive = lit->kind == SEXPR_SYMBOL;
+        const Sexpr *sym = positive ? lit
+                         : (lit->kind == SEXPR_LIST && lit->list.count == 2 &&
+                            sexpr_is_symbol(lit->list.items[0], "not") &&
+                            lit->list.items[1]->kind == SEXPR_SYMBOL) ? lit->list.items[1] : NULL;
+        Smt2Var *v = sym ? _find_var(fe, sym->sym.str, sym->sym.len) : NULL;
+        if (!v || !v->is_bool) { free(roots); return 0; }
+        roots[n] = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ,
+                       dvs_builder_expr_var(fe->builder, v->var_id),
+                       _bv_const(fe, positive ? 1 : 0, 1));
+        if (roots[n++] == EXPR_NULL) { free(roots); return 0; }
+    }
+    fe->n_last_assump = 0;
+    for (uint32_t i = 0; i < ls->list.count && fe->n_last_assump < SMT2_MAX_ASSUMPS; i++) {
+        const Sexpr *lit = ls->list.items[i];
+        const Sexpr *sym = lit->kind == SEXPR_SYMBOL ? lit : lit->list.items[1];
+        uint32_t k = fe->n_last_assump++;
+        uint32_t cpy = sym->sym.len < SMT2_MAX_NAME - 1 ? sym->sym.len : SMT2_MAX_NAME - 1;
+        memcpy(fe->last_assump_names[k], sym->sym.str, cpy);
+        fe->last_assump_names[k][cpy] = '\0';
+        fe->last_assump_positive[k] = (uint8_t)(lit->kind == SEXPR_SYMBOL);
+    }
+    int ok = _check_sat_assuming_session(fe, roots, n);
+    free(roots);
+    if (ok) fe->last_assump_unsat = (fe->last_result == DVS_SOLVE_UNSAT);
+    return ok;
+}
+
 static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 2 || cmd->list.items[1]->kind != SEXPR_LIST) {
         _input_error(fe, "check-sat-assuming requires a literal list");
@@ -7320,7 +7611,28 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
      * previous check-sat's model, so it must NOT clear this.) */
     fe->bb_model_valid = 0;
 
-    if (_ensure_compiled(fe) < 0) {
+    /* A problem that bit-blasts: the assumptions go in a scope of the
+     * bit-blast session (plan piece 6.1), so successive properties share
+     * the design's encoding. The CDCL path below cannot take variables
+     * wider than 64 bits, so these used to answer `unknown`. */
+    _end_assumptions(fe);
+    _route_qfbv(fe);
+    if (_engine_is_bitblast(fe) && _check_sat_assuming_bb(fe, cmd->list.items[1]))
+        return 0;
+
+    int crc = _ensure_compiled(fe);
+    if (crc == -2) {
+        /* The assertions alone are unsat; the empty set of assumptions is a
+         * core. */
+        fe->n_last_assump = 0;
+        fe->last_assump_unsat = 1;
+        fprintf(fe->out, "unsat\n");
+        fflush(fe->out);
+        fe->last_result = DVS_SOLVE_UNSAT;
+        fe->has_result = 1;
+        return 0;
+    }
+    if (crc < 0) {
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
         return -1;
@@ -7328,10 +7640,25 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
     _end_assumptions(fe);
     if (fe->has_result) dvs_solver_reset(fe->ctx);
     fe->has_result = 0;
-    if (_flush_aux(fe) < 0) {
+    int frc = _flush_aux(fe);
+    if (frc < 0 && frc != -2) {
+        fe->needs_bitblast = 1;            /* the context missed some (B87) */
+        if (!fe->nb_why) fe->nb_why = "flush-failed";
         SMT2_EMIT_UNKNOWN(fe);
         fflush(fe->out);
         return -1;
+    }
+    if (fe->flush_unsat) {
+        /* The assertions alone are unsat (a flush met the conflict). The
+         * checkpoint below loses the context's record of it: the next
+         * check-sat-assuming answered `sat`. */
+        fe->n_last_assump = 0;
+        fe->last_assump_unsat = 1;
+        fprintf(fe->out, "unsat\n");
+        fflush(fe->out);
+        fe->last_result = DVS_SOLVE_UNSAT;
+        fe->has_result = 1;
+        return 0;
     }
     int cp = dvs_solver_checkpoint(fe->ctx);
     if (cp < 0) {
@@ -7386,6 +7713,32 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
         memset(&opts, 0, sizeof(opts));
         opts.seed = fe->seed;
         fe->last_result = dvs_solver_solve(fe->ctx, &opts);
+        /* The validation net check-sat has: a constraint the compile could
+         * not take is missing from the context, so its `sat` must be checked
+         * against the whole problem. Without it, `p == (not (x < 3))` under
+         * the assumption (not p) answered sat with x = 4. */
+        const char *mode_env = getenv("DV_VALIDATE_MODEL");
+        int mode = mode_env ? atoi(mode_env) : 2;
+        if (fe->last_result == DVS_SOLVE_OK && fe->problem && mode > 0) {
+            int viol = dvs_solver_validate_model(fe->ctx, fe->problem, fe->err);
+            for (uint32_t i = 0; i < fe->n_aux_problems; i++)
+                viol += dvs_solver_validate_model(fe->ctx, fe->aux_problems[i], fe->err);
+            if (viol > 0) {
+                fprintf(fe->err, "model-validation: %d constraint(s) violated%s\n", viol,
+                        mode >= 2 ? "; downgrading sat -> unknown" : "");
+                if (mode >= 2) fe->last_result = DVS_SOLVE_TIMEOUT;
+            }
+        }
+        if (fe->last_result == DVS_SOLVE_TIMEOUT && !getenv("DV_NO_BITBLAST")) {
+            /* Escalate to the bit-blast session, as check-sat escalates. */
+            dvs_solver_restore(fe->ctx, (uint32_t)cp);
+            if (_check_sat_assuming_bb(fe, lits)) return 0;
+            cp = dvs_solver_checkpoint(fe->ctx);
+            if (cp < 0) {
+                fprintf(fe->err, "error: check-sat-assuming: no checkpoint slot\n");
+                return -1;
+            }
+        }
         switch (fe->last_result) {
         case DVS_SOLVE_OK:      fprintf(fe->out, "sat\n"); break;
         case DVS_SOLVE_UNSAT:   fprintf(fe->out, "unsat\n"); break;
@@ -7473,6 +7826,7 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     free(fe->ctx_buf);
     free(fe->vars);
     free(fe->var_idx);
+    free(fe->fun_idx);
     free(fe->funs);
     free(fe->subst_stack);
     free(fe->fun_memo);
@@ -7519,8 +7873,9 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     int      array_auto = fe->array_auto;
     uint64_t div_counter = fe->div_counter;
     uint32_t reseed_period = fe->reseed_period;
-    /* The array engine's bb_solver was built over fe->problem, freed below. */
-    if (fe->bb_over_problem && fe->bb_solver) {
+    /* The array engine's bb_solver was built over fe->problem, freed below;
+     * a session's holds the assertions being reset. */
+    if ((fe->bb_over_problem || fe->bb_sess) && fe->bb_solver) {
         dvs_bbsolver_free(fe->bb_solver);
         fe->bb_solver = NULL;
         fe->cache_valid = 0;
@@ -7554,6 +7909,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     free(fe->ctx_buf);
     free(fe->vars);
     free(fe->var_idx);
+    free(fe->fun_idx);
     free(fe->funs);          /* re-zeroed by the memset below; realloc'd on next define-fun */
     free(fe->subst_stack);   /* re-zeroed by the memset below; realloc'd on next let */
     free(fe->fun_memo);

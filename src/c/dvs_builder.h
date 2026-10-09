@@ -77,6 +77,19 @@ dvs_problem_t *dvs_builder_finalize_reserve(dvs_builder_t *b, size_t *size,
                                        uint32_t extra_bytes);
 
 /**
+ * Bring `prev`, a problem this function returned earlier for the same builder,
+ * up to date: copy only the pool bytes added since, growing it (realloc) when
+ * its capacity is short. Valid because the pool is append-only between
+ * resets: nothing rewrites a byte a finalize has copied (rewind drops list
+ * items without reclaiming their bytes). With prev NULL, a full copy with
+ * headroom. Returns the (possibly moved) problem; on failure NULL, and prev is
+ * untouched. The caller frees it with free(); with a custom allocator this is
+ * a plain dvs_builder_finalize.
+ */
+dvs_problem_t *dvs_builder_finalize_append(dvs_builder_t *b, dvs_problem_t *prev,
+                                           size_t *size);
+
+/**
  * A position in the builder's item lists (vars, constraints, sources,
  * all-different groups, softs, dists), taken with dvs_builder_mark().
  */

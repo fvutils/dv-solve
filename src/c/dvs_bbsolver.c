@@ -47,6 +47,15 @@ typedef struct {
 
 #define BB_NO_SLICE UINT32_MAX
 
+/* A session scope (dvs_bbsolver_sess_push). Its assertions are clauses
+ * (-sel | a), live while `sel` is assumed; pop adds the unit -sel. */
+typedef struct {
+    dvs_aig_node_t sel;
+    uint32_t       var_mark;    /* variables from here up belong to the scope */
+    uint32_t       n_asserts;   /* assert_nodes at the push */
+    uint32_t       n_slices;    /* slices at the push */
+} bb_frame_t;
+
 /* Memoization cache entry — one per dvs_expr_t byte offset in the pool. */
 typedef struct {
     dvs_bv_t bv;      /* size == 0 marks "not yet bit-blasted" */
@@ -87,6 +96,10 @@ struct dvs_bbsolver_s {
     uint32_t       *reach_mark;  /* size reach_cap, or NULL */
     uint32_t        reach_cap;
     uint32_t        reach_epoch;
+    /* rhs_var[v]: v occurs in the right side of a recorded substitution or
+     * slice. Only then can a new substitution's right side reach v through
+     * the substitution graph, so subst_reaches_var runs only for those. */
+    uint8_t        *rhs_var;     /* size n_vars, or NULL (always walk) */
 
     /* Slice substitutions (piece 5.1): slice_head[var_id] starts the var's
      * chain in slices[], BB_NO_SLICE if none. A var has slices or a whole
@@ -101,6 +114,7 @@ struct dvs_bbsolver_s {
      * (dvs_bbsum); one used more often is kept, so it stays shared. */
     uint8_t        *uses;        /* size uses_cap, or NULL */
     uint32_t        uses_cap;
+    uint8_t        *fo_seen;     /* count_fanout's visited set, size uses_cap */
 
     /* Bitmap of constraint indices to skip (those consumed by substitution).
      * Indexed by enumeration order of constraints_head walk. */
@@ -153,6 +167,27 @@ struct dvs_bbsolver_s {
     /* An assertion could not be recorded in assert_nodes (out of memory), so
      * the list is not the whole problem: no simulation verdicts. */
     int             asserts_lost;
+
+    /* Session mode (dvs_bbsolver_sess_*): constraints arrive in batches, each
+     * at the depth of its scope, and the instance outlives check-sats. */
+    int             sess;
+    bb_frame_t     *frames;
+    uint32_t        n_frames, cap_frames;
+    /* A substitution may define only variables from sub_floor up: those of
+     * the innermost scope, which go when it does. */
+    uint32_t        sub_floor;
+    /* Variables substituted in the current batch (their bits are encoded so
+     * the model reads them). */
+    uint32_t       *new_subst;
+    uint32_t        n_new_subst, cap_new_subst;
+    /* Variable-list entries bb_grow_vars has seen; a pop sets refill. */
+    uint32_t        seen_vars;
+    int             refill;
+    /* assert_top guards its assertion with the selector of scope
+     * assert_frame - 1 (0: none), and tags it in assert_tags. */
+    uint32_t        assert_frame;
+    uint32_t       *assert_tags;
+    uint32_t        tags_cap;
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -167,7 +202,26 @@ static void xfree(dvs_alloc_t *a, void *p, size_t sz) {
 /* Encode `node` as a hard top-level assertion AND remember it, so the diversity
  * flip-check can re-verify every assertion after a tentative bit flip. */
 static void assert_top(dvs_bbsolver_t *S, dvs_aig_node_t node) {
-    dvs_aig_cnf_encode(S->cnf, node, /*top_level=*/1);
+    if (S->assert_frame) {
+        /* Inside a session scope: the clause (-sel | node), live while sel is
+         * assumed. Encoding TRUE first gives FALSE its variable. */
+        dvs_aig_node_t sel = S->frames[S->assert_frame - 1].sel;
+        dvs_aig_cnf_encode(S->cnf, DVS_AIG_TRUE, /*top_level=*/0);
+        dvs_aig_cnf_encode(S->cnf, node, /*top_level=*/0);
+        dvs_sat_add_binary(S->sat, (dvs_sat_lit_t)-sel, (dvs_sat_lit_t)node);
+    } else {
+        dvs_aig_cnf_encode(S->cnf, node, /*top_level=*/1);
+    }
+    if (S->sess && !S->asserts_lost) {
+        /* Which scope owns each entry, so a pop keeps the others. */
+        if (S->n_asserts == S->tags_cap) {
+            uint32_t nc = S->tags_cap ? 2 * S->tags_cap : 64;
+            uint32_t *t = (uint32_t *)realloc(S->assert_tags, nc * sizeof(*t));
+            if (!t) { S->asserts_lost = 1; return; }
+            S->assert_tags = t; S->tags_cap = nc;
+        }
+        S->assert_tags[S->n_asserts] = S->assert_frame;
+    }
     if (S->n_asserts == S->asserts_cap) {
         uint32_t nc = S->asserts_cap ? S->asserts_cap * 2 : 64;
         dvs_aig_node_t *na = (dvs_aig_node_t *)xalloc(S->alloc,
@@ -343,6 +397,10 @@ static int subst_reaches_var(dvs_bbsolver_t *S,
         if (v->var_id >= S->n_vars) return 0;
         if (visited[v->var_id] == S->reach_epoch) return 0;
         visited[v->var_id] = S->reach_epoch;
+        /* A built variable's bits are fixed: bit-blasting never resolves
+         * through its substitution again, so no cycle passes through it.
+         * (Only a session builds variables between substitution passes.) */
+        if (S->vars[v->var_id].bv_built) return 0;
         /* If this variable has its own substitution, look through it. */
         if (S->subst[v->var_id] != EXPR_NULL) {
             return subst_reaches_var(S, S->subst[v->var_id], target_var, visited);
@@ -424,6 +482,101 @@ static uint32_t *reach_begin(dvs_bbsolver_t *S) {
     return S->reach_mark;
 }
 
+/* Walk `ref` down to its variables, not looking through substitutions. With
+ * `flag`, mark each in rhs_var and return 0; otherwise return whether
+ * `target` occurs. */
+static int expr_direct_vars(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t target,
+                            int flag) {
+    if (ref == EXPR_NULL) return 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp) return 0;
+    switch (*kp) {
+    case EXPR_VAR: {
+        uint32_t id = ((ExprVar *)kp)->var_id;
+        if (!flag) return id == target;
+        if (id < S->n_vars) S->rhs_var[id] = 1;
+        return 0;
+    }
+    case EXPR_BINARY: {
+        ExprBinary *b = (ExprBinary *)kp;
+        return expr_direct_vars(S, b->lhs, target, flag)
+            || expr_direct_vars(S, b->rhs, target, flag);
+    }
+    case EXPR_UNARY:
+        return expr_direct_vars(S, ((ExprUnary *)kp)->operand, target, flag);
+    case EXPR_ITE: {
+        ExprITE *e = (ExprITE *)kp;
+        return expr_direct_vars(S, e->cond, target, flag)
+            || expr_direct_vars(S, e->then_e, target, flag)
+            || expr_direct_vars(S, e->else_e, target, flag);
+    }
+    case EXPR_IN_RANGE: {
+        ExprInRange *r = (ExprInRange *)kp;
+        return expr_direct_vars(S, r->value, target, flag)
+            || expr_direct_vars(S, r->lo, target, flag)
+            || expr_direct_vars(S, r->hi, target, flag);
+    }
+    case EXPR_IN_SET: {
+        ExprInSet *iset = (ExprInSet *)kp;
+        if (expr_direct_vars(S, iset->value, target, flag)) return 1;
+        dvs_expr_t *elems = expr_in_set_elems(S->problem, ref);
+        for (uint32_t i = 0; i < iset->n_elems; i++)
+            if (expr_direct_vars(S, elems[i], target, flag)) return 1;
+        return 0;
+    }
+    case EXPR_IN_RANGES: {
+        ExprInRanges *irs = (ExprInRanges *)kp;
+        if (expr_direct_vars(S, irs->value, target, flag)) return 1;
+        dvs_expr_t *los = expr_in_ranges_los(S->problem, ref);
+        dvs_expr_t *his = expr_in_ranges_his(S->problem, ref);
+        for (uint32_t i = 0; i < irs->n_ranges; i++)
+            if (expr_direct_vars(S, los[i], target, flag) ||
+                expr_direct_vars(S, his[i], target, flag)) return 1;
+        return 0;
+    }
+    case EXPR_EXTEND:
+        return expr_direct_vars(S, ((ExprExtend *)kp)->operand, target, flag);
+    case EXPR_SV_CAST:
+        return expr_direct_vars(S, ((ExprSvCast *)kp)->operand, target, flag);
+    case EXPR_EXTRACT:
+        return expr_direct_vars(S, ((ExprExtract *)kp)->operand, target, flag);
+    case EXPR_CONCAT: {
+        ExprConcat *c = (ExprConcat *)kp;
+        return expr_direct_vars(S, c->hi, target, flag)
+            || expr_direct_vars(S, c->lo, target, flag);
+    }
+    default: return 0;
+    }
+}
+
+/* Would var := eref close a cycle in the substitution graph? Everything
+ * eref reaches is a variable of eref itself or of some recorded right side,
+ * so a variable in no right side is reached only by occurring in eref. */
+static int subst_cycles(dvs_bbsolver_t *S, dvs_expr_t eref, uint32_t var) {
+    if (S->rhs_var && !S->rhs_var[var]) return expr_direct_vars(S, eref, var, 0);
+    uint32_t *mark = reach_begin(S);
+    return !mark || subst_reaches_var(S, eref, var, mark);
+}
+
+/* May a substitution define `var`? Not once its bits are built (a session's
+ * earlier batch referenced it), nor below the innermost scope's variables. */
+static int subst_definable(const dvs_bbsolver_t *S, uint32_t var) {
+    return var >= S->sub_floor && !S->vars[var].bv_built;
+}
+
+/* Bookkeeping for a recorded substitution of `var` by `eref`. */
+static void note_subst(dvs_bbsolver_t *S, dvs_expr_t eref, uint32_t var) {
+    if (S->rhs_var) expr_direct_vars(S, eref, 0, 1);
+    if (!S->sess) return;
+    if (S->n_new_subst == S->cap_new_subst) {
+        uint32_t c = S->cap_new_subst ? 2 * S->cap_new_subst : 256;
+        uint32_t *p = (uint32_t *)realloc(S->new_subst, c * sizeof(*p));
+        if (!p) { S->had_error = 1; return; }
+        S->new_subst = p; S->cap_new_subst = c;
+    }
+    S->new_subst[S->n_new_subst++] = var;
+}
+
 /* Attempt to register a substitution var(vref) := eref. Returns 1 if
  * a new substitution was recorded. Rejects if eref transitively
  * (through the current subst graph) reaches the var being substituted —
@@ -433,6 +586,7 @@ static int try_record_subst(dvs_bbsolver_t *S, dvs_expr_t vref, dvs_expr_t eref)
     if (!vk || *vk != EXPR_VAR) return 0;
     ExprVar *v = (ExprVar *)vk;
     if (v->var_id >= S->n_vars) return 0;
+    if (!subst_definable(S, v->var_id)) return 0;
     if (S->subst[v->var_id] != EXPR_NULL) return 0;
     if (S->slice_head && S->slice_head[v->var_id] != BB_NO_SLICE) return 0;
     /* `v == e` DEFINES v only when e is no wider than v (v then equals e
@@ -441,10 +595,10 @@ static int try_record_subst(dvs_bbsolver_t *S, dvs_expr_t vref, dvs_expr_t eref)
     if (bb_self_width(S, eref, 0) > S->vars[v->var_id].width) return 0;
     /* Transitive cycle check: would substituting create a cycle in the
      * subst graph reachable from this var? */
-    uint32_t *mark = reach_begin(S);
-    if (!mark || subst_reaches_var(S, eref, v->var_id, mark)) return 0;
+    if (subst_cycles(S, eref, v->var_id)) return 0;
     S->subst[v->var_id] = eref;
     S->n_substs++;
+    note_subst(S, eref, v->var_id);
     return 1;
 }
 
@@ -483,11 +637,11 @@ static int try_record_slice(dvs_bbsolver_t *S, dvs_expr_t sref, dvs_expr_t eref)
     if (!S->slice_head) return 0;
     uint32_t id; uint16_t hi, lo;
     if (!as_var_slice(S, sref, &id, &hi, &lo)) return 0;
+    if (!subst_definable(S, id)) return 0;
     if (bb_self_width(S, eref, 0) > (uint32_t)(hi - lo + 1)) return 0;
     for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
         if (!(hi < S->slices[i].lo || lo > S->slices[i].hi)) return 0;
-    uint32_t *mark = reach_begin(S);
-    if (!mark || subst_reaches_var(S, eref, id, mark)) return 0;
+    if (subst_cycles(S, eref, id)) return 0;
     if (S->n_slices == S->cap_slices) {
         uint32_t c = S->cap_slices ? 2 * S->cap_slices : 64;
         bb_slice_t *p = (bb_slice_t *)realloc(S->slices, c * sizeof(*p));
@@ -498,6 +652,7 @@ static int try_record_slice(dvs_bbsolver_t *S, dvs_expr_t sref, dvs_expr_t eref)
     sl->eref = eref; sl->hi = hi; sl->lo = lo; sl->next = S->slice_head[id];
     S->slice_head[id] = S->n_slices++;
     S->n_substs++;
+    note_subst(S, eref, id);
     return 1;
 }
 
@@ -579,17 +734,37 @@ static dvs_expr_t fanout_inner(dvs_bbsolver_t *S, dvs_expr_t ref) {
     }
 }
 
-/* Count the fanout of every node reachable from the constraints that are
- * still encoded (see S->uses). Iterative: the DAG can be deep. */
-static void count_fanout(dvs_bbsolver_t *S) {
-    uint32_t cap = S->cache_cap;
-    if (!cap || getenv("DV_BB_SUM_NO_FANOUT")) return;
-    S->uses = (uint8_t *)calloc(cap, 1);
-    uint8_t *seen = (uint8_t *)calloc(cap, 1);
+/* Size uses[] and fo_seen[] to the memo cache (a session's grows). */
+static int fanout_reserve(dvs_bbsolver_t *S) {
+    uint32_t cap = S->cache_cap, old = S->uses ? S->uses_cap : 0;
+    if (S->uses && old >= cap) return 1;
+    uint8_t *u = (uint8_t *)realloc(S->uses, cap);
+    if (u) S->uses = u;
+    uint8_t *f = u ? (uint8_t *)realloc(S->fo_seen, cap) : NULL;
+    if (f) S->fo_seen = f;
+    if (!u || !f) {
+        free(S->uses); free(S->fo_seen);
+        S->uses = NULL; S->fo_seen = NULL; S->uses_cap = 0;
+        return 0;
+    }
+    memset(u + old, 0, cap - old);
+    memset(f + old, 0, cap - old);
+    S->uses_cap = cap;
+    return 1;
+}
+
+/* Count the fanout of every node reachable from `roots` (skipping those with
+ * skip[i] set) into S->uses. Nodes counted by an earlier call are not
+ * descended again, so a session counts each batch's new nodes once.
+ * Iterative: the DAG can be deep. */
+static void count_fanout_from(dvs_bbsolver_t *S, const dvs_expr_t *roots,
+                              const uint8_t *skip, uint32_t n_roots) {
+    if (!S->cache_cap || getenv("DV_BB_SUM_NO_FANOUT")) return;
+    if (!fanout_reserve(S)) return;
+    uint32_t cap = S->uses_cap;
+    uint8_t *seen = S->fo_seen;
     dvs_expr_t *stk = NULL;
     size_t n = 0, scap = 0;
-    if (!S->uses || !seen) goto fail;
-    S->uses_cap = cap;
     #define FO_EDGE(C) do {                                                    \
         dvs_expr_t c_ = (C);                                                   \
         for (int g_ = 0; g_ < 64 && c_ != EXPR_NULL; g_++) {                   \
@@ -608,12 +783,8 @@ static void count_fanout(dvs_bbsolver_t *S) {
             break;                                                             \
         }                                                                      \
     } while (0)
-    uint32_t idx = 0;
-    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL; idx++) {
-        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
-        if (!(S->constraint_skip && S->constraint_skip[idx])) FO_EDGE(cs->root);
-        cur = cs->next;
-    }
+    for (uint32_t i = 0; i < n_roots; i++)
+        if (!(skip && skip[i])) FO_EDGE(roots[i]);
     while (n > 0) {
         dvs_expr_t r = stk[--n];
         ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, r);
@@ -684,14 +855,28 @@ static void count_fanout(dvs_bbsolver_t *S) {
     }
     #undef FO_EDGE
     free(stk);
-    free(seen);
     return;
 fail:
     free(stk);
-    free(seen);
-    free(S->uses);
-    S->uses = NULL;
-    S->uses_cap = 0;
+    free(S->uses); free(S->fo_seen);
+    S->uses = NULL; S->fo_seen = NULL; S->uses_cap = 0;
+}
+
+/* Fanout over the constraints that are still encoded (see S->uses). */
+static void count_fanout(dvs_bbsolver_t *S) {
+    uint32_t n = 0;
+    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL; n++)
+        cur = ((ConstraintSpec *)POOL_PTR(S->problem, cur))->next;
+    dvs_expr_t *roots = (dvs_expr_t *)malloc((n ? n : 1) * sizeof(dvs_expr_t));
+    if (!roots) return;
+    uint32_t i = 0;
+    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL; i++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        roots[i] = cs->root;
+        cur = cs->next;
+    }
+    count_fanout_from(S, roots, S->n_constraints == n ? S->constraint_skip : NULL, n);
+    free(roots);
 }
 
 /* Pre-pass: scan all top-level constraints, populate S->subst, mark
@@ -711,6 +896,7 @@ static void run_subst_pass(dvs_bbsolver_t *S) {
     S->constraint_skip = (uint8_t *)xalloc(S->alloc, n * sizeof(uint8_t));
     if (!S->subst || !S->resolving || !S->constraint_skip) return;
     for (uint32_t i = 0; i < S->n_vars; i++) S->subst[i] = EXPR_NULL;
+    S->rhs_var = (uint8_t *)calloc(S->n_vars, 1);
     if (getenv("DV_BB_NO_SLICE") == NULL) {
         S->slice_head = (uint32_t *)malloc(S->n_vars * sizeof(uint32_t));
         if (S->slice_head)
@@ -1569,8 +1755,13 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     xfree(S->alloc, S->subst, S->n_vars * sizeof(dvs_expr_t));
     xfree(S->alloc, S->resolving, S->n_vars * sizeof(uint8_t));
     free(S->reach_mark);
+    free(S->rhs_var);
     free(S->slice_head);
     free(S->uses);
+    free(S->fo_seen);
+    free(S->frames);
+    free(S->new_subst);
+    free(S->assert_tags);
     free(S->slices);
     xfree(S->alloc, S->constraint_skip, S->n_constraints * sizeof(uint8_t));
     xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(dvs_aig_node_t));
@@ -2269,9 +2460,16 @@ static int _sim_result(dvs_bbsolver_t *S, dvs_aigsim_t *sim, int r) {
     return DVS_BB_SAT;
 }
 
+/* Solve under the live session scopes' selectors (none outside a session). */
+static int bb_sat_solve(dvs_bbsolver_t *S) {
+    for (uint32_t i = 0; i < S->n_frames; i++)
+        dvs_sat_assume(S->sat, (dvs_sat_lit_t)S->frames[i].sel);
+    return dvs_sat_solve(S->sat);
+}
+
 static void _sim_check(dvs_bbsolver_t *S, int verdict) {
     if (!getenv("DV_SIM_CHECK") || verdict == DVS_BB_UNKNOWN) return;
-    int sat = dvs_sat_solve(S->sat);
+    int sat = bb_sat_solve(S);
     if ((sat == DVS_BB_SAT || sat == DVS_BB_UNSAT) && sat != verdict) {
         fprintf(stderr, "bb-sim: MISMATCH simulation %s, SAT %s\n",
                 verdict == DVS_BB_SAT ? "sat" : "unsat", sat == DVS_BB_SAT ? "sat" : "unsat");
@@ -2281,7 +2479,7 @@ static void _sim_check(dvs_bbsolver_t *S, int verdict) {
 
 /* Simulation, then SAT. Returns the DVS_BB_* verdict. */
 static int _solve_with_sim(dvs_bbsolver_t *S) {
-    if (!S->presim || S->asserts_lost || !S->n_asserts) return dvs_sat_solve(S->sat);
+    if (!S->presim || S->asserts_lost || !S->n_asserts) return bb_sat_solve(S);
     int log = getenv("DV_LOG") != NULL;
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -2305,7 +2503,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
         }
     }
     dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
-    if (!sim) return dvs_sat_solve(S->sat);
+    if (!sim) return bb_sat_solve(S);
     uint64_t work = dvs_aigsim_exhaustive_work(sim);
     uint64_t per_pass = (uint64_t)dvs_aigsim_gates(sim) + S->n_asserts;
     const char *how;
@@ -2337,7 +2535,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
     int raced = work <= _env_u64("DV_SIM_RACE_WORK", 6000000000ull)
              && dvs_thread_create(&th, bb_sweep_worker, &arg) == 0;
     if (raced) dvs_sat_set_terminate(S->sat, (void *)&arg.sat_stop, bb_sweep_terminate);
-    rc = dvs_sat_solve(S->sat);
+    rc = bb_sat_solve(S);
     const char *winner = "sat-solver";
     if (raced) {
         arg.stop = 1;
@@ -2725,15 +2923,43 @@ int dvs_bbsolver_rediversify(dvs_bbsolver_t *S, uint64_t seed) {
  * assert's bounds loop both index by var_id < S->n_vars, so this keeps them in
  * range. The memo cache bounds-checks out-of-range refs itself, so it needs no
  * growth (new lemma nodes are simply re-blasted without memoization). */
+/* Fill each table entry from `from` up that is not yet defined from the
+ * first `walk` entries of the problem's variable list. */
+static void bb_fill_vars(dvs_bbsolver_t *S, uint32_t from, uint32_t walk) {
+    uint32_t k = 0;
+    for (dvs_expr_t cur = S->problem->vars_head; cur != EXPR_NULL && k++ < walk; ) {
+        VarSpec *vs = (VarSpec *)POOL_PTR(S->problem, cur);
+        if (vs->var_id >= from && vs->var_id < S->n_vars && !S->vars[vs->var_id].defined) {
+            bb_var_t *v = &S->vars[vs->var_id];
+            v->width = vs->width; v->is_signed = vs->is_signed;
+            v->defined = 1; v->lo = vs->lo; v->hi = vs->hi;
+        }
+        cur = vs->next;
+    }
+}
+
 static void bb_grow_vars(dvs_bbsolver_t *S) {
-    uint32_t max_id = 0; int any = 0;
-    for (dvs_expr_t cur = S->problem->vars_head; cur != EXPR_NULL; ) {
+    /* A session walks only the variables added since its last sync (the
+     * list is newest first and only grows between pops); after a pop, all
+     * of them, to refill the entries the pop cleared (ids are reused). */
+    uint32_t walk = UINT32_MAX;
+    if (S->sess && !S->refill && S->problem->n_vars >= S->seen_vars)
+        walk = S->problem->n_vars - S->seen_vars;
+    uint32_t max_id = 0, k = 0; int any = 0;
+    for (dvs_expr_t cur = S->problem->vars_head; cur != EXPR_NULL && k < walk; k++) {
         VarSpec *vs = (VarSpec *)POOL_PTR(S->problem, cur);
         if (!any || vs->var_id > max_id) { max_id = vs->var_id; any = 1; }
         cur = vs->next;
     }
     uint32_t need = any ? max_id + 1 : 0;
-    if (need <= S->n_vars) return;
+    if (need <= S->n_vars) {
+        if (S->sess) {
+            bb_fill_vars(S, 0, walk);
+            S->seen_vars = S->problem->n_vars;
+            S->refill = 0;
+        }
+        return;
+    }
     uint32_t old = S->n_vars;
     bb_var_t *nv = (bb_var_t *)xalloc(S->alloc, need * sizeof(bb_var_t));
     if (!nv) return;   /* OOM: leave as-is; assert's var_id<n_vars guard holds */
@@ -2750,6 +2976,8 @@ static void bb_grow_vars(dvs_bbsolver_t *S) {
             for (uint32_t i = old; i < need; i++) ns[i] = EXPR_NULL;
             xfree(S->alloc, S->subst, old * sizeof(dvs_expr_t));
             S->subst = ns;
+        } else {
+            return;
         }
     }
     if (S->slice_head) {
@@ -2768,17 +2996,25 @@ static void bb_grow_vars(dvs_bbsolver_t *S) {
             memset(nr + old, 0, need - old);
             xfree(S->alloc, S->resolving, old * sizeof(uint8_t));
             S->resolving = nr;
+        } else {
+            return;
+        }
+    }
+    if (S->rhs_var) {
+        uint8_t *nr = (uint8_t *)realloc(S->rhs_var, need);
+        if (nr) {
+            memset(nr + old, 0, need - old);
+            S->rhs_var = nr;
+        } else {
+            free(S->rhs_var);       /* exact fallback: always walk */
+            S->rhs_var = NULL;
         }
     }
     S->n_vars = need;
-    for (dvs_expr_t cur = S->problem->vars_head; cur != EXPR_NULL; ) {
-        VarSpec *vs = (VarSpec *)POOL_PTR(S->problem, cur);
-        if (vs->var_id >= old && vs->var_id < need) {
-            bb_var_t *v = &S->vars[vs->var_id];
-            v->width = vs->width; v->is_signed = vs->is_signed;
-            v->defined = 1; v->lo = vs->lo; v->hi = vs->hi;
-        }
-        cur = vs->next;
+    bb_fill_vars(S, S->sess ? 0 : old, walk);
+    if (S->sess) {
+        S->seen_vars = S->problem->n_vars;
+        S->refill = 0;
     }
 }
 
@@ -2882,6 +3118,172 @@ int dvs_bbsolver_resolve_raw(dvs_bbsolver_t *S) {
     S->node_val = NULL;   /* value readback -> raw cnf model (seed 0) */
     int rc = dvs_sat_solve(S->sat);
     S->last_result = rc;
+    return rc;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Session mode (docs/fw_hdl_implementation_plan.md, piece 6.1).
+ *
+ * One instance serves every check-sat of an SMT-LIB session. Constraints are
+ * added in batches; a batch added inside a scope (sess_push) is asserted as
+ * (-sel | c) and solved under the assumption sel, and the scope's pop adds
+ * -sel for good. Selectors are AIG inputs, so they share the AIG's id space
+ * with every other SAT variable.
+ *
+ * Substitution (`v == e` defines v) works batch by batch: v must not be
+ * built yet (an earlier batch did not read it) and, inside a scope, must
+ * belong to the innermost scope, whose pop forgets it. The caller reuses
+ * variable ids after a pop, so pop clears those entries; expression offsets
+ * are never reused (the builder does not reclaim its pool), so the memo cache
+ * stays valid.
+ * ------------------------------------------------------------------------- */
+
+int dvs_bbsolver_sess_begin(dvs_bbsolver_t *S) {
+    if (!S || S->sess || S->orig_problem || S->subst || S->n_asserts
+            || !dvs_sat_is_incremental(S->sat))
+        return -1;
+    uint32_t n = S->n_vars ? S->n_vars : 1;
+    S->subst = (dvs_expr_t *)xalloc(S->alloc, n * sizeof(dvs_expr_t));
+    S->resolving = (uint8_t *)xalloc(S->alloc, n);
+    S->rhs_var = (uint8_t *)calloc(n, 1);
+    if (!S->subst || !S->resolving || !S->rhs_var) return -1;
+    for (uint32_t i = 0; i < n; i++) S->subst[i] = EXPR_NULL;
+    memset(S->resolving, 0, n);
+    if (getenv("DV_BB_NO_SLICE") == NULL) {
+        S->slice_head = (uint32_t *)malloc(n * sizeof(uint32_t));
+        if (!S->slice_head) return -1;
+        for (uint32_t i = 0; i < n; i++) S->slice_head[i] = BB_NO_SLICE;
+    }
+    S->sess = 1;
+    return 0;
+}
+
+uint32_t dvs_bbsolver_sess_depth(const dvs_bbsolver_t *S) {
+    return S ? S->n_frames : 0;
+}
+
+int dvs_bbsolver_sess_push(dvs_bbsolver_t *S, uint32_t var_mark) {
+    if (!S || !S->sess) return -1;
+    if (S->n_frames && var_mark < S->frames[S->n_frames - 1].var_mark) return -1;
+    if (S->n_frames == S->cap_frames) {
+        uint32_t c = S->cap_frames ? 2 * S->cap_frames : 8;
+        bb_frame_t *f = (bb_frame_t *)realloc(S->frames, c * sizeof(*f));
+        if (!f) return -1;
+        S->frames = f; S->cap_frames = c;
+    }
+    bb_frame_t *f = &S->frames[S->n_frames];
+    f->sel = dvs_aig_mk_input(S->aig);
+    dvs_aig_cnf_encode(S->cnf, f->sel, /*top_level=*/0);
+    f->var_mark  = var_mark;
+    f->n_asserts = S->n_asserts;
+    f->n_slices  = S->n_slices;
+    S->n_frames++;
+    S->sub_floor = var_mark;
+    return 0;
+}
+
+int dvs_bbsolver_sess_pop(dvs_bbsolver_t *S) {
+    if (!S || !S->sess || !S->n_frames) return -1;
+    bb_frame_t *f = &S->frames[--S->n_frames];
+    dvs_sat_add_unit(S->sat, (dvs_sat_lit_t)-f->sel);
+    if (!S->asserts_lost) {
+        /* Drop the scope's entries; keep the permanent ones made inside it
+         * (bounds of a variable from outside the scope). */
+        uint32_t k = f->n_asserts, depth = S->n_frames + 1;
+        for (uint32_t i = f->n_asserts; i < S->n_asserts; i++)
+            if (S->assert_tags[i] < depth) {
+                S->assert_nodes[k] = S->assert_nodes[i];
+                S->assert_tags[k++] = S->assert_tags[i];
+            }
+        S->n_asserts = k;
+    }
+    for (uint32_t v = f->var_mark; v < S->n_vars; v++) {
+        memset(&S->vars[v], 0, sizeof(S->vars[v]));
+        S->subst[v] = EXPR_NULL;
+        S->resolving[v] = 0;
+        if (S->rhs_var) S->rhs_var[v] = 0;
+        if (S->slice_head) S->slice_head[v] = BB_NO_SLICE;
+    }
+    S->n_slices  = f->n_slices;
+    S->sub_floor = S->n_frames ? S->frames[S->n_frames - 1].var_mark : 0;
+    S->refill = 1;
+    free(S->node_val);
+    S->node_val = NULL;
+    S->last_result = DVS_BB_UNKNOWN;
+    return 0;
+}
+
+/* The innermost scope owning variable `v`, plus one (0: none). */
+static uint32_t sess_owner(const dvs_bbsolver_t *S, uint32_t v) {
+    for (uint32_t i = S->n_frames; i-- > 0; )
+        if (S->frames[i].var_mark <= v) return i + 1;
+    return 0;
+}
+
+int dvs_bbsolver_sess_add(dvs_bbsolver_t *S, const dvs_expr_t *roots, uint32_t n) {
+    if (!S || !S->sess) return DVS_BB_ERROR;
+    if (S->had_error)       return DVS_BB_ERROR;
+    if (S->had_unsupported) return DVS_BB_UNKNOWN;
+    if (S->problem->sources_head != EXPR_NULL) return DVS_BB_UNKNOWN;
+    uint8_t *skip = (uint8_t *)calloc(n ? n : 1, 1);
+    if (!skip) return DVS_BB_ERROR;
+    S->n_new_subst = 0;
+    /* Newest first, as run_subst_pass walks the constraint list: a
+     * transition's `(= w15 w16)` then comes before the bindings of w15 and
+     * w16, so slices go from the next state to the current one and the
+     * transition folds away. Oldest first left 2048 of crc32x16's
+     * equalities to the affine pass at every check. (subst_reaches_var
+     * stops at built variables, so the walk stays inside the batch.) */
+    if (getenv("DV_BB_NO_SUBST") == NULL)
+        for (uint32_t i = n; i-- > 0; ) skip[i] = (uint8_t)collect_substs_from(S, roots[i]);
+    count_fanout_from(S, roots, skip, n);
+    memset(S->resolving, 0, S->n_vars);
+
+    S->assert_frame = S->n_frames;
+    for (uint32_t i = 0; i < n && !S->had_error && !S->had_unsupported; i++) {
+        if (skip[i]) continue;
+        dvs_bv_t pred = bb_predicate(S, roots[i]);
+        if (S->had_error || S->had_unsupported) break;
+        assert_top(S, pred.bits[0]);
+    }
+    free(skip);
+    /* A substituted variable's bits are gates: encode them so the model
+     * reads them (see the same pass in _bb_encode). */
+    for (uint32_t i = 0; i < S->n_new_subst && !S->had_error; i++) {
+        dvs_bv_t bv = bv_for_var(S, S->new_subst[i]);
+        if (S->had_error) break;
+        for (uint32_t bit = 0; bit < bv.size; bit++)
+            dvs_aig_cnf_encode(S->cnf, bv.bits[bit], /*top_level=*/0);
+    }
+    for (uint32_t v = 0; v < S->n_vars && !S->had_error; v++) {
+        if (S->vars[v].defined && S->vars[v].bv_built && !S->vars[v].bounds_asserted) {
+            S->assert_frame = sess_owner(S, v);
+            assert_var_bounds(S, v);
+            S->vars[v].bounds_asserted = 1;
+        }
+    }
+    S->assert_frame = 0;
+    if (S->had_error)       { S->last_result = DVS_BB_ERROR;   return DVS_BB_ERROR; }
+    if (S->had_unsupported) { S->last_result = DVS_BB_UNKNOWN; return DVS_BB_UNKNOWN; }
+    return 0;
+}
+
+int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
+    if (!S || !S->sess) return DVS_BB_ERROR;
+    if (S->had_error)       return DVS_BB_ERROR;
+    if (S->had_unsupported) return DVS_BB_UNKNOWN;
+    S->seed = seed;
+    dvs_sat_set_seed(S->sat, seed);
+    {
+        const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
+        uint64_t thresh = mcl && *mcl ? strtoull(mcl, NULL, 10) : 2000000;
+        dvs_sat_set_light_search(S->sat, dvs_aig_cnf_num_clauses(S->cnf) < thresh);
+    }
+    free(S->node_val);
+    S->node_val = NULL;
+    int rc = _solve_with_sim(S);
+    S->last_result = rc;
+    if (rc == DVS_BB_SAT) _diversify(S);
     return rc;
 }
 

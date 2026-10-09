@@ -300,3 +300,91 @@ def test_push_after_conflicting_assert_keeps_the_scope(script, want):
 def test_declarations_after_a_compile_get_distinct_ids(script):
     out, _, _ = _run_interactive(_H.replace("QF_BV", "QF_ABV") + script)
     assert _results(out)[-1] == "sat"
+
+
+@pytest.mark.parametrize("script,want", [
+    # B87: a >64-bit declaration after the CDCL compile made the next push's
+    # flush fail; push returned without a scope, and the pop removed the
+    # enclosing one with `x == 7` -- `sat`.
+    ("(check-sat)(push 1)(assert (= x #x7))(declare-fun q () (_ BitVec 70))"
+     "(push 1)(pop 1)(assert (= x #x8))(check-sat)", ["sat", "unsat"]),
+    ("(check-sat)(push 1)(declare-fun q () (_ BitVec 70))(push 1)"
+     "(assert (= ((_ extract 3 0) q) x))(pop 1)(assert (= x #x1))(check-sat)"
+     "(pop 1)(assert (= x #x2))(check-sat)(assert (= x #x1))(check-sat)", ["sat", "sat", "sat", "unsat"]),
+])
+def test_push_after_a_wide_declaration_keeps_the_scope(script, want):
+    out, err, _ = _run_interactive(_H + script)
+    assert _results(out) == want, err
+    assert "underflow" not in out
+
+
+@pytest.mark.parametrize("script,want", [
+    # Bit-blast session (fw-hdl plan piece 6.1): one instance across the
+    # check-sats, scopes as selectors, ids reused after a pop.
+    ("(declare-fun w () (_ BitVec 70))(assert (= x ((_ extract 3 0) w)))(check-sat)"
+     "(push 1)(declare-fun v () (_ BitVec 4))(assert (= v #x5))(assert (= x v))(check-sat)"
+     "(pop 1)(declare-fun u () (_ BitVec 8))(assert (= ((_ extract 3 0) u) x))"
+     "(assert (not (= x #x5)))(check-sat)(push 1)(assert (= x #x5))(check-sat)(pop 1)(check-sat)",
+     ["sat", "sat", "sat", "unsat", "sat"]),
+    # A variable declared before a push and defined inside it is free again
+    # after the pop.
+    ("(declare-fun w () (_ BitVec 70))(declare-fun v () (_ BitVec 8))(check-sat)(check-sat)"
+     "(push 1)(assert (= v #x05))(check-sat)(pop 1)(assert (= v #x06))(check-sat)",
+     ["sat", "sat", "sat", "sat"]),
+])
+def test_bitblast_session_scopes(script, want):
+    out, err, _ = _run_interactive(_H + script)
+    assert _results(out) == want, err
+
+
+_HB = _H + "(declare-fun b () Bool)(declare-fun p () Bool)"
+
+
+@pytest.mark.parametrize("script,want", [
+    # B89: `p == (not (x < 3))` is not compiled; check-sat-assuming had no
+    # validation net and answered sat with x = 4 (the model check made it
+    # `unknown`).
+    ("(assert (= p (not (bvult x #x3))))(check-sat-assuming ((not p)))", ["sat"]),
+    ("(assert (= p (not (bvult x #x3))))(assert (= x #x1))(check-sat-assuming (p))", ["unsat"]),
+    # B88: an unsat compile kept its context uncompiled, then served it.
+    ("(assert (bvult x x))(push 1)(check-sat-assuming (b))(check-sat-assuming (b))",
+     ["unsat", "unsat"]),
+    # ... and a flush conflict was forgotten by the next check-sat-assuming,
+    # but goes with its scope.
+    ("(push 1)(assert (bvugt y y))(check-sat-assuming (b))(check-sat-assuming (b))"
+     "(pop 1)(check-sat-assuming (b))", ["unsat", "unsat", "sat"]),
+    # ... and push flushed into a context holding the last model.
+    ("(push 1)(check-sat)(assert p)(push 1)(check-sat-assuming (b))", ["sat", "sat"]),
+])
+def test_check_sat_assuming_cdcl(script, want):
+    out, err, _ = _run_interactive(_HB + script)
+    assert _results(out) == want, err
+
+
+@pytest.mark.parametrize("script,want", [
+    ("(assert (bvult x x))(push 1)(check-sat-assuming (b))(check-sat-assuming (b))",
+     ["unsat", "unsat"]),
+    ("(push 1)(assert (bvugt y y))(check-sat-assuming (b))(check-sat-assuming (b))"
+     "(pop 1)(check-sat-assuming (b))", ["unsat", "unsat", "sat"]),
+])
+def test_check_sat_assuming_cdcl_without_the_net(script, want, monkeypatch):
+    """B88 without the validation net and the escalation behind it: the
+    context's own record of the conflict must answer."""
+    monkeypatch.setenv("DV_VALIDATE_MODEL", "0")
+    monkeypatch.setenv("DV_CHECK_MODEL", "0")
+    out, err, _ = _run_interactive(_HB + script)
+    assert _results(out) == want, err
+
+
+def test_check_sat_assuming_wide_uses_the_session():
+    """Assumptions over a >64-bit design answer from the bit-blast session
+    (they used to be `unknown`), and get-unsat-assumptions has its core."""
+    out, err, _ = _run_interactive(
+        "(set-option :produce-models true)(set-logic QF_BV)"
+        "(declare-fun s () (_ BitVec 80))(declare-fun p1 () Bool)(declare-fun p2 () Bool)"
+        "(assert (= p1 (= ((_ extract 7 0) s) #x05)))(assert (= p2 (= ((_ extract 7 0) s) #x06)))"
+        "(check-sat-assuming (p1))(get-value (((_ extract 7 0) s)))"
+        "(check-sat-assuming (p1 p2))(get-unsat-assumptions)"
+        "(check-sat-assuming (p2 (not p1)))(get-value (((_ extract 7 0) s)))(check-sat)")
+    assert _results(out) == ["sat", "unsat", "sat", "sat"], err
+    assert "#b00000101" in out and "(p1 p2)" in out and "#b00000110" in out

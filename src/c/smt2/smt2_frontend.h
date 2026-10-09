@@ -364,6 +364,11 @@ typedef struct {
     uint32_t             var_idx_cap;    /* power of two, or 0 */
     uint32_t             var_idx_used;
     uint32_t             var_idx_n;
+    /* The same over funs[0, fun_idx_n), for _find_fun. */
+    uint32_t            *fun_idx;
+    uint32_t             fun_idx_cap;
+    uint32_t             fun_idx_used;
+    uint32_t             fun_idx_n;
 
     /* Configuration */
     int                  produce_models;
@@ -569,6 +574,12 @@ typedef struct {
 
     /* Incremental state: 1 once the initial problem has been compiled. */
     int                  compiled;
+    /* The compile found the assertions unsat (fe->ctx kept, compiled == 0)
+     * at this push depth; a pop below it drops the context. */
+    uint32_t             ctx_unsat_depth;
+    /* A flush into the context met a conflict at push depth flush_unsat - 1
+     * (0: none): the assertions are unsat until a pop below that depth. */
+    uint32_t             flush_unsat;
     int                  has_aux;
 
     /* Bit-blast incremental state (B14). The bit-blast engine reads fe->problem
@@ -666,6 +677,14 @@ typedef struct {
     int                  bb_inc;
     dvs_expr_t           bb_inc_head;      /* builder constraints_head then */
     uint32_t             bb_inc_ncons, bb_inc_nsofts, bb_inc_ndists, bb_inc_nalldiffs;
+    /* Bit-blast session (_check_sat_session, plan piece 6.1): bb_solver is a
+     * live instance over bb_problem holding the builder's first bb_sess_ncons
+     * constraints, its scopes mirroring the push stack. Pop pops it; _free_bb
+     * and any builder reset end it. bb_checks counts bit-blast check-sats. */
+    int                  bb_sess;
+    int                  bb_sess_assume;   /* a check-sat-assuming scope is open */
+    uint32_t             bb_sess_ncons;
+    uint32_t             bb_checks;
     Smt2ArrayValue     **anodes;
     uint32_t             n_anodes, anodes_cap;
     Smt2ArrayRead       *areads;
