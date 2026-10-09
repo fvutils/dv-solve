@@ -126,6 +126,21 @@ static void _term_error(Smt2Frontend *fe, const char *fmt, ...) {
     if (!fe->term_err[0]) memcpy(fe->term_err, msg, sizeof msg);
     fprintf(fe->err, "error: %s\n", msg);
 }
+
+/* A well-formed term dv-solve does not implement: keep the first message for
+ * (get-info :reason-unknown), and log it as a diagnostic. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 2, 3)))
+#endif
+static void _unsupported(Smt2Frontend *fe, const char *fmt, ...) {
+    char msg[sizeof fe->unsup_msg];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    if (!fe->unsup_msg[0]) memcpy(fe->unsup_msg, msg, sizeof msg);
+    fprintf(fe->err, "error: %s\n", msg);
+}
 #include "dvs_i128.h"
 #include "dvs_stackinfo.h"
 
@@ -647,7 +662,9 @@ static uint32_t _fresh_aux(Smt2Frontend *fe, uint16_t width) {
      * own through whichever branch is consistent with r's domain. */
     dvs_builder_mark_var_aux(fe->builder, vref);
     char name[SMT2_MAX_NAME];
-    snprintf(name, sizeof(name), "__aux%u", var_id);
+    /* A backslash cannot occur in any SMT-LIB symbol, so no user name
+     * collides with an internal one. */
+    snprintf(name, sizeof(name), "\\aux%u", var_id);
     _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint16_t)width);
     /* If _next_var_id skipped past fe->n_vars to dodge backend-internal
      * aux slots, sync fe->n_vars up so the next allocation doesn't
@@ -866,7 +883,7 @@ static uint32_t _fresh_read_var(Smt2Frontend *fe, uint16_t width) {
     int64_t max_val = _bv_unsigned_hi(width);
     dvs_builder_add_var(fe->builder, var_id, (uint16_t)width, 0, 0, max_val);
     char name[SMT2_MAX_NAME];
-    snprintf(name, sizeof(name), "__rd%u", var_id);
+    snprintf(name, sizeof(name), "\\rd%u", var_id);
     _add_var(fe, name, (uint32_t)strlen(name), var_id, (uint16_t)width);
     _bump_n_vars(fe, var_id + 1);
     _builder_touched(fe);
@@ -1862,7 +1879,7 @@ static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
         return _translate_rewrite(fe, s, text);
     }
     if (sw == 0) {
-        fprintf(fe->err, "error: signed compare of width %u unsupported\n",
+        _unsupported(fe, "signed compare of width %u",
                 (unsigned)sw);
         return TAGGED_NULL;
     }
@@ -2182,7 +2199,10 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
                                         head->list.items[2]->numval, &handled);
             if (handled) return r;
         }
-        fprintf(fe->err, "error: unsupported indexed operator\n");
+        if (op_sym->kind == SEXPR_SYMBOL)
+            _unsupported(fe, "indexed operator '%.*s'", (int)op_sym->sym.len, op_sym->sym.str);
+        else
+            _unsupported(fe, "indexed operator");
         return TAGGED_NULL;
     }
 
@@ -3084,7 +3104,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     if ((oplen == 6 && memcmp(op, "bvsdiv", 6) == 0) ||
         (oplen == 6 && memcmp(op, "bvsrem", 6) == 0) ||
         (oplen == 6 && memcmp(op, "bvsmod", 6) == 0)) {
-        fprintf(fe->err, "error: signed operation '%.*s' not yet supported\n",
+        _unsupported(fe, "signed operation '%.*s'",
                 (int)oplen, op);
         return TAGGED_NULL;
     }
@@ -3095,7 +3115,7 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         if (handled) return r;
     }
 
-    fprintf(fe->err, "error: unsupported operation '%.*s'\n",
+    _unsupported(fe, "operation '%.*s'",
             (int)oplen, op);
     return TAGGED_NULL;
 }
@@ -4369,6 +4389,8 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
 
     TypedExpr te;
     fe->term_err[0] = '\0';
+    fe->unsup_msg[0] = '\0';
+    const char *why0 = fe->incomplete ? fe->incomplete_why : NULL;
     dvs_expr_t reified = _try_translate_in_set(fe, cmd->list.items[1]);
     if (reified == EXPR_NULL) reified = _try_translate_reified_or(fe, cmd->list.items[1]);
     if (reified != EXPR_NULL) {
@@ -4392,7 +4414,15 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
         }
         fprintf(fe->err, "error: failed to translate assert expression "
                          "(unsupported construct) -> result will be unknown\n");
-        SMT2_TAINT(fe, "assert used an untranslatable construct");
+        /* Keep a reason the translation recorded; else name the construct. */
+        if (!fe->incomplete || fe->incomplete_why == why0) {
+            if (fe->unsup_msg[0]) {
+                snprintf(fe->taint_msg, sizeof fe->taint_msg, "%s", fe->unsup_msg);
+                SMT2_TAINT(fe, fe->taint_msg);
+            } else {
+                SMT2_TAINT(fe, "assert used an untranslatable construct");
+            }
+        }
         return 0;
     }
     _add_user_constraint(fe, te.ref);
@@ -4513,6 +4543,7 @@ static int _ensure_compiled(Smt2Frontend *fe) {
              * after `(assert (xor true ...))`, `(assert false)` answered sat
              * (B58). */
             fe->compiled = 1;
+            fe->ctx_uncompiled = (uint32_t)rc;
             fe->builder_retained = 0;   /* fe->problem can't be rebuilt in place (B14) */
             fe->has_aux = 0;
             _start_cdcl_retention(fe);
@@ -4593,6 +4624,7 @@ static int _flush_aux(Smt2Frontend *fe) {
         if (fe->ctx_buf_scale && fe->ctx_buf_scale < 64) fe->ctx_buf_scale *= 2;
         rc = 1;
     }
+    if (rc > 0) fe->ctx_uncompiled += (uint32_t)rc;
     /* Retain the aux dvs_problem_t (instead of freeing) so the post-solve
      * model-validation pass can re-evaluate the constraints it contributed.
      * Storage is reclaimed in smt2_frontend_destroy. */
@@ -5251,7 +5283,7 @@ static int _check_sat_array(Smt2Frontend *fe) {
         if (fe->anodes[i]->sort.addr_width > 64 || fe->anodes[i]->sort.data_width > 64) {
             if (fe->print_stats || getenv("DV_LOG"))
                 fprintf(fe->err, "cdcl-unknown: abstract array wider than 64 bits\n");
-            SMT2_EMIT_UNKNOWN(fe); fflush(fe->out);
+            SMT2_EMIT_UNKNOWN(fe, "incomplete: an abstract array wider than 64 bits"); fflush(fe->out);
             fe->last_result = DVS_SOLVE_TIMEOUT; fe->has_result = 1;
             return 0;
         }
@@ -5262,7 +5294,7 @@ static int _check_sat_array(Smt2Frontend *fe) {
     uint32_t vu = dvs_builder_virtual_used(fe->builder);
     uint32_t reserve = vu > (32u << 20) ? vu : (32u << 20);   /* >= 32 MB slack */
     fe->problem = _explicit(dvs_builder_finalize_reserve(fe->builder, &fe->problem_size, reserve));
-    if (!fe->problem) { SMT2_EMIT_UNKNOWN(fe); fflush(fe->out); return -1; }
+    if (!fe->problem) { SMT2_EMIT_UNKNOWN(fe, "memout"); fflush(fe->out); return -1; }
     fe->problem_dirty = 0;
     fe->has_aux = 0;
     if (!fe->compiled) fe->builder_retained = 1;
@@ -5271,7 +5303,7 @@ static int _check_sat_array(Smt2Frontend *fe) {
     fe->bb_solver = dvs_bbsolver_new_backend(NULL, fe->problem, /*cadical=*/1);
     fe->bb_over_problem = 1;
     if (!fe->bb_solver || !dvs_bbsolver_is_incremental(fe->bb_solver)) {
-        SMT2_EMIT_UNKNOWN(fe); fflush(fe->out);
+        SMT2_EMIT_UNKNOWN(fe, "incomplete: no incremental SAT backend for the array engine"); fflush(fe->out);
         return -1;
     }
 
@@ -5295,7 +5327,7 @@ static int _check_sat_array(Smt2Frontend *fe) {
         fprintf(fe->out, "unsat\n");
         fe->last_result = DVS_SOLVE_UNSAT; fe->has_result = 1;
     } else {
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, dvs_bbsolver_unknown_reason(fe->bb_solver));
         fe->last_result = DVS_SOLVE_TIMEOUT; fe->has_result = 1;
     }
     fflush(fe->out);
@@ -5339,7 +5371,7 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
                                     dvs_problem_t **owned_io) {
     dvs_problem_t *owned = *owned_io;
     if (!p) {
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "memout");
         fflush(fe->out);
         return -1;
     }
@@ -5382,7 +5414,7 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
     fe->bb_problem = owned;                 /* lives exactly as long as bb_solver */
     *owned_io = NULL;
     if (!fe->bb_solver) {
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "memout");
         fflush(fe->out);
         fe->cache_valid = 0;
         return -1;
@@ -5413,7 +5445,7 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
         fe->last_result = DVS_SOLVE_UNSAT;
         fe->has_result = 1;
     } else {
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, dvs_bbsolver_unknown_reason(fe->bb_solver));
     }
     fflush(fe->out);
     /* The CDCL path returns 0 for both SAT and UNSAT (only protocol errors
@@ -5682,7 +5714,7 @@ static int _engine_is_cube(Smt2Frontend *fe) {
  * one-shot hard instances, not the re-randomize loop. */
 static int _check_sat_cube(Smt2Frontend *fe) {
     if (!fe->problem) {
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "memout");
         fflush(fe->out);
         return -1;
     }
@@ -5691,7 +5723,7 @@ static int _check_sat_cube(Smt2Frontend *fe) {
      * back to kissat (→ single-shot solve) when CaDiCaL is not compiled in. */
     fe->bb_solver = dvs_bbsolver_new_backend(NULL, fe->problem, /*prefer_cadical=*/1);
     if (!fe->bb_solver) {
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "memout");
         fflush(fe->out);
         return -1;
     }
@@ -5706,7 +5738,7 @@ static int _check_sat_cube(Smt2Frontend *fe) {
         fe->last_result = DVS_SOLVE_UNSAT;
         fe->has_result = 1;
     } else {
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "incomplete: cube-and-conquer gave no verdict");
     }
     fflush(fe->out);
     return rc == DVS_BB_ERROR ? -1 : 0;
@@ -5907,6 +5939,16 @@ static void _shape_record(Smt2Frontend *fe, long us) {
 
 /* DV_LOG in Verilator mode: one `vlt-time <us> <engine>/<why>` line per
  * check-sat, so solve time can be attributed to the routing decision. */
+/* Why CDCL answered unknown, for SMT2_EMIT_UNKNOWN. */
+static const char *_cdcl_unknown_why(Smt2Frontend *fe) {
+    if (fe->last_validate_viol > 0)
+        return "incomplete: the CDCL model failed validation, and the problem "
+               "could not be bit-blasted instead";
+    snprintf(fe->unknown_why, sizeof fe->unknown_why, "incomplete: CDCL search stopped: %s",
+             dvs_solver_bail_reason_str(fe->ctx));
+    return NULL;
+}
+
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     if (!fe->verilator_mode) return _cmd_check_sat_body(fe, cmd);
     struct timespec t0, t1;
@@ -5954,7 +5996,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
             fprintf(fe->err, "cdcl-unknown: tainted at %s:%u -- %s\n",
                     "smt2_frontend.c", fe->incomplete_line,
                     fe->incomplete_why ? fe->incomplete_why : "reason not recorded");
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, NULL);
         fflush(fe->out);
         fe->last_result = DVS_SOLVE_TIMEOUT;
         fe->has_result = 1;
@@ -5984,7 +6026,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
         }
         if (fe->print_stats || getenv("DV_LOG"))
             fprintf(fe->err, "cdcl-unknown: abstract arrays after a CDCL compile\n");
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "incomplete: abstract arrays after a CDCL compile");
         fflush(fe->out);
         fe->last_result = DVS_SOLVE_TIMEOUT;
         fe->has_result = 1;
@@ -5995,7 +6037,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
      * the first finalize (correctness oracle). */
     if (fe->array_eager && !fe->problem && !fe->compiled) {
         if (_emit_array_axioms(fe) < 0) {
-            SMT2_EMIT_UNKNOWN(fe);
+            SMT2_EMIT_UNKNOWN(fe, "incomplete: the array axioms could not be built (out of memory?)");
             fflush(fe->out);
             fe->last_result = DVS_SOLVE_TIMEOUT;
             fe->has_result = 1;
@@ -6082,7 +6124,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
             /* -2: stale problem we cannot safely rebuild -> honest `unknown`,
              * not an error, so the driver's protocol stream stays in sync. */
             if (prc == -2) SMT2_TAINT(fe, "stale problem could not be safely rebuilt");
-            SMT2_EMIT_UNKNOWN(fe);
+            SMT2_EMIT_UNKNOWN(fe, prc == -2 ? NULL : "memout");
             fflush(fe->out);
             fe->last_result = DVS_SOLVE_TIMEOUT;
             fe->has_result  = 1;
@@ -6110,7 +6152,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
             /* -2: stale problem we cannot safely rebuild -> honest `unknown`,
              * not an error, so the driver's protocol stream stays in sync. */
             if (prc == -2) SMT2_TAINT(fe, "stale problem could not be safely rebuilt");
-            SMT2_EMIT_UNKNOWN(fe);
+            SMT2_EMIT_UNKNOWN(fe, prc == -2 ? NULL : "memout");
             fflush(fe->out);
             fe->last_result = DVS_SOLVE_TIMEOUT;
             fe->has_result  = 1;
@@ -6142,7 +6184,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
             fprintf(fe->err, "cdcl-unknown: dvs_solver_compile failed (rc=%d) -- the "
                              "CDCL compile could not build a context for this "
                              "problem\n", crc);
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "incomplete: the CDCL compile could not build a context");
         fflush(fe->out);
         return -1;
     }
@@ -6161,7 +6203,9 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
     if (fe->has_result) dvs_solver_reset(fe->ctx);
 
     int frc = _flush_aux(fe);
-    if (frc == -2) {
+    /* flush_unsat: an earlier flush in a live scope met a root conflict. The
+     * reset above forgot it, so a later flush and solve answered `sat`. */
+    if (frc == -2 || fe->flush_unsat) {
         fprintf(fe->out, "unsat\n");
         fflush(fe->out);
         fe->last_result = DVS_SOLVE_UNSAT;
@@ -6174,7 +6218,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
          * from here on (B87). */
         fe->needs_bitblast = 1;
         if (!fe->nb_why) fe->nb_why = "flush-failed";
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "incomplete: an assertion could not be added to the CDCL context; later checks bit-blast");
         fflush(fe->out);
         return -1;
     }
@@ -6190,7 +6234,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
             if (full) return _check_sat_bitblast_on(fe, full, full);
         }
         if (fe->n_aux_problems == 0) return _check_sat_bitblast(fe);
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "incomplete: the CDCL context overflowed with incremental assertions");
         fflush(fe->out);
         fe->last_result = DVS_SOLVE_TIMEOUT;
         fe->has_result = 1;
@@ -6350,8 +6394,8 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
     if (fe->last_result == DVS_SOLVE_TIMEOUT
             && (fe->print_stats || getenv("DV_LOG"))) {
         fprintf(fe->err,
-                "cdcl-unknown: %s; uncompiled-constraints=%d; vars=%u; conflicts=%llu\n",
-                dvs_solver_bail_reason_str(fe->ctx), crc,
+                "cdcl-unknown: %s; uncompiled-constraints=%u; vars=%u; conflicts=%llu\n",
+                dvs_solver_bail_reason_str(fe->ctx), fe->ctx_uncompiled,
                 fe->ctx ? fe->ctx->n_vars : 0u,
                 fe->ctx ? (unsigned long long)fe->ctx->conflict_count : 0ull);
     }
@@ -6387,7 +6431,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
     switch (fe->last_result) {
     case DVS_SOLVE_OK:      fprintf(fe->out, "sat\n"); break;
     case DVS_SOLVE_UNSAT:   fprintf(fe->out, "unsat\n"); break;
-    case DVS_SOLVE_TIMEOUT: SMT2_EMIT_UNKNOWN(fe); break;
+    case DVS_SOLVE_TIMEOUT: SMT2_EMIT_UNKNOWN(fe, _cdcl_unknown_why(fe)); break;
     }
     fflush(fe->out);
     return 0;
@@ -6792,7 +6836,11 @@ static void _emit_hex_key(FILE *out, uint64_t lo, uint64_t hi, uint32_t width) {
 static void _fprint_sexpr(FILE *out, const Sexpr *s) {
     switch (s->kind) {
     case SEXPR_SYMBOL: case SEXPR_KEYWORD: case SEXPR_DECIMAL:
-        fprintf(out, "%.*s", (int)s->sym.len, s->sym.str); break;
+        if (s->kind == SEXPR_SYMBOL && s->quoted)
+            fprintf(out, "|%.*s|", (int)s->sym.len, s->sym.str);
+        else
+            fprintf(out, "%.*s", (int)s->sym.len, s->sym.str);
+        break;
     case SEXPR_STRING:
         fprintf(out, "\"%.*s\"", (int)s->sym.len, s->sym.str); break;
     case SEXPR_NUMERAL:
@@ -6919,7 +6967,9 @@ static int _get_value_body(Smt2Frontend *fe, const Sexpr *vars_list) {
         if (name_s->kind == SEXPR_SYMBOL) {
             Smt2ArrayVar *av = _find_array_var(fe, name_s->sym.str, name_s->sym.len);
             if (av) {
-                fprintf(fe->out, "(%.*s ", (int)name_s->sym.len, name_s->sym.str);
+                fputc('(', fe->out);
+                _fprint_sexpr(fe->out, name_s);
+                fputc(' ', fe->out);
                 _emit_array_store_chain(fe, av);
                 fprintf(fe->out, ")");
                 continue;
@@ -6927,7 +6977,9 @@ static int _get_value_body(Smt2Frontend *fe, const Sexpr *vars_list) {
 
             Smt2Var *v = _find_var(fe, name_s->sym.str, name_s->sym.len);
             if (v) {
-                fprintf(fe->out, "(%.*s ", (int)name_s->sym.len, name_s->sym.str);
+                fputc('(', fe->out);
+                _fprint_sexpr(fe->out, name_s);
+                fputc(' ', fe->out);
                 if (v->is_bool) {
                     fputs(_fe_get_var_value(fe, v->var_id) & 1 ? "true" : "false", fe->out);
                 } else if (v->width > 64) {
@@ -6994,11 +7046,13 @@ static int _get_value_body(Smt2Frontend *fe, const Sexpr *vars_list) {
                 } else {
                     fprintf(fe->out, "((select ");
                     if (outer_idx) {
-                        fprintf(fe->out, "(select %.*s ", (int)arr_s->sym.len, arr_s->sym.str);
+                        fprintf(fe->out, "(select ");
+                        _fprint_sexpr(fe->out, arr_s);
+                        fputc(' ', fe->out);
                         _emit_hex_key(fe->out, o_lo, o_hi, ow);
                         fprintf(fe->out, ")");
                     } else {
-                        fprintf(fe->out, "%.*s", (int)arr_s->sym.len, arr_s->sym.str);
+                        _fprint_sexpr(fe->out, arr_s);
                     }
                     fprintf(fe->out, " ");
                     _emit_hex_key(fe->out, k, k_hi, iw);
@@ -7050,9 +7104,21 @@ static int _cmd_get_model(Smt2Frontend *fe, const Sexpr *cmd) {
     for (uint32_t i = 0; i < fe->n_vars && i < fe->vars_cap; i++) {
         Smt2Var *v = &fe->vars[i];
         if (!v->name[0]) continue;                 /* an unnamed id (_bump_n_vars) */
-        if (strncmp(v->name, "__aux", 5) == 0) continue;
-        /* Skip array element vars (they appear as part of array model) */
-        if (strchr(v->name, '[') != NULL) continue;
+        if (v->name[0] == '\\') continue;         /* internal (_fresh_aux) */
+        /* Skip array element vars "name[i]" (they appear in the array's
+         * model). A user symbol never ends in ']': a simple one cannot
+         * contain it and a quoted one ends in '|'. */
+        size_t nl = strlen(v->name);
+        if (nl && v->name[nl - 1] == ']') continue;
+        if (v->width > 64) {
+            uint64_t limbs[(SMT2_MAX_BV_BITS + 63) / 64];
+            uint32_t nl = (v->width + 63u) / 64u;
+            _fe_get_var_value_wide(fe, v->var_id, limbs, nl);
+            fprintf(fe->out, "  (define-fun %s () (_ BitVec %u) ", v->name, (unsigned)v->width);
+            _emit_bv_bin_literal_wide(fe->out, limbs, nl, (unsigned)v->width);
+            fprintf(fe->out, ")\n");
+            continue;
+        }
         int64_t val = _fe_get_var_value(fe, v->var_id);
         if (v->is_bool) {
             fprintf(fe->out, "  (define-fun %s () Bool %s)\n", v->name, val & 1 ? "true" : "false");
@@ -7122,6 +7188,12 @@ static int _cmd_get_info(Smt2Frontend *fe, const Sexpr *cmd) {
             fprintf(fe->out, "(:reason-unknown \"unsupported: ");
             _fprint_smt2_string_body(fe->out, fe->incomplete_why
                                      ? fe->incomplete_why : "construct");
+            fprintf(fe->out, "\")\n");
+        } else if (!strcmp(fe->unknown_why, "memout")) {
+            fprintf(fe->out, "(:reason-unknown memout)\n");
+        } else if (fe->unknown_why[0]) {
+            fprintf(fe->out, "(:reason-unknown \"");
+            _fprint_smt2_string_body(fe->out, fe->unknown_why);
             fprintf(fe->out, "\")\n");
         } else {
             fprintf(fe->out, "(:reason-unknown incomplete)\n");
@@ -7565,7 +7637,7 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
 
     /* Tainted or poisoned context -> honest `unknown` (see _cmd_check_sat). */
     if (fe->incomplete || fe->input_poisoned) {
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, NULL);
         fflush(fe->out);
         fe->last_result = DVS_SOLVE_TIMEOUT;
         fe->has_result = 1;
@@ -7599,7 +7671,7 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
             switch (fe->last_result) {
             case DVS_SOLVE_OK:      fprintf(fe->out, "sat\n");     break;
             case DVS_SOLVE_UNSAT:   fprintf(fe->out, "unsat\n");   break;
-            default:            SMT2_EMIT_UNKNOWN(fe); break;
+            default:            SMT2_EMIT_UNKNOWN(fe, NULL); break;
             }
             fflush(fe->out);
             return 0;
@@ -7633,7 +7705,7 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
         return 0;
     }
     if (crc < 0) {
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "incomplete: the CDCL compile could not build a context");
         fflush(fe->out);
         return -1;
     }
@@ -7644,7 +7716,7 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
     if (frc < 0 && frc != -2) {
         fe->needs_bitblast = 1;            /* the context missed some (B87) */
         if (!fe->nb_why) fe->nb_why = "flush-failed";
-        SMT2_EMIT_UNKNOWN(fe);
+        SMT2_EMIT_UNKNOWN(fe, "incomplete: an assertion could not be added to the CDCL context; later checks bit-blast");
         fflush(fe->out);
         return -1;
     }
@@ -7742,7 +7814,7 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
         switch (fe->last_result) {
         case DVS_SOLVE_OK:      fprintf(fe->out, "sat\n"); break;
         case DVS_SOLVE_UNSAT:   fprintf(fe->out, "unsat\n"); break;
-        case DVS_SOLVE_TIMEOUT: SMT2_EMIT_UNKNOWN(fe); break;
+        case DVS_SOLVE_TIMEOUT: SMT2_EMIT_UNKNOWN(fe, _cdcl_unknown_why(fe)); break;
         }
     }
     fe->last_assump_unsat = (fe->last_result == DVS_SOLVE_UNSAT);
@@ -8144,6 +8216,7 @@ static void _note_answer(Smt2Frontend *fe, int rc) {
 static int _check_sat_checked(Smt2Frontend *fe, const Sexpr *cmd,
                               int (*run)(Smt2Frontend *, const Sexpr *)) {
     fe->model_check_why[0] = '\0';
+    fe->unknown_why[0] = '\0';
     Smt2MemOut m;
     if (!_check_models_on(fe) || !_memout_open(&m)) {
         int rc = run(fe, cmd);

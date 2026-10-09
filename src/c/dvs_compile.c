@@ -4398,6 +4398,29 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
         }
     }
 
+    /* ---- At the root, the bounds compile set join the reset snapshot ----
+     * Outside every checkpoint the constraint is permanent, but a bound
+     * tightening has no propagator to re-derive it: the next reset restored
+     * the snapshot and dropped it, so `(assert (= a #x5)) (check-sat)
+     * (check-sat)` answered the second from a context without it. New
+     * variables are snapshotted whole below. */
+    if (ctx->n_checkpoints == 0 && ctx->initial_vars) {
+        for (TrailEntry *t = ctx->trail_top; t && t != add_trail_top; t = t->prev) {
+            if (t->kind != TRAIL_LB && t->kind != TRAIL_UB) continue;
+            uint32_t id = t->var_id;
+            if (id >= init_base_n_vars || id >= ctx->initial_n_vars) continue;
+            const Variable *v = &ctx->vars[id];
+            Variable *iv = &ctx->initial_vars[id];
+            if (VAR_IS_TIER0(v->flags)) {
+                iv->lo = v->lo;
+                iv->hi = v->hi;
+            } else if (VAR_IS_TIER1(v->flags) && v->holes_offset && iv->holes_offset) {
+                *(WideBounds64 *)dvs_pool_ptr(&ctx->pool, iv->holes_offset) =
+                    *(const WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+            }
+        }
+    }
+
     if (_snapshot_added_vars(ctx, init_base_n_vars) < 0) return -1;
 
     /* ---- Run propagation to fixpoint ---- */

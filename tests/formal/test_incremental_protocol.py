@@ -388,3 +388,63 @@ def test_check_sat_assuming_wide_uses_the_session():
         "(check-sat-assuming (p2 (not p1)))(get-value (((_ extract 7 0) s)))(check-sat)")
     assert _results(out) == ["sat", "unsat", "sat", "sat"], err
     assert "#b00000101" in out and "(p1 p2)" in out and "#b00000110" in out
+
+
+_CDCL_SEQ = "(set-option :produce-models true)(set-logic QF_BV)" \
+            "(declare-fun a () (_ BitVec {w}))(declare-fun b () (_ BitVec {w}))"
+
+
+@pytest.mark.parametrize("w", [4, 40])
+@pytest.mark.parametrize("script, want, value", [
+    # A bound an incremental assert sets at the root was dropped by the next
+    # reset: the second check-sat solved without (= a 5) (B93).
+    ("(assert (bvult a b))(check-sat)(assert (= a (_ bv5 {w})))(check-sat)(check-sat)",
+     ["sat", "sat", "sat"], 5),
+    ("(push 1)(check-sat)(pop 1)(assert (= a (_ bv5 {w})))(check-sat)"
+     "(assert (bvult a b))(check-sat)", ["sat", "sat", "sat"], 5),
+    ("(assert (bvule a b))(check-sat)(assert (distinct a (_ bv0 {w})))"
+     "(assert (distinct a (_ bv1 {w})))(check-sat)(check-sat)", ["sat", "sat", "sat"], None),
+    # A flush that met a root conflict in a live scope was forgotten by the
+    # next check-sat in that scope (B92).
+    ("(check-sat)(push 1)(assert (distinct a a))(check-sat)(assert (= a (_ bv1 {w})))(check-sat)"
+     "(pop 1)(check-sat)", ["sat", "unsat", "unsat", "sat"], None),
+])
+def test_cdcl_incremental_without_the_net(w, script, want, value, monkeypatch):
+    """CDCL incremental asserts, with no model check or validation to catch
+    a context that lost one."""
+    monkeypatch.setenv("DV_ENGINE", "cdcl")
+    monkeypatch.setenv("DV_VALIDATE_MODEL", "0")
+    monkeypatch.setenv("DV_CHECK_MODEL", "0")
+    out, err, _ = _run_interactive(_CDCL_SEQ.format(w=w) + script.format(w=w)
+                                   + "(get-value (a))")
+    assert _results(out) == want, err
+    if value is not None:
+        assert f"#b{value:0{w}b}" in out, out
+    elif want[-1] == "sat" and "distinct a (_ bv1" in script:
+        assert f"#b{0:0{w}b}" not in out and f"#b{1:0{w}b}" not in out, out
+
+
+def test_get_model_wide_values():
+    """get-model printed the low 64 bits of a wider variable (B90)."""
+    out, err, _ = _run_interactive(
+        "(set-option :produce-models true)(set-logic QF_BV)"
+        "(declare-fun x () (_ BitVec 100))(assert (= x (bvnot (_ bv0 100))))"
+        "(check-sat)(get-model)")
+    assert "(define-fun x () (_ BitVec 100) #b" + "1" * 100 + ")" in out, out + err
+
+
+def test_quoted_and_simple_symbols_are_one_symbol():
+    """|c| and c name the same symbol (SMT-LIB 2.6 §3.1); a get-value key
+    echoes as written. A user name may look like an internal one (B91)."""
+    out, err, _ = _run_interactive(
+        "(set-option :produce-models true)(set-logic QF_BV)"
+        "(declare-fun |c| () (_ BitVec 4))(declare-fun a () (_ BitVec 8))"
+        "(assert (= (ite (bvult a #x05) a #x07) #x07))"
+        "(declare-fun __aux2 () (_ BitVec 4))(declare-fun |a b| () Bool)"
+        "(assert (= c #x3))(assert (= __aux2 |c|))(assert |a b|)"
+        "(check-sat)(get-value (|c| c (bvadd |c| #x1) __aux2 |a b|))(get-model)")
+    assert _results(out) == ["sat"], err
+    assert "((|c| #b0011)" in out and "(c #b0011)" in out and "((bvadd |c| #x1) #b0100)" in out, out
+    assert "(__aux2 #b0011)" in out and "(|a b| true)" in out, out
+    assert "(define-fun __aux2 () (_ BitVec 4) (_ bv3 4))" in out, out
+    assert "\\aux" not in out, out

@@ -56,7 +56,13 @@ extern size_t g_smt2_translate_stack_bytes;
  * docs/cdcl_verilator_coverage_plan.md: an `unknown` with no explanation costs a
  * manual delta-debug every time, so every emission site is traceable under
  * DV_LOG=1. Purely diagnostic. */
-#define SMT2_EMIT_UNKNOWN(fe) do {                                        \
+/* `why_` is what (get-info :reason-unknown) reports for this answer (fw-hdl
+ * plan 6.3): "memout", "incomplete: ...", "unsupported: ...", or NULL to keep
+ * the reason already recorded for this check. */
+#define SMT2_EMIT_UNKNOWN(fe, why_) do {                                  \
+        const char *w_ = (why_);                                          \
+        if (w_) snprintf((fe)->unknown_why, sizeof (fe)->unknown_why,     \
+                         "%s", w_);                                       \
         if ((fe)->print_stats || getenv("DV_LOG"))                        \
             fprintf((fe)->err, "unknown-from: smt2_frontend.c:%d%s%s\n",   \
                     __LINE__,                                             \
@@ -580,6 +586,10 @@ typedef struct {
     /* A flush into the context met a conflict at push depth flush_unsat - 1
      * (0: none): the assertions are unsat until a pop below that depth. */
     uint32_t             flush_unsat;
+    /* Constraints the current CDCL context left out: its compile plus every
+     * flush since (an over-count after a pop). Validation and escalation
+     * cover them; a violation with none left out is a CDCL bug. */
+    uint32_t ctx_uncompiled;
     int                  has_aux;
 
     /* Bit-blast incremental state (B14). The bit-blast engine reads fe->problem
@@ -615,6 +625,9 @@ typedef struct {
      * sites used to be silent, so a fixture that answered `unknown` gave no
      * clue which construct was responsible. Reported by (check-sat) under
      * DV_LOG / --stats. */
+    /* Why the last check-sat answered unknown (SMT2_EMIT_UNKNOWN); cleared
+     * when a check starts. */
+    char                 unknown_why[192];
     const char          *incomplete_why;
     uint32_t             incomplete_line;
 
@@ -632,6 +645,10 @@ typedef struct {
      * translator also runs speculatively; reported as an input error only if
      * the assert as a whole fails to translate. */
     char                 term_err[160];
+    /* The construct the translator could not take (_unsupported), for the
+     * taint reason; and the taint reason built from it. */
+    char                 unsup_msg[160];
+    char                 taint_msg[176];
     /* Position of the command being dispatched, for error messages (0: none). */
     uint32_t             cmd_line;
     uint32_t             cmd_col;

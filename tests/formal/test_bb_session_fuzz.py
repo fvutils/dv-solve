@@ -6,11 +6,15 @@ check-sat, push/pop map to selector scopes, and variable ids are reused after
 a pop. These scripts mix nested push/pop, declarations inside scopes, names
 re-declared at other widths after a pop, defining equalities (`(= v e)`, which
 the bit-blaster substitutes), slice definitions (`(= ((_ extract h l) s) e)`)
-and `let`, with a check-sat and get-value every few commands.
+and `let`, with a check-sat, get-value and get-model every few commands.
 
 z3 runs the same script; every dv-solve sat/unsat must match it, and every
-dv-solve model must satisfy the assertions in scope (checked by z3). The model
+dv-solve model must satisfy the assertions in scope (checked by z3), and
+get-model must list every visible name with get-value's value. The model
 check is off (DV_CHECK_MODEL=0) so wrong answers show instead of `unknown`.
+CDCL's validation net stays on: it is how constraints the CDCL compile leaves
+out are enforced. A violation it reports with every constraint compiled is a
+CDCL bug all the same, and fails the test.
 Most seeds force the bit-blast engine; every fourth keeps the default
 routing, so narrow problems take the CDCL path (check-sat-assuming included).
 
@@ -197,6 +201,7 @@ class Gen:
         cmds = [f"(check-sat-assuming ({' '.join(lits)}))" if lits else "(check-sat)"]
         if names:
             cmds.append(f"(get-value ({' '.join(names)}))")
+            cmds.append("(get-model)")
         flat = (self.visible(), [a for s in self.scopes for a in s["asserts"]] + (lits or []))
         self.checks.append(flat)
         return cmds
@@ -210,7 +215,9 @@ class Gen:
         return "\n".join(out) + "\n", self.checks
 
 
-_VAL = re.compile(r"\(\s*([A-Za-z_][\w]*)\s+(#b[01]+|#x[0-9a-fA-F]+|\(_ bv\d+ \d+\)|true|false)\s*\)")
+_LIT = r"(#b[01]+|#x[0-9a-fA-F]+|\(_ bv\d+ \d+\)|true|false)"
+_VAL = re.compile(r"\(\s*([A-Za-z_][\w]*)\s+" + _LIT + r"\s*\)")
+_DEF = re.compile(r"\(define-fun\s+([A-Za-z_][\w]*)\s+\(\)\s+(Bool|\(_ BitVec (\d+)\))\s+" + _LIT + r"\s*\)")
 
 
 def _int(v):
@@ -224,15 +231,20 @@ def _int(v):
 
 
 def _parse(out):
-    """[(answer, {name: value} or None)] per check-sat. A get-value response
-    may span lines; it runs until the next answer."""
+    """[(answer, get-value {name: value} or None, get-model {name: (width,
+    value)} or None)] per check-sat. The responses may span lines; they run
+    until the next answer."""
     res, text = [], None
     for line in out.splitlines() + ["sat"]:
         w = line.strip()
         if w in ("sat", "unsat", "unknown"):
             if res and text and text.lstrip().startswith("(("):
-                res[-1][1] = {m.group(1): _int(m.group(2)) for m in _VAL.finditer(text)}
-            res.append([w, None])
+                gv, _, gm = text.partition("(define-fun")
+                res[-1][1] = {m.group(1): _int(m.group(2)) for m in _VAL.finditer(gv)}
+                if gm:
+                    res[-1][2] = {m.group(1): (int(m.group(3) or 0), _int(m.group(4)))
+                                  for m in _DEF.finditer("(define-fun" + gm)}
+            res.append([w, None, None])
             text = ""
         elif text is not None:
             text += " " + w
@@ -249,7 +261,7 @@ def _model_problems(checks, answers):
     """One z3 problem per dv-solve model: the assertions in scope plus the
     model's values. Each must be sat."""
     blocks, idx = [], []
-    for i, ((vis, asserts), (ans, model)) in enumerate(zip(checks, answers)):
+    for i, ((vis, asserts), (ans, model, _)) in enumerate(zip(checks, answers)):
         if ans != "sat" or not vis:
             continue
         if model is None or set(model) != set(vis):
@@ -274,7 +286,7 @@ def _model_problems(checks, answers):
 def test_bb_session_fuzz(seed, tmp_path):
     g = Gen(seed)
     script, checks = g.script(g.r.randint(15, 60))
-    env = {"DV_ENGINE": "bitblast", "DV_CHECK_MODEL": "0", "LD_LIBRARY_PATH": ""}
+    env = {"DV_ENGINE": "bitblast", "DV_CHECK_MODEL": "0", "DV_LOG": "1", "LD_LIBRARY_PATH": ""}
     if seed % 3 == 1:
         env["DV_SIM"] = "0"                  # plain SAT under the scope assumptions
     if seed % 4 == 3:
@@ -284,11 +296,19 @@ def test_bb_session_fuzz(seed, tmp_path):
     dv, z3 = _parse(dv_out), _parse(z3_out)
     (tmp_path / "s.smt2").write_text(script)
     where = f"seed {seed}; script {tmp_path / 's.smt2'}\n{dv_err[-2000:]}"
+    for m in re.finditer(r"top-level constraint\(s\) violated.*\ncdcl-unknown: .*"
+                         r"uncompiled-constraints=(\d+)", dv_err):
+        assert m.group(1) != "0", f"CDCL model wrong with every constraint compiled; {where}"
     assert len(dv) == len(checks), f"dv-solve gave {len(dv)} answers for {len(checks)}: {where}"
     assert len(z3) == len(checks), f"z3 gave {len(z3)} answers: {where}"
-    for i, ((a, _), (b, _)) in enumerate(zip(dv, z3)):
+    for i, ((a, *_), (b, *_)) in enumerate(zip(dv, z3)):
         if a in ("sat", "unsat") and b in ("sat", "unsat"):
             assert a == b, f"check-sat {i + 1}: dv-solve {a}, z3 {b}; {where}"
+    for i, ((vis, _), (a, gv, gm)) in enumerate(zip(checks, dv)):
+        if a != "sat" or not vis:
+            continue
+        want = {n: (w, gv.get(n) if gv else None) for n, w in vis.items()}
+        assert gm == want, f"check-sat {i + 1}: get-model {gm} != get-value {want}; {where}"
     blocks, idx = _model_problems(checks, dv)
     assert all(b is not None for b in blocks), f"incomplete get-value; {where}"
     if blocks:

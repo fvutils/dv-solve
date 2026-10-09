@@ -865,6 +865,7 @@ static const Smt2Value *_apply_uf(Smt2Eval *ev, const Sexpr *head,
     memcpy(copy, name, len);
     Sexpr sym;
     sym.kind = SEXPR_SYMBOL;
+    sym.quoted = 0;
     sym.sym.str = copy;
     sym.sym.len = len;
     const Smt2Value *r = _symbol(ev, &sym, NULL);

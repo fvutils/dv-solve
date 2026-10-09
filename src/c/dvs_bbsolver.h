@@ -193,6 +193,9 @@ int      dvs_bbsolver_sess_solve(dvs_bbsolver_t *bb, uint64_t seed);
  */
 int dvs_bbsolver_prepare(dvs_bbsolver_t *bb, uint64_t seed);
 int dvs_bbsolver_is_incremental(const dvs_bbsolver_t *bb);
+/* Why the last check or solve gave no verdict, for (get-info :reason-unknown).
+ * A static string; meaningful only after DVS_BB_UNKNOWN or DVS_BB_ERROR. */
+const char *dvs_bbsolver_unknown_reason(const dvs_bbsolver_t *bb);
 uint32_t dvs_bbsolver_split_lits(dvs_bbsolver_t *bb, int32_t *out, uint32_t cap);
 
 /**

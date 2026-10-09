@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,6 +124,24 @@ static void _list_free(SexprList *l) {
     l->capacity = SEXPR_LIST_INLINE;
 }
 
+/* Is `t` (length n) a quoted symbol |x| whose body x is a simple symbol, and
+ * so the same symbol as x? Reserved words are not simple symbols. */
+static uint8_t _unquotable(const char *t, uint32_t n) {
+    static const char *const reserved[] = {
+        "_", "!", "as", "let", "exists", "forall", "match", "par",
+        "NUMERAL", "DECIMAL", "STRING", "BINARY", "HEXADECIMAL" };
+    if (n < 3 || t[0] != '|' || t[n - 1] != '|') return 0;
+    const char *b = t + 1;
+    uint32_t m = n - 2;
+    if (isdigit((unsigned char)b[0])) return 0;
+    for (uint32_t i = 0; i < m; i++)
+        if (!b[i] || (!isalnum((unsigned char)b[i]) && !strchr("~!@$%^&*_-+=<>.?/", b[i])))
+            return 0;
+    for (size_t i = 0; i < sizeof reserved / sizeof reserved[0]; i++)
+        if (strlen(reserved[i]) == m && !memcmp(reserved[i], b, m)) return 0;
+    return 1;
+}
+
 static Sexpr *_alloc_sexpr(SexprArena *arena) {
     return (Sexpr *)sexpr_arena_alloc(arena, sizeof(Sexpr), _Alignof(Sexpr));
 }
@@ -164,8 +183,9 @@ static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
         Sexpr *s = _alloc_sexpr(arena);
         if (!s) { _perr_oom(lex); return NULL; }
         s->kind    = SEXPR_SYMBOL;
-        s->sym.str = tok.start;
-        s->sym.len = tok.length;
+        s->quoted  = _unquotable(tok.start, tok.length);
+        s->sym.str = tok.start + s->quoted;
+        s->sym.len = tok.length - 2u * s->quoted;
         return s;
     }
     case TOK_NUMERAL: {

@@ -25,6 +25,10 @@ typedef enum {
 
 typedef struct Sexpr {
     SexprKind kind;
+    /* SYMBOL written |x| where x is also a simple symbol: `sym` holds x (the
+     * two spellings name the same symbol, SMT-LIB 2.6 §3.1), and printing
+     * puts the bars back so a get-value key echoes as written. */
+    uint8_t   quoted;
     union {
         struct { const char *str; uint32_t len; }        sym;   /* SYMBOL/KEYWORD/STRING/DECIMAL */
         uint64_t                                         numval;/* NUMERAL */

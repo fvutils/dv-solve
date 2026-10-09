@@ -2694,6 +2694,13 @@ int dvs_bbsolver_is_incremental(const dvs_bbsolver_t *S) {
     return (S && S->sat) ? dvs_sat_is_incremental(S->sat) : 0;
 }
 
+const char *dvs_bbsolver_unknown_reason(const dvs_bbsolver_t *S) {
+    if (!S) return "incomplete: the bit-blast engine could not start (out of memory?)";
+    if (S->had_unsupported) return "unsupported: a construct the bit-blast engine does not encode";
+    if (S->had_error) return "incomplete: the bit-blast encoding failed (out of memory?)";
+    return "incomplete: the SAT search stopped without a verdict (conflict limit)";
+}
+
 uint32_t dvs_bbsolver_split_lits(dvs_bbsolver_t *S, int32_t *out, uint32_t cap) {
     if (!S || !out || cap == 0) return 0;
     uint32_t n = 0;
