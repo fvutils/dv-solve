@@ -9,8 +9,9 @@
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
+/* The pool's fixed region starts after the header, 16-byte aligned. */
 static inline size_t _pool_offset(void) {
-    return offsetof(dvs_ctx_t, pool);
+    return (sizeof(dvs_ctx_t) + 15u) & ~(size_t)15u;
 }
 
 /* ------------------------------------------------------------------ */
@@ -21,7 +22,7 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
                          dvs_block_alloc_t *block_alloc) {
     if (!static_buf) return NULL;
 
-    size_t min_size = offsetof(dvs_ctx_t, pool) + sizeof(dvs_pool_t) + 1;
+    size_t min_size = _pool_offset() + 64u;
     if (static_size < min_size) return NULL;
 
     dvs_ctx_t *ctx        = (dvs_ctx_t *)static_buf;
@@ -30,7 +31,7 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
      * var_holes_head, prop_guard_vars, ... were left as whatever the buffer
      * held). Compile's set punch-out read initial_vars before setting it and
      * dereferenced garbage once dv-solve-smt2 reused a dirty buffer. */
-    memset(ctx, 0, offsetof(dvs_ctx_t, pool));
+    memset(ctx, 0, sizeof(dvs_ctx_t));
     ctx->vars            = NULL;
     ctx->n_vars          = 0;
     ctx->n_vars_capacity = 0;
@@ -98,34 +99,39 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
         ctx->queue.tails[i] = EXPR_NULL;
     }
 
-    size_t pool_buf_size = static_size - _pool_offset();
-    if (!dvs_pool_init(&ctx->pool, pool_buf_size)) return NULL;
+    /* The pool's fixed region is the rest of the buffer; with a block
+     * allocator it grows past it through ctx->alloc. */
+    if (dvs_spool_init(&ctx->pool, (uint8_t *)static_buf + _pool_offset(),
+                       static_size - _pool_offset(),
+                       block_alloc ? ctx->alloc : NULL) != 0)
+        return NULL;
 
     /* Pre-allocate LevelMark[MAX_DECISION_DEPTH] in the static pool */
-    uint32_t marks_ref = dvs_pool_alloc(
-        &ctx->pool,
+    uint32_t marks_ref = dvs_spool_alloc(&ctx->pool,
         MAX_DECISION_DEPTH * (uint32_t)sizeof(LevelMark),
         (uint32_t)_Alignof(LevelMark));
-    if (marks_ref == EXPR_NULL) return NULL;
-    ctx->level_marks = (LevelMark *)dvs_pool_ptr(&ctx->pool, marks_ref);
+    if (marks_ref == EXPR_NULL) goto fail;
+    ctx->level_marks = (LevelMark *)dvs_spool_ptr(&ctx->pool, marks_ref);
     ctx->max_depth   = MAX_DECISION_DEPTH;
     memset(ctx->level_marks, 0, MAX_DECISION_DEPTH * sizeof(LevelMark));
 
     /* Pre-allocate DecisionRecord[MAX_DECISION_DEPTH] in the static pool */
-    uint32_t dec_ref = dvs_pool_alloc(
-        &ctx->pool,
+    uint32_t dec_ref = dvs_spool_alloc(&ctx->pool,
         MAX_DECISION_DEPTH * (uint32_t)sizeof(DecisionRecord),
         (uint32_t)_Alignof(DecisionRecord));
-    if (dec_ref == EXPR_NULL) return NULL;
-    ctx->decisions = (DecisionRecord *)dvs_pool_ptr(&ctx->pool, dec_ref);
+    if (dec_ref == EXPR_NULL) goto fail;
+    ctx->decisions = (DecisionRecord *)dvs_spool_ptr(&ctx->pool, dec_ref);
     memset(ctx->decisions, 0, MAX_DECISION_DEPTH * sizeof(DecisionRecord));
 
     if (block_alloc) {
         ctx->dynamic = dvs_stack_create(block_alloc);
-        if (!ctx->dynamic) return NULL;
+        if (!ctx->dynamic) goto fail;
     }
 
     return ctx;
+fail:
+    dvs_spool_destroy(&ctx->pool);
+    return NULL;
 }
 
 int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx) {
@@ -199,6 +205,7 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     ctx->scope_log_var = NULL; ctx->scope_log_bound = NULL;
     ctx->scope_log_depth = NULL; ctx->scope_log_is_lb = NULL;
     ctx->n_scope_log = ctx->scope_log_cap = 0;
+    dvs_spool_destroy(&ctx->pool);
 }
 
 /* ------------------------------------------------------------------ */
@@ -227,7 +234,7 @@ Variable *dvs_solver_get_var(const dvs_ctx_t *ctx, uint32_t var_id) {
 }
 
 uint32_t dvs_ctx_pool_used(const dvs_ctx_t *ctx) {
-    return dvs_pool_used(&ctx->pool);
+    return dvs_spool_used(&ctx->pool);
 }
 
 uint32_t dvs_ctx_decision_level(const dvs_ctx_t *ctx) {

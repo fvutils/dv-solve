@@ -38,7 +38,7 @@ static inline int _tron(void) {
 
 static const char *_pname(dvs_ctx_t *ctx, uint32_t prop_ref) {
     if (prop_ref == EXPR_NULL) return "<decision>";
-    Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref);
+    Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, prop_ref);
     return prop_fire_name(p->fire);
 }
 
@@ -445,7 +445,7 @@ static void _set_bound(dvs_ctx_t *ctx, uint32_t var_id, uint8_t kind, int64_t va
     if (VAR_IS_TIER0(v->flags)) {
         if (kind == TRAIL_LB) v->lo = (int32_t)val; else v->hi = (int32_t)val;
     } else if (VAR_IS_TIER1(v->flags)) {
-        WideBounds64 *wb = (WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+        WideBounds64 *wb = (WideBounds64 *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
         if (kind == TRAIL_LB) wb->lo = val; else wb->hi = val;
     }
 }
@@ -673,8 +673,7 @@ static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *ou
         }
     } else if (ctx->conflict_prop_ref != EXPR_NULL) {
         if (_tron()) {
-            Propagator *cp_ = (Propagator *)dvs_pool_ptr(
-                &ctx->pool, ctx->conflict_prop_ref);
+            Propagator *cp_ = (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->conflict_prop_ref);
             fprintf(stderr,
                 "[lcg-trace] prop-conflict seed from %s (watch-vars)\n",
                 prop_fire_name(cp_->fire));
@@ -686,8 +685,7 @@ static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *ou
          * bounds: the conjunction of these current LB/UB literals
          * implies the conflict.  The learnt clause is their negation,
          * which says "at least one of these bounds must change". */
-        Propagator *cp = (Propagator *)dvs_pool_ptr(
-            &ctx->pool, ctx->conflict_prop_ref);
+        Propagator *cp = (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->conflict_prop_ref);
         uint32_t nw;
         const uint32_t *wv = prop_watched_vars(cp, &nw);
         if (nw == 0) {
@@ -787,7 +785,7 @@ static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *ou
 
         /* Resolve through propagator explanation, asking for exactly the
          * literal the working set needs. */
-        Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, e->prop_ref);
+        Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, e->prop_ref);
         if (!p->explain) { lcg_dbg_bail[7]++; return -1; }
         if (_rewind_before(lcg, ctx, &applied, e) != 0) { lcg_dbg_bail[14]++; return -1; }
         Explanation expl;
@@ -950,7 +948,7 @@ static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *ou
                         }
                     }
                 } else if (te->prop_ref != EXPR_NULL) {
-                    Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, te->prop_ref);
+                    Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, te->prop_ref);
                     if (p->explain) {
                         Explanation expl;
                         int64_t bv = (ant_kind == TRAIL_LB)

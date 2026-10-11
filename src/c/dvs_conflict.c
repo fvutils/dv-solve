@@ -69,7 +69,7 @@ uint32_t analyze_conflict(dvs_ctx_t *ctx) {
     uint32_t conflict_prop = ctx->conflict_prop_ref;
     if (conflict_prop == EXPR_NULL) return current_level - 1;
 
-    Propagator    *p  = (Propagator *)dvs_pool_ptr(&ctx->pool, conflict_prop);
+    Propagator    *p  = (Propagator *)dvs_spool_ptr(&ctx->pool, conflict_prop);
     PropWatchSect *ws = PROP_WS(p);
     uint32_t       max_lower = 0;
     int            found_lower = 0;
@@ -85,7 +85,7 @@ uint32_t analyze_conflict(dvs_ctx_t *ctx) {
         /* Second tier: if the var was tightened at current level by a
          * propagator, follow that propagator's antecedents too. */
         if (at_current && e && e->prop_ref != EXPR_NULL) {
-            Propagator    *ap  = (Propagator *)dvs_pool_ptr(&ctx->pool,
+            Propagator    *ap  = (Propagator *)dvs_spool_ptr(&ctx->pool,
                                                              e->prop_ref);
             PropWatchSect *aws = PROP_WS(ap);
             for (uint32_t j = 0; j < aws->n_watches; j++) {

@@ -94,10 +94,10 @@ uint32_t prop_add_min_of_n_32(dvs_ctx_t *ctx, uint32_t result_id,
     if (n_operands < 1 || n_operands > MAX_MINMAX_VARS) return EXPR_NULL;
 
     uint32_t n_total = 1 + n_operands;
-    uint32_t ref = dvs_pool_alloc(&ctx->pool, (uint32_t)sizeof(MinOfN_32_t), 8u);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(MinOfN_32_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    MinOfN_32_t *m = (MinOfN_32_t *)dvs_pool_ptr(&ctx->pool, ref);
+    MinOfN_32_t *m = (MinOfN_32_t *)dvs_spool_ptr(&ctx->pool, ref);
     memset(m, 0, sizeof(MinOfN_32_t));
 
     m->hdr.fire       = _fire_min_of_n_32;
@@ -193,10 +193,10 @@ uint32_t prop_add_max_of_n_32(dvs_ctx_t *ctx, uint32_t result_id,
     if (n_operands < 1 || n_operands > MAX_MINMAX_VARS) return EXPR_NULL;
 
     uint32_t n_total = 1 + n_operands;
-    uint32_t ref = dvs_pool_alloc(&ctx->pool, (uint32_t)sizeof(MaxOfN_32_t), 8u);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(MaxOfN_32_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    MaxOfN_32_t *m = (MaxOfN_32_t *)dvs_pool_ptr(&ctx->pool, ref);
+    MaxOfN_32_t *m = (MaxOfN_32_t *)dvs_spool_ptr(&ctx->pool, ref);
     memset(m, 0, sizeof(MaxOfN_32_t));
 
     m->hdr.fire       = _fire_max_of_n_32;
@@ -745,10 +745,10 @@ uint32_t prop_add_no_overlap_2d(dvs_ctx_t *ctx, uint32_t n_rects,
                                  const RectSpec *rects, uint8_t priority) {
     if (n_rects < 2 || n_rects > MAX_NOOVERLAP2D_RECTS) return EXPR_NULL;
 
-    uint32_t ref = dvs_pool_alloc(&ctx->pool, (uint32_t)sizeof(NoOverlap2D_t), 8u);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(NoOverlap2D_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    NoOverlap2D_t *no = (NoOverlap2D_t *)dvs_pool_ptr(&ctx->pool, ref);
+    NoOverlap2D_t *no = (NoOverlap2D_t *)dvs_spool_ptr(&ctx->pool, ref);
     memset(no, 0, sizeof(NoOverlap2D_t));
     memset(no->last_pair, 0xFF, sizeof(no->last_pair));
 
@@ -815,10 +815,10 @@ int dvs_solver_optimize(dvs_ctx_t *ctx, uint32_t objective_var_id,
         best_values = stack_buf;
     } else {
         /* Use block allocator */
-        uint32_t bv_ref = dvs_pool_alloc(&ctx->pool, n * (uint32_t)sizeof(int64_t),
+        uint32_t bv_ref = dvs_spool_alloc(&ctx->pool, n * (uint32_t)sizeof(int64_t),
                                           (uint32_t)_Alignof(int64_t));
         if (bv_ref == EXPR_NULL) return -1;
-        best_values = (int64_t *)dvs_pool_ptr(&ctx->pool, bv_ref);
+        best_values = (int64_t *)dvs_spool_ptr(&ctx->pool, bv_ref);
     }
 
     dvs_solve_opts_t sopts;

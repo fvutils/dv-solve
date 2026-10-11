@@ -193,6 +193,7 @@ set(DVS_SOURCES
     src/c/dvs_ctx.c
     src/c/dvs_nogood.c
     src/c/dvs_pool.c
+    src/c/dvs_spool.c
     src/c/dvs_problem.c
     src/c/dvs_propagate.c
     src/c/dvs_prop_templates.c
@@ -418,6 +419,16 @@ add_executable(test_checkpoint_pool tests/c/test_checkpoint_pool.c)
 target_link_libraries(test_checkpoint_pool PRIVATE dv_solve)
 target_include_directories(test_checkpoint_pool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_checkpoint_pool COMMAND test_checkpoint_pool)
+
+# The segmented pool at the default slot size, and at 256-byte slots so the
+# test's allocations cross slots and take the large-object path constantly.
+add_executable(test_dvs_spool tests/c/test_dvs_spool.c src/c/dvs_spool.c src/c/dvs_block_alloc.c)
+target_include_directories(test_dvs_spool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_spool COMMAND test_dvs_spool)
+add_executable(test_dvs_spool_shift8 tests/c/test_dvs_spool.c src/c/dvs_spool.c src/c/dvs_block_alloc.c)
+target_include_directories(test_dvs_spool_shift8 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+target_compile_definitions(test_dvs_spool_shift8 PRIVATE DVS_SEG_SHIFT=8u)
+add_test(NAME test_dvs_spool_shift8 COMMAND test_dvs_spool_shift8)
 
 # The public API through dv_solve.h alone; the test includes no other header.
 add_executable(test_public_api tests/c/test_public_api.c)

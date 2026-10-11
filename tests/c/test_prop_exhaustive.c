@@ -345,7 +345,7 @@ static void set_bounds(dvs_ctx_t *ctx, uint32_t v, int64_t lo, int64_t hi) {
     Variable *var = &ctx->vars[v];
     if (VAR_IS_TIER0(var->flags)) { var->lo = (int32_t)lo; var->hi = (int32_t)hi; }
     else {
-        WideBounds64 *wb = (WideBounds64 *)dvs_pool_ptr(&ctx->pool, var->holes_offset);
+        WideBounds64 *wb = (WideBounds64 *)dvs_spool_ptr(&ctx->pool, var->holes_offset);
         wb->lo = lo; wb->hi = hi;
     }
 }
@@ -401,7 +401,7 @@ static void run_case(const Case *c) {
     uint32_t ref = c->add(ctx, c);
     if (ref == EXPR_NULL) { printf("FAIL %s: add\n", c->name); n_err++; return; }
     contra_register_explanations(ctx);
-    Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+    Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
     int own = p->explain ? own_bound_added(p) : 0;
     int errs = 0, max_report = 4;
 

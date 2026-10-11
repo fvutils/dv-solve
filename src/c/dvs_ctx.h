@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include "dvs_variable.h"
 #include "dvs_pool.h"
+#include "dvs_spool.h"
 #include "dvs_stack.h"
 #include "dvs_block_alloc.h"
 #include "dvs_problem.h"
@@ -32,10 +33,10 @@ extern "C" {
 /* dvs_ctx_t — the top-level solver context                            */
 /*                                                                     */
 /* Memory layout:                                                      */
-/*   [ dvs_ctx_t header | dvs_pool_t header | static pool data ... ]   */
-/*                      ^-- &ctx->pool                                */
+/*   [ dvs_ctx_t header | pool's fixed region ... ]  (caller's buffer) */
+/*   + pool slots from ctx->alloc as the pool grows (dvs_spool.h)      */
 /*                                                                     */
-/* The static pool is used for:                                        */
+/* The pool (ctx->pool, offsets via dvs_spool_ptr) is used for:       */
 /*   - Variable[] array                                               */
 /*   - WideBounds64/WideBoundsN for tier-1/2 variables                */
 /*   - Propagators (Phase 6)                                          */
@@ -70,7 +71,7 @@ typedef struct {
     /* The pool position: dvs_solver_restore frees everything the scope
      * allocated (its propagators, its variables' wide bounds, a regrown
      * reset snapshot), so push/pop sessions hold pool use flat. */
-    dvs_pool_mark_t  pool_mark;
+    dvs_spool_mark_t pool_mark;
     /* The reset snapshot as it stood: an add in the scope extends it, and
      * may regrow it into memory the restore frees. */
     Variable        *initial_vars;
@@ -131,7 +132,7 @@ typedef struct dvs_ctx_s {
     dvs_alloc_t       *alloc;         /* source of the context's heap
                                        * tables: block_alloc's backing
                                        * allocator, else dvs_malloc_alloc */
-    uint32_t           pool_floor;    /* pool position after compile: a
+    dvs_spool_mark_t   pool_floor;    /* pool position after compile: a
                                        * restore never frees below it   */
     dvs_stack_t       *dynamic;       /* dynamic stack (trail etc.)    */
     TrailEntry        *trail_top;     /* newest trail entry, or NULL   */
@@ -240,8 +241,7 @@ typedef struct dvs_ctx_s {
     /* Compile's recursive passes stop (decline the constraint) when the
      * stack runs low (dvs_stackinfo.h). A cache; any value is safe. */
     dvs_stack_guard_t  stack_guard;
-    dvs_pool_t         pool;          /* MUST be last field            */
-    /* static pool data region follows immediately                      */
+    dvs_spool_t        pool;          /* offset-addressed, growable    */
 } dvs_ctx_t;
 
 /* ------------------------------------------------------------------ */
@@ -343,7 +343,7 @@ static inline int64_t var_lo64(const dvs_ctx_t *ctx, const Variable *v) {
     }
     assert(!VAR_IS_TIER2(v->flags) && "tier-2 bounds are WideBoundsN");
     const WideBounds64 *wb =
-        (const WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+        (const WideBounds64 *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
     return wb->lo;
 }
 
@@ -354,7 +354,7 @@ static inline int64_t var_hi64(const dvs_ctx_t *ctx, const Variable *v) {
     }
     assert(!VAR_IS_TIER2(v->flags) && "tier-2 bounds are WideBoundsN");
     const WideBounds64 *wb =
-        (const WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+        (const WideBounds64 *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
     return wb->hi;
 }
 
@@ -431,14 +431,14 @@ static inline int64_t var_repr_max(const Variable *v) {
 static inline const uint64_t *var_lo_wide(const dvs_ctx_t *ctx,
                                            const Variable *v) {
     const WideBoundsN *wn =
-        (const WideBoundsN *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+        (const WideBoundsN *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
     return (const uint64_t *)(wn + 1);
 }
 
 static inline const uint64_t *var_hi_wide(const dvs_ctx_t *ctx,
                                            const Variable *v) {
     const WideBoundsN *wn =
-        (const WideBoundsN *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+        (const WideBoundsN *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
     return (const uint64_t *)(wn + 1) + wn->n_limbs;
 }
 

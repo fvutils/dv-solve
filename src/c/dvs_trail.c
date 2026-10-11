@@ -50,7 +50,7 @@ int trail_record_lb(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_lb) {
         v->lo  = (int32_t)new_lb;
     } else if (VAR_IS_TIER1(v->flags)) {
         WideBounds64 *wb =
-            (WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+            (WideBounds64 *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
         old_lb  = wb->lo;
         vsize   = TRAIL_VALUE_64;
         wb->lo  = new_lb;
@@ -88,7 +88,7 @@ int trail_record_ub(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub) {
         v->hi  = (int32_t)new_ub;
     } else if (VAR_IS_TIER1(v->flags)) {
         WideBounds64 *wb =
-            (WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+            (WideBounds64 *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
         old_ub  = wb->hi;
         vsize   = TRAIL_VALUE_64;
         wb->hi  = new_ub;
@@ -149,7 +149,7 @@ void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
                 v->lo = (int32_t)e->old_value;
             } else if (VAR_IS_TIER1(v->flags)) {
                 WideBounds64 *wb =
-                    (WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+                    (WideBounds64 *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
                 wb->lo = e->old_value;
             }
             break;
@@ -159,7 +159,7 @@ void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
                 v->hi = (int32_t)e->old_value;
             } else if (VAR_IS_TIER1(v->flags)) {
                 WideBounds64 *wb =
-                    (WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+                    (WideBounds64 *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
                 wb->hi = e->old_value;
             }
             break;
@@ -200,7 +200,7 @@ void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
     for (uint32_t lvl = 0; lvl < 16; lvl++) {
         uint32_t ref = ctx->queue.heads[lvl];
         while (ref != EXPR_NULL) {
-            Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+            Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
             uint32_t next = p->queue_next;
             p->flags &= (uint8_t)~PROP_FLAG_IN_QUEUE;
             p->flags &= (uint8_t)~PROP_FLAG_ENTAILED;
@@ -230,7 +230,7 @@ void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
         for (uint32_t vi = 0; vi < ctx->n_vars; vi++) {
             uint32_t ref = ctx->watcher_heads[vi];
             while (ref != EXPR_NULL) {
-                Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+                Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
                 int is_live = 1;
                 if (ctx->prop_refs && p->prop_id < ctx->n_prop_refs_capacity) {
                     if (ctx->prop_refs[p->prop_id] != ref) is_live = 0;

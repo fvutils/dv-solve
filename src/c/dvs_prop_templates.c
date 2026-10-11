@@ -183,7 +183,7 @@ static int sv_fits_signed(int64_t v, uint16_t w) {
 static void _register_watcher(dvs_ctx_t *ctx, uint32_t prop_ref,
                                uint32_t var_id, uint32_t slot) {
     PropWatchSect *ws = PROP_WS(
-        (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref));
+        (Propagator *)dvs_spool_ptr(&ctx->pool, prop_ref));
     ws->next_watchers[slot]     = ctx->watcher_heads[var_id];
     ctx->watcher_heads[var_id]  = prop_ref;
 }
@@ -196,10 +196,10 @@ static uint32_t _alloc_prop(dvs_ctx_t *ctx,
                              uint8_t priority,
                              uint32_t n_watches, const uint32_t *var_ids,
                              uint32_t total_bytes) {
-    uint32_t ref = dvs_pool_alloc(&ctx->pool, total_bytes, 8u);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, total_bytes, 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    Propagator *p    = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+    Propagator *p    = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
     memset(p, 0, total_bytes);
 
     p->fire       = fire;
@@ -775,7 +775,7 @@ uint32_t prop_add_in_set_32(dvs_ctx_t *ctx, uint32_t x_id,
     uint32_t ref = _alloc_prop(ctx, _fire_in_set_32, priority, 1, ids, sz);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    InSet_32_t *p = (InSet_32_t *)dvs_pool_ptr(&ctx->pool, ref);
+    InSet_32_t *p = (InSet_32_t *)dvs_spool_ptr(&ctx->pool, ref);
     p->n_elems = n_elems;
     int32_t   *dst = (int32_t *)((char *)p + sizeof(InSet_32_t));
     memcpy(dst, elems, n_elems * sizeof(int32_t));
@@ -836,7 +836,7 @@ uint32_t prop_add_implication_64(dvs_ctx_t *ctx,
                                 sizeof(Implication_64_t));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    Implication_64_t *p = (Implication_64_t *)dvs_pool_ptr(&ctx->pool, ref);
+    Implication_64_t *p = (Implication_64_t *)dvs_spool_ptr(&ctx->pool, ref);
     p->bound = bound;
     p->is_ub = is_ub;
     return ref;
@@ -856,7 +856,7 @@ uint32_t prop_add_implication_32(dvs_ctx_t *ctx,
                                 sizeof(Implication_32_t));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    Implication_32_t *p = (Implication_32_t *)dvs_pool_ptr(&ctx->pool, ref);
+    Implication_32_t *p = (Implication_32_t *)dvs_spool_ptr(&ctx->pool, ref);
     p->bound = bound;
     p->is_ub = is_ub;
     return ref;
@@ -1174,7 +1174,7 @@ uint32_t prop_add_bit_slice_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                 sizeof(BitSlice_32_t));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    BitSlice_32_t *p = (BitSlice_32_t *)dvs_pool_ptr(&ctx->pool, ref);
+    BitSlice_32_t *p = (BitSlice_32_t *)dvs_spool_ptr(&ctx->pool, ref);
     p->hi_bit = hi_bit;
     p->lo_bit = lo_bit;
     return ref;
@@ -1224,7 +1224,7 @@ uint32_t prop_add_bounds_le_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uin
     uint32_t ids[2] = { x_id, y_id };
     uint32_t ref = _alloc_prop(ctx, _fire_bounds_le_64, priority, 2, ids, sizeof(BoundsLE_64_t));
     if (ref != EXPR_NULL) {
-        Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+        Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
         p->explain = _explain_bounds_le_64;
     }
     return ref;
@@ -1288,7 +1288,7 @@ uint32_t prop_add_bounds_lt_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uin
     uint32_t ids[2] = { x_id, y_id };
     uint32_t ref = _alloc_prop(ctx, _fire_bounds_lt_64, priority, 2, ids, sizeof(BoundsLT_64_t));
     if (ref != EXPR_NULL) {
-        Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+        Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
         p->explain = _explain_bounds_lt_64;
     }
     return ref;
@@ -1335,7 +1335,7 @@ uint32_t prop_add_bounds_eq_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uin
     uint32_t ids[2] = { x_id, y_id };
     uint32_t ref = _alloc_prop(ctx, _fire_bounds_eq_64, priority, 2, ids, sizeof(BoundsEQ_64_t));
     if (ref != EXPR_NULL) {
-        Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+        Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
         p->explain = _explain_bounds_eq_64;
     }
     return ref;
@@ -1494,7 +1494,7 @@ uint32_t prop_add_bounds_add_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, ui
     uint32_t ids[3] = { r_id, a_id, b_id };
     uint32_t ref = _alloc_prop(ctx, _fire_bounds_add_64, priority, 3, ids, sizeof(BoundsAdd_64_t));
     if (ref != EXPR_NULL) {
-        Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+        Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
         p->explain = _explain_bounds_add_64;
     }
     return ref;
@@ -1616,10 +1616,10 @@ uint32_t prop_add_bvadd_const_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t x_id,
     uint32_t ref = _alloc_prop(ctx, _fire_bvadd_const_64, priority, 2, ids,
                                 sizeof(BvAddConst_64_t));
     if (ref == EXPR_NULL) return ref;
-    BvAddConst_64_t *bp = (BvAddConst_64_t *)dvs_pool_ptr(&ctx->pool, ref);
+    BvAddConst_64_t *bp = (BvAddConst_64_t *)dvs_spool_ptr(&ctx->pool, ref);
     bp->c     = c;
     bp->width = width;
-    Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+    Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
     p->explain = _explain_bvadd_const_64;
     return ref;
 }
@@ -2252,9 +2252,9 @@ static uint32_t _prop_add_bvbin_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
     uint32_t ids[3] = { r_id, a_id, b_id };
     uint32_t ref = _alloc_prop(ctx, fire, priority, 3, ids, sizeof(BvBin_64_t));
     if (ref == EXPR_NULL) return ref;
-    BvBin_64_t *bp = (BvBin_64_t *)dvs_pool_ptr(&ctx->pool, ref);
+    BvBin_64_t *bp = (BvBin_64_t *)dvs_spool_ptr(&ctx->pool, ref);
     bp->width = width;
-    Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+    Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
     p->explain = _explain_bvbin_64;
     return ref;
 }
@@ -2743,7 +2743,7 @@ uint32_t prop_add_in_set_64(dvs_ctx_t *ctx, uint32_t x_id,
     uint32_t sz  = (uint32_t)(sizeof(InSet_64_t) + n_elems * sizeof(int64_t));
     uint32_t ref = _alloc_prop(ctx, _fire_in_set_64, priority, 1, ids, sz);
     if (ref == EXPR_NULL) return EXPR_NULL;
-    InSet_64_t *p = (InSet_64_t *)dvs_pool_ptr(&ctx->pool, ref);
+    InSet_64_t *p = (InSet_64_t *)dvs_spool_ptr(&ctx->pool, ref);
     p->n_elems = n_elems;
     int64_t *dst = (int64_t *)((char *)p + sizeof(InSet_64_t));
     memcpy(dst, elems, n_elems * sizeof(int64_t));
@@ -2792,7 +2792,7 @@ uint32_t prop_add_in_ranges_64(dvs_ctx_t *ctx, uint32_t x_id,
                               2u * n_ranges * sizeof(int64_t));
     uint32_t ref = _alloc_prop(ctx, _fire_in_ranges_64, priority, 1, ids, sz);
     if (ref == EXPR_NULL) return EXPR_NULL;
-    InRanges_64_t *p = (InRanges_64_t *)dvs_pool_ptr(&ctx->pool, ref);
+    InRanges_64_t *p = (InRanges_64_t *)dvs_spool_ptr(&ctx->pool, ref);
     p->n_ranges = n_ranges;
     int64_t *lo_dst = (int64_t *)((char *)p + sizeof(InRanges_64_t));
     int64_t *hi_dst = lo_dst + n_ranges;
@@ -2985,7 +2985,7 @@ uint32_t prop_add_bit_slice_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
     uint32_t ids[2] = { r_id, a_id };
     uint32_t ref = _alloc_prop(ctx, _fire_bit_slice_64, priority, 2, ids, sizeof(BitSlice_64_t));
     if (ref == EXPR_NULL) return EXPR_NULL;
-    BitSlice_64_t *p = (BitSlice_64_t *)dvs_pool_ptr(&ctx->pool, ref);
+    BitSlice_64_t *p = (BitSlice_64_t *)dvs_spool_ptr(&ctx->pool, ref);
     p->hi_bit = hi_bit; p->lo_bit = lo_bit;
     return ref;
 }
@@ -3546,7 +3546,7 @@ uint32_t prop_add_bounds_concat_64(dvs_ctx_t *ctx, uint32_t r_id,
                                 sizeof(BoundsConcat_64_t));
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    BoundsConcat_64_t *p = (BoundsConcat_64_t *)dvs_pool_ptr(&ctx->pool, ref);
+    BoundsConcat_64_t *p = (BoundsConcat_64_t *)dvs_spool_ptr(&ctx->pool, ref);
     p->lo_width = lo_width;
     return ref;
 }
@@ -3914,10 +3914,10 @@ uint32_t prop_add_disj_clause(dvs_ctx_t *ctx,
         if (all_vids[i] >= ctx->n_vars) return EXPR_NULL;
         if (ctx->vars[all_vids[i]].width > 64) return EXPR_NULL;
     }
-    uint32_t ref = dvs_pool_alloc(&ctx->pool, (uint32_t)sizeof(DisjClause_t), 8u);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(DisjClause_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    DisjClause_t *dc = (DisjClause_t *)dvs_pool_ptr(&ctx->pool, ref);
+    DisjClause_t *dc = (DisjClause_t *)dvs_spool_ptr(&ctx->pool, ref);
     memset(dc, 0, sizeof(DisjClause_t));
     dc->hdr.fire       = _fire_disj_clause;
     dc->hdr.queue_next = EXPR_NULL;
@@ -4118,10 +4118,10 @@ uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
         if (ctx->vars[var_ids[i]].width > 32) return EXPR_NULL;
     }
 
-    uint32_t ref = dvs_pool_alloc(&ctx->pool, (uint32_t)sizeof(AllDifferent_t), 8u);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(AllDifferent_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    AllDifferent_t *ad = (AllDifferent_t *)dvs_pool_ptr(&ctx->pool, ref);
+    AllDifferent_t *ad = (AllDifferent_t *)dvs_spool_ptr(&ctx->pool, ref);
     memset(ad, 0, sizeof(AllDifferent_t));
 
     ad->hdr.fire       = _fire_all_different_32;
@@ -4206,10 +4206,10 @@ uint32_t prop_add_sum_eq_32(dvs_ctx_t *ctx, uint32_t result_id,
 
     uint32_t n_total = 1 + n_summands;  /* result + summands */
 
-    uint32_t ref = dvs_pool_alloc(&ctx->pool, (uint32_t)sizeof(SumEq_32_t), 8u);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(SumEq_32_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
-    SumEq_32_t *s = (SumEq_32_t *)dvs_pool_ptr(&ctx->pool, ref);
+    SumEq_32_t *s = (SumEq_32_t *)dvs_spool_ptr(&ctx->pool, ref);
     memset(s, 0, sizeof(SumEq_32_t));
 
     s->hdr.fire       = _fire_sum_eq_32;
@@ -4552,7 +4552,7 @@ void contra_register_explanations(dvs_ctx_t *ctx) {
                    ? ctx->n_props : ctx->n_prop_refs_capacity;
     for (uint32_t pi = 0; pi < lim; pi++) {
         if (ctx->prop_refs[pi] == EXPR_NULL) continue;
-        Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ctx->prop_refs[pi]);
+        Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[pi]);
         if (p->explain) continue;  /* already set */
 
         for (uint32_t j = 0; j < n_entries; j++) {

@@ -38,7 +38,7 @@ static int _solver_checkpoint(dvs_ctx_t *ctx) {
      * matching rewind on dvs_solver_restore is deferred to the deep kissat
      * refactor (see dvs_trail.h:LevelMark for the full note). */
     m->sat_arena_top  = 0;
-    m->pool_mark        = dvs_pool_mark(&ctx->pool);
+    m->pool_mark        = dvs_spool_mark(&ctx->pool);
     m->initial_vars     = ctx->initial_vars;
     m->initial_n_vars   = ctx->initial_n_vars;
     m->initial_vars_cap = ctx->initial_vars_cap;
@@ -93,12 +93,12 @@ typedef struct { uint32_t var; int64_t value; } _HoleCarry;
  * Never frees below pool_floor, the end of compile. */
 static void _rewind_pool(dvs_ctx_t *ctx, const CheckpointMark *m,
                          uint32_t n_vars_was) {
-    dvs_pool_mark_t mark = m->pool_mark;
-    if (mark.used < ctx->pool_floor) {
-        mark.used     = ctx->pool_floor;
+    dvs_spool_mark_t mark = m->pool_mark;
+    if (mark.top < ctx->pool_floor.top) {
+        mark          = ctx->pool_floor;
         mark.overflow = ctx->pool.overflow;
     }
-    uint32_t first = dvs_pool_mark_offset(mark);
+    uint32_t first = dvs_spool_mark_offset(mark);
     uint32_t n_keep = m->n_vars_at_cp;
     if (n_vars_was > ctx->n_vars_capacity) n_vars_was = ctx->n_vars_capacity;
 
@@ -106,7 +106,7 @@ static void _rewind_pool(dvs_ctx_t *ctx, const CheckpointMark *m,
         for (uint32_t v = 0; v < n_keep; v++) {
             uint32_t ref = ctx->watcher_heads[v];
             while (ref != EXPR_NULL && ref >= first)
-                ref = _watch_next((const Propagator *)dvs_pool_ptr(&ctx->pool, ref), v);
+                ref = _watch_next((const Propagator *)dvs_spool_ptr(&ctx->pool, ref), v);
             ctx->watcher_heads[v] = ref;
         }
         for (uint32_t v = n_keep; v < n_vars_was; v++)
@@ -119,7 +119,7 @@ static void _rewind_pool(dvs_ctx_t *ctx, const CheckpointMark *m,
         for (uint32_t v = 0; v < n_keep; v++) {
             uint32_t *link = &ctx->var_holes_head[v];
             while (*link != 0) {
-                HoleEntry *he = (HoleEntry *)dvs_pool_ptr(&ctx->pool, *link);
+                HoleEntry *he = (HoleEntry *)dvs_spool_ptr(&ctx->pool, *link);
                 if (*link < first) { link = &he->next; continue; }
                 if (n_carry == carry_cap) {
                     uint32_t cap = carry_cap ? 2 * carry_cap : 16;
@@ -151,7 +151,7 @@ static void _rewind_pool(dvs_ctx_t *ctx, const CheckpointMark *m,
     if (ctx->conflict_prop_ref != EXPR_NULL && ctx->conflict_prop_ref >= first)
         ctx->conflict_prop_ref = EXPR_NULL;
 
-    dvs_pool_release(&ctx->pool, mark);
+    dvs_spool_release(&ctx->pool, mark);
 
     /* The rewind freed at least as much as the carried holes held. */
     for (uint32_t i = 0; i < n_carry; i++)
@@ -231,7 +231,7 @@ static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
         for (uint32_t i = m->n_props_at_cp; i < lim; i++) {
             uint32_t pref = ctx->prop_refs[i];
             if (pref != EXPR_NULL) {
-                Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, pref);
+                Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, pref);
                 /* Mark entailed too in case the watcher chain still
                  * iterates the propagator before its slot is checked.
                  * trail_backtrack's watcher-chain walk skips clearing
@@ -305,7 +305,7 @@ static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
         for (uint32_t i = 0; i < lim; i++) {
             uint32_t pref = ctx->prop_refs[i];
             if (pref != EXPR_NULL) {
-                Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, pref);
+                Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, pref);
                 p->flags &= (uint8_t)~(PROP_FLAG_ENTAILED | PROP_FLAG_IN_QUEUE);
                 prop_enqueue(ctx, pref);
             }

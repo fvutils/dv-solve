@@ -33,12 +33,12 @@ static void _init_tier0(Variable *v, uint16_t width, uint8_t flags,
 /** Initialise a tier-1 Variable (33–64 bits); allocates WideBounds64. */
 static int _init_tier1(dvs_ctx_t *ctx, Variable *v, uint16_t width,
                         uint8_t flags, int64_t lo, int64_t hi) {
-    uint32_t ref = dvs_pool_alloc(&ctx->pool,
+    uint32_t ref = dvs_spool_alloc(&ctx->pool,
                                   (uint32_t)sizeof(WideBounds64),
                                   (uint32_t)_Alignof(WideBounds64));
     if (ref == EXPR_NULL) return -1;
 
-    WideBounds64 *wb = (WideBounds64 *)dvs_pool_ptr(&ctx->pool, ref);
+    WideBounds64 *wb = (WideBounds64 *)dvs_spool_ptr(&ctx->pool, ref);
     wb->lo = lo;
     wb->hi = hi;
 
@@ -96,11 +96,11 @@ static int _init_tier2(dvs_ctx_t *ctx, Variable *v, uint16_t width,
     uint32_t n = _n_limbs(width);
     /* Header + 2 limb arrays */
     uint32_t total = (uint32_t)sizeof(WideBoundsN) + 2u * n * (uint32_t)sizeof(uint64_t);
-    uint32_t ref = dvs_pool_alloc(&ctx->pool, total,
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, total,
                                   (uint32_t)_Alignof(WideBoundsN));
     if (ref == EXPR_NULL) return -1;
 
-    WideBoundsN *wn = (WideBoundsN *)dvs_pool_ptr(&ctx->pool, ref);
+    WideBoundsN *wn = (WideBoundsN *)dvs_spool_ptr(&ctx->pool, ref);
     wn->n_limbs = n;
     wn->_pad    = 0;
 
@@ -3919,7 +3919,7 @@ static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     dvs_problem_t *msp = dvs_sv_rewrite_masks(esp, NULL, NULL);
     int rc = _solver_compile_body(ctx, msp);
     /* What compile allocated is permanent: a restore never frees it. */
-    ctx->pool_floor = dvs_pool_used(&ctx->pool);
+    ctx->pool_floor = dvs_spool_mark(&ctx->pool);
     dvs_sv_release(esp, msp);
     dvs_sv_release(sp, esp);
 #ifdef DVS_STEP_CHECK
@@ -3962,12 +3962,12 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         if (want > n + slack) { slack = want - n; }
     }
     uint32_t capacity = n + slack;
-    uint32_t vars_ref = dvs_pool_alloc(&ctx->pool,
+    uint32_t vars_ref = dvs_spool_alloc(&ctx->pool,
                                         capacity * (uint32_t)sizeof(Variable),
                                         (uint32_t)_Alignof(Variable));
     if (vars_ref == EXPR_NULL) return -1;
 
-    ctx->vars           = (Variable *)dvs_pool_ptr(&ctx->pool, vars_ref);
+    ctx->vars           = (Variable *)dvs_spool_ptr(&ctx->pool, vars_ref);
     ctx->n_vars         = n;
     ctx->n_decl_vars    = n;
     free(ctx->var_order);
@@ -4056,11 +4056,11 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     }
 
     /* ---- Allocate per-variable watcher head array (with slack) ---- */
-    uint32_t wh_ref = dvs_pool_alloc(&ctx->pool,
+    uint32_t wh_ref = dvs_spool_alloc(&ctx->pool,
                                       capacity * (uint32_t)sizeof(uint32_t),
                                       (uint32_t)_Alignof(uint32_t));
     if (wh_ref == EXPR_NULL) return -1;
-    ctx->watcher_heads = (uint32_t *)dvs_pool_ptr(&ctx->pool, wh_ref);
+    ctx->watcher_heads = (uint32_t *)dvs_spool_ptr(&ctx->pool, wh_ref);
     for (uint32_t i = 0; i < capacity; i++) ctx->watcher_heads[i] = EXPR_NULL;
 
     /* ---- Allocate prop_refs array for checkpoint/restore ----
@@ -4084,37 +4084,37 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
      * (not EXPR_NULL) as a valid prop offset, segfaulting in fire(). */
     if (ctx->incremental_capacity_hint && pr_cap < ctx->incremental_capacity_hint)
         pr_cap = ctx->incremental_capacity_hint;
-    uint32_t pr_ref = dvs_pool_alloc(&ctx->pool,
+    uint32_t pr_ref = dvs_spool_alloc(&ctx->pool,
                                       pr_cap * (uint32_t)sizeof(uint32_t),
                                       (uint32_t)_Alignof(uint32_t));
     if (pr_ref == EXPR_NULL) return -1;
-    ctx->prop_refs = (uint32_t *)dvs_pool_ptr(&ctx->pool, pr_ref);
+    ctx->prop_refs = (uint32_t *)dvs_spool_ptr(&ctx->pool, pr_ref);
     ctx->n_prop_refs_capacity = pr_cap;
     for (uint32_t i = 0; i < pr_cap; i++) ctx->prop_refs[i] = EXPR_NULL;
 
     /* ---- Allocate guard-variable side table ---- */
-    uint32_t gv_ref = dvs_pool_alloc(&ctx->pool,
+    uint32_t gv_ref = dvs_spool_alloc(&ctx->pool,
                                       pr_cap * (uint32_t)sizeof(uint32_t),
                                       (uint32_t)_Alignof(uint32_t));
     if (gv_ref == EXPR_NULL) return -1;
-    ctx->prop_guard_vars = (uint32_t *)dvs_pool_ptr(&ctx->pool, gv_ref);
+    ctx->prop_guard_vars = (uint32_t *)dvs_spool_ptr(&ctx->pool, gv_ref);
     for (uint32_t i = 0; i < pr_cap; i++) ctx->prop_guard_vars[i] = EXPR_NULL;
 
     /* ---- Allocate prop_constraint_id side table ---- */
-    uint32_t pc_ref = dvs_pool_alloc(&ctx->pool,
+    uint32_t pc_ref = dvs_spool_alloc(&ctx->pool,
                                       pr_cap * (uint32_t)sizeof(uint32_t),
                                       (uint32_t)_Alignof(uint32_t));
     if (pc_ref == EXPR_NULL) return -1;
-    ctx->prop_constraint_id = (uint32_t *)dvs_pool_ptr(&ctx->pool, pc_ref);
+    ctx->prop_constraint_id = (uint32_t *)dvs_spool_ptr(&ctx->pool, pc_ref);
     for (uint32_t i = 0; i < pr_cap; i++) ctx->prop_constraint_id[i] = 0;
 
     /* ---- Build var alias table (union-find for DVS_BIN_EQ(var,var)) ---- */
     {
-        uint32_t al_ref = dvs_pool_alloc(&ctx->pool,
+        uint32_t al_ref = dvs_spool_alloc(&ctx->pool,
                                           capacity * (uint32_t)sizeof(uint32_t),
                                           (uint32_t)_Alignof(uint32_t));
         if (al_ref != EXPR_NULL) {
-            ctx->var_alias = (uint32_t *)dvs_pool_ptr(&ctx->pool, al_ref);
+            ctx->var_alias = (uint32_t *)dvs_spool_ptr(&ctx->pool, al_ref);
             for (uint32_t i = 0; i < capacity; i++) ctx->var_alias[i] = i;
 
             /* Pre-scan: collect unconditional DVS_BIN_EQ(var, var) constraints,
@@ -4249,15 +4249,15 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     if (sp->n_softs > 0) {
         uint32_t ns = sp->n_softs;
         /* Allocate assumption tracking arrays */
-        uint32_t av_ref = dvs_pool_alloc(&ctx->pool,
+        uint32_t av_ref = dvs_spool_alloc(&ctx->pool,
                                           ns * (uint32_t)sizeof(uint32_t),
                                           (uint32_t)_Alignof(uint32_t));
-        uint32_t ap_ref = dvs_pool_alloc(&ctx->pool,
+        uint32_t ap_ref = dvs_spool_alloc(&ctx->pool,
                                           ns * (uint32_t)sizeof(uint32_t),
                                           (uint32_t)_Alignof(uint32_t));
         if (av_ref != EXPR_NULL && ap_ref != EXPR_NULL) {
-            ctx->assumption_var_ids = (uint32_t *)dvs_pool_ptr(&ctx->pool, av_ref);
-            ctx->assumption_priorities = (uint32_t *)dvs_pool_ptr(&ctx->pool, ap_ref);
+            ctx->assumption_var_ids = (uint32_t *)dvs_spool_ptr(&ctx->pool, av_ref);
+            ctx->assumption_priorities = (uint32_t *)dvs_spool_ptr(&ctx->pool, ap_ref);
 
             uint32_t aidx = 0;
             dvs_expr_t sref = sp->softs_head;
@@ -4309,11 +4309,11 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     ctx->dist_offsets = NULL;
     if (sp->n_dists > 0) {
         /* Allocate per-var dist_offsets array */
-        uint32_t do_ref = dvs_pool_alloc(&ctx->pool,
+        uint32_t do_ref = dvs_spool_alloc(&ctx->pool,
                                           ctx->n_vars_capacity * (uint32_t)sizeof(uint32_t),
                                           (uint32_t)_Alignof(uint32_t));
         if (do_ref != EXPR_NULL) {
-            ctx->dist_offsets = (uint32_t *)dvs_pool_ptr(&ctx->pool, do_ref);
+            ctx->dist_offsets = (uint32_t *)dvs_spool_ptr(&ctx->pool, do_ref);
             for (uint32_t i = 0; i < ctx->n_vars_capacity; i++)
                 ctx->dist_offsets[i] = 0;
 
@@ -4327,10 +4327,10 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                 /* Allocate DistMeta + trailing DistMetaEntry array in pool */
                 uint32_t dm_total = (uint32_t)sizeof(DistMeta) +
                                     ne * (uint32_t)sizeof(DistMetaEntry);
-                uint32_t dm_ref = dvs_pool_alloc(&ctx->pool, dm_total,
+                uint32_t dm_ref = dvs_spool_alloc(&ctx->pool, dm_total,
                                                   (uint32_t)_Alignof(DistMeta));
                 if (dm_ref != EXPR_NULL && vid < ctx->n_vars_capacity) {
-                    DistMeta *dm = (DistMeta *)dvs_pool_ptr(&ctx->pool, dm_ref);
+                    DistMeta *dm = (DistMeta *)dvs_spool_ptr(&ctx->pool, dm_ref);
                     dm->n_entries = ne;
                     dm->_pad = 0;
                     DistMetaEntry *dme = (DistMetaEntry *)(dm + 1);
@@ -4367,21 +4367,21 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 
     /* ---- Allocate per-variable hole list heads (randc support) ---- */
     {
-        uint32_t vh_ref = dvs_pool_alloc(&ctx->pool,
+        uint32_t vh_ref = dvs_spool_alloc(&ctx->pool,
                                           ctx->n_vars_capacity * (uint32_t)sizeof(uint32_t),
                                           (uint32_t)_Alignof(uint32_t));
         if (vh_ref != EXPR_NULL) {
-            ctx->var_holes_head = (uint32_t *)dvs_pool_ptr(&ctx->pool, vh_ref);
+            ctx->var_holes_head = (uint32_t *)dvs_spool_ptr(&ctx->pool, vh_ref);
             for (uint32_t i = 0; i < ctx->n_vars_capacity; i++)
                 ctx->var_holes_head[i] = 0;
         } else {
             ctx->var_holes_head = NULL;
         }
-        uint32_t vn_ref = dvs_pool_alloc(&ctx->pool,
+        uint32_t vn_ref = dvs_spool_alloc(&ctx->pool,
                                           ctx->n_vars_capacity * (uint32_t)sizeof(uint64_t),
                                           (uint32_t)_Alignof(uint64_t));
         if (vn_ref != EXPR_NULL) {
-            ctx->var_n_values = (uint64_t *)dvs_pool_ptr(&ctx->pool, vn_ref);
+            ctx->var_n_values = (uint64_t *)dvs_spool_ptr(&ctx->pool, vn_ref);
             for (uint32_t i = 0; i < ctx->n_vars_capacity; i++)
                 ctx->var_n_values[i] = 0;
         } else {
@@ -4431,7 +4431,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                     continue;   /* conditional: the set only holds under a guard */
 
                 Propagator *p =
-                    (Propagator *)dvs_pool_ptr(&ctx->pool, ctx->prop_refs[pi]);
+                    (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[pi]);
                 uint32_t vid = 0;
                 uint32_t nv = prop_disj_eq_set(p, &vid, vals, MAX_DISJ_CLAUSES);
                 if (nv == 0 || vid >= ctx->n_vars) continue;
@@ -4464,11 +4464,11 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     /* Use ctx->n_vars (not n) to include assumption vars from soft constraints */
     {
         uint32_t save_n = ctx->n_vars;
-        uint32_t iv_ref = dvs_pool_alloc(&ctx->pool,
+        uint32_t iv_ref = dvs_spool_alloc(&ctx->pool,
                                           save_n * (uint32_t)sizeof(Variable),
                                           (uint32_t)_Alignof(Variable));
         if (iv_ref != EXPR_NULL) {
-            ctx->initial_vars = (Variable *)dvs_pool_ptr(&ctx->pool, iv_ref);
+            ctx->initial_vars = (Variable *)dvs_spool_ptr(&ctx->pool, iv_ref);
             memcpy(ctx->initial_vars, ctx->vars, save_n * sizeof(Variable));
             ctx->initial_n_vars = save_n;
             ctx->initial_vars_cap = save_n;
@@ -4482,12 +4482,12 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                 if (VAR_IS_TIER1(v->flags) && v->holes_offset != 0) {
                     /* The initial_vars[i].holes_offset points to the same
                      * WideBounds64 in the pool. We need a separate copy. */
-                    uint32_t wb_ref = dvs_pool_alloc(&ctx->pool,
+                    uint32_t wb_ref = dvs_spool_alloc(&ctx->pool,
                                                       (uint32_t)sizeof(WideBounds64),
                                                       (uint32_t)_Alignof(WideBounds64));
                     if (wb_ref != EXPR_NULL) {
-                        WideBounds64 *src = (WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
-                        WideBounds64 *dst = (WideBounds64 *)dvs_pool_ptr(&ctx->pool, wb_ref);
+                        WideBounds64 *src = (WideBounds64 *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
+                        WideBounds64 *dst = (WideBounds64 *)dvs_spool_ptr(&ctx->pool, wb_ref);
                         *dst = *src;
                         /* Point initial_vars[i].holes_offset to the saved copy */
                         ctx->initial_vars[i].holes_offset = wb_ref;
@@ -4568,10 +4568,10 @@ static int _snapshot_added_vars(dvs_ctx_t *ctx, uint32_t base) {
         if (cap < n + 64) cap = n + 64;
         if (ctx->n_vars_capacity && cap > ctx->n_vars_capacity)
             cap = ctx->n_vars_capacity > n ? ctx->n_vars_capacity : n;
-        uint32_t ref = dvs_pool_alloc(&ctx->pool, cap * (uint32_t)sizeof(Variable),
+        uint32_t ref = dvs_spool_alloc(&ctx->pool, cap * (uint32_t)sizeof(Variable),
                                       (uint32_t)_Alignof(Variable));
         if (ref == EXPR_NULL) return -1;
-        Variable *grown = (Variable *)dvs_pool_ptr(&ctx->pool, ref);
+        Variable *grown = (Variable *)dvs_spool_ptr(&ctx->pool, ref);
         memcpy(grown, ctx->initial_vars, ctx->initial_n_vars * sizeof(Variable));
         ctx->initial_vars = grown;
         ctx->initial_vars_cap = cap;
@@ -4582,11 +4582,11 @@ static int _snapshot_added_vars(dvs_ctx_t *ctx, uint32_t base) {
         if (VAR_IS_TIER1(v->flags) && v->holes_offset != 0) {
             /* As at compile: the snapshot keeps its own copy of the wide
              * bounds, since the live copy changes during search. */
-            uint32_t wb_ref = dvs_pool_alloc(&ctx->pool, (uint32_t)sizeof(WideBounds64),
+            uint32_t wb_ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(WideBounds64),
                                              (uint32_t)_Alignof(WideBounds64));
             if (wb_ref == EXPR_NULL) return -1;
-            *(WideBounds64 *)dvs_pool_ptr(&ctx->pool, wb_ref) =
-                *(WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+            *(WideBounds64 *)dvs_spool_ptr(&ctx->pool, wb_ref) =
+                *(WideBounds64 *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
             ctx->initial_vars[i].holes_offset = wb_ref;
         }
     }
@@ -4709,8 +4709,8 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
                 iv->lo = v->lo;
                 iv->hi = v->hi;
             } else if (VAR_IS_TIER1(v->flags) && v->holes_offset && iv->holes_offset) {
-                *(WideBounds64 *)dvs_pool_ptr(&ctx->pool, iv->holes_offset) =
-                    *(const WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+                *(WideBounds64 *)dvs_spool_ptr(&ctx->pool, iv->holes_offset) =
+                    *(const WideBounds64 *)dvs_spool_ptr(&ctx->pool, v->holes_offset);
             }
         }
     }

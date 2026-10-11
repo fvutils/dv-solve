@@ -143,7 +143,7 @@ static void _sc_dump_props_always(dvs_ctx_t *ctx) {
                    ? ctx->n_props : ctx->n_prop_refs_capacity;
     for (uint32_t i = 0; i < lim; i++) {
         if (ctx->prop_refs[i] == EXPR_NULL) continue;
-        Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ctx->prop_refs[i]);
+        Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[i]);
         uint32_t nw;
         const uint32_t *wv = prop_watched_vars(p, &nw);
         fprintf(stderr, "[step-check]   prop %u %s", i, prop_fire_name(p->fire));
@@ -172,7 +172,7 @@ static void _step_check_sat_exit(dvs_ctx_t *ctx) {
         for (uint32_t i = 0; i < lim; i++) {
             uint32_t ref = ctx->prop_refs[i];
             if (ref == EXPR_NULL) continue;
-            Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ref);
+            Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
             if (ctx->prop_guard_vars && ctx->prop_guard_vars[i] != EXPR_NULL) {
                 const Variable *g = &ctx->vars[ctx->prop_guard_vars[i]];
                 if (var_lo64(ctx, g) == 0) continue;   /* gated off */
@@ -468,7 +468,7 @@ static int64_t _pick_value_dist(dvs_ctx_t *ctx, uint32_t var_id,
     uint32_t dm_off = ctx->dist_offsets[var_id];
     if (dm_off == 0) return _rand_range64(ctx, lo, hi);
 
-    DistMeta *dm = (DistMeta *)dvs_pool_ptr(&ctx->pool, dm_off);
+    DistMeta *dm = (DistMeta *)dvs_spool_ptr(&ctx->pool, dm_off);
     DistMetaEntry *entries = (DistMetaEntry *)(dm + 1);
     uint32_t ne = dm->n_entries;
 
@@ -559,7 +559,7 @@ static int64_t _pick_avoiding_holes(dvs_ctx_t *ctx, uint32_t var_id,
     int64_t cur = lo;
     uint32_t hoff = ctx->var_holes_head[var_id];
     while (hoff != 0) {
-        const HoleEntry *he = (const HoleEntry *)dvs_pool_ptr(&ctx->pool, hoff);
+        const HoleEntry *he = (const HoleEntry *)dvs_spool_ptr(&ctx->pool, hoff);
         if (he->value < lo) { hoff = he->next; continue; }
         if (he->value > hi) break;
         uint64_t gap = (uint64_t)(he->value - cur);  /* valid count in [cur, hole) */
@@ -1720,7 +1720,7 @@ static void _reset_in_scope(dvs_ctx_t *ctx) {
                    ? ctx->n_props : ctx->n_prop_refs_capacity;
     for (uint32_t i = 0; i < lim; i++) {
         if (ctx->prop_refs[i] != EXPR_NULL) {
-            Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ctx->prop_refs[i]);
+            Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[i]);
             p->flags &= (uint8_t)~(PROP_FLAG_ENTAILED | PROP_FLAG_IN_QUEUE);
             prop_enqueue(ctx, ctx->prop_refs[i]);
         }
@@ -1777,8 +1777,8 @@ static void _solver_reset(dvs_ctx_t *ctx) {
         int tier1 = VAR_IS_TIER1(v->flags) && live_off != 0 && iv->holes_offset != 0;
         *v = *iv;   /* restore lo/hi/flags/width (and holes_offset := saved copy) */
         if (tier1) {
-            WideBounds64 *saved = (WideBounds64 *)dvs_pool_ptr(&ctx->pool, iv->holes_offset);
-            WideBounds64 *live  = (WideBounds64 *)dvs_pool_ptr(&ctx->pool, live_off);
+            WideBounds64 *saved = (WideBounds64 *)dvs_spool_ptr(&ctx->pool, iv->holes_offset);
+            WideBounds64 *live  = (WideBounds64 *)dvs_spool_ptr(&ctx->pool, live_off);
             *live = *saved;              /* live wide bounds back to pristine */
             v->holes_offset = live_off;  /* keep the var on its live struct */
         }
@@ -1815,7 +1815,7 @@ static void _solver_reset(dvs_ctx_t *ctx) {
                    ? ctx->n_props : ctx->n_prop_refs_capacity;
     for (uint32_t i = 0; i < lim; i++) {
         if (ctx->prop_refs[i] != EXPR_NULL) {
-            Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool,
+            Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool,
                                                         ctx->prop_refs[i]);
             p->flags &= (uint8_t)~(PROP_FLAG_ENTAILED | PROP_FLAG_IN_QUEUE);
             prop_enqueue(ctx, ctx->prop_refs[i]);
@@ -1956,7 +1956,7 @@ static int _is_hole(const dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx->var_holes_head) return 0;
     uint32_t off = ctx->var_holes_head[var_id];
     while (off != 0) {
-        const HoleEntry *he = (const HoleEntry *)dvs_pool_ptr(&ctx->pool, off);
+        const HoleEntry *he = (const HoleEntry *)dvs_spool_ptr(&ctx->pool, off);
         if (he->value == value) return 1;
         if (he->value > value) return 0;  /* sorted ascending, done */
         off = he->next;
@@ -1971,7 +1971,7 @@ static uint32_t _count_holes_in_range(const dvs_ctx_t *ctx, uint32_t var_id,
     uint32_t count = 0;
     uint32_t off = ctx->var_holes_head[var_id];
     while (off != 0) {
-        const HoleEntry *he = (const HoleEntry *)dvs_pool_ptr(&ctx->pool, off);
+        const HoleEntry *he = (const HoleEntry *)dvs_spool_ptr(&ctx->pool, off);
         if (he->value > hi) break;
         if (he->value >= lo) count++;
         off = he->next;
@@ -1985,12 +1985,12 @@ static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx->var_holes_head) return -1;
 
     /* Allocate a HoleEntry in the static pool */
-    uint32_t he_ref = dvs_pool_alloc(&ctx->pool,
+    uint32_t he_ref = dvs_spool_alloc(&ctx->pool,
                                       (uint32_t)sizeof(HoleEntry),
                                       (uint32_t)_Alignof(HoleEntry));
     if (he_ref == EXPR_NULL) return -1;
 
-    HoleEntry *he = (HoleEntry *)dvs_pool_ptr(&ctx->pool, he_ref);
+    HoleEntry *he = (HoleEntry *)dvs_spool_ptr(&ctx->pool, he_ref);
     he->value = value;
     he->_hpad = 0;
 
@@ -1999,7 +1999,7 @@ static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     uint32_t *prev_next_ptr = &ctx->var_holes_head[var_id];
 
     while (cur_off != 0) {
-        HoleEntry *cur = (HoleEntry *)dvs_pool_ptr(&ctx->pool, cur_off);
+        HoleEntry *cur = (HoleEntry *)dvs_spool_ptr(&ctx->pool, cur_off);
         if (cur->value == value) return 1;  /* already present */
         if (cur->value > value) break;
         prev_next_ptr = &cur->next;

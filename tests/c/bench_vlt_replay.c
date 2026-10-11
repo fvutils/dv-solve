@@ -564,7 +564,10 @@ static int cdcl_open(Cdcl *c, Built *bt) {
         c->ctx->incremental_capacity_hint = 8192;
         int rc = dvs_solver_compile(c->ctx, bt->p);
         if (rc == -2) return -2;
-        size_t used = c->ctx->pool.used, cap = c->ctx->pool.capacity;
+        /* A pool that can grow (a block allocator was given) needs no
+         * headroom; only a fixed one is sized up front. */
+        size_t used = dvs_spool_used(&c->ctx->pool);
+        size_t cap  = c->ctx->pool.alloc ? SIZE_MAX : c->ctx->pool.fixed_end;
         size_t want = used / 4 > ((size_t)512 << 10) ? used / 4 : ((size_t)512 << 10);
         int grow = rc >= 0 ? cap - used < want && sz < CTX_BUF_MAX
                            : c->ctx->pool.overflow && sz < CTX_BUF_MAX;

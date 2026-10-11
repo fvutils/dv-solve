@@ -281,7 +281,7 @@ int diffcycle_build(dvs_ctx_t *ctx) {
          * `idx == i`) states its relation only while the guard holds; as an
          * unconditional edge it closes cycles that do not exist. */
         if (ctx->prop_guard_vars && ctx->prop_guard_vars[pi] != EXPR_NULL) continue;
-        Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, ctx->prop_refs[pi]);
+        Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[pi]);
         DiffRel two[2];
         int k = prop_difference_relations(p, ctx, two);
         for (int j = 0; j < k; j++) {
@@ -345,9 +345,9 @@ int diffcycle_build(dvs_ctx_t *ctx) {
     uint32_t edges_off = off;      off += 4u * nk * (uint32_t)sizeof(DcEdge);
     if (ctx->n_props >= ctx->n_prop_refs_capacity) goto out;
 
-    uint32_t ref = dvs_pool_alloc(&ctx->pool, off, 8u);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, off, 8u);
     if (ref == EXPR_NULL) { rc = -1; goto out; }
-    DcHead *h = (DcHead *)dvs_pool_ptr(&ctx->pool, ref);
+    DcHead *h = (DcHead *)dvs_spool_ptr(&ctx->pool, ref);
     memset(h, 0, off);
     h->hdr.fire       = _fire_diffcycle;
     h->hdr.explain    = _explain_diffcycle;

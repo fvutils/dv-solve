@@ -4644,8 +4644,8 @@ static int _ensure_compiled(Smt2Frontend *fe) {
          * uncompiled -- the first such add also re-copies the reset snapshot
          * of every variable. Keep a quarter of the compile's use free;
          * failing that, recompile into a bigger pool. */
-        if (rc >= 0 && sz < (size_t)CTX_BUF_SIZE) {
-            size_t used = fe->ctx->pool.used, cap = fe->ctx->pool.capacity;
+        if (rc >= 0 && sz < (size_t)CTX_BUF_SIZE && !fe->ctx->pool.alloc) {
+            size_t used = dvs_spool_used(&fe->ctx->pool), cap = fe->ctx->pool.fixed_end;
             size_t want = used / 4 > ((size_t)512 << 10) ? used / 4 : ((size_t)512 << 10);
             if (cap - used < want) {
                 dvs_solver_destroy(fe->ctx); fe->ctx = NULL;

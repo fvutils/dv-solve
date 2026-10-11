@@ -127,8 +127,7 @@ class SolveCtx:
         self._ctx_buf = (ctypes.c_uint8 * ctx_buf_size)()
         ctx = lib.dvs_solver_create(self._ctx_buf, ctx_buf_size, self._ba)
         if ctx is None:
-            lib.dvs_block_alloc_destroy(self._ba)
-            self._ba = None
+            self._drop_native()
             raise RuntimeError("dvs_solver_create failed")
         self._ctx = ctx  # c_void_p value
 
@@ -154,17 +153,15 @@ class SolveCtx:
             self._detach_oracle()
             if rc == -2:
                 oracle._after()
-        # On every error path below, NULL out self._ba after releasing it: the
-        # half-constructed SolveCtx still exists (the exception unwinds out of
-        # __init__) and will be garbage-collected, at which point __del__ ->
-        # destroy() must NOT free the already-freed block allocator again.
+        # Every error path below releases the context and its block allocator
+        # and NULLs self._ba: the half-constructed SolveCtx still exists (the
+        # exception unwinds out of __init__) and will be garbage-collected, at
+        # which point __del__ -> destroy() must NOT free them again.
         if rc == -2:
-            lib.dvs_block_alloc_destroy(self._ba)
-            self._ba = None
+            self._drop_native()
             raise CompileUnsatError("Domain became empty during compile-time bound tightening")
         if rc == _COMPILE_UNSUPPORTED_WIDTH:
-            lib.dvs_block_alloc_destroy(self._ba)
-            self._ba = None
+            self._drop_native()
             raise CompileUnsupportedError(
                 "problem goes beyond a supported limit: a variable wider than "
                 "64 bits, an expression wider than 255 bits or nested more "
@@ -172,22 +169,25 @@ class SolveCtx:
                 "variables or one wider than 32 bits"
             )
         if rc == _COMPILE_BAD_VAR:
-            lib.dvs_block_alloc_destroy(self._ba)
-            self._ba = None
+            self._drop_native()
             raise ValueError(
                 "variable ids must be 0..n-1, each declared once with add_var, "
                 "and every variable an expression names must be declared"
             )
         if rc < 0:
-            lib.dvs_block_alloc_destroy(self._ba)
-            self._ba = None
+            self._drop_native()
             raise RuntimeError(f"dvs_solver_compile failed (rc={rc})")
         if rc > 0:
-            lib.dvs_block_alloc_destroy(self._ba)
-            self._ba = None
+            self._drop_native()
             raise CompileIncompleteError(
                 f"{rc} constraint(s) could not be compiled natively"
             )
+
+    def _drop_native(self) -> None:
+        # The context may hold pool memory it grew into, beside its buffer.
+        self._lib.dvs_solver_destroy(self._ctx)
+        self._lib.dvs_block_alloc_destroy(self._ba)
+        self._ba = None
 
     # ------------------------------------------------------------------ #
     # Context manager support                                              #

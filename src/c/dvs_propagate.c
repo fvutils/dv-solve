@@ -13,7 +13,7 @@
 static void _wake_var(dvs_ctx_t *ctx, uint32_t var_id) {
     uint32_t prop_ref = ctx->watcher_heads[var_id];
     while (prop_ref != EXPR_NULL) {
-        Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref);
+        Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, prop_ref);
 
         /* Find next in chain for this variable before potentially re-queuing */
         uint32_t next = EXPR_NULL;
@@ -69,7 +69,7 @@ static void _wake_var(dvs_ctx_t *ctx, uint32_t var_id) {
 /* ------------------------------------------------------------------ */
 
 void prop_enqueue(dvs_ctx_t *ctx, uint32_t prop_ref) {
-    Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref);
+    Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, prop_ref);
     if (p->flags & (PROP_FLAG_IN_QUEUE | PROP_FLAG_ENTAILED)) return;
 
     p->flags    |= PROP_FLAG_IN_QUEUE;
@@ -81,7 +81,7 @@ void prop_enqueue(dvs_ctx_t *ctx, uint32_t prop_ref) {
         ctx->queue.tails[lvl] = prop_ref;
         ctx->queue.non_empty_mask |= (uint16_t)(1u << lvl);
     } else {
-        Propagator *tail = (Propagator *)dvs_pool_ptr(&ctx->pool,
+        Propagator *tail = (Propagator *)dvs_spool_ptr(&ctx->pool,
                                                        ctx->queue.tails[lvl]);
         tail->queue_next      = prop_ref;
         ctx->queue.tails[lvl] = prop_ref;
@@ -93,7 +93,7 @@ void prop_enqueue(dvs_ctx_t *ctx, uint32_t prop_ref) {
 /* ------------------------------------------------------------------ */
 
 void prop_set_guard(dvs_ctx_t *ctx, uint32_t prop_ref, uint32_t guard_var_id) {
-    Propagator *p = (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref);
+    Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, prop_ref);
     if (ctx->prop_guard_vars && p->prop_id < ctx->n_prop_refs_capacity) {
         ctx->prop_guard_vars[p->prop_id] = guard_var_id;
     }
@@ -261,7 +261,7 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
 
         /* Dequeue head */
         uint32_t    prop_ref = ctx->queue.heads[lvl];
-        Propagator *p        = (Propagator *)dvs_pool_ptr(&ctx->pool, prop_ref);
+        Propagator *p        = (Propagator *)dvs_spool_ptr(&ctx->pool, prop_ref);
 
         ctx->queue.heads[lvl] = p->queue_next;
         if (ctx->queue.heads[lvl] == EXPR_NULL) {
