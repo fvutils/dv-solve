@@ -65,14 +65,11 @@ static uint8_t *_b64_decode(const char *src, size_t *out_len) {
 /* so their effects persist across solve calls until restored.         */
 /* ------------------------------------------------------------------ */
 
-#define INTERNAL_CTX_SIZE (2 << 20)  /* 2 MiB for persistent ctx */
-
 typedef struct {
     void              *problem_buf;  /* malloc'd decoded dvs_problem_t buffer */
     size_t             problem_size;
-    void              *ctx_buf;      /* malloc'd dvs_ctx_t static pool */
-    dvs_block_alloc_t *block_alloc;  /* dynamic stack allocator */
-    dvs_ctx_t          *ctx;          /* persistent solver context */
+    dvs_ctx_t          *ctx;          /* persistent solver context
+                                      * (dvs_solver_new: grows as needed) */
     uint32_t           n_vars;
     int                solved;       /* 1 if last solve returned DVS_SOLVE_OK */
     int                n_uncompiled; /* constraints dvs_solver_compile could not take */
@@ -110,26 +107,13 @@ void *dvs_dpi_compile_b64(const char *b64_data) {
     if (!buf) return NULL;
 
     /* 2. Allocate the persistent dvs_ctx_t */
-    void *ctx_buf = malloc(INTERNAL_CTX_SIZE);
-    if (!ctx_buf) { free(buf); return NULL; }
-
-    dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, 0);
-    if (!ba) { free(ctx_buf); free(buf); return NULL; }
-
-    dvs_ctx_t *ctx = dvs_solver_create(ctx_buf, INTERNAL_CTX_SIZE, ba);
-    if (!ctx) {
-        dvs_block_alloc_destroy(ba);
-        free(ctx_buf);
-        free(buf);
-        return NULL;
-    }
+    dvs_ctx_t *ctx = dvs_solver_new(NULL);
+    if (!ctx) { free(buf); return NULL; }
 
     /* 3. Compile the problem into the persistent context */
     int rc = dvs_solver_compile(ctx, (dvs_problem_t *)buf);
     if (rc < 0) {
-        dvs_solver_destroy(ctx);
-        dvs_block_alloc_destroy(ba);
-        free(ctx_buf);
+        dvs_solver_free(ctx);
         free(buf);
         return NULL;
     }
@@ -137,17 +121,13 @@ void *dvs_dpi_compile_b64(const char *b64_data) {
     /* 4. Build the handle */
     DpiHandle *h = (DpiHandle *)calloc(1, sizeof(DpiHandle));
     if (!h) {
-        dvs_solver_destroy(ctx);
-        dvs_block_alloc_destroy(ba);
-        free(ctx_buf);
+        dvs_solver_free(ctx);
         free(buf);
         return NULL;
     }
 
     h->problem_buf  = buf;
     h->problem_size = buf_len;
-    h->ctx_buf      = ctx_buf;
-    h->block_alloc  = ba;
     h->ctx          = ctx;
     h->n_vars       = ((dvs_problem_t *)buf)->n_vars;
     h->solved       = 0;
@@ -250,9 +230,7 @@ long long dvs_dpi_get_value_h(void *ctx, int var_id) {
 void dvs_dpi_release_h(void *ctx) {
     if (!ctx) return;
     DpiHandle *h = (DpiHandle *)ctx;
-    dvs_solver_destroy(h->ctx);
-    dvs_block_alloc_destroy(h->block_alloc);
-    free(h->ctx_buf);
+    dvs_solver_free(h->ctx);
     free(h->problem_buf);
     free(h);
 }

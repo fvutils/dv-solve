@@ -6,16 +6,20 @@ Header: `dvs_search.h`, `dvs_ctx.h`.
 ## Lifecycle
 
 ```c
-// Create a solver context in a caller-supplied buffer.
+// Create a solver context; its memory comes from alloc (NULL: malloc) and
+// grows as the problem needs.
+SolveCtx *dvs_solver_new(dvs_alloc_t *alloc);
+void dvs_solver_free(SolveCtx *ctx);
+
+// Embedded: a context in a caller-supplied buffer. With a block allocator
+// it grows past the buffer; with NULL it stays inside (fixed).
 SolveCtx *dvs_solver_create(void *static_buf, size_t static_size,
                          dvs_block_alloc_t *block_alloc);
+void dvs_solver_destroy(SolveCtx *ctx);   // does not free the static buffer
 
 // Compile a SolveProblem into the context.
-// Returns 0 on success, -1 on pool overflow, -2 on compile-time UNSAT.
+// Returns 0 on success, -1 when memory runs out, -2 on compile-time UNSAT.
 int dvs_solver_compile(SolveCtx *ctx, SolveProblem *sp);
-
-// Destroy the context (does not free the static buffer).
-void dvs_solver_destroy(SolveCtx *ctx);
 ```
 
 ## Solving

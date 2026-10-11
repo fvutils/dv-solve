@@ -18,6 +18,35 @@ static inline size_t _pool_offset(void) {
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
 
+static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
+                            dvs_block_alloc_t *block_alloc, dvs_alloc_t *grow);
+
+dvs_ctx_t *dvs_solver_new(dvs_alloc_t *alloc) {
+    if (!alloc) alloc = &dvs_malloc_alloc;
+    dvs_ctx_t *ctx = (dvs_ctx_t *)DVS_ALLOC(alloc, sizeof(dvs_ctx_t));
+    if (!ctx) return NULL;
+    /* No fixed region: the pool grows from its first allocation, and the
+     * trail stack gets a block allocator of its own over `alloc`. */
+    dvs_block_alloc_t *ba = dvs_block_alloc_create(alloc, 64u << 10);
+    if (!ba) { DVS_RELEASE(alloc, ctx, sizeof(dvs_ctx_t)); return NULL; }
+    if (!_ctx_init(ctx, NULL, 0, ba, alloc)) {
+        dvs_block_alloc_destroy(ba);
+        DVS_RELEASE(alloc, ctx, sizeof(dvs_ctx_t));
+        return NULL;
+    }
+    ctx->own_block_alloc = ba;
+    ctx->own_header = 1;
+    return ctx;
+}
+
+void dvs_solver_free(dvs_ctx_t *ctx) {
+    if (!ctx) return;
+    dvs_alloc_t *alloc = ctx->alloc;
+    int own = ctx->own_header;
+    dvs_solver_destroy(ctx);
+    if (own) DVS_RELEASE(alloc, ctx, sizeof(dvs_ctx_t));
+}
+
 dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
                          dvs_block_alloc_t *block_alloc) {
     if (!static_buf) return NULL;
@@ -25,7 +54,20 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     size_t min_size = _pool_offset() + 64u;
     if (static_size < min_size) return NULL;
 
-    dvs_ctx_t *ctx        = (dvs_ctx_t *)static_buf;
+    /* The header at the front of the buffer, the pool's fixed region after
+     * it. With a block allocator the pool grows past the buffer through
+     * the allocator behind it; without one it stays inside. */
+    return _ctx_init((dvs_ctx_t *)static_buf,
+                     (uint8_t *)static_buf + _pool_offset(),
+                     static_size - _pool_offset(), block_alloc,
+                     block_alloc ? dvs_block_alloc_backing(block_alloc) : NULL);
+}
+
+/* Set up the header at `ctx`: a pool over [pool_buf, pool_buf + pool_size)
+ * growing through `grow` (NULL: fixed), the trail stack on `block_alloc`
+ * (NULL: a block allocator of the context's own). */
+static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
+                            dvs_block_alloc_t *block_alloc, dvs_alloc_t *grow) {
     /* Zero every header field first: the caller's buffer may be recycled, and
      * the per-field list below had fallen behind the struct (initial_vars,
      * var_holes_head, prop_guard_vars, ... were left as whatever the buffer
@@ -40,8 +82,7 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     ctx->conflict_count  = 0;
     ctx->rng_state       = 0;
     ctx->block_alloc     = block_alloc;
-    ctx->alloc           = block_alloc ? dvs_block_alloc_backing(block_alloc)
-                                       : &dvs_malloc_alloc;
+    ctx->alloc           = grow ? grow : &dvs_malloc_alloc;
     ctx->dynamic         = NULL;
     ctx->trail_top       = NULL;
     ctx->level_marks     = NULL;
@@ -98,13 +139,9 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
         ctx->queue.tails[i] = EXPR_NULL;
     }
 
-    /* The pool's fixed region is the rest of the buffer; with a block
-     * allocator it grows past it through ctx->alloc. Without one the pool
-     * is fixed (a problem that does not fit is DVS_COMPILE_NOMEM), and the
-     * context makes a small block allocator of its own for the trail. */
-    if (dvs_spool_init(&ctx->pool, (uint8_t *)static_buf + _pool_offset(),
-                       static_size - _pool_offset(),
-                       block_alloc ? ctx->alloc : NULL) != 0)
+    /* A fixed pool (no `grow`): a problem that does not fit is
+     * DVS_COMPILE_NOMEM. */
+    if (dvs_spool_init(&ctx->pool, pool_buf, pool_size, grow) != 0)
         return NULL;
     if (!block_alloc) {
         block_alloc = ctx->own_block_alloc = dvs_block_alloc_create(NULL, 64u << 10);

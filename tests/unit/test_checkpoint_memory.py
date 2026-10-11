@@ -9,8 +9,9 @@ popped to that push rather than to the checkpoint's, keeping every entry the
 pins and the solve's first propagation made. A context then took a new block
 every few solves for as long as it was reused.
 
-The backing allocator here counts what the context's block allocator asks
-for, so the test needs no process-memory measurement.
+The allocator here counts the 64 KiB blocks the context takes (its trail
+stack's blocks and its pool slots), so the test needs no process-memory
+measurement.
 """
 import ctypes
 import os
@@ -74,13 +75,13 @@ def _ctx(counting):
         b.add_constraint(b.expr_binary(BIN_LT, b.expr_var(v), b.expr_var(v + 1)))
     buf, _ = b.finalize()
     lib = ctx_mod._load_lib()
-    create = lib.dvs_block_alloc_create
+    new = lib.dvs_solver_new
     try:
-        lib.dvs_block_alloc_create = lambda _a, size: create(
-            ctypes.cast(ctypes.byref(counting.alloc), ctypes.c_void_p), size)
-        ctx = SolveCtx(buf, ctx_buf_size=BLOCK)
+        lib.dvs_solver_new = lambda _a: new(
+            ctypes.cast(ctypes.byref(counting.alloc), ctypes.c_void_p))
+        ctx = SolveCtx(buf)
     finally:
-        lib.dvs_block_alloc_create = create
+        lib.dvs_solver_new = new
     return b, ctx
 
 

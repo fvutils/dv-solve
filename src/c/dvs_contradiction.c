@@ -15,8 +15,6 @@
 #include "dvs_search.h"
 #include "dvs_block_alloc.h"
 
-#define CONTRA_CTX_BUF_SIZE  (1024u * 1024u)
-#define CONTRA_BLOCK_SIZE    4096u
 #define MAX_CORE_SIZE        256u
 
 /* ---- Time-limit helper ---- */
@@ -130,32 +128,24 @@ static void _gated_free(GatedProblem *g) {
 /* ---- SolverInstance ---- */
 
 typedef struct {
-    dvs_ctx_t *ctx;  void *ctx_buf;  dvs_block_alloc_t *ba;
+    dvs_ctx_t *ctx;
 } SolverInstance;
 
 static int _solver_create(SolverInstance *si, dvs_problem_t *sp) {
     memset(si, 0, sizeof(*si));
-    si->ctx_buf = malloc(CONTRA_CTX_BUF_SIZE);
-    if (!si->ctx_buf) return -1;
-    si->ba = dvs_block_alloc_create(NULL, CONTRA_BLOCK_SIZE);
-    if (!si->ba) { free(si->ctx_buf); si->ctx_buf = NULL; return -1; }
-    si->ctx = dvs_solver_create(si->ctx_buf, CONTRA_CTX_BUF_SIZE, si->ba);
-    if (!si->ctx) {
-        dvs_block_alloc_destroy(si->ba); free(si->ctx_buf);
-        memset(si, 0, sizeof(*si)); return -1;
-    }
+    si->ctx = dvs_solver_new(NULL);
+    if (!si->ctx) return -1;
     int rc = dvs_solver_compile(si->ctx, sp);
     if (rc == -1) {
-        dvs_block_alloc_destroy(si->ba); free(si->ctx_buf);
+        dvs_solver_free(si->ctx);
         memset(si, 0, sizeof(*si)); return -1;
     }
     return rc;
 }
 
 static void _solver_destroy(SolverInstance *si) {
-    if (si->ctx) dvs_solver_destroy(si->ctx);
-    if (si->ba) dvs_block_alloc_destroy(si->ba);
-    free(si->ctx_buf); memset(si, 0, sizeof(*si));
+    if (si->ctx) dvs_solver_free(si->ctx);
+    memset(si, 0, sizeof(*si));
 }
 
 /* ---- _is_sat: raw SAT/UNSAT check with current assumption mask ---- */

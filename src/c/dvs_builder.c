@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include "dvs_builder.h"
@@ -317,6 +318,10 @@ dvs_problem_t *dvs_builder_finalize_append(dvs_builder_t *b, dvs_problem_t *prev
     }
     dvs_problem_t *sp = prev;
     if (used > prev->pool.capacity) {
+        /* Growing moves the problem; a context that compiled it still points
+         * at the old one. */
+        assert(!(prev->pool._pad & DVS_PROBLEM_HELD) && "problem held by a context");
+        if (prev->pool._pad & DVS_PROBLEM_HELD) return NULL;
         uint32_t cap = used + (used / 2 > 4096 ? used / 2 : 4096);
         sp = (dvs_problem_t *)realloc(prev, sizeof(dvs_problem_t) + cap);
         if (!sp) return NULL;                 /* prev is still valid */

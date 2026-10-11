@@ -135,6 +135,10 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.dvs_solver_create.argtypes = [c.c_void_p, c.c_size_t, c.c_void_p]
     lib.dvs_solver_destroy.restype  = None
     lib.dvs_solver_destroy.argtypes = [c.c_void_p]
+    lib.dvs_solver_new.restype  = c.c_void_p
+    lib.dvs_solver_new.argtypes = [c.c_void_p]
+    lib.dvs_solver_free.restype  = None
+    lib.dvs_solver_free.argtypes = [c.c_void_p]
     lib.dvs_solver_compile.restype  = c.c_int
     lib.dvs_solver_compile.argtypes = [c.c_void_p, c.c_void_p]
     lib.dvs_solver_solve.restype  = c.c_int

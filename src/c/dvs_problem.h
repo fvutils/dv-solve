@@ -314,6 +314,11 @@ typedef struct {
 /* All dvs_expr_t values are offsets from &sp->pool (i.e. from the start  */
 /* of the embedded pool, NOT from the start of the buffer).           */
 /* ------------------------------------------------------------------ */
+/* pool._pad of a problem: set by dvs_solver_compile / dvs_solver_add_constraint.
+ * A context keeps a pointer to the problem it compiled, so nothing may move
+ * it afterwards (dvs_builder_finalize_append refuses to). */
+#define DVS_PROBLEM_HELD 1u
+
 struct dvs_problem_s {
     uint32_t   n_vars;            /* number of variables added         */
     uint32_t   n_constraints;     /* number of constraints added       */

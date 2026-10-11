@@ -52,8 +52,12 @@ Ownership is explicit:
 |---|---|---|---|
 | builder | {c:func}`dvs_builder_create` | {c:func}`dvs_builder_destroy` | the problems it finalized, until they are freed |
 | problem | {c:func}`dvs_builder_finalize` | {c:func}`dvs_builder_free_problem` | every context compiled from it |
-| block allocator | {c:func}`dvs_block_alloc_create` | {c:func}`dvs_block_alloc_destroy` | every context using it |
-| context | {c:func}`dvs_solver_create`, in a buffer you supply | {c:func}`dvs_solver_destroy`, then free the buffer | |
+| context | {c:func}`dvs_solver_new` | {c:func}`dvs_solver_free` | |
+| context in your own buffer (embedded) | {c:func}`dvs_solver_create` | {c:func}`dvs_solver_destroy`, then free the buffer | |
+| block allocator (embedded only) | {c:func}`dvs_block_alloc_create` | {c:func}`dvs_block_alloc_destroy` | every context using it |
+
+A context from {c:func}`dvs_solver_new` takes its memory from an allocator
+and grows as the problem needs; there is no size to choose.
 
 A context is not safe to use from two threads at once.
 
@@ -291,6 +295,19 @@ Unary operators, for {c:func}`dvs_builder_expr_unary`.
 
 ## Solving
 
+```{c:function} dvs_ctx_t *dvs_solver_new(dvs_alloc_t *alloc)
+Create a solver context. Its memory comes from `alloc` and grows with the
+problem.
+
+:param alloc: Allocator, or `NULL` for `malloc`. It must outlive the context.
+:returns: The context, or `NULL` when memory runs out. Release it with
+  {c:func}`dvs_solver_free`.
+```
+
+```{c:function} void dvs_solver_free(dvs_ctx_t *ctx)
+Release a context made by {c:func}`dvs_solver_new`, and all its memory.
+```
+
 ```{c:function} dvs_block_alloc_t *dvs_block_alloc_create(dvs_alloc_t *alloc, size_t block_size)
 Create the allocator that supplies a solver context's working memory.
 
@@ -303,19 +320,24 @@ Free a block allocator. Destroy every context using it first.
 ```
 
 ```{c:function} dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size, dvs_block_alloc_t *block_alloc)
-Create a solver context inside a buffer you supply.
+Create a solver context inside a buffer you supply: the embedded option, for
+when memory must be bounded or placed. Prefer {c:func}`dvs_solver_new`.
 
 :param static_buf: Memory for the context, aligned as `malloc` aligns. It
   must stay valid until {c:func}`dvs_solver_destroy`.
-:param static_size: Its size. 1 MiB holds large problems; if it is too small,
-  {c:func}`dvs_solver_compile` returns {c:macro}`DVS_COMPILE_NOMEM`.
-:param block_alloc: Supplies the rest of the context's memory.
+:param static_size: Its size, at least 64 KiB.
+:param block_alloc: With a block allocator, the context grows past
+  `static_buf` through the allocator behind it. `NULL` keeps it inside
+  `static_buf` (it still mallocs a little for its search trail): a problem
+  that does not fit makes {c:func}`dvs_solver_compile` return
+  {c:macro}`DVS_COMPILE_NOMEM`.
 :returns: The context (at `static_buf`), or `NULL` if `static_size` is too
   small.
 ```
 
 ```{c:function} void dvs_solver_destroy(dvs_ctx_t *ctx)
-Release the context's memory. `static_buf` itself is yours to free.
+Release the memory of a context made by {c:func}`dvs_solver_create`.
+`static_buf` itself is yours to free.
 ```
 
 ```{c:function} int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *p)
@@ -421,7 +443,8 @@ The search gave up before deciding; a solution may or may not exist.
 ```
 
 ```{c:macro} DVS_COMPILE_NOMEM
-−1: the context buffer, or other memory, ran out.
+−1: memory ran out (the allocator failed, a fixed context's buffer is full,
+or the problem needs more than 65,535 propagators).
 ```
 
 ```{c:macro} DVS_COMPILE_UNSAT

@@ -16,17 +16,18 @@
  *     size_t sz;
  *     dvs_problem_t *p = dvs_builder_finalize(b, &sz);
  *
- *     dvs_block_alloc_t *ba = dvs_block_alloc_create(NULL, 1 << 20);
- *     static uint8_t buf[1 << 20];
- *     dvs_ctx_t *ctx = dvs_solver_create(buf, sizeof(buf), ba);
+ *     dvs_ctx_t *ctx = dvs_solver_new(NULL);
  *     if (dvs_solver_compile(ctx, p) == 0 &&
  *         dvs_solver_solve(ctx, NULL) == DVS_SOLVE_OK)
  *         printf("%lld\n", (long long)dvs_solver_get_value(ctx, 0));
  *
- *     dvs_solver_destroy(ctx);
- *     dvs_block_alloc_destroy(ba);
+ *     dvs_solver_free(ctx);
  *     dvs_builder_free_problem(b, p, sz);
  *     dvs_builder_destroy(b);
+ *
+ * The context takes its memory from an allocator and grows as the problem
+ * needs. dvs_solver_create() instead places it in a buffer you supply, for
+ * platforms that must bound or place memory themselves.
  */
 #ifndef DV_SOLVE_H
 #define DV_SOLVE_H
@@ -319,19 +320,37 @@ dvs_block_alloc_t *dvs_block_alloc_create(dvs_alloc_t *alloc,
 void dvs_block_alloc_destroy(dvs_block_alloc_t *ba);
 
 /**
- * Create a solver context inside a buffer you supply.
+ * Create a solver context. Its memory comes from `alloc` and grows with
+ * the problem; there is no size to choose.
+ *
+ * @param alloc  Allocator, or NULL for malloc. It must outlive the context.
+ * @return  The context, or NULL when memory runs out. Release it with
+ *          dvs_solver_free().
+ */
+dvs_ctx_t *dvs_solver_new(dvs_alloc_t *alloc);
+
+/** Release a context made by dvs_solver_new(), and all its memory. */
+void dvs_solver_free(dvs_ctx_t *ctx);
+
+/**
+ * Create a solver context inside a buffer you supply: the embedded option,
+ * for when memory must be bounded or placed. Prefer dvs_solver_new().
  *
  * @param static_buf   Memory for the context, aligned as malloc() aligns. It
  *                     must stay valid until dvs_solver_destroy().
- * @param static_size  Its size. 1 MiB holds large problems; if it is too
- *                     small, dvs_solver_compile() returns DVS_COMPILE_NOMEM.
- * @param block_alloc  Supplies the rest of the context's memory.
+ * @param static_size  Its size, at least 64 KiB.
+ * @param block_alloc  With a block allocator, the context grows past
+ *                     static_buf through the allocator behind it. NULL keeps
+ *                     it inside static_buf (the context still mallocs a
+ *                     little for its search trail): a problem that does not
+ *                     fit makes dvs_solver_compile() return DVS_COMPILE_NOMEM.
  * @return  The context (at static_buf), or NULL if static_size is too small.
  */
 dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
                              dvs_block_alloc_t *block_alloc);
 
-/** Release the context's memory. static_buf itself is yours to free. */
+/** Release the memory of a context made by dvs_solver_create(). static_buf
+ *  itself is yours to free. */
 void dvs_solver_destroy(dvs_ctx_t *ctx);
 
 /**

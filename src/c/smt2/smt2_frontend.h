@@ -356,9 +356,6 @@ typedef struct {
     uint32_t             checked_cap;
     char                 model_check_why[200];  /* set when the check said unknown */
     uint8_t              core_replayable;    /* last unsat came from a plain check-sat */
-    dvs_block_alloc_t   *block_alloc;
-    void                *ctx_buf;      /* raw buffer for dvs_ctx_t */
-    size_t               ctx_buf_size;
 
     /* Symbol table */
     Smt2Var             *vars;
@@ -662,11 +659,6 @@ typedef struct {
     uint64_t             cdcl_probe_fp;
     uint8_t              cdcl_route;
 
-    /* Multiplier (x1, x2, x4, ...) on the CDCL context-pool estimate. Raised when
-     * a compile leaves too little room for later incremental asserts, or an
-     * incremental assert overflows the pool; carried across (reset) so the
-     * re-solved instances of a randomize() loop are sized right first time. */
-    uint32_t             ctx_buf_scale;
     uint32_t             cdcl_ticks;      /* propagator firings of the last CDCL solve */
     uint64_t             shape_fp;        /* hash of the declared names since (reset) */
     void                *shape_tab;       /* Smt2ShapeCost[]: per-shape engine choice, kept across (reset) */

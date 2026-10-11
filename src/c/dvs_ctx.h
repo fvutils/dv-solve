@@ -131,6 +131,8 @@ typedef struct dvs_ctx_s {
                                        * the constraint at all. Read it via
                                        * DV_LOG=1 / --stats. */
     dvs_block_alloc_t *block_alloc;   /* source of dynamic blocks      */
+    uint8_t            own_header;    /* made by dvs_solver_new: the
+                                       * header is from ctx->alloc      */
     dvs_block_alloc_t *own_block_alloc; /* made by dvs_solver_create when
                                        * given none (fixed pool): the
                                        * trail stack still needs blocks */

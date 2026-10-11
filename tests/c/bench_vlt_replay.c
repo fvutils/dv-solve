@@ -45,8 +45,6 @@
 #include "dvs_builder.h"
 #include "dvs_problem.h"
 
-#define CTX_BUF_MAX  (64u * 1024u * 1024u)
-#define BA_BLOCK     (64u * 1024u)
 #define MAX_AUX      16
 
 static double now_s(void) {
@@ -535,46 +533,23 @@ static uint64_t built_hash(Built *bt) {
 }
 
 typedef struct {
-    void              *buf;
-    dvs_block_alloc_t *ba;
     dvs_ctx_t         *ctx;
 } Cdcl;
 
-static size_t ctx_size_for(const dvs_problem_t *p) {
-    size_t nc = (size_t)p->n_constraints + p->n_softs + p->n_dists + p->n_alldiffs;
-    size_t est = (size_t)2 * 1024 * 1024 + (size_t)p->n_vars * 256 + nc * 512;
-    return est > CTX_BUF_MAX ? CTX_BUF_MAX : est;
-}
-
 static void cdcl_close(Cdcl *c) {
     if (!c->ctx) return;
-    dvs_solver_destroy(c->ctx);
-    dvs_block_alloc_destroy(c->ba);
-    free(c->buf);
+    dvs_solver_free(c->ctx);
     c->ctx = NULL;
 }
 
-/* Compile, growing the pool as the front end does (keeping a quarter of it
- * free for the add-ons), then add the add-ons. 0 ok, -2 unsat, -1 failed. */
+/* Compile as the front end does (a context that grows as needed), then add
+ * the add-ons. 0 ok, -2 unsat, -1 failed. */
 static int cdcl_open(Cdcl *c, Built *bt) {
-    for (size_t sz = ctx_size_for(bt->p);;) {
-        c->buf = malloc(sz);
-        c->ba = dvs_block_alloc_create(NULL, BA_BLOCK);
-        c->ctx = dvs_solver_create(c->buf, sz, c->ba);
-        int rc = dvs_solver_compile(c->ctx, bt->p);
-        if (rc == -2) return -2;
-        /* A pool that can grow (a block allocator was given) needs no
-         * headroom; only a fixed one is sized up front. */
-        size_t used = dvs_spool_used(&c->ctx->pool);
-        size_t cap  = c->ctx->pool.alloc ? SIZE_MAX : c->ctx->pool.fixed_end;
-        size_t want = used / 4 > ((size_t)512 << 10) ? used / 4 : ((size_t)512 << 10);
-        int grow = rc >= 0 ? cap - used < want && sz < CTX_BUF_MAX
-                           : c->ctx->pool.overflow && sz < CTX_BUF_MAX;
-        if (rc >= 0 && !grow) break;
-        cdcl_close(c);
-        if (!grow) return -1;
-        sz = sz * 4 < CTX_BUF_MAX ? sz * 4 : CTX_BUF_MAX;
-    }
+    c->ctx = dvs_solver_new(NULL);
+    if (!c->ctx) return -1;
+    int rc = dvs_solver_compile(c->ctx, bt->p);
+    if (rc == -2) return -2;
+    if (rc < 0) { cdcl_close(c); return -1; }
     for (uint32_t k = 0; k < bt->n_aux; k++) {
         int rc = dvs_solver_add_constraint(c->ctx, bt->aux[k]);
         if (rc == -2) return -2;

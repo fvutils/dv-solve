@@ -3941,6 +3941,7 @@ static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 }
 
 int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    if (sp) sp->pool._pad |= DVS_PROBLEM_HELD;   /* the context keeps it */
     if (!ctx || !ctx->oracle) return _solver_compile(ctx, sp);
     double t0 = dvs_oracle_clock_ms();
     int rc = _solver_compile(ctx, sp);
@@ -4454,6 +4455,7 @@ static int _solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
 }
 
 int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
+    if (aux_sp) aux_sp->pool._pad |= DVS_PROBLEM_HELD;
     dvs_search_discard(ctx);
     int rc = _solver_add_constraint(ctx, aux_sp);
     if (ctx && ctx->oracle) dvs_oracle_on_add(ctx, aux_sp, rc);

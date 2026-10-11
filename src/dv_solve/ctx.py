@@ -12,6 +12,7 @@ Usage::
 from __future__ import annotations
 
 import ctypes
+import warnings
 from typing import Optional
 
 from .lib import _load_lib, _library_not_found_error
@@ -23,8 +24,6 @@ SOLVE_OK      = 0
 SOLVE_UNSAT   = 1
 SOLVE_TIMEOUT = 2
 
-# Buffer sizes
-_CTX_BUF_SIZE = 1 << 20  # 1 MiB — headroom for propagators + decisions
 
 
 # ------------------------------------------------------------------ #
@@ -92,7 +91,8 @@ class SolveCtx:
 
     Args:
         problem: The finalized problem buffer.
-        ctx_buf_size: Initial working-memory size, in bytes.
+        ctx_buf_size: Ignored, and deprecated: the context grows as the
+            problem needs.
         oracle: A :class:`dv_solve.oracle.Oracle` to check every answer with;
             by default the one set by :func:`dv_solve.oracle.set_default_oracle`,
             if any. ``False``: none.
@@ -104,8 +104,11 @@ class SolveCtx:
         CompileUnsupportedError: The problem goes beyond a supported limit.
     """
 
-    def __init__(self, problem: "SolveProblem", ctx_buf_size: int = _CTX_BUF_SIZE,  # noqa: F821
+    def __init__(self, problem: "SolveProblem", ctx_buf_size: Optional[int] = None,  # noqa: F821
                  oracle=None, label=None) -> None:
+        if ctx_buf_size is not None:
+            warnings.warn("SolveCtx(ctx_buf_size=...) is ignored: the context "
+                          "grows as the problem needs", DeprecationWarning, stacklevel=2)
         lib = _load_lib()
         if lib is None:
             raise _library_not_found_error()
@@ -118,17 +121,11 @@ class SolveCtx:
         # would be collected and the ctx would read freed memory.
         self._problem = problem
 
-        # Block allocator owns all dynamic memory used by the context.
-        self._ba = lib.dvs_block_alloc_create(None, ctx_buf_size)
-        if self._ba is None:
-            raise RuntimeError("dvs_block_alloc_create failed")
-
-        # Context lives inside a caller-managed buffer.
-        self._ctx_buf = (ctypes.c_uint8 * ctx_buf_size)()
-        ctx = lib.dvs_solver_create(self._ctx_buf, ctx_buf_size, self._ba)
+        # The context takes its memory from malloc and grows as needed.
+        self._ctx = None
+        ctx = lib.dvs_solver_new(None)
         if ctx is None:
-            self._drop_native()
-            raise RuntimeError("dvs_solver_create failed")
+            raise MemoryError("dvs_solver_new failed")
         self._ctx = ctx  # c_void_p value
 
         # The oracle check, attached before compile: it takes the problem from
@@ -153,10 +150,10 @@ class SolveCtx:
             self._detach_oracle()
             if rc == -2:
                 oracle._after()
-        # Every error path below releases the context and its block allocator
-        # and NULLs self._ba: the half-constructed SolveCtx still exists (the
-        # exception unwinds out of __init__) and will be garbage-collected, at
-        # which point __del__ -> destroy() must NOT free them again.
+        # Every error path below releases the context and NULLs self._ctx: the
+        # half-constructed SolveCtx still exists (the exception unwinds out of
+        # __init__) and will be garbage-collected, at which point __del__ ->
+        # destroy() must NOT free it again.
         if rc == -2:
             self._drop_native()
             raise CompileUnsatError("Domain became empty during compile-time bound tightening")
@@ -184,10 +181,8 @@ class SolveCtx:
             )
 
     def _drop_native(self) -> None:
-        # The context may hold pool memory it grew into, beside its buffer.
-        self._lib.dvs_solver_destroy(self._ctx)
-        self._lib.dvs_block_alloc_destroy(self._ba)
-        self._ba = None
+        self._lib.dvs_solver_free(self._ctx)
+        self._ctx = None
 
     # ------------------------------------------------------------------ #
     # Context manager support                                              #
@@ -215,14 +210,9 @@ class SolveCtx:
 
     def destroy(self) -> None:
         """Release the native memory. Also called when the context is garbage-collected."""
-        if self._ba is not None:
+        if getattr(self, "_ctx", None) is not None:
             self._detach_oracle()
-            # dvs_solver_destroy frees what the context malloc'd beside its
-            # buffer (the clause-learning state, the scope log); without it
-            # each context that learnt leaked several MiB.
-            self._lib.dvs_solver_destroy(self._ctx)
-            self._lib.dvs_block_alloc_destroy(self._ba)
-            self._ba = None
+            self._drop_native()
 
     # ------------------------------------------------------------------ #
     # Solve API                                                            #

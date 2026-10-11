@@ -153,8 +153,6 @@ static void _unsupported(Smt2Frontend *fe, const char *fmt, ...) {
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-#define CTX_BUF_SIZE  (64u * 1024u * 1024u)
-#define BA_BLOCK_SIZE (64u * 1024u)
 
 static const TypedExpr TYPED_NULL = { EXPR_NULL, 0 };
 
@@ -4550,26 +4548,10 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     return 0;
 }
 
-/* Initial static-pool size estimate for a problem. The pool holds per-variable
- * (Variable + watcher head + prop ref) and per-constraint (propagator) state,
- * all linear in the problem.
- * The estimate only needs to be right for the common case: grow-and-retry in
- * _ensure_compiled reallocates a larger buffer if this under-provisions. */
-static size_t _ctx_buf_size_for(const dvs_problem_t *p) {
-    size_t nv = p ? p->n_vars : 0;
-    size_t nc = p ? ((size_t)p->n_constraints + p->n_softs + p->n_dists
-                     + p->n_alldiffs) : 0;
-    size_t est = (size_t)2 * 1024 * 1024   /* base: 8192-var hint + headroom */
-               + nv * 256                  /* per variable */
-               + nc * 512;                 /* per constraint (propagator) */
-    if (est > (size_t)CTX_BUF_SIZE) est = (size_t)CTX_BUF_SIZE;
-    return est;
-}
-
 /* Finalize the builder into fe->problem WITHOUT building the CDCL context. The
  * bit-blast engine reads fe->problem directly and never touches fe->ctx, so in
  * Verilator mode (always bit-blast) we skip dvs_solver_create + dvs_solver_compile here
- * and, symmetrically, the dvs_solver_destroy/ctx_buf-free the (reset) would pay --
+ * and, symmetrically, the dvs_solver_free the (reset) would pay --
  * both were pure waste on every randomize(). */
 /* Returns 0 on success, -1 on a hard error, -2 when the problem is stale but
  * cannot be safely rebuilt (caller must answer `unknown`, never a verdict).
@@ -4614,47 +4596,13 @@ static int _ensure_compiled(Smt2Frontend *fe) {
     fe->builder_retained = 1;
     fe->problem_dirty    = 0;
 
-    /* The static ctx pool is a fixed-capacity bump allocator (32-bit offsets
-     * into one buffer; a pop rewinds it to its push), so it cannot grow in
-     * place. Rather than always allocate the 64 MB maximum --
-     * a large per-solve cost the frontend pays on every Verilator randomize() --
-     * start from a problem-sized estimate and, if dvs_solver_compile overflows the
-     * pool, reallocate a larger contiguous buffer and recompile. This gives
-     * dynamic sizing with no risk of under-provisioning (capped at the old max). */
-    if (!fe->ctx_buf_scale) fe->ctx_buf_scale = 1;
-    size_t sz = _ctx_buf_size_for(fe->problem) * fe->ctx_buf_scale;
-    if (sz > (size_t)CTX_BUF_SIZE) sz = (size_t)CTX_BUF_SIZE;
-    for (;;) {
-        fe->ctx_buf = malloc(sz);
-        if (!fe->ctx_buf) return -1;
-        fe->ctx_buf_size = sz;
-        fe->block_alloc = dvs_block_alloc_create(NULL, BA_BLOCK_SIZE);
-        if (!fe->block_alloc) { free(fe->ctx_buf); fe->ctx_buf = NULL; return -1; }
-        fe->ctx = dvs_solver_create(fe->ctx_buf, sz, fe->block_alloc);
-        if (!fe->ctx) {
-            dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
-            free(fe->ctx_buf); fe->ctx_buf = NULL;
-            return -1;
-        }
+    /* The context grows as the compile needs (dvs_solver_new): no size to
+     * estimate, no grow-and-recompile. A pool overflow now means memory ran
+     * out, and compile reports it as DVS_COMPILE_NOMEM. */
+    {
+        fe->ctx = dvs_solver_new(NULL);
+        if (!fe->ctx) return -1;
         int rc = dvs_solver_compile(fe->ctx, fe->problem);
-        /* The pool cannot grow once compiled, and an incremental assert
-         * (e.g. after a push) that overflows it leaves its constraints
-         * uncompiled -- the first such add also re-copies the reset snapshot
-         * of every variable. Keep a quarter of the compile's use free;
-         * failing that, recompile into a bigger pool. */
-        if (rc >= 0 && sz < (size_t)CTX_BUF_SIZE && !fe->ctx->pool.alloc) {
-            size_t used = dvs_spool_used(&fe->ctx->pool), cap = fe->ctx->pool.fixed_end;
-            size_t want = used / 4 > ((size_t)512 << 10) ? used / 4 : ((size_t)512 << 10);
-            if (cap - used < want) {
-                dvs_solver_destroy(fe->ctx); fe->ctx = NULL;
-                dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
-                free(fe->ctx_buf); fe->ctx_buf = NULL;
-                size_t need = used + want;
-                while (sz < need && sz < (size_t)CTX_BUF_SIZE) { sz *= 2; if (fe->ctx_buf_scale < 64) fe->ctx_buf_scale *= 2; }
-                if (sz > (size_t)CTX_BUF_SIZE) sz = (size_t)CTX_BUF_SIZE;
-                continue;
-            }
-        }
         if (rc >= 0) {
             /* rc > 0 (some constraints left uncompiled; validation and
              * escalation cover them) is a context like any other. Leaving
@@ -4668,25 +4616,13 @@ static int _ensure_compiled(Smt2Frontend *fe) {
             _start_cdcl_retention(fe);
             return rc;
         }
-        /* Grow-and-retry only on a genuine pool overflow (not a compile-time
-         * UNSAT, rc == -2, or other error), and only until the cap. */
-        if (fe->ctx->pool.overflow && sz < (size_t)CTX_BUF_SIZE) {
-            dvs_solver_destroy(fe->ctx); fe->ctx = NULL;
-            dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
-            free(fe->ctx_buf); fe->ctx_buf = NULL;
-            sz = (sz * 4 < (size_t)CTX_BUF_SIZE) ? sz * 4 : (size_t)CTX_BUF_SIZE;
-            if (fe->ctx_buf_scale < 64) fe->ctx_buf_scale *= 4;
-            continue;
-        }
         if (rc == -2) fe->ctx_unsat_depth = fe->push_depth;
         if (rc != -2) {
             /* No usable context (e.g. a variable wider than 64 bits): release
              * it. Leaving it made the next push checkpoint a context that was
              * never compiled, and the pop then kept the popped assertions in
              * the builder the bitblast path solves -- a wrong unsat (B63). */
-            dvs_solver_destroy(fe->ctx); fe->ctx = NULL;
-            dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
-            free(fe->ctx_buf); fe->ctx_buf = NULL;
+            dvs_solver_free(fe->ctx); fe->ctx = NULL;
         }
         return rc;
     }
@@ -4739,10 +4675,7 @@ static int _flush_aux(Smt2Frontend *fe) {
      * can read the failed allocation as a conflict: neither its `unsat` nor
      * the context can be trusted. Report it incomplete -- check-sat then
      * answers from bitblast -- and give later instances a bigger pool. */
-    if (fe->ctx->pool.overflow) {
-        if (fe->ctx_buf_scale && fe->ctx_buf_scale < 64) fe->ctx_buf_scale *= 2;
-        rc = 1;
-    }
+    if (fe->ctx->pool.overflow) rc = 1;
     if (rc > 0) fe->ctx_uncompiled += (uint32_t)rc;
     /* Retain the aux dvs_problem_t (instead of freeing) so the post-solve
      * model-validation pass can re-evaluate the constraints it contributed.
@@ -7524,9 +7457,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
         /* The compile that proved unsat ran inside a scope being popped, so
          * its verdict goes with it. The builder still holds every assertion
          * (_ensure_compiled keeps it), so the next use compiles afresh. */
-        dvs_solver_destroy(fe->ctx); fe->ctx = NULL;
-        dvs_block_alloc_destroy(fe->block_alloc); fe->block_alloc = NULL;
-        free(fe->ctx_buf); fe->ctx_buf = NULL;
+        dvs_solver_free(fe->ctx); fe->ctx = NULL;
         if (fe->problem) fe->problem_dirty = 1;
     }
     if (fe->bb_sess && n <= fe->push_depth) {
@@ -8060,9 +7991,7 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     }
     free(fe->aux_problems);
     if (fe->builder)     dvs_builder_destroy(fe->builder);
-    if (fe->ctx)         dvs_solver_destroy(fe->ctx);
-    if (fe->block_alloc) dvs_block_alloc_destroy(fe->block_alloc);
-    free(fe->ctx_buf);
+    if (fe->ctx)         dvs_solver_free(fe->ctx);
     free(fe->vars);
     free(fe->var_idx);
     free(fe->fun_idx);
@@ -8127,7 +8056,6 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     int      vlt_hash_ignore = fe->vlt_hash_ignore;
     uint64_t cdcl_probe_fp = fe->cdcl_probe_fp;
     uint8_t  cdcl_route = fe->cdcl_route;
-    uint32_t ctx_buf_scale = fe->ctx_buf_scale;
     void    *shape_tab = fe->shape_tab;
     uint32_t n_input_errors = fe->n_input_errors;   /* drives the exit status */
     int8_t   check_models = fe->check_models;
@@ -8143,9 +8071,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     if (fe->problem) free(fe->problem);
     for (uint32_t i = 0; i < fe->n_aux_problems; i++) free(fe->aux_problems[i]);
     free(fe->aux_problems);
-    if (fe->ctx)         dvs_solver_destroy(fe->ctx);
-    if (fe->block_alloc) dvs_block_alloc_destroy(fe->block_alloc);
-    free(fe->ctx_buf);
+    if (fe->ctx)         dvs_solver_free(fe->ctx);
     free(fe->vars);
     free(fe->var_idx);
     free(fe->fun_idx);
@@ -8199,7 +8125,6 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->vlt_hash_ignore = vlt_hash_ignore;
     fe->cdcl_probe_fp = cdcl_probe_fp;
     fe->cdcl_route = cdcl_route;
-    fe->ctx_buf_scale = ctx_buf_scale;
     fe->shape_tab = shape_tab;
     fe->n_input_errors = n_input_errors;
     fe->check_models = check_models;
