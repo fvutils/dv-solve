@@ -132,6 +132,8 @@ typedef struct dvs_ctx_s {
                                        * equality, not drawn by the tier */
     uint32_t           n_decl_vars;   /* vars the problem declared; compile
                                        * adds its own after them         */
+    uint8_t           *var_order;     /* [n_decl_vars] solve-order stage
+                                       * (VarSpec.order), NULL: none     */
     DvsModLink        *mod_links;
     uint32_t           n_mod_links;
     uint32_t           mod_links_cap;

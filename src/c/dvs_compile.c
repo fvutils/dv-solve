@@ -3719,6 +3719,8 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     ctx->vars           = (Variable *)dvs_pool_ptr(&ctx->pool, vars_ref);
     ctx->n_vars         = n;
     ctx->n_decl_vars    = n;
+    free(ctx->var_order);
+    ctx->var_order      = NULL;
     ctx->n_vars_capacity = capacity;
 
     /* Zero-initialise the whole array (including slack) */
@@ -3744,6 +3746,11 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         uint8_t  flags = 0;
         if (vs->is_signed) flags |= VAR_SIGNED;
         if (vs->is_aux)    flags |= VAR_AUX;
+        if (vs->order) {
+            if (!ctx->var_order) ctx->var_order = (uint8_t *)calloc(n, 1);
+            if (!ctx->var_order) return -1;
+            ctx->var_order[id] = vs->order;
+        }
 
         int rc;
         if (vs->width < 32) {

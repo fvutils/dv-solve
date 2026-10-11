@@ -199,6 +199,19 @@ dvs_expr_t dvs_builder_add_all_different(dvs_builder_t *b, uint32_t n_vars,
 dvs_expr_t dvs_builder_add_soft_constraint(dvs_builder_t *b, dvs_expr_t root,
                                            uint32_t priority);
 
+/**
+ * Put variable `var_id` in solve-order stage `stage` (SV `solve ... before`):
+ * the variables of stage 1 are chosen first, then those of stage 2, and so
+ * on; variables in stage 0 (the default) come last. Each stage is chosen
+ * among the values that leave the constraints satisfiable, and in a seeded
+ * fair_pick solve the last stage is uniform over the solutions that remain.
+ * Declare the variable first.
+ *
+ * @return 0, or -1 if no variable `var_id` has been declared.
+ */
+int dvs_builder_set_var_order(dvs_builder_t *b, uint32_t var_id,
+                              uint8_t stage);
+
 /** Give variable `var_id` a weighted distribution (SV `dist`). */
 dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,
                                 uint32_t n_entries,

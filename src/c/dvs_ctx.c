@@ -57,6 +57,7 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     ctx->box_cap         = 0;
     ctx->box_state       = 0;
     ctx->box_skip        = NULL;
+    ctx->var_order       = NULL;
     ctx->mod_links       = NULL;
     ctx->n_mod_links     = 0;
     ctx->mod_links_cap   = 0;
@@ -160,6 +161,8 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     free(ctx->box_val);
     free(ctx->box_skip);
     ctx->box_skip = NULL;
+    free(ctx->var_order);
+    ctx->var_order = NULL;
     ctx->box_val = NULL; ctx->box_cap = 0;
     ctx->keep_val = NULL; ctx->keep_state = NULL; ctx->keep_cap = 0;
     free(ctx->mod_links);
