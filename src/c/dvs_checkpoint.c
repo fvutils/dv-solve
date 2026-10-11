@@ -117,10 +117,10 @@ static void _rewind_pool(dvs_ctx_t *ctx, const CheckpointMark *m,
     uint32_t n_carry = 0, carry_cap = 0;
     if (ctx->var_holes_head) {
         for (uint32_t v = 0; v < n_keep; v++) {
-            uint32_t *link = &ctx->var_holes_head[v];
-            while (*link != 0) {
-                HoleEntry *he = (HoleEntry *)dvs_spool_ptr(&ctx->pool, *link);
-                if (*link < first) { link = &he->next; continue; }
+            HoleEntry *prev = NULL;
+            for (HoleEntry *he = dvs_hole_first(ctx, v), *next; he; he = next) {
+                next = he->next;
+                if (he->self < first) { prev = he; continue; }
                 if (n_carry == carry_cap) {
                     uint32_t cap = carry_cap ? 2 * carry_cap : 16;
                     _HoleCarry *nc = (_HoleCarry *)DVS_RESIZE(
@@ -136,7 +136,8 @@ static void _rewind_pool(dvs_ctx_t *ctx, const CheckpointMark *m,
                 carry[n_carry].var   = v;
                 carry[n_carry].value = he->value;
                 n_carry++;
-                *link = he->next;
+                if (prev) prev->next = next;            /* unlink he */
+                else ctx->var_holes_head[v] = next ? next->self : 0;
             }
         }
         for (uint32_t v = n_keep; v < n_vars_was; v++)

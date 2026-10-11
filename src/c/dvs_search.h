@@ -75,14 +75,17 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 /* HoleEntry -- linked list node for excluded values (randc support)   */
 /*                                                                     */
-/* Stored in the static pool; var_holes_head[var_id] points to the    */
-/* first entry.  Values are kept sorted ascending for efficient skip. */
+/* Stored in the pool; var_holes_head[var_id] is the pool offset of  */
+/* the first entry (0 = none). Values are kept sorted ascending.      */
+/* The links are pointers: pool memory never moves, and a walk is a   */
+/* pointer chase, where decoding an offset per hop doubled its cost.  */
 /* ------------------------------------------------------------------ */
 
-typedef struct {
-    int64_t  value;    /* excluded value                              */
-    uint32_t next;     /* pool offset to next HoleEntry, or 0 = end  */
-    uint32_t _hpad;
+typedef struct HoleEntry {
+    int64_t           value;  /* excluded value                        */
+    struct HoleEntry *next;   /* next entry, or NULL                   */
+    uint32_t          self;   /* its own pool offset (restore uses it) */
+    uint32_t          _hpad;
 } HoleEntry;
 
 /* Add `value` to var_id's hole list (allocated in the pool). 0 on success,

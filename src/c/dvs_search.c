@@ -557,16 +557,13 @@ static int64_t _pick_avoiding_holes(dvs_ctx_t *ctx, uint32_t var_id,
     if ((uint64_t)n_holes >= n_total) return lo;  /* all holes (shouldn't happen) */
     uint64_t k = _rand64(ctx) % (n_total - (uint64_t)n_holes);  /* k-th valid */
     int64_t cur = lo;
-    uint32_t hoff = ctx->var_holes_head[var_id];
-    while (hoff != 0) {
-        const HoleEntry *he = (const HoleEntry *)dvs_spool_ptr(&ctx->pool, hoff);
-        if (he->value < lo) { hoff = he->next; continue; }
+    for (const HoleEntry *he = dvs_hole_first(ctx, var_id); he; he = he->next) {
+        if (he->value < lo) continue;
         if (he->value > hi) break;
         uint64_t gap = (uint64_t)(he->value - cur);  /* valid count in [cur, hole) */
         if (k < gap) return cur + (int64_t)k;
         k -= gap;
         cur = he->value + 1;
-        hoff = he->next;
     }
     return cur + (int64_t)k;
 }
@@ -1961,12 +1958,9 @@ int dvs_solver_soft_active(const dvs_ctx_t *ctx, uint32_t assumption_idx) {
 /* Check if a value is in the hole list for a variable. */
 static int _is_hole(const dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx->var_holes_head) return 0;
-    uint32_t off = ctx->var_holes_head[var_id];
-    while (off != 0) {
-        const HoleEntry *he = (const HoleEntry *)dvs_spool_ptr(&ctx->pool, off);
+    for (const HoleEntry *he = dvs_hole_first(ctx, var_id); he; he = he->next) {
         if (he->value == value) return 1;
         if (he->value > value) return 0;  /* sorted ascending, done */
-        off = he->next;
     }
     return 0;
 }
@@ -1976,12 +1970,9 @@ static uint32_t _count_holes_in_range(const dvs_ctx_t *ctx, uint32_t var_id,
                                        int64_t lo, int64_t hi) {
     if (!ctx->var_holes_head) return 0;
     uint32_t count = 0;
-    uint32_t off = ctx->var_holes_head[var_id];
-    while (off != 0) {
-        const HoleEntry *he = (const HoleEntry *)dvs_spool_ptr(&ctx->pool, off);
+    for (const HoleEntry *he = dvs_hole_first(ctx, var_id); he; he = he->next) {
         if (he->value > hi) break;
         if (he->value >= lo) count++;
-        off = he->next;
     }
     return count;
 }
@@ -1991,29 +1982,26 @@ static uint32_t _count_holes_in_range(const dvs_ctx_t *ctx, uint32_t var_id,
 static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx->var_holes_head) return -1;
 
-    /* Allocate a HoleEntry in the static pool */
+    /* Find the place (sorted ascending) before allocating. */
+    HoleEntry *prev = NULL, *cur = dvs_hole_first(ctx, var_id);
+    while (cur) {
+        if (cur->value == value) return 1;  /* already present */
+        if (cur->value > value) break;
+        prev = cur;
+        cur = cur->next;
+    }
+
     uint32_t he_ref = dvs_spool_alloc(&ctx->pool,
                                       (uint32_t)sizeof(HoleEntry),
                                       (uint32_t)_Alignof(HoleEntry));
     if (he_ref == EXPR_NULL) return -1;
-
     HoleEntry *he = (HoleEntry *)dvs_spool_ptr(&ctx->pool, he_ref);
     he->value = value;
+    he->next  = cur;
+    he->self  = he_ref;
     he->_hpad = 0;
-
-    /* Insert sorted ascending */
-    uint32_t cur_off = ctx->var_holes_head[var_id];
-    uint32_t *prev_next_ptr = &ctx->var_holes_head[var_id];
-
-    while (cur_off != 0) {
-        HoleEntry *cur = (HoleEntry *)dvs_spool_ptr(&ctx->pool, cur_off);
-        if (cur->value == value) return 1;  /* already present */
-        if (cur->value > value) break;
-        prev_next_ptr = &cur->next;
-        cur_off = cur->next;
-    }
-    he->next = cur_off;
-    *prev_next_ptr = he_ref;
+    if (prev) prev->next = he;
+    else      ctx->var_holes_head[var_id] = he_ref;
     return 0;
 }
 

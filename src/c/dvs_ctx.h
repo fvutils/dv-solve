@@ -288,6 +288,12 @@ void dvs_solver_set_value_selector(dvs_ctx_t *ctx,
                                int64_t (*fn)(dvs_ctx_t *, uint32_t, void *),
                                void *data);
 
+/* The first hole (excluded value) of var_id, or NULL. */
+static inline HoleEntry *dvs_hole_first(const dvs_ctx_t *ctx, uint32_t var_id) {
+    uint32_t off = ctx->var_holes_head[var_id];
+    return off ? (HoleEntry *)dvs_spool_ptr(&ctx->pool, off) : NULL;
+}
+
 /* The context's heap memory comes from ctx->alloc (dvs_alloc.h). */
 static inline void *dvs_ctx_resize(dvs_ctx_t *ctx, void *p, size_t old_sz,
                                    size_t new_sz) {
