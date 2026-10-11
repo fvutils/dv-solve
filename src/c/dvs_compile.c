@@ -3718,6 +3718,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 
     ctx->vars           = (Variable *)dvs_pool_ptr(&ctx->pool, vars_ref);
     ctx->n_vars         = n;
+    ctx->n_decl_vars    = n;
     ctx->n_vars_capacity = capacity;
 
     /* Zero-initialise the whole array (including slack) */

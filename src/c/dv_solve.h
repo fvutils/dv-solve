@@ -126,7 +126,10 @@ typedef struct {
     uint8_t  fair_pick;       /* 1: break decision ties at random, giving
                                * evenly spread solutions (use this for
                                * constrained-random stimulus); 0: fastest   */
-    uint8_t  _pad[1];
+    uint8_t  seq_pick;        /* with fair_pick: 1 draws variables one at a
+                               * time (the search order), 0 draws them
+                               * uniformly over solutions where it can.
+                               * Set it for a solve-order (solve x before y) */
     uint32_t max_shave_iters; /* search tuning; leave 0                     */
     uint32_t time_limit_ms;   /* wall-clock budget for this solve; 0 = the
                                * default                                    */
