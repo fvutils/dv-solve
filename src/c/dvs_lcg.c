@@ -57,18 +57,42 @@ static void _trace_lit(const char *prefix, Literal lit) {
 /* Clause Database                                                     */
 /* ================================================================== */
 
+/* A zeroed array of n elements of `sz` bytes from `a`, or NULL. */
+static void *_zalloc(dvs_alloc_t *a, size_t n, size_t sz) {
+    void *p = DVS_ALLOC(a, n * sz ? n * sz : 1);
+    if (p) memset(p, 0, n * sz);
+    return p;
+}
+static void _afree(dvs_alloc_t *a, void *p, size_t bytes) {
+    if (p) DVS_RELEASE(a, p, bytes ? bytes : 1);
+}
+/* Grow `*p` from `old` to `n` elements of `sz` bytes, zeroing the new ones. */
+static int _agrow(dvs_alloc_t *a, void *pp, size_t old, size_t n, size_t sz) {
+    void **p = (void **)pp;
+    void *q = DVS_RESIZE(a, *p, old * sz ? old * sz : (*p ? 1 : 0), n * sz);
+    if (!q) return -1;
+    memset((char *)q + old * sz, 0, (n - old) * sz);
+    *p = q;
+    return 0;
+}
+
 int clause_db_init(ClauseDB *db, uint32_t n_vars) {
+    return clause_db_init_alloc(db, n_vars, &dvs_malloc_alloc);
+}
+
+int clause_db_init_alloc(ClauseDB *db, uint32_t n_vars, dvs_alloc_t *alloc) {
     memset(db, 0, sizeof(*db));
+    db->alloc = alloc;
 
     db->clauses_cap = CLAUSE_DB_INIT_CAP;
     db->clauses = (Clause **)calloc(db->clauses_cap, sizeof(Clause *));
     if (!db->clauses) return -1;
 
     db->n_watch_vars = n_vars;
-    db->watch_lb = (WatchEntry **)calloc(n_vars, sizeof(WatchEntry *));
-    db->watch_ub = (WatchEntry **)calloc(n_vars, sizeof(WatchEntry *));
+    db->watch_lb = (WatchEntry **)_zalloc(alloc, n_vars, sizeof(WatchEntry *));
+    db->watch_ub = (WatchEntry **)_zalloc(alloc, n_vars, sizeof(WatchEntry *));
     db->pend_cap = 2u * n_vars + 64u;
-    db->pend = (uint32_t *)malloc(db->pend_cap * sizeof(uint32_t));
+    db->pend = (uint32_t *)_zalloc(alloc, db->pend_cap, sizeof(uint32_t));
     if (!db->watch_lb || !db->watch_ub || !db->pend) {
         clause_db_destroy(db);
         return -1;
@@ -87,9 +111,11 @@ int clause_db_init(ClauseDB *db, uint32_t n_vars) {
 
 void clause_db_destroy(ClauseDB *db) {
     free(db->clauses);
-    free(db->watch_lb);
-    free(db->watch_ub);
-    free(db->pend);
+    if (db->alloc) {
+        _afree(db->alloc, db->watch_lb, db->n_watch_vars * sizeof(WatchEntry *));
+        _afree(db->alloc, db->watch_ub, db->n_watch_vars * sizeof(WatchEntry *));
+        _afree(db->alloc, db->pend, db->pend_cap * sizeof(uint32_t));
+    }
     free(db->arena);
     memset(db, 0, sizeof(*db));
 }
@@ -177,17 +203,22 @@ void clause_db_gc(ClauseDB *db, uint32_t lbd_threshold) {
 /* VSIDS                                                               */
 /* ================================================================== */
 
-int vsids_init(VSIDS *vs, uint32_t n_vars) {
+static int _vsids_init(VSIDS *vs, uint32_t n_vars, dvs_alloc_t *alloc) {
     memset(vs, 0, sizeof(*vs));
+    vs->alloc = alloc;
     vs->n_vars = n_vars;
     vs->var_inc = 1.0;
     vs->var_decay = 0.95;
-    vs->activity = (double *)calloc(n_vars, sizeof(double));
+    vs->activity = (double *)_zalloc(alloc, n_vars, sizeof(double));
     return vs->activity ? 0 : -1;
 }
 
+int vsids_init(VSIDS *vs, uint32_t n_vars) {
+    return _vsids_init(vs, n_vars, &dvs_malloc_alloc);
+}
+
 void vsids_destroy(VSIDS *vs) {
-    free(vs->activity);
+    if (vs->alloc) _afree(vs->alloc, vs->activity, vs->n_vars * sizeof(double));
     memset(vs, 0, sizeof(*vs));
 }
 
@@ -228,10 +259,16 @@ uint32_t vsids_pick(const VSIDS *vs, const dvs_ctx_t *ctx) {
 /* ================================================================== */
 
 int lcg_init(LCGCtx *lcg, uint32_t n_vars) {
+    return lcg_init_alloc(lcg, n_vars, &dvs_malloc_alloc);
+}
+
+/* The per-variable conflict-analysis arrays, sized by vsids.n_vars:
+ * seen, seen_lit, body_pos, mk_cur (2n each) and mk_start (2n + 1). */
+int lcg_init_alloc(LCGCtx *lcg, uint32_t n_vars, dvs_alloc_t *alloc) {
     memset(lcg, 0, sizeof(*lcg));
 
-    if (clause_db_init(&lcg->clause_db, n_vars) != 0) return -1;
-    if (vsids_init(&lcg->vsids, n_vars) != 0) {
+    if (clause_db_init_alloc(&lcg->clause_db, n_vars, alloc) != 0) return -1;
+    if (_vsids_init(&lcg->vsids, n_vars, alloc) != 0) {
         clause_db_destroy(&lcg->clause_db);
         return -1;
     }
@@ -240,11 +277,11 @@ int lcg_init(LCGCtx *lcg, uint32_t n_vars) {
      * analyzer can track LB and UB literals on the same variable
      * independently — required for non-monotone propagators (bvand,
      * etc.) whose antecedents include both bounds on a singleton var. */
-    lcg->seen = (uint8_t *)calloc(2u * n_vars, sizeof(uint8_t));
-    lcg->seen_lit = (Literal *)calloc(2u * n_vars, sizeof(Literal));
-    lcg->body_pos = (uint32_t *)calloc(2u * n_vars, sizeof(uint32_t));
-    lcg->mk_start = (uint32_t *)calloc(2u * n_vars + 1u, sizeof(uint32_t));
-    lcg->mk_cur = (uint32_t *)calloc(2u * n_vars, sizeof(uint32_t));
+    lcg->seen = (uint8_t *)_zalloc(alloc, 2u * n_vars, sizeof(uint8_t));
+    lcg->seen_lit = (Literal *)_zalloc(alloc, 2u * n_vars, sizeof(Literal));
+    lcg->body_pos = (uint32_t *)_zalloc(alloc, 2u * n_vars, sizeof(uint32_t));
+    lcg->mk_start = (uint32_t *)_zalloc(alloc, 2u * n_vars + 1u, sizeof(uint32_t));
+    lcg->mk_cur = (uint32_t *)_zalloc(alloc, 2u * n_vars, sizeof(uint32_t));
     lcg->learnt_cap = MAX_CLAUSE_LITS;
     lcg->learnt_buf = (Literal *)calloc(lcg->learnt_cap, sizeof(Literal));
     if (!lcg->seen || !lcg->seen_lit || !lcg->body_pos || !lcg->learnt_buf ||
@@ -254,6 +291,33 @@ int lcg_init(LCGCtx *lcg, uint32_t n_vars) {
     }
 
     lcg->enabled = 1;
+    return 0;
+}
+
+int lcg_reserve_vars(LCGCtx *lcg, dvs_alloc_t *alloc, uint32_t n) {
+    (void)alloc;                     /* the arrays stay with their allocator */
+    VSIDS *vs = &lcg->vsids;
+    ClauseDB *db = &lcg->clause_db;
+    dvs_alloc_t *a = vs->alloc;
+    uint32_t old = vs->n_vars;
+    if (n <= old) return 0;
+    size_t o2 = 2u * (size_t)old, n2 = 2u * (size_t)n;
+    /* On a failure part-way the arrays already grown stay larger than
+     * n_vars records (harmless to use; their release passes the old size).
+     * The context is out of memory then and reports DVS_COMPILE_NOMEM. */
+    if (_agrow(a, &lcg->seen, o2, n2, sizeof(uint8_t)) ||
+        _agrow(a, &lcg->seen_lit, o2, n2, sizeof(Literal)) ||
+        _agrow(a, &lcg->body_pos, o2, n2, sizeof(uint32_t)) ||
+        _agrow(a, &lcg->mk_start, o2 + 1u, n2 + 1u, sizeof(uint32_t)) ||
+        _agrow(a, &lcg->mk_cur, o2, n2, sizeof(uint32_t)) ||
+        _agrow(a, &vs->activity, old, n, sizeof(double)) ||
+        _agrow(a, &db->watch_lb, db->n_watch_vars, n, sizeof(WatchEntry *)) ||
+        _agrow(a, &db->watch_ub, db->n_watch_vars, n, sizeof(WatchEntry *)) ||
+        _agrow(a, &db->pend, db->pend_cap, 2u * (size_t)n + 64u, sizeof(uint32_t)))
+        return -1;
+    vs->n_vars = n;
+    db->n_watch_vars = n;
+    db->pend_cap = 2u * n + 64u;
     return 0;
 }
 
@@ -290,14 +354,18 @@ int lcg_is_pristine(const LCGCtx *lcg) {
 }
 
 void lcg_destroy(LCGCtx *lcg) {
+    dvs_alloc_t *a = lcg->vsids.alloc;
+    size_t n2 = 2u * (size_t)lcg->vsids.n_vars;
+    if (a) {
+        _afree(a, lcg->seen, n2 * sizeof(uint8_t));
+        _afree(a, lcg->seen_lit, n2 * sizeof(Literal));
+        _afree(a, lcg->body_pos, n2 * sizeof(uint32_t));
+        _afree(a, lcg->mk_start, (n2 + 1u) * sizeof(uint32_t));
+        _afree(a, lcg->mk_cur, n2 * sizeof(uint32_t));
+    }
     clause_db_destroy(&lcg->clause_db);
     vsids_destroy(&lcg->vsids);
-    free(lcg->seen);
-    free(lcg->seen_lit);
-    free(lcg->body_pos);
     free(lcg->mk_ent);
-    free(lcg->mk_start);
-    free(lcg->mk_cur);
     free(lcg->undo_var);
     free(lcg->undo_kind);
     free(lcg->undo_val);

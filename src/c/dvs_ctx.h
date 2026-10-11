@@ -90,7 +90,9 @@ typedef struct {
 typedef struct dvs_ctx_s {
     Variable          *vars;          /* pointer into static pool      */
     uint32_t           n_vars;        /* number of compiled variables  */
-    uint32_t           n_vars_capacity; /* allocated size of vars array */
+    uint32_t           n_vars_capacity; /* entries in every per-variable
+                                       * table; grown by
+                                       * dvs_ctx_reserve_vars        */
     uint32_t           decision_level;
     /* The decision level a solve started at: its root. Each open checkpoint
      * holds a level of its own, so a solve under checkpoints (and the pins
@@ -139,7 +141,7 @@ typedef struct dvs_ctx_s {
     LevelMark         *level_marks;   /* array[MAX_DECISION_DEPTH]     */
     uint32_t           max_depth;     /* == MAX_DECISION_DEPTH         */
     uint32_t           n_props;       /* total propagators created     */
-    uint32_t          *watcher_heads; /* array[n_vars] in static pool  */
+    uint32_t          *watcher_heads; /* per variable: first watcher  */
     DecisionRecord    *decisions;     /* array[MAX_DECISION_DEPTH]     */
     int64_t           *phase_save;    /* last tried value per var;
                                        * from ctx->alloc, created lazily */
@@ -197,9 +199,14 @@ typedef struct dvs_ctx_s {
      * If var_alias[i] == i, the var is its own representative.
      * NULL if aliasing is not enabled. */
     uint32_t          *var_alias;
-    uint32_t           incremental_capacity_hint; /* SMT2 frontend uses
-                                       * to request a larger vars[] for
-                                       * incremental mode (yosys-smtbmc) */
+    /* The per-variable tables (vars, var_n_values, watcher_heads,
+     * var_alias, dist_offsets, var_holes_head) share one block, and the
+     * per-propagator ones (prop_refs, prop_guard_vars, prop_constraint_id)
+     * another, so a resize is all-or-nothing. From ctx->alloc when the pool
+     * can grow; carved from the pool in fixed mode. */
+    void              *var_block;
+    void              *prop_block;
+    uint8_t            has_dists;     /* dist_offsets is in use        */
     /* LCG solver fields */
     uint32_t           current_prop_ref;  /* prop being fired (for trail) */
     uint32_t           conflict_prop_ref; /* prop that caused conflict    */
@@ -275,6 +282,42 @@ void dvs_solver_set_value_selector(dvs_ctx_t *ctx,
 
 /** Allocate ctx->phase_save (uninitialised) from ctx->alloc; 0 or -1. */
 int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx);
+
+/**
+ * Make every per-variable table hold at least `n` variables, growing them
+ * together (and the phase-save array and the clause-learning state). New
+ * entries read as "nothing": a zeroed Variable, no watcher, its own alias,
+ * no dist, no holes. Pointers into the tables (`Variable *`, ...) are
+ * invalid after a call that grows them.
+ *
+ * @return 0, or -1 when memory runs out; the pool's overflow flag is then
+ *         set, so compile reports DVS_COMPILE_NOMEM. In fixed mode a table
+ *         cannot grow inside a checkpoint scope (restore would free it).
+ */
+int dvs_ctx_reserve_vars(dvs_ctx_t *ctx, uint32_t n);
+
+/** Start using dist_offsets (all 0: no dist on any variable). */
+void dvs_ctx_enable_dists(dvs_ctx_t *ctx);
+
+/** The most propagators a context holds: Propagator.prop_id is 16 bits. */
+#define DVS_MAX_PROPS 0xFFFFu
+
+/** As dvs_ctx_reserve_vars, for the per-propagator tables. Fails past
+ *  DVS_MAX_PROPS. */
+int dvs_ctx_reserve_props(dvs_ctx_t *ctx, uint32_t n);
+
+/** Room for `k` more variables: the per-variable tables can take ids up to
+ *  n_vars + k - 1. */
+static inline int dvs_ctx_room(dvs_ctx_t *ctx, uint32_t k) {
+    return ctx->n_vars + k <= ctx->n_vars_capacity ||
+           dvs_ctx_reserve_vars(ctx, ctx->n_vars + k) == 0;
+}
+
+/** Reserve the prop_refs slot of the next propagator; 0 or -1. */
+static inline int dvs_ctx_room_prop(dvs_ctx_t *ctx) {
+    return ctx->n_props < ctx->n_prop_refs_capacity ||
+           dvs_ctx_reserve_props(ctx, ctx->n_props + 1) == 0 ? 0 : -1;
+}
 
 /* ------------------------------------------------------------------ */
 /* Accessor wrappers (thin C functions for ctypes compatibility)       */

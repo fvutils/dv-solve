@@ -561,7 +561,6 @@ static int cdcl_open(Cdcl *c, Built *bt) {
         c->buf = malloc(sz);
         c->ba = dvs_block_alloc_create(NULL, BA_BLOCK);
         c->ctx = dvs_solver_create(c->buf, sz, c->ba);
-        c->ctx->incremental_capacity_hint = 8192;
         int rc = dvs_solver_compile(c->ctx, bt->p);
         if (rc == -2) return -2;
         /* A pool that can grow (a block allocator was given) needs no

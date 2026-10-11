@@ -159,6 +159,7 @@ void dvs_spool_release(dvs_spool_t *p, dvs_spool_mark_t m) {
     if (kept_end > m.top) {
         uint8_t *freed = (uint8_t *)dvs_spool_ptr(p, m.top);
 #ifdef DVS_DEBUG_ALWAYS_MOVE
+        UNPOISON(freed, kept_end - m.top);   /* a never-used tail is poisoned */
         memset(freed, 0xA5, kept_end - m.top);
 #endif
         POISON(freed, kept_end - m.top);
@@ -169,6 +170,7 @@ void dvs_spool_release(dvs_spool_t *p, dvs_spool_mark_t m) {
         for (uint32_t i = 0; i < k; i++) p->seg[s + i] = NULL;
         if (b->size == DVS_SEG_SIZE && p->n_spare < DVS_SPOOL_SPARES) {
 #ifdef DVS_DEBUG_ALWAYS_MOVE
+            UNPOISON(b->mem, b->size);
             memset(b->mem, 0xA5, b->size);
 #endif
             POISON(b->mem, b->size);

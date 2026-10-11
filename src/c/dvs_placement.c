@@ -94,6 +94,7 @@ uint32_t prop_add_min_of_n_32(dvs_ctx_t *ctx, uint32_t result_id,
     if (n_operands < 1 || n_operands > MAX_MINMAX_VARS) return EXPR_NULL;
 
     uint32_t n_total = 1 + n_operands;
+    if (dvs_ctx_room_prop(ctx) != 0) return EXPR_NULL;  /* prop_refs slot */
     uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(MinOfN_32_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -193,6 +194,7 @@ uint32_t prop_add_max_of_n_32(dvs_ctx_t *ctx, uint32_t result_id,
     if (n_operands < 1 || n_operands > MAX_MINMAX_VARS) return EXPR_NULL;
 
     uint32_t n_total = 1 + n_operands;
+    if (dvs_ctx_room_prop(ctx) != 0) return EXPR_NULL;  /* prop_refs slot */
     uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(MaxOfN_32_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -745,6 +747,7 @@ uint32_t prop_add_no_overlap_2d(dvs_ctx_t *ctx, uint32_t n_rects,
                                  const RectSpec *rects, uint8_t priority) {
     if (n_rects < 2 || n_rects > MAX_NOOVERLAP2D_RECTS) return EXPR_NULL;
 
+    if (dvs_ctx_room_prop(ctx) != 0) return EXPR_NULL;  /* prop_refs slot */
     uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(NoOverlap2D_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 

@@ -4552,7 +4552,7 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
 
 /* Initial static-pool size estimate for a problem. The pool holds per-variable
  * (Variable + watcher head + prop ref) and per-constraint (propagator) state,
- * all linear in the problem, atop the 8192-var incremental_capacity_hint floor.
+ * all linear in the problem.
  * The estimate only needs to be right for the common case: grow-and-retry in
  * _ensure_compiled reallocates a larger buffer if this under-provisions. */
 static size_t _ctx_buf_size_for(const dvs_problem_t *p) {
@@ -4636,8 +4636,6 @@ static int _ensure_compiled(Smt2Frontend *fe) {
             free(fe->ctx_buf); fe->ctx_buf = NULL;
             return -1;
         }
-        /* Vars[] capacity headroom for yosys-smtbmc-style incremental aux vars. */
-        fe->ctx->incremental_capacity_hint = 8192;
         int rc = dvs_solver_compile(fe->ctx, fe->problem);
         /* The pool cannot grow once compiled, and an incremental assert
          * (e.g. after a push) that overflows it leaves its constraints

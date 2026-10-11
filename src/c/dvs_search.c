@@ -1034,7 +1034,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (lcg) {
             uint32_t nv = ctx->n_vars_capacity > 0
                           ? ctx->n_vars_capacity : ctx->n_vars;
-            if (lcg_init(lcg, nv) == 0) {
+            if (lcg_init_alloc(lcg, nv, ctx->alloc) == 0) {
                 ctx->lcg = lcg;
             } else {
                 free(lcg);

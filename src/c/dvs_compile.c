@@ -214,7 +214,7 @@ static int _compile_var_const_cmp(dvs_ctx_t *ctx, dvs_binop_t op,
         /* General case: create a const-var and add an NE propagator. The
          * constant is held at its own value (a tier-0 int32 slot would
          * truncate an unsigned 32-bit constant >= 2^31). */
-        if (ctx->n_vars < ctx->n_vars_capacity) {
+        if (dvs_ctx_room(ctx, 1)) {
             uint32_t cv_id = ctx->n_vars;
             if (_init_const_singleton(ctx, &ctx->vars[cv_id], cv,
                     ctx->vars[vid].flags & VAR_SIGNED,
@@ -751,7 +751,7 @@ static int _init_aux_tiered(dvs_ctx_t *ctx, Variable *v, uint16_t width,
  * @return the var id, or EXPR_NULL if it cannot be represented / no room. */
 static uint32_t _const_singleton_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                                      dvs_expr_t ref, uint16_t width) {
-    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
     ExprConst *ec = (ExprConst *)dvs_pool_ptr(&sp->pool, ref);
     uint32_t id = ctx->n_vars;
     Variable *v = &ctx->vars[id];
@@ -781,7 +781,7 @@ static int _init_aux_tiered(dvs_ctx_t *ctx, Variable *v, uint16_t width,
  * int32 singleton, which the reification compares correctly against any peer.
  * EXPR_NULL when neither fits: the caller leaves the constraint uncompiled. */
 static uint32_t _adjacent_const_var(dvs_ctx_t *ctx, uint32_t peer, int64_t c, int delta) {
-    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
     if ((delta < 0 && c == INT64_MIN) || (delta > 0 && c == INT64_MAX)) return EXPR_NULL;
     int64_t val = c + delta;
     const Variable *p = &ctx->vars[peer];
@@ -1358,7 +1358,7 @@ static int _emit_binop_prop(dvs_ctx_t *ctx, dvs_binop_t op,
 
 /** Allocate a fresh 0/1 guard var. Returns EXPR_NULL if capacity is exhausted. */
 static uint32_t _new_guard(dvs_ctx_t *ctx) {
-    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
     uint32_t g = ctx->n_vars;
     _init_tier0(&ctx->vars[g], 1, VAR_AUX, 0, 1);
     ctx->n_vars = g + 1;
@@ -1374,7 +1374,7 @@ static uint32_t _invert_guard(dvs_ctx_t *ctx, uint32_t g) {
     if (g == EXPR_NULL) return EXPR_NULL;
     uint32_t ng = _new_guard(ctx);
     if (ng == EXPR_NULL) return EXPR_NULL;
-    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
     uint32_t one_id = ctx->n_vars;
     _init_tier0(&ctx->vars[one_id], 32, VAR_AUX, 1, 1);
     ctx->n_vars = one_id + 1;
@@ -1385,7 +1385,7 @@ static uint32_t _invert_guard(dvs_ctx_t *ctx, uint32_t g) {
 
 /** Allocate a 0/1 var pinned to a constant truth value. */
 static uint32_t _const_guard(dvs_ctx_t *ctx, int val) {
-    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
     uint32_t g = ctx->n_vars;
     _init_tier0(&ctx->vars[g], 1, VAR_AUX, val, val);
     ctx->n_vars = g + 1;
@@ -1479,12 +1479,14 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
          * nonzero, so it gets a guard `g <-> v != 0`. Returned as is, a 2-bit
          * v = 2 made `!v` (1 - g) come out -1 and `!v || a` wrong-unsat
          * (B98). Domains only narrow, so one inside [0,1] now stays there. */
-        Variable *v = &ctx->vars[vid];
+        const Variable *v = &ctx->vars[vid];
         if (var_lo64(ctx, v) >= 0 && var_hi64(ctx, v) <= 1) return vid;
-        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        uint16_t v_w = v->width;
+        uint8_t  v_sf = v->flags & VAR_SIGNED;
+        if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;      /* may move vars */
         uint32_t z = ctx->n_vars;
-        if (_init_aux_tiered(ctx, &ctx->vars[z], v->width,
-                             (uint8_t)(VAR_AUX | (v->flags & VAR_SIGNED)), 0, 0) != 0)
+        if (_init_aux_tiered(ctx, &ctx->vars[z], v_w,
+                             (uint8_t)(VAR_AUX | v_sf), 0, 0) != 0)
             return EXPR_NULL;
         ctx->n_vars = z + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[z] = EXPR_NULL;
@@ -1497,7 +1499,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         return _invert_guard(ctx, g);
     }
     if (k == EXPR_CONST) {
-        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
         ExprConst *ec = (ExprConst *)dvs_pool_ptr(&sp->pool, ref);
         uint32_t gid = ctx->n_vars;
         int64_t v = ec->value ? 1 : 0;
@@ -1511,7 +1513,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         if (eu->op == DVS_UN_NOT) {
             uint32_t inner = _bool_to_var(ctx, sp, eu->operand);
             if (inner == EXPR_NULL) return EXPR_NULL;
-            if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
+            if (!dvs_ctx_room(ctx, 2)) return EXPR_NULL;
             /* not_gid = 1 - inner.  Use add: 1_const + (not_gid + inner) ?
              * Simpler: not_gid + inner == 1. Allocate a const-1 var and use
              * bounds_add_32 (a + b == c form: prop_add_bounds_add_32(c=one,
@@ -1728,7 +1730,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
             default: break;
             }
             if (fold >= 0) {
-                if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
+                if (!dvs_ctx_room(ctx, 2)) return EXPR_NULL;
                 uint32_t gid = ctx->n_vars;
                 _init_tier0(&ctx->vars[gid], 1, VAR_AUX, fold, fold);
                 ctx->n_vars = gid + 1;
@@ -1741,7 +1743,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
          * it is read in the var's order: give it the var's signedness. */
         uint8_t cv_f = (uint8_t)(VAR_AUX | (ctx->vars[cmp_vid].flags & VAR_SIGNED));
         if (eff == DVS_BIN_EQ) {
-            if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
+            if (!dvs_ctx_room(ctx, 2)) return EXPR_NULL;
             uint32_t gid = ctx->n_vars;
             _init_tier0(&ctx->vars[gid], 1, VAR_AUX, 0, 1);
             ctx->n_vars = gid + 1;
@@ -1766,7 +1768,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         case DVS_BIN_GT:   k = cmp_cv;     invert = 1; break;  /* var > c  -> ¬(var ≤ c) */
         case DVS_BIN_GTE:  k = cmp_cv - 1; invert = 1; break;  /* var ≥ c  -> ¬(var ≤ c-1) */
         case DVS_BIN_NEQ: {
-            if (ctx->n_vars + 3 >= ctx->n_vars_capacity) return EXPR_NULL;
+            if (!dvs_ctx_room(ctx, 4)) return EXPR_NULL;
             uint32_t geq = ctx->n_vars;
             _init_tier0(&ctx->vars[geq], 1, VAR_AUX, 0, 1);
             ctx->n_vars = geq + 1;
@@ -1793,7 +1795,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         default: return EXPR_NULL;
         }
 
-        if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
+        if (!dvs_ctx_room(ctx, 2)) return EXPR_NULL;
         uint32_t cmp_const = ctx->n_vars;
         if (_init_aux_tiered(ctx, &ctx->vars[cmp_const], cv_w, cv_f, k, k) != 0)
             return EXPR_NULL;   /* B24 */
@@ -1806,7 +1808,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         prop_add_reification_32(ctx, gle, cmp_vid, cmp_const, 0);
 
         if (!invert) return gle;
-        if (ctx->n_vars + 1 >= ctx->n_vars_capacity) return EXPR_NULL;
+        if (!dvs_ctx_room(ctx, 2)) return EXPR_NULL;
         uint32_t gid = ctx->n_vars;
         _init_tier0(&ctx->vars[gid], 1, VAR_AUX, 0, 1);
         ctx->n_vars = gid + 1;
@@ -1899,7 +1901,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
     if (k == EXPR_CONST) {
         ExprConst *ec = (ExprConst *)dvs_pool_ptr(&sp->pool, ref);
         if (ec->width) return _const_singleton_var(ctx, sp, ref, ec->width);
-        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
         uint32_t cv_id = ctx->n_vars;
         uint16_t w = width ? width : 32;
         if (_init_aux_tiered(ctx, &ctx->vars[cv_id], w, VAR_AUX,
@@ -1921,7 +1923,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         int64_t fv; uint16_t fw; uint8_t fs;
         if (_fold_const_unary(sp, ref, &fv, &fw, &fs)) {
             if (width && width != fw) return EXPR_NULL;
-            if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+            if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
             uint32_t cv_id = ctx->n_vars;
             if (_init_aux_tiered(ctx, &ctx->vars[cv_id], fw,
                                  (uint8_t)(VAR_AUX | (fs ? VAR_SIGNED : 0)), fv, fv) != 0)
@@ -1938,20 +1940,20 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         if (eu->op == DVS_UN_INVERT) {
             uint32_t a_id = _value_to_var(ctx, sp, eu->operand, width);
             if (a_id == EXPR_NULL) return EXPR_NULL;
-            const Variable *av = &ctx->vars[a_id];
-            uint16_t w = av->width;
+            uint16_t w = ctx->vars[a_id].width;
+            uint8_t a_sf = ctx->vars[a_id].flags & VAR_SIGNED;
             if ((width && width != w) || w == 0 || w > 64) return EXPR_NULL;
-            if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+            if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;      /* may move vars */
             uint32_t r_id = ctx->n_vars;
             int64_t lo, hi;
-            if (av->flags & VAR_SIGNED) {
+            if (a_sf) {
                 hi = (w >= 64) ? INT64_MAX : ((int64_t)1 << (w - 1)) - 1;
                 lo = -hi - 1;
             } else {
                 lo = 0; hi = (w >= 64) ? (int64_t)UINT64_MAX : (int64_t)((1ULL << w) - 1);
             }
             if (_init_aux_tiered(ctx, &ctx->vars[r_id], w,
-                                 (uint8_t)(VAR_AUX | (av->flags & VAR_SIGNED)), lo, hi) != 0)
+                                 (uint8_t)(VAR_AUX | a_sf), lo, hi) != 0)
                 return EXPR_NULL;
             ctx->n_vars = r_id + 1;
             if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
@@ -1981,7 +1983,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                 cond_ok = 1;
             }
             ExprKind ck = *(ExprKind *)dvs_pool_ptr(&sp->pool, ite->cond);
-            if (!cond_ok && ck == EXPR_BINARY && ctx->n_vars + 2 <= ctx->n_vars_capacity) {
+            if (!cond_ok && ck == EXPR_BINARY && dvs_ctx_room(ctx, 2)) {
                 ExprBinary *cmp = (ExprBinary *)dvs_pool_ptr(&sp->pool, ite->cond);
                 if (cmp->op == DVS_BIN_EQ) {
                     int is_vc = _is_var(sp, cmp->lhs, &cmp_vid) &&
@@ -2015,7 +2017,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                         uint32_t lhs_vid, rhs_vid;
                         if (_is_var(sp, cmp->lhs, &lhs_vid) &&
                             _is_var(sp, cmp->rhs, &rhs_vid) &&
-                            ctx->n_vars + 1 <= ctx->n_vars_capacity) {
+                            dvs_ctx_room(ctx, 1)) {
                             lhs_vid = _resolve(ctx, lhs_vid);
                             rhs_vid = _resolve(ctx, rhs_vid);
                             uint32_t gid = ctx->n_vars;
@@ -2038,7 +2040,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         if (else_id == EXPR_NULL) return EXPR_NULL;
 
         /* Create result var for this ITE — VAR_AUX: determined by propagation */
-        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
         uint32_t r_id = ctx->n_vars;
         uint16_t w = width ? width : 32;
         int64_t max_val = (w >= 64) ? (int64_t)UINT64_MAX
@@ -2056,7 +2058,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         uint16_t out_w = (uint16_t)(ex->hi_bit - ex->lo_bit + 1);
         uint32_t src_id = _value_to_var(ctx, sp, ex->operand, 0);
         if (src_id == EXPR_NULL) return EXPR_NULL;
-        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
         uint32_t r_id = ctx->n_vars;
         int64_t max_val = (out_w >= 64) ? (int64_t)UINT64_MAX
                                         : (int64_t)((1ULL << out_w) - 1);
@@ -2090,7 +2092,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                 || (ctx->vars[hi_id].flags & VAR_SIGNED)
                 || (ctx->vars[lo_id].flags & VAR_SIGNED))
             return EXPR_NULL;
-        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
         uint32_t r_id = ctx->n_vars;
         uint16_t out_w = (uint16_t)(hi_w + lo_w);
         if (_init_aux_tiered(ctx, &ctx->vars[r_id], out_w, VAR_AUX,
@@ -2148,7 +2150,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
             rhi = (to >= 64) ? (int64_t)UINT64_MAX : (int64_t)((1ULL << to) - 1);
         }
         if (preserve) {
-            if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+            if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
             r_id = ctx->n_vars;
             if (_init_aux_tiered(ctx, &ctx->vars[r_id], to,
                                  (uint8_t)(VAR_AUX | (dst_signed ? VAR_SIGNED : 0)),
@@ -2178,7 +2180,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         if (ee.sign_extend != src_signed && from < to) {
             /* Reinterpret the operand's `from`-bit pattern with the extension's
              * signedness first, so the next step extends it the right way. */
-            if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+            if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
             uint32_t mid = ctx->n_vars;
             int64_t mlo, mhi;
             if (ee.sign_extend) {
@@ -2197,7 +2199,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
             prop_add_bvadd_64(ctx, mid, cur, z, from, 0);
             cur = mid;
         }
-        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
         r_id = ctx->n_vars;
         if (_init_aux_tiered(ctx, &ctx->vars[r_id], to,
                              (uint8_t)(VAR_AUX | (dst_signed ? VAR_SIGNED : 0)),
@@ -2265,7 +2267,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
             if (b_id == EXPR_NULL) return EXPR_NULL;
         }
 
-        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
         uint32_t r_id = ctx->n_vars;
 
         /* Signedness follows the operands: a signed operand means the result
@@ -2332,7 +2334,7 @@ static uint32_t _const_to_var_like(dvs_ctx_t *ctx, dvs_problem_t *sp,
                                    int is_cmp) {
     ExprConst *ec = (ExprConst *)dvs_pool_ptr(&sp->pool, ref);
     if (ec->width) return _const_singleton_var(ctx, sp, ref, ec->width);
-    if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+    if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
     uint8_t flags = VAR_AUX;
     if ((ctx->vars[peer].flags & VAR_SIGNED) || (is_cmp && ec->value < 0))
         flags |= VAR_SIGNED;
@@ -2811,7 +2813,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                 int is_cv3 = !is_vc3 && _is_const(sp, e->lhs, &cv3) && _is_var(sp, e->rhs, &vid3);
                 if (is_vc3 || is_cv3) {
                     vid3 = _resolve(ctx, vid3);
-                    if (ctx->n_vars < ctx->n_vars_capacity) {
+                    if (dvs_ctx_room(ctx, 1)) {
                         uint32_t cv_id = ctx->n_vars;
                         Variable *cvv = &ctx->vars[cv_id];
                         _init_tier0(cvv, 32, 0, cv3, cv3);
@@ -2861,7 +2863,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                      * sp needed (pool may be full after finalization). */
                     ExprConst *rhs_c = (ExprConst *)dvs_pool_ptr(&sp->pool, e->rhs);
                     int64_t pin_val = rhs_c->value;
-                    if (ctx->n_vars < ctx->n_vars_capacity) {
+                    if (dvs_ctx_room(ctx, 1)) {
                         uint32_t r_id = ctx->n_vars;
                         Variable *rv = &ctx->vars[r_id];
                         /* The pin var IS the result of the binary op, and the
@@ -2896,7 +2898,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                     /* const == dvs_binop_t(...): symmetric */
                     ExprConst *lhs_c = (ExprConst *)dvs_pool_ptr(&sp->pool, e->lhs);
                     int64_t pin_val = lhs_c->value;
-                    if (ctx->n_vars < ctx->n_vars_capacity) {
+                    if (dvs_ctx_room(ctx, 1)) {
                         uint32_t r_id = ctx->n_vars;
                         Variable *rv = &ctx->vars[r_id];
                         int pin_rc;
@@ -2986,7 +2988,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                     if (has_var_const && !has_var_var) {
                         /* a_id is set, cv is the constant on the right.
                          * Create a const-var for cv. */
-                        if (ctx->n_vars < ctx->n_vars_capacity) {
+                        if (dvs_ctx_room(ctx, 1)) {
                             b_id = ctx->n_vars;
                             Variable *cv_var = &ctx->vars[b_id];
                             /* Same signedness as the var operand: an unsigned
@@ -3006,7 +3008,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                     }
                     if (has_const_var && !has_var_var) {
                         /* cv is the constant on the left, b_id is the var on the right. */
-                        if (ctx->n_vars < ctx->n_vars_capacity) {
+                        if (dvs_ctx_room(ctx, 1)) {
                             a_id = ctx->n_vars;
                             Variable *cv_var = &ctx->vars[a_id];
                             uint8_t sf = (ctx->vars[_resolve(ctx, b_id)].flags & VAR_SIGNED);
@@ -3348,7 +3350,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
 
                 /* Promote const then/else branches to const-vars */
                 if (cond_ok && !then_ok && _is_const(sp, ite->then_e, &then_cv) &&
-                    ctx->n_vars < ctx->n_vars_capacity) {
+                    dvs_ctx_room(ctx, 1)) {
                     a_id = ctx->n_vars;
                     _init_tier0(&ctx->vars[a_id], 32, 0, then_cv, then_cv);
                     ctx->n_vars = a_id + 1;
@@ -3356,7 +3358,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                     then_ok = 1;
                 }
                 if (cond_ok && !else_ok && _is_const(sp, ite->else_e, &else_cv) &&
-                    ctx->n_vars < ctx->n_vars_capacity) {
+                    dvs_ctx_room(ctx, 1)) {
                     b_id = ctx->n_vars;
                     _init_tier0(&ctx->vars[b_id], 32, 0, else_cv, else_cv);
                     ctx->n_vars = b_id + 1;
@@ -3419,7 +3421,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
             uint32_t elem_id = _resolve(ctx, base + i);
 
             /* Create guard variable [0,1] */
-            if (ctx->n_vars >= ctx->n_vars_capacity) return 0;
+            if (!dvs_ctx_room(ctx, 1)) return 0;
             uint32_t gid = ctx->n_vars;
             Variable *gv = &ctx->vars[gid];
             _init_tier0(gv, 1, 0, 0, 1);
@@ -3428,7 +3430,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
             if (gid < 64) ctx->unassigned_mask |= (1ULL << gid);
 
             /* Create const-var for index value i */
-            if (ctx->n_vars >= ctx->n_vars_capacity) return 0;
+            if (!dvs_ctx_room(ctx, 1)) return 0;
             uint32_t cv_id = ctx->n_vars;
             Variable *cvv = &ctx->vars[cv_id];
             _init_tier0(cvv, 32, 0, (int64_t)i, (int64_t)i);
@@ -3681,7 +3683,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                     if (negated == DVS_BIN_NEQ) {
                         int is_vc = _is_var(sp, inner->lhs, &lid) && _is_const(sp, inner->rhs, &cv);
                         int is_cv = !is_vc && _is_const(sp, inner->lhs, &cv) && _is_var(sp, inner->rhs, &lid);
-                        if ((is_vc || is_cv) && ctx->n_vars < ctx->n_vars_capacity) {
+                        if ((is_vc || is_cv) && dvs_ctx_room(ctx, 1)) {
                             lid = _resolve(ctx, lid);
                             int nc_wide = _var_needs_wide(ctx, lid)
                                           || ctx->vars[lid].width > 32;
@@ -3909,6 +3911,16 @@ dvs_problem_t *dvs_sc_problem;   /* the step checker validates models against it
 int dvs_sc_uncompiled;           /* and needs to know if compile left some out */
 #endif
 
+/* Memory ran out part-way (the pool, a table, the prop-id space): a failed
+ * allocation can leave a constraint unenforced or be read as a conflict, so
+ * neither "compiled" nor "unsat" can be trusted. Report NOMEM instead. */
+static int _nomem_check(const dvs_ctx_t *ctx, int rc) {
+    if (ctx->pool.overflow && rc != DVS_COMPILE_UNSUPPORTED_WIDTH &&
+        rc != DVS_COMPILE_BAD_VAR)
+        return DVS_COMPILE_NOMEM;
+    return rc;
+}
+
 static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 #ifdef DVS_STEP_CHECK
     dvs_sc_problem = sp;
@@ -3917,7 +3929,7 @@ static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     dvs_problem_t *esp = dvs_sv_elaborate(sp, NULL, NULL, &err);
     if (err) return _elab_error_code(err);
     dvs_problem_t *msp = dvs_sv_rewrite_masks(esp, NULL, NULL);
-    int rc = _solver_compile_body(ctx, msp);
+    int rc = _nomem_check(ctx, _solver_compile_body(ctx, msp));
     /* What compile allocated is permanent: a restore never frees it. */
     ctx->pool_floor = dvs_spool_mark(&ctx->pool);
     dvs_sv_release(esp, msp);
@@ -3944,39 +3956,15 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         return 0;
     }
 
-    /* Allocate a contiguous Variable[n + slack] in the static pool.
-       Slack is needed for compile-time aux vars (ITE chain materialisation,
-       reification guards, const-vars) plus incremental variable addition.
-       Each select-over-N-array element creates ~3N aux during compile,
-       and nested stores compound that — scale slack with `n` so larger
-       problems don't silently silently drop the bounds_eq link. */
-    #define VAR_SLACK_MIN  64u
-    #define VAR_SLACK_FACTOR 32u
-    uint32_t slack = n * VAR_SLACK_FACTOR;
-    if (slack < VAR_SLACK_MIN) slack = VAR_SLACK_MIN;
-    /* When the SMT2 frontend signals incremental mode (yosys-smtbmc
-     * emits unboundedly many aux vars per BMC step), grow capacity
-     * generously so we don't have to realloc the vars array. */
-    if (ctx->incremental_capacity_hint) {
-        uint32_t want = ctx->incremental_capacity_hint;
-        if (want > n + slack) { slack = want - n; }
-    }
-    uint32_t capacity = n + slack;
-    uint32_t vars_ref = dvs_spool_alloc(&ctx->pool,
-                                        capacity * (uint32_t)sizeof(Variable),
-                                        (uint32_t)_Alignof(Variable));
-    if (vars_ref == EXPR_NULL) return -1;
+    /* The per-variable tables. Compile-time aux variables (ITE chains,
+     * reification guards, const-vars) and incremental adds grow them
+     * (dvs_ctx_reserve_vars). */
+    if (dvs_ctx_reserve_vars(ctx, n) != 0) return -1;
 
-    ctx->vars           = (Variable *)dvs_spool_ptr(&ctx->pool, vars_ref);
     ctx->n_vars         = n;
     ctx->n_decl_vars    = n;
     free(ctx->var_order);
     ctx->var_order      = NULL;
-    ctx->n_vars_capacity = capacity;
-
-    /* Zero-initialise the whole array (including slack) */
-    memset(ctx->vars, 0, capacity * sizeof(Variable));
-
     /* Initialise unassigned_mask -- set after variable init below */
     ctx->unassigned_mask = 0;
 
@@ -4055,67 +4043,16 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         ctx->unassigned_mask = mask;
     }
 
-    /* ---- Allocate per-variable watcher head array (with slack) ---- */
-    uint32_t wh_ref = dvs_spool_alloc(&ctx->pool,
-                                      capacity * (uint32_t)sizeof(uint32_t),
-                                      (uint32_t)_Alignof(uint32_t));
-    if (wh_ref == EXPR_NULL) return -1;
-    ctx->watcher_heads = (uint32_t *)dvs_spool_ptr(&ctx->pool, wh_ref);
-    for (uint32_t i = 0; i < capacity; i++) ctx->watcher_heads[i] = EXPR_NULL;
-
-    /* ---- Allocate prop_refs array for checkpoint/restore ----
-     * Capacity must cover all propagators, including aux ones created
-     * during compile-time materialisation of ITE chains, boolean trees,
-     * and array select/store. A fixed slack of 128 was hit by larger
-     * QF_AUFBV BMC fixtures, so we use a multiplicative slack mirroring
-     * the variable-slack policy. */
-    #define PROP_SLACK_FACTOR 32u
-    #define PROP_SLACK_MIN    128u
-    uint32_t pr_base = sp->n_constraints + sp->n_alldiffs;
-    uint32_t pr_cap  = pr_base * PROP_SLACK_FACTOR;
-    if (pr_cap < pr_base + PROP_SLACK_MIN) pr_cap = pr_base + PROP_SLACK_MIN;
-    if (pr_cap < 2u * capacity) pr_cap = 2u * capacity;
-    /* Incremental mode (yosys-smtbmc) keeps adding propagators per BMC
-     * step. The var-capacity hint already covers fresh aux vars; mirror
-     * it for the propagator side tables so prop_refs/prop_guard_vars/
-     * prop_constraint_id don't get out-grown. dvs_solver_restore iterates
-     * prop_refs[0..n_props_at_cp); if n_props_at_cp exceeds capacity,
-     * the iteration reads adjacent pool memory and may treat a 0 value
-     * (not EXPR_NULL) as a valid prop offset, segfaulting in fire(). */
-    if (ctx->incremental_capacity_hint && pr_cap < ctx->incremental_capacity_hint)
-        pr_cap = ctx->incremental_capacity_hint;
-    uint32_t pr_ref = dvs_spool_alloc(&ctx->pool,
-                                      pr_cap * (uint32_t)sizeof(uint32_t),
-                                      (uint32_t)_Alignof(uint32_t));
-    if (pr_ref == EXPR_NULL) return -1;
-    ctx->prop_refs = (uint32_t *)dvs_spool_ptr(&ctx->pool, pr_ref);
-    ctx->n_prop_refs_capacity = pr_cap;
-    for (uint32_t i = 0; i < pr_cap; i++) ctx->prop_refs[i] = EXPR_NULL;
-
-    /* ---- Allocate guard-variable side table ---- */
-    uint32_t gv_ref = dvs_spool_alloc(&ctx->pool,
-                                      pr_cap * (uint32_t)sizeof(uint32_t),
-                                      (uint32_t)_Alignof(uint32_t));
-    if (gv_ref == EXPR_NULL) return -1;
-    ctx->prop_guard_vars = (uint32_t *)dvs_spool_ptr(&ctx->pool, gv_ref);
-    for (uint32_t i = 0; i < pr_cap; i++) ctx->prop_guard_vars[i] = EXPR_NULL;
-
-    /* ---- Allocate prop_constraint_id side table ---- */
-    uint32_t pc_ref = dvs_spool_alloc(&ctx->pool,
-                                      pr_cap * (uint32_t)sizeof(uint32_t),
-                                      (uint32_t)_Alignof(uint32_t));
-    if (pc_ref == EXPR_NULL) return -1;
-    ctx->prop_constraint_id = (uint32_t *)dvs_spool_ptr(&ctx->pool, pc_ref);
-    for (uint32_t i = 0; i < pr_cap; i++) ctx->prop_constraint_id[i] = 0;
+    /* ---- The per-propagator tables (prop_refs for checkpoint/restore,
+     * guard variables, constraint ids). Propagator creation grows them
+     * (dvs_ctx_reserve_props). ---- */
+    if (dvs_ctx_reserve_props(ctx, sp->n_constraints + sp->n_alldiffs + 64u) != 0)
+        return -1;
 
     /* ---- Build var alias table (union-find for DVS_BIN_EQ(var,var)) ---- */
     {
-        uint32_t al_ref = dvs_spool_alloc(&ctx->pool,
-                                          capacity * (uint32_t)sizeof(uint32_t),
-                                          (uint32_t)_Alignof(uint32_t));
-        if (al_ref != EXPR_NULL) {
-            ctx->var_alias = (uint32_t *)dvs_spool_ptr(&ctx->pool, al_ref);
-            for (uint32_t i = 0; i < capacity; i++) ctx->var_alias[i] = i;
+        /* var_alias starts as the identity (dvs_ctx_reserve_vars). */
+        {
 
             /* Pre-scan: collect unconditional DVS_BIN_EQ(var, var) constraints,
              * including those nested inside DVS_BIN_AND trees. */
@@ -4266,7 +4203,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 
                 /* Create an assumption boolean variable [0,1], pinned to 1 */
                 uint32_t avar_id = ctx->n_vars;
-                if (avar_id < ctx->n_vars_capacity) {
+                if (dvs_ctx_room(ctx, 1)) {
                     Variable *av = &ctx->vars[avar_id];
                     av->lo = 1; av->hi = 1;   /* pinned to 1 = active */
                     av->width = 1; av->flags = 0;
@@ -4306,16 +4243,10 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     }
 
     /* ---- Walk DistSpec list -> store dist metadata per variable ---- */
-    ctx->dist_offsets = NULL;
     if (sp->n_dists > 0) {
-        /* Allocate per-var dist_offsets array */
-        uint32_t do_ref = dvs_spool_alloc(&ctx->pool,
-                                          ctx->n_vars_capacity * (uint32_t)sizeof(uint32_t),
-                                          (uint32_t)_Alignof(uint32_t));
-        if (do_ref != EXPR_NULL) {
-            ctx->dist_offsets = (uint32_t *)dvs_spool_ptr(&ctx->pool, do_ref);
-            for (uint32_t i = 0; i < ctx->n_vars_capacity; i++)
-                ctx->dist_offsets[i] = 0;
+        /* The per-var dist_offsets table, all 0 (none) */
+        dvs_ctx_enable_dists(ctx);
+        {
 
             dvs_expr_t dref = sp->dists_head;
             while (dref != EXPR_NULL) {
@@ -4365,29 +4296,8 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         }
     }
 
-    /* ---- Allocate per-variable hole list heads (randc support) ---- */
-    {
-        uint32_t vh_ref = dvs_spool_alloc(&ctx->pool,
-                                          ctx->n_vars_capacity * (uint32_t)sizeof(uint32_t),
-                                          (uint32_t)_Alignof(uint32_t));
-        if (vh_ref != EXPR_NULL) {
-            ctx->var_holes_head = (uint32_t *)dvs_spool_ptr(&ctx->pool, vh_ref);
-            for (uint32_t i = 0; i < ctx->n_vars_capacity; i++)
-                ctx->var_holes_head[i] = 0;
-        } else {
-            ctx->var_holes_head = NULL;
-        }
-        uint32_t vn_ref = dvs_spool_alloc(&ctx->pool,
-                                          ctx->n_vars_capacity * (uint32_t)sizeof(uint64_t),
-                                          (uint32_t)_Alignof(uint64_t));
-        if (vn_ref != EXPR_NULL) {
-            ctx->var_n_values = (uint64_t *)dvs_spool_ptr(&ctx->pool, vn_ref);
-            for (uint32_t i = 0; i < ctx->n_vars_capacity; i++)
-                ctx->var_n_values[i] = 0;
-        } else {
-            ctx->var_n_values = NULL;
-        }
-    }
+    /* The per-variable hole lists (randc) and value counts are part of the
+     * per-variable tables (dvs_ctx_reserve_vars), empty until used. */
 
     /* ---- Exact domains for single-variable equality disjunctions ---- */
     /*
@@ -4530,7 +4440,7 @@ static int _solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
     dvs_problem_t *esp = dvs_sv_elaborate(aux_sp, _ctx_var_type, ctx, &err);
     if (err) return _elab_error_code(err);
     dvs_problem_t *msp = dvs_sv_rewrite_masks(esp, _ctx_var_type, ctx);
-    int rc = _solver_add_constraint_body(ctx, msp);
+    int rc = _nomem_check(ctx, _solver_add_constraint_body(ctx, msp));
     dvs_sv_release(esp, msp);
     dvs_sv_release(aux_sp, esp);
     return rc;
@@ -4606,13 +4516,16 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
      * ctx->n_vars past them. */
     uint32_t init_base_n_vars = ctx->n_vars;
     {
+        uint32_t want = ctx->n_vars;
         dvs_expr_t vref = aux_sp->vars_head;
         while (vref != EXPR_NULL) {
             VarSpec *vs = (VarSpec *)dvs_pool_ptr(&aux_sp->pool, vref);
-            if (vs->var_id + 1 > ctx->n_vars)
-                ctx->n_vars = vs->var_id + 1;
+            if (vs->var_id + 1 > want)
+                want = vs->var_id + 1;
             vref = vs->next;
         }
+        if (dvs_ctx_reserve_vars(ctx, want) != 0) return -1;
+        ctx->n_vars = want;
     }
 
     dvs_expr_t vref = aux_sp->vars_head;
@@ -4742,7 +4655,7 @@ int dvs_solver_add_array_vars(dvs_ctx_t *ctx,
                           int64_t  lo,
                           int64_t  hi) {
     uint32_t end = elem_var_base + n_elems;
-    if (end > ctx->n_vars_capacity) return -1;
+    if (end < elem_var_base || dvs_ctx_reserve_vars(ctx, end) != 0) return -1;
 
     uint8_t flags = is_signed ? VAR_SIGNED : 0;
     for (uint32_t i = elem_var_base; i < end; i++) {

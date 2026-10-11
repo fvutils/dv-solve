@@ -196,6 +196,7 @@ static uint32_t _alloc_prop(dvs_ctx_t *ctx,
                              uint8_t priority,
                              uint32_t n_watches, const uint32_t *var_ids,
                              uint32_t total_bytes) {
+    if (dvs_ctx_room_prop(ctx) != 0) return EXPR_NULL;  /* prop_refs slot */
     uint32_t ref = dvs_spool_alloc(&ctx->pool, total_bytes, 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -3914,6 +3915,7 @@ uint32_t prop_add_disj_clause(dvs_ctx_t *ctx,
         if (all_vids[i] >= ctx->n_vars) return EXPR_NULL;
         if (ctx->vars[all_vids[i]].width > 64) return EXPR_NULL;
     }
+    if (dvs_ctx_room_prop(ctx) != 0) return EXPR_NULL;  /* prop_refs slot */
     uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(DisjClause_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -4118,6 +4120,7 @@ uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
         if (ctx->vars[var_ids[i]].width > 32) return EXPR_NULL;
     }
 
+    if (dvs_ctx_room_prop(ctx) != 0) return EXPR_NULL;  /* prop_refs slot */
     uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(AllDifferent_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -4206,6 +4209,7 @@ uint32_t prop_add_sum_eq_32(dvs_ctx_t *ctx, uint32_t result_id,
 
     uint32_t n_total = 1 + n_summands;  /* result + summands */
 
+    if (dvs_ctx_room_prop(ctx) != 0) return EXPR_NULL;  /* prop_refs slot */
     uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(SumEq_32_t), 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 

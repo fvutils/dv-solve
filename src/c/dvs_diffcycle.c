@@ -343,7 +343,7 @@ int diffcycle_build(dvs_ctx_t *ctx) {
     uint32_t pred_off = off;       off += nv * (uint32_t)sizeof(uint32_t);
     off = (off + 7u) & ~7u;
     uint32_t edges_off = off;      off += 4u * nk * (uint32_t)sizeof(DcEdge);
-    if (ctx->n_props >= ctx->n_prop_refs_capacity) goto out;
+    if (dvs_ctx_room_prop(ctx) != 0) goto out;
 
     uint32_t ref = dvs_spool_alloc(&ctx->pool, off, 8u);
     if (ref == EXPR_NULL) { rc = -1; goto out; }

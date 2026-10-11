@@ -23,6 +23,7 @@
  */
 
 #include <stdint.h>
+#include "dvs_alloc.h"
 #include "dvs_propagator.h"  /* PropResult */
 
 #ifdef __cplusplus
@@ -106,6 +107,9 @@ typedef struct {
     uint32_t    *pend;       /* queued events: var_id*2 + (1 = ub event)   */
     uint32_t     n_pend;
     uint32_t     pend_cap;
+    /* The per-variable arrays above (watch_lb, watch_ub, pend) come from
+     * here, so they grow with the context (lcg_reserve_vars). */
+    dvs_alloc_t *alloc;
 
     /* Allocation arena for clauses and watch entries */
     uint8_t  *arena;
@@ -120,6 +124,8 @@ typedef struct {
 /** Initialize a clause database.
  *  @param n_vars  Number of integer variables (for watch list sizing). */
 int clause_db_init(ClauseDB *db, uint32_t n_vars);
+/** clause_db_init, with the per-variable arrays from `alloc`. */
+int clause_db_init_alloc(ClauseDB *db, uint32_t n_vars, dvs_alloc_t *alloc);
 
 /** Destroy the clause database and free all memory. */
 void clause_db_destroy(ClauseDB *db);
@@ -174,7 +180,8 @@ typedef int (*ExplainFunc)(Propagator *self, dvs_ctx_t *ctx,
 /* ================================================================== */
 
 typedef struct {
-    double  *activity;    /* per-variable activity score */
+    double  *activity;    /* per-variable activity score (from alloc) */
+    dvs_alloc_t *alloc;
     uint32_t n_vars;
     double   var_inc;     /* current increment (grows with decay) */
     double   var_decay;   /* decay factor (e.g. 0.95) */
@@ -221,6 +228,11 @@ typedef struct {
 } LCGCtx;
 
 int  lcg_init(LCGCtx *lcg, uint32_t n_vars);
+/** lcg_init, with every per-variable array from `alloc` (the context's). */
+int  lcg_init_alloc(LCGCtx *lcg, uint32_t n_vars, dvs_alloc_t *alloc);
+/** Make the per-variable arrays hold `n_vars` variables (never shrinks);
+ *  new entries are empty. 0, or -1 on allocation failure (unchanged). */
+int  lcg_reserve_vars(LCGCtx *lcg, dvs_alloc_t *alloc, uint32_t n_vars);
 void lcg_destroy(LCGCtx *lcg);
 /** Return `lcg` to the state lcg_init left it in: no clauses, no watches,
  *  an empty arena, zero activity, zero statistics. Keeps its allocations. */
