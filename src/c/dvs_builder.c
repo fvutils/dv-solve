@@ -788,11 +788,23 @@ dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id,
     v->width      = width;
     v->is_signed  = is_signed;
     v->is_aux     = 0;
+    v->order      = 0;
     v->lo         = lo;
     v->hi         = hi;
     b->vars_head  = ref;
     b->n_vars++;
     return ref;
+}
+
+int dvs_builder_set_var_order(dvs_builder_t *b, uint32_t var_id,
+                              uint8_t stage) {
+    for (dvs_expr_t r = b->vars_head; r != EXPR_NULL; ) {
+        VarSpec *v = (VarSpec *)dvs_builder_ref_ptr(b, r);
+        if (!v) return -1;
+        if (v->var_id == var_id) { v->order = stage; return 0; }
+        r = v->next;
+    }
+    return -1;
 }
 
 void dvs_builder_mark_var_aux(dvs_builder_t *b, dvs_expr_t var_ref) {

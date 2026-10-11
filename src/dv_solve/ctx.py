@@ -41,7 +41,7 @@ class _SolveOpts(ctypes.Structure):
         ("use_phase_save", ctypes.c_uint8),
         ("use_lcg",        ctypes.c_uint8),
         ("fair_pick",      ctypes.c_uint8),
-        ("_pad",           ctypes.c_uint8 * 1),
+        ("seq_pick",       ctypes.c_uint8),
         ("max_shave_iters", ctypes.c_uint32),
         ("time_limit_ms",  ctypes.c_uint32),
     ]
@@ -238,6 +238,7 @@ class SolveCtx:
         fair_pick: bool = False,
         time_limit_ms: int = 0,
         use_lcg: bool = False,
+        seq_pick: bool = False,
     ) -> int:
         """Search for a solution.
 
@@ -269,6 +270,10 @@ class SolveCtx:
             use_phase_save: Search tuning; leave at the default.
             max_shave_iters: Search tuning; leave at the default.
             fair_pick: See below.
+            seq_pick: With ``fair_pick``, draw variables one at a time in
+                search order instead of uniformly over solutions. For a
+                solve order (``solve x before y``), whose distribution is
+                defined by that sequence.
 
         ``fair_pick`` selects the decision-variable tie-break: ``False`` (fast)
         uses deterministic MRV and finds *a* solution quickly; ``True``
@@ -285,6 +290,7 @@ class SolveCtx:
             max_shave_iters=max_shave_iters,
             time_limit_ms=time_limit_ms,
             use_lcg=1 if use_lcg else 0,
+            seq_pick=1 if seq_pick else 0,
         )
         rc = self._lib.dvs_solver_solve(self._ctx, ctypes.byref(opts))
         if self._oracle is not None:

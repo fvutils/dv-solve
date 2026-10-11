@@ -126,7 +126,10 @@ typedef struct {
     uint8_t  fair_pick;       /* 1: break decision ties at random, giving
                                * evenly spread solutions (use this for
                                * constrained-random stimulus); 0: fastest   */
-    uint8_t  _pad[1];
+    uint8_t  seq_pick;        /* with fair_pick: 1 draws variables one at a
+                               * time (the search order), 0 draws them
+                               * uniformly over solutions where it can.
+                               * Set it for a solve-order (solve x before y) */
     uint32_t max_shave_iters; /* search tuning; leave 0                     */
     uint32_t time_limit_ms;   /* wall-clock budget for this solve; 0 = the
                                * default                                    */
@@ -195,6 +198,19 @@ dvs_expr_t dvs_builder_add_all_different(dvs_builder_t *b, uint32_t n_vars,
  */
 dvs_expr_t dvs_builder_add_soft_constraint(dvs_builder_t *b, dvs_expr_t root,
                                            uint32_t priority);
+
+/**
+ * Put variable `var_id` in solve-order stage `stage` (SV `solve ... before`):
+ * the variables of stage 1 are chosen first, then those of stage 2, and so
+ * on; variables in stage 0 (the default) come last. Each stage is chosen
+ * among the values that leave the constraints satisfiable, and in a seeded
+ * fair_pick solve the last stage is uniform over the solutions that remain.
+ * Declare the variable first.
+ *
+ * @return 0, or -1 if no variable `var_id` has been declared.
+ */
+int dvs_builder_set_var_order(dvs_builder_t *b, uint32_t var_id,
+                              uint8_t stage);
 
 /** Give variable `var_id` a weighted distribution (SV `dist`). */
 dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,

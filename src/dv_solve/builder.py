@@ -421,6 +421,26 @@ class SolveProblemBuilder:
             raise RuntimeError("dvs_builder_add_soft_constraint returned EXPR_NULL")
         return ref
 
+    def set_var_order(self, var_id: int, stage: int) -> None:
+        """Put a variable in a solve-order stage, like SystemVerilog's
+        ``solve ... before``.
+
+        Stage 1's variables are chosen first, then stage 2's, and so on;
+        variables left in stage 0 (the default) come last. Each stage is
+        chosen among the values that leave the constraints satisfiable, and
+        in a seeded ``fair_pick`` solve the last stage is uniform over the
+        solutions that remain.
+
+        Args:
+            var_id: A declared variable.
+            stage: 0 to 255.
+        """
+        if not 0 <= stage <= 255:
+            raise ValueError("solve-order stage must be 0..255, got %d" % stage)
+        if self._lib.dvs_builder_set_var_order(
+                self._b, ctypes.c_uint32(var_id), ctypes.c_uint8(stage)) != 0:
+            raise ValueError("set_var_order: variable %d is not declared" % var_id)
+
     def add_dist(self, var_id: int, entries) -> int:
         """Give a variable a weighted distribution, like SystemVerilog's ``dist``.
 

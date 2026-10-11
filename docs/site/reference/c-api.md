@@ -136,6 +136,15 @@ soft constraints conflict, those with the highest priority number are dropped
 first. See {doc}`../concepts/soft-constraints`.
 ```
 
+```{c:function} int dvs_builder_set_var_order(dvs_builder_t *b, uint32_t var_id, uint8_t stage)
+Put a variable in a solve-order stage (SystemVerilog `solve ... before`). The
+variables of stage 1 are chosen first, then those of stage 2, and so on;
+variables in stage 0 (the default) come last. Each stage is chosen among the
+values that leave the constraints satisfiable, and in a seeded `fair_pick`
+solve the last stage is uniform over the solutions that remain. Declare the
+variable first. Returns 0, or -1 if no variable `var_id` has been declared.
+```
+
 ```{c:function} dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id, uint32_t n_entries, const dvs_dist_entry_t *entries)
 Give a variable a weighted distribution (SystemVerilog `dist`). See
 {doc}`../concepts/randomization-seeds`.
@@ -362,6 +371,13 @@ Selects which solution is returned: the same seed gives the same solution.
 ```{c:member} uint8_t fair_pick
 1 breaks decision ties at random, spreading solutions evenly over the
 solution space; use it for constrained-random stimulus. 0 is fastest.
+```
+
+```{c:member} uint8_t seq_pick
+With `fair_pick`: 1 draws the variables one at a time, in search order. 0
+(the default) draws them uniformly over solutions where it can. Set it for
+a solve order (`solve x before y`), whose distribution is defined by the
+order the values are drawn in.
 ```
 
 ```{c:member} uint32_t time_limit_ms

@@ -243,6 +243,8 @@ typedef struct {
     uint8_t  is_signed;  /* non-zero = signed          */
     uint8_t  is_aux;     /* non-zero = compiler-generated aux (never a
                           * search decision; determined by propagation) */
+    uint8_t  order;      /* solve-order stage: 0 none, else 1.. earliest
+                          * first (dvs_builder_set_var_order)          */
     int64_t  lo;         /* initial lower bound        */
     int64_t  hi;         /* initial upper bound        */
 } VarSpec;
