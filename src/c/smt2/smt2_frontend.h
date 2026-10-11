@@ -31,13 +31,15 @@ extern size_t g_smt2_translate_stack_bytes;
 /* ------------------------------------------------------------------ */
 
 #define SMT2_MAX_NAME       128
-#define SMT2_MAX_BV_BITS    192   /* widest BitVec sort accepted (>64-bit is bitblast-routed); riscv-dv rv64 vtype is 154 */
+#define SMT2_MAX_BV_BITS  65535   /* widest BitVec sort accepted (>64-bit is bitblast-routed) */
+#define SMT2_MAX_ARRAY_BV_BITS 192 /* widest Array index or element sort */
 #define SMT2_MAX_FUNS      8192   /* yosys-smtbmc emits one per BMC unroll step */
 #define SMT2_MAX_FUN_PARAMS   8
 #define SMT2_MAX_SORTS       16
 #define SMT2_MAX_SORT_FUNS  256
 #define SMT2_MAX_SORT_CONSTS 256
 #define SMT2_MAX_SUBST       64
+#define SMT2_MAX_REWRITES    96
 #define SMT2_MAX_ASSUMPS    256   /* assumption literals recorded per check-sat-assuming */
 
 /* Array expansion limits */
@@ -54,7 +56,13 @@ extern size_t g_smt2_translate_stack_bytes;
  * docs/cdcl_verilator_coverage_plan.md: an `unknown` with no explanation costs a
  * manual delta-debug every time, so every emission site is traceable under
  * DV_LOG=1. Purely diagnostic. */
-#define SMT2_EMIT_UNKNOWN(fe) do {                                        \
+/* `why_` is what (get-info :reason-unknown) reports for this answer (fw-hdl
+ * plan 6.3): "memout", "incomplete: ...", "unsupported: ...", or NULL to keep
+ * the reason already recorded for this check. */
+#define SMT2_EMIT_UNKNOWN(fe, why_) do {                                  \
+        const char *w_ = (why_);                                          \
+        if (w_) snprintf((fe)->unknown_why, sizeof (fe)->unknown_why,     \
+                         "%s", w_);                                       \
         if ((fe)->print_stats || getenv("DV_LOG"))                        \
             fprintf((fe)->err, "unknown-from: smt2_frontend.c:%d%s%s\n",   \
                     __LINE__,                                             \
@@ -76,9 +84,9 @@ extern size_t g_smt2_translate_stack_bytes;
 typedef struct {
     char     name[SMT2_MAX_NAME];
     uint32_t var_id;
-    uint8_t  width;
+    uint16_t width;
     uint8_t  is_signed;
-    uint8_t  _pad[2];
+    uint8_t  is_bool;    /* declared Bool: get-value prints true/false */
 } Smt2Var;
 
 /* One recorded command for get-unsat-core replay: a deep copy of the command
@@ -211,7 +219,7 @@ typedef struct Smt2ArrayEq {
 typedef struct {
     char          name[SMT2_MAX_NAME];
     uint8_t       n_params;
-    uint8_t       return_width;    /* 0 if array return, else BV/Bool width */
+    uint16_t      return_width;    /* 0 if array return, else BV/Bool width */
     uint8_t       is_bool_return;
     uint8_t       is_array_return; /* 1 if return sort is (Array ...) */
     Smt2ArraySort array_sort;      /* valid iff is_array_return */
@@ -223,16 +231,24 @@ typedef struct {
     char     sort_name[SMT2_MAX_NAME];
 } Smt2SortConst;
 
+/* (define-sort NAME () SORT): a sort alias. `def` is SORT with every alias in
+ * it already expanded, deep-copied into persistent_arena. Aliases are global:
+ * (pop) does not remove them, as with :global-declarations. */
+typedef struct {
+    char         name[SMT2_MAX_NAME];
+    const Sexpr *def;
+} Smt2SortAlias;
+
 /* Parameterized macro (define-fun) */
 typedef struct {
     char           name[SMT2_MAX_NAME];
     uint32_t       n_params;
     char           param_names[SMT2_MAX_FUN_PARAMS][SMT2_MAX_NAME];
     /* param_widths[i]: 0 if param is sort-typed (opaque/array), else BV/Bool width */
-    uint8_t        param_widths[SMT2_MAX_FUN_PARAMS];
+    uint16_t       param_widths[SMT2_MAX_FUN_PARAMS];
     uint8_t        param_is_sort[SMT2_MAX_FUN_PARAMS];
     const struct Sexpr *body;   /* lives in persistent arena */
-    uint8_t        return_width; /* 1 for Bool, BV width otherwise; 0 for array return */
+    uint16_t       return_width; /* 1 for Bool, BV width otherwise; 0 for array return */
     uint8_t        is_bool_return;
     uint8_t        is_array_return;
     Smt2ArraySort  array_return_sort;  /* valid iff is_array_return */
@@ -251,13 +267,14 @@ typedef struct {
     Smt2ArrayValue     *cached_array;
     int                 cached_leaf_kind;
     uint8_t             has_cache;       /* 0 for define-fun params, 1 for let bindings */
-    /* Set while this define-fun parameter's argument is being lazily
-     * translated. Lookups skip an entry that is currently expanding so a
-     * self-referential argument (e.g. param `b` bound to `(bvult a b)` where
-     * `b` is also a global) resolves the inner `b` to the outer/global binding
-     * instead of re-entering this parameter and recursing until the C stack
-     * overflows (SIGSEGV). */
-    uint8_t             expanding;
+    /* Scoping (B78). Entries form linked environments, not one flat scope:
+     * `up` is the enclosing binding (index + 1; 0 = none, only globals
+     * beyond). A define-fun body starts a fresh environment holding just its
+     * parameters, and a parameter's argument is translated in `arg_env`, the
+     * caller's environment at the call, so neither side's names capture the
+     * other's. */
+    uint32_t            up;
+    uint32_t            arg_env;
 } Smt2Subst;
 
 /* ------------------------------------------------------------------ */
@@ -315,10 +332,29 @@ typedef struct {
      * named assertions the contradiction does not need. Off by default, so the
      * Verilator randomize() loop never pays for the copies. */
     int                  produce_unsat_cores;
+    uint8_t              print_success;       /* :print-success: "success" after a silent command */
+    uint8_t              produce_assertions;  /* :produce-assertions: keep them for get-assertions */
     Smt2CoreCmd         *core_hist;
     uint32_t             n_core_hist;
     uint32_t             core_hist_cap;
     uint32_t             core_hist_at_check; /* n_core_hist at the last check-sat */
+    /* Model check (docs/fw_hdl_implementation_plan.md 2.5): every assertion as
+     * written, deep-copied into persistent_arena and scoped by push/pop, is
+     * evaluated by smt2_eval.c under each `sat` model. The evaluator shares no
+     * code with the translator, so a false assertion is a translation bug: the
+     * answer becomes `unknown`. check_models: 0 undecided (DV_CHECK_MODEL, else
+     * on except in Verilator mode), 1 on, -1 off. */
+    /* Level-0 declarations, definitions and options, deep-copied into
+     * persistent_arena: (reset-assertions) is a (reset) followed by their
+     * replay, since a compiled constraint cannot be taken back. */
+    const Sexpr        **decl_hist;
+    uint32_t             n_decl_hist;
+    uint32_t             decl_hist_cap;
+    int8_t               check_models;
+    const Sexpr        **checked;
+    uint32_t             n_checked;
+    uint32_t             checked_cap;
+    char                 model_check_why[200];  /* set when the check said unknown */
     uint8_t              core_replayable;    /* last unsat came from a plain check-sat */
     dvs_block_alloc_t   *block_alloc;
     void                *ctx_buf;      /* raw buffer for dvs_ctx_t */
@@ -328,6 +364,17 @@ typedef struct {
     Smt2Var             *vars;
     uint32_t             n_vars;
     uint32_t             vars_cap;
+    /* Name index over vars[0, var_idx_n): open addressing, slot+1 (0 empty).
+     * Caught up lazily by _find_var; var_idx_n > n_vars (a pop) rebuilds it. */
+    uint32_t            *var_idx;
+    uint32_t             var_idx_cap;    /* power of two, or 0 */
+    uint32_t             var_idx_used;
+    uint32_t             var_idx_n;
+    /* The same over funs[0, fun_idx_n), for _find_fun. */
+    uint32_t            *fun_idx;
+    uint32_t             fun_idx_cap;
+    uint32_t             fun_idx_used;
+    uint32_t             fun_idx_n;
 
     /* Configuration */
     int                  produce_models;
@@ -405,6 +452,11 @@ typedef struct {
      * non-zero from an earlier bail is harmless (only ever increments/compares)
      * but it is reset to 0 at the start of every top-level expression. */
     uint32_t             translate_depth;
+    /* The translator stops when the stack runs low (stack_guard), or, where
+     * the stack cannot be measured, at translate_max_depth (set at each
+     * top-level translate). */
+    uint32_t             translate_max_depth;
+    dvs_stack_guard_t    stack_guard;
 
     /* Set when a construct is lowered into a composed expression the CDCL
      * engine cannot solve soundly (e.g. signed bvsdiv/bvsrem lower to an ITE of
@@ -431,6 +483,10 @@ typedef struct {
     /* Result of last check-sat */
     dvs_result_t          last_result;
     int                  has_result;   /* 1 after check-sat */
+    /* The last check-sat's answer, for the exit status: kept across the
+     * push/pop/assert that clear has_result. answered = 0 before any. */
+    int                  answered;
+    dvs_result_t         answered_result;
     /* Checkpoint a successful default-mode check-sat-assuming left open, plus
      * one (0: none). It holds the assumption pins while get-value and
      * get-unsat-assumptions read the answer; _end_assumptions restores it
@@ -455,6 +511,9 @@ typedef struct {
     /* Opaque sorts */
     char                 sort_names[SMT2_MAX_SORTS][SMT2_MAX_NAME];
     uint32_t             n_sort_names;
+    Smt2SortAlias       *sort_aliases;     /* heap; see Smt2SortAlias */
+    uint32_t             n_sort_aliases;
+    uint32_t             sort_alias_cap;
 
     /* Sort-typed declare-fun entries (e.g., accessor functions) */
     Smt2SortFun          sort_funs[SMT2_MAX_SORT_FUNS];
@@ -480,6 +539,22 @@ typedef struct {
     Smt2Subst           *subst_stack;
     uint32_t             subst_cap;
     uint32_t             subst_depth;
+    uint32_t             subst_env;    /* innermost visible binding, index + 1; 0 = none */
+
+    /* define-fun applications already translated in this command, keyed by
+     * the function and its arguments' identities (_apply_fun_def). An entry
+     * is live while its gen equals fun_memo_gen. */
+    struct Smt2FunMemo  *fun_memo;
+    uint32_t             fun_memo_cap;
+    uint32_t             fun_memo_n;
+    uint32_t             fun_memo_gen;
+
+    /* Operators lowered by rewriting into supported ones (_translate_rewrite):
+     * each template, keyed by its text and parsed once into persistent_arena.
+     * Kept across a soft reset, like the arena. */
+    struct { const char *text; const struct Sexpr *body; }
+                         rewrites[SMT2_MAX_REWRITES];
+    uint32_t             n_rewrites;
 
     /* Assumption literals from the most recent check-sat-assuming, recorded so
      * (get-unsat-assumptions) can answer. When the last check-sat-assuming was
@@ -498,6 +573,9 @@ typedef struct {
     uint32_t             push_n_aux_problems[32];
     uint32_t             push_n_named[32];
     uint32_t             push_n_core_hist[32];
+    uint32_t             push_n_checked[32];
+    uint32_t             push_n_funs[32];          /* define-fun is scoped too (B82) */
+    uint32_t             push_n_sort_aliases[32];  /* and define-sort */
     dvs_builder_mark_t   push_bmark[32];     /* builder position at each push */
     uint8_t              push_incomplete[32];  /* `incomplete` at each push */
     uint32_t             push_n_anodes[32];    /* abstract-array state at each push */
@@ -507,6 +585,16 @@ typedef struct {
 
     /* Incremental state: 1 once the initial problem has been compiled. */
     int                  compiled;
+    /* The compile found the assertions unsat (fe->ctx kept, compiled == 0)
+     * at this push depth; a pop below it drops the context. */
+    uint32_t             ctx_unsat_depth;
+    /* A flush into the context met a conflict at push depth flush_unsat - 1
+     * (0: none): the assertions are unsat until a pop below that depth. */
+    uint32_t             flush_unsat;
+    /* Constraints the current CDCL context left out: its compile plus every
+     * flush since (an over-count after a pop). Validation and escalation
+     * cover them; a violation with none left out is a CDCL bug. */
+    uint32_t ctx_uncompiled;
     int                  has_aux;
 
     /* Bit-blast incremental state (B14). The bit-blast engine reads fe->problem
@@ -542,8 +630,33 @@ typedef struct {
      * sites used to be silent, so a fixture that answered `unknown` gave no
      * clue which construct was responsible. Reported by (check-sat) under
      * DV_LOG / --stats. */
+    /* Why the last check-sat answered unknown (SMT2_EMIT_UNKNOWN); cleared
+     * when a check starts. */
+    char                 unknown_why[192];
     const char          *incomplete_why;
     uint32_t             incomplete_line;
+
+    /* Input errors (malformed or unsupported commands; plan D2 in
+     * docs/fw_hdl_implementation_plan.md). Each is answered with an SMT-LIB
+     * `(error "...")` on fe->out. After one, the session is poisoned: every
+     * check-sat answers `unknown`, because we cannot know what the bad input
+     * meant. (reset) clears the poison; n_input_errors survives it and drives
+     * the exit status (SMT2_EXIT_INPUT_ERROR). */
+    uint32_t             n_input_errors;
+    int                  input_poisoned;
+    char                 input_err_reason[200];
+    /* First ill-formed-term message of the current assert (unknown symbol,
+     * arity or sort mismatch). Recorded rather than printed, because the
+     * translator also runs speculatively; reported as an input error only if
+     * the assert as a whole fails to translate. */
+    char                 term_err[160];
+    /* The construct the translator could not take (_unsupported), for the
+     * taint reason; and the taint reason built from it. */
+    char                 unsup_msg[160];
+    char                 taint_msg[176];
+    /* Position of the command being dispatched, for error messages (0: none). */
+    uint32_t             cmd_line;
+    uint32_t             cmd_col;
 
     int                  verilator_cdcl;
     uint64_t             cdcl_probe_fp;
@@ -559,6 +672,12 @@ typedef struct {
     void                *shape_tab;       /* Smt2ShapeCost[]: per-shape engine choice, kept across (reset) */
     uint8_t              shape_route;     /* engine the shape routing chose for this check-sat: 1 CDCL, 2 bitblast */
     uint8_t              shape_bb;        /* this check-sat goes to bitblast by its shape */
+    /* One-shot QF_BV routing (docs/fw_hdl_implementation_plan.md 3.1, 3.2):
+     * qfbv_bb sends this check-sat to bitblast by the problem's operator mix;
+     * qfbv_why says why (DV_LOG). Otherwise CDCL runs under a short budget and
+     * escalates to bitblast. */
+    uint8_t              qfbv_bb;
+    const char          *qfbv_why;
 
     /* Array variable table (persistent: element vars survive commands) */
     Smt2ArrayVar         array_vars[SMT2_MAX_ARRAY_VARS];
@@ -580,6 +699,14 @@ typedef struct {
     int                  bb_inc;
     dvs_expr_t           bb_inc_head;      /* builder constraints_head then */
     uint32_t             bb_inc_ncons, bb_inc_nsofts, bb_inc_ndists, bb_inc_nalldiffs;
+    /* Bit-blast session (_check_sat_session, plan piece 6.1): bb_solver is a
+     * live instance over bb_problem holding the builder's first bb_sess_ncons
+     * constraints, its scopes mirroring the push stack. Pop pops it; _free_bb
+     * and any builder reset end it. bb_checks counts bit-blast check-sats. */
+    int                  bb_sess;
+    int                  bb_sess_assume;   /* a check-sat-assuming scope is open */
+    uint32_t             bb_sess_ncons;
+    uint32_t             bb_checks;
     Smt2ArrayValue     **anodes;
     uint32_t             n_anodes, anodes_cap;
     Smt2ArrayRead       *areads;
@@ -607,6 +734,18 @@ typedef struct {
 /* API                                                                 */
 /* ------------------------------------------------------------------ */
 
+/* Exit status of dv-solve-smt2 (plan D3; documented in --help). */
+#define SMT2_EXIT_SAT          0
+#define SMT2_EXIT_UNSAT        1
+#define SMT2_EXIT_UNKNOWN      2   /* also: no check-sat was run */
+#define SMT2_EXIT_ORACLE_ABORT 3
+#define SMT2_EXIT_INPUT_ERROR  4
+#define SMT2_EXIT_USAGE        5
+#define SMT2_EXIT_INTERNAL     6
+
+/* Errors reported per session before further ones are only counted. */
+#define SMT2_MAX_REPORTED_ERRORS 20
+
 /**
  * Initialise a frontend.  Caller owns *fe and must call smt2_frontend_destroy().
  */
@@ -623,6 +762,18 @@ void smt2_frontend_destroy(Smt2Frontend *fe);
  * @return  0 to continue, 1 on (exit), -1 on fatal error.
  */
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd);
+
+/**
+ * Report an input error: print `(error "line L column C: <msg>")` on fe->out
+ * (the position is left out when line is 0) and poison the session (see
+ * Smt2Frontend.input_poisoned). printf-style.
+ */
+void smt2_frontend_input_error(Smt2Frontend *fe, uint32_t line, uint32_t col,
+                               const char *fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 4, 5)))
+#endif
+    ;
 
 /**
  * Answer a (get-value ...) command given as text into a malloc'd buffer,

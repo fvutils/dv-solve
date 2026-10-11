@@ -209,6 +209,11 @@ set(DVS_SOURCES
     src/c/dvs_bitblast.c
     src/c/dvs_bbsolver.c
     src/c/dvs_cube.c
+    src/c/dvs_shape.c
+    src/c/dvs_aigsim.c
+    src/c/dvs_affine.c
+    src/c/dvs_bbsum.c
+    src/c/dvs_bbword.c
     src/c/dvs_thread.c
     src/c/dvs_arena.c
     src/c/dvs_bvdom.c
@@ -405,6 +410,11 @@ add_executable(test_ctx_dirty_buffer tests/c/test_ctx_dirty_buffer.c)
 target_link_libraries(test_ctx_dirty_buffer PRIVATE dv_solve)
 add_test(NAME test_ctx_dirty_buffer COMMAND test_ctx_dirty_buffer)
 
+add_executable(test_clause_notify tests/c/test_clause_notify.c)
+target_link_libraries(test_clause_notify PRIVATE dv_solve)
+target_include_directories(test_clause_notify PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_clause_notify COMMAND test_clause_notify)
+
 add_executable(test_dvs_arena tests/c/test_dvs_arena.c)
 target_link_libraries(test_dvs_arena PRIVATE dv_solve)
 target_include_directories(test_dvs_arena PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -452,6 +462,7 @@ add_executable(bench_inproc
     src/c/smt2/smt2_lexer.c
     src/c/smt2/smt2_parser.c
     src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_eval.c
 )
 target_link_libraries(bench_inproc PRIVATE dv_solve)
 target_include_directories(bench_inproc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -464,6 +475,7 @@ add_executable(bench_vlt_replay
     src/c/smt2/smt2_lexer.c
     src/c/smt2/smt2_parser.c
     src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_eval.c
 )
 target_link_libraries(bench_vlt_replay PRIVATE dv_solve)
 target_include_directories(bench_vlt_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -477,6 +489,7 @@ add_executable(test_smt2_frontend
     src/c/smt2/smt2_lexer.c
     src/c/smt2/smt2_parser.c
     src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_eval.c
 )
 target_link_libraries(test_smt2_frontend PRIVATE dv_solve)
 target_include_directories(test_smt2_frontend PRIVATE
@@ -542,6 +555,7 @@ set(SMT2_SOURCES
     src/c/smt2/smt2_lexer.c
     src/c/smt2/smt2_parser.c
     src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_eval.c
     src/c/smt2/smt2_oracle.c
     src/c/smt2/smt2_main.c
 )

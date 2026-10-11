@@ -370,7 +370,7 @@ int explain_ite_value(Propagator *self, dvs_ctx_t *ctx,
     return 0;
 }
 
-/* ---- InSet: x in {elems} ---- */
+/* ---- InSet: x in {elems}; also InRanges: x in [lo0,hi0] U ... ---- */
 
 int explain_in_set(Propagator *self, dvs_ctx_t *ctx,
                     uint32_t var_id, uint8_t is_lb,

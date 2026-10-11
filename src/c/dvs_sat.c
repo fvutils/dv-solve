@@ -10,6 +10,7 @@
 #include "dvs_sat.h"
 #include "dvs_sat_backend.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -115,6 +116,9 @@ dvs_sat_t *dvs_sat_new_backend(dvs_alloc_t *alloc, dvs_sat_backend_t backend) {
     s->vt          = vt;
     s->incremental = vt->incremental;
     s->sel_next    = 0; /* set to max_var+1 lazily at first push */
+    /* DV_DUMP_CNF=path: record the clause log and write it as DIMACS at the
+     * first solve (a diagnostic for comparing SAT backends offline). */
+    if (getenv("DV_DUMP_CNF")) s->recording = 1;
     return s;
 }
 
@@ -231,6 +235,24 @@ int dvs_sat_solve(dvs_sat_t *s) {
             if (assume_append_raw(s, (dvs_sat_lit_t)s->sel_stack[i]) != 0) {
                 return DVS_SAT_UNKNOWN; /* OOM: fail safe */
             }
+        }
+    }
+
+    const char *dump = getenv("DV_DUMP_CNF");
+    if (dump && s->recording && s->rec_n) {
+        FILE *f = fopen(dump, "w");
+        if (f) {
+            fprintf(f, "p cnf %u %llu\n", (unsigned)s->max_var,
+                    (unsigned long long)(s->num_clauses + s->assume_n));
+            int open = 0;
+            for (size_t i = 0; i < s->rec_n; i++) {
+                if (s->rec_buf[i] == 0 && !open) continue;
+                fprintf(f, s->rec_buf[i] ? "%d " : "%d\n", (int)s->rec_buf[i]);
+                open = s->rec_buf[i] != 0;
+            }
+            for (size_t i = 0; i < s->assume_n; i++)
+                fprintf(f, "%d 0\n", (int)s->assume_buf[i]);
+            fclose(f);
         }
     }
 

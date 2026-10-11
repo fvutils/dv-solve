@@ -8,13 +8,28 @@
 #include <time.h>
 
 #include "dvs_aig.h"
+#include "dvs_affine.h"
+#include "dvs_aigsim.h"
 #include "dvs_aig_cnf.h"
 #include "dvs_bitblast.h"
+#include "dvs_bbsum.h"
+#include "dvs_bbword.h"
 #include "dvs_bvdom.h"
 #include "dvs_pool.h"
 #include "dvs_sat.h"
 #include "dvs_sv.h"
 #include "dvs_thread.h"
+#include "dvs_stackinfo.h"
+
+/* The per-kind blasters stay out of bb_expr, so a level of nesting costs
+ * bb_expr's frame plus the one kind's, not the union of all of them. */
+#if defined(_MSC_VER)
+#define BB_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__)
+#define BB_NOINLINE __attribute__((noinline))
+#else
+#define BB_NOINLINE
+#endif
 
 /* ----------------------------- types -------------------------------------- */
 
@@ -31,6 +46,27 @@ typedef struct {
     int      bounds_asserted; /* lo<=v<=hi already emitted (incremental reuse) */
 } bb_var_t;
 
+/* A slice substitution: bits [hi:lo] of `var` are defined as `eref`, from a
+ * top-level (= (extract var hi lo) eref). Yosys `-stbv` output relates whole
+ * state vectors this way: each register is a slice of the next state, set
+ * from the current one. Chained per variable through `next`. */
+typedef struct {
+    dvs_expr_t eref;
+    uint32_t   next;
+    uint16_t   hi, lo;
+} bb_slice_t;
+
+#define BB_NO_SLICE UINT32_MAX
+
+/* A session scope (dvs_bbsolver_sess_push). Its assertions are clauses
+ * (-sel | a), live while `sel` is assumed; pop adds the unit -sel. */
+typedef struct {
+    dvs_aig_node_t sel;
+    uint32_t       var_mark;    /* variables from here up belong to the scope */
+    uint32_t       n_asserts;   /* assert_nodes at the push */
+    uint32_t       n_slices;    /* slices at the push */
+} bb_frame_t;
+
 /* Memoization cache entry — one per dvs_expr_t byte offset in the pool. */
 typedef struct {
     dvs_bv_t bv;      /* size == 0 marks "not yet bit-blasted" */
@@ -38,6 +74,10 @@ typedef struct {
 
 struct dvs_bbsolver_s {
     dvs_alloc_t    *alloc;
+    /* The expression walks below stop when the stack runs low: blasting
+     * reports the problem unsupported (so another engine, or "unknown",
+     * answers), the cycle checks answer "may cycle". */
+    dvs_stack_guard_t sg;
     dvs_problem_t   *problem;
     /* The caller's problem when `problem` is an SV-elaborated copy we own
      * (dvs_sv_elaborate); NULL when `problem` is the caller's. */
@@ -47,6 +87,8 @@ struct dvs_bbsolver_s {
     dvs_sat_t      *sat;
     dvs_aig_cnf_t  *cnf;
     dvs_bitblast_t *bb;
+    dvs_bbsum_t    *sum;     /* word-level sum normalization (piece 5.1) */
+    dvs_bbword_t   *word;    /* word-level facts: inverses, residues (5.4) */
 
     uint64_t        seed;    /* from dvs_bbsolver_check; 0 = deterministic */
 
@@ -64,6 +106,30 @@ struct dvs_bbsolver_s {
      * graph that the linear-scan acyclicity check might miss. */
     dvs_expr_t        *subst;       /* size n_vars, or NULL */
     uint8_t        *resolving;   /* size n_vars, or NULL */
+    /* Visited stamps for subst_reaches_var: var v is visited when
+     * reach_mark[v] == reach_epoch (no clearing per query). */
+    uint32_t       *reach_mark;  /* size reach_cap, or NULL */
+    uint32_t        reach_cap;
+    uint32_t        reach_epoch;
+    /* rhs_var[v]: v occurs in the right side of a recorded substitution or
+     * slice. Only then can a new substitution's right side reach v through
+     * the substitution graph, so subst_reaches_var runs only for those. */
+    uint8_t        *rhs_var;     /* size n_vars, or NULL (always walk) */
+
+    /* Slice substitutions (piece 5.1): slice_head[var_id] starts the var's
+     * chain in slices[], BB_NO_SLICE if none. A var has slices or a whole
+     * substitution, never both; its slices never overlap. */
+    uint32_t       *slice_head;  /* size n_vars, or NULL */
+    bb_slice_t     *slices;
+    uint32_t        n_slices, cap_slices;
+
+    /* Fanout of each expression node (saturating), with zero-extensions,
+     * `concat` of a zero and substituted variables passed through to what
+     * they wrap. A sum used once may be flattened into its user
+     * (dvs_bbsum); one used more often is kept, so it stays shared. */
+    uint8_t        *uses;        /* size uses_cap, or NULL */
+    uint32_t        uses_cap;
+    uint8_t        *fo_seen;     /* count_fanout's visited set, size uses_cap */
 
     /* Bitmap of constraint indices to skip (those consumed by substitution).
      * Indexed by enumeration order of constraints_head walk. */
@@ -87,6 +153,8 @@ struct dvs_bbsolver_s {
      * had_error: maps to DVS_BB_UNKNOWN so the caller defers to its fallback
      * rather than treating the result as a real verdict. */
     int             had_unsupported;
+    /* had_unsupported because an expression nests deeper than the stack. */
+    int             too_deep;
 
     /* DSE-2 soft-aware serve. soft_keep[i] (indexed by softs_head walk order)
      * selects which soft constraints to encode as *hard* top-level assertions
@@ -111,6 +179,32 @@ struct dvs_bbsolver_s {
     int             no_memo;
     /* Skip the post-solve flip-check (dvs_bbsolver_set_diversify). */
     int             no_diversify;
+    /* Simulate before SAT (dvs_bbsolver_set_presim). */
+    int             presim;
+    /* An assertion could not be recorded in assert_nodes (out of memory), so
+     * the list is not the whole problem: no simulation verdicts. */
+    int             asserts_lost;
+
+    /* Session mode (dvs_bbsolver_sess_*): constraints arrive in batches, each
+     * at the depth of its scope, and the instance outlives check-sats. */
+    int             sess;
+    bb_frame_t     *frames;
+    uint32_t        n_frames, cap_frames;
+    /* A substitution may define only variables from sub_floor up: those of
+     * the innermost scope, which go when it does. */
+    uint32_t        sub_floor;
+    /* Variables substituted in the current batch (their bits are encoded so
+     * the model reads them). */
+    uint32_t       *new_subst;
+    uint32_t        n_new_subst, cap_new_subst;
+    /* Variable-list entries bb_grow_vars has seen; a pop sets refill. */
+    uint32_t        seen_vars;
+    int             refill;
+    /* assert_top guards its assertion with the selector of scope
+     * assert_frame - 1 (0: none), and tags it in assert_tags. */
+    uint32_t        assert_frame;
+    uint32_t       *assert_tags;
+    uint32_t        tags_cap;
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -125,12 +219,31 @@ static void xfree(dvs_alloc_t *a, void *p, size_t sz) {
 /* Encode `node` as a hard top-level assertion AND remember it, so the diversity
  * flip-check can re-verify every assertion after a tentative bit flip. */
 static void assert_top(dvs_bbsolver_t *S, dvs_aig_node_t node) {
-    dvs_aig_cnf_encode(S->cnf, node, /*top_level=*/1);
+    if (S->assert_frame) {
+        /* Inside a session scope: the clause (-sel | node), live while sel is
+         * assumed. Encoding TRUE first gives FALSE its variable. */
+        dvs_aig_node_t sel = S->frames[S->assert_frame - 1].sel;
+        dvs_aig_cnf_encode(S->cnf, DVS_AIG_TRUE, /*top_level=*/0);
+        dvs_aig_cnf_encode(S->cnf, node, /*top_level=*/0);
+        dvs_sat_add_binary(S->sat, (dvs_sat_lit_t)-sel, (dvs_sat_lit_t)node);
+    } else {
+        dvs_aig_cnf_encode(S->cnf, node, /*top_level=*/1);
+    }
+    if (S->sess && !S->asserts_lost) {
+        /* Which scope owns each entry, so a pop keeps the others. */
+        if (S->n_asserts == S->tags_cap) {
+            uint32_t nc = S->tags_cap ? 2 * S->tags_cap : 64;
+            uint32_t *t = (uint32_t *)realloc(S->assert_tags, nc * sizeof(*t));
+            if (!t) { S->asserts_lost = 1; return; }
+            S->assert_tags = t; S->tags_cap = nc;
+        }
+        S->assert_tags[S->n_asserts] = S->assert_frame;
+    }
     if (S->n_asserts == S->asserts_cap) {
         uint32_t nc = S->asserts_cap ? S->asserts_cap * 2 : 64;
         dvs_aig_node_t *na = (dvs_aig_node_t *)xalloc(S->alloc,
                                                       nc * sizeof(dvs_aig_node_t));
-        if (!na) return;   /* out of memory: skip recording (flip-check no-ops) */
+        if (!na) { S->asserts_lost = 1; return; }   /* flip-check and presim no-op */
         if (S->assert_nodes) {
             memcpy(na, S->assert_nodes, S->n_asserts * sizeof(dvs_aig_node_t));
             xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(dvs_aig_node_t));
@@ -154,7 +267,9 @@ static uint16_t max_w(uint16_t a, uint16_t b) { return a > b ? a : b; }
  * in, and what a narrower operand is extended by. (An SMT-LIB problem has no
  * signed leaves at all, so everything there is unsigned, as before.) */
 static int bb_signed(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
-    if (ref == EXPR_NULL || depth > 4096) return 0;
+    if (ref == EXPR_NULL) return 0;
+    /* Too deep to tell: guessing would extend by the wrong signedness. */
+    if (dvs_stack_deep(&S->sg, depth, 4096)) { S->had_unsupported = 1; return 0; }
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
@@ -202,7 +317,8 @@ static int bb_signed(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
 
 /* Self-determined width of `ref` (0 = an unsized constant, which adapts). */
 static uint16_t bb_self_width(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
-    if (ref == EXPR_NULL || depth > 4096) return 0;
+    if (ref == EXPR_NULL) return 0;
+    if (dvs_stack_deep(&S->sg, depth, 4096)) { S->had_unsupported = 1; return 0; }
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
@@ -283,14 +399,15 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width);
  * a direct reference check (neither RHS mentions the LHS directly), but
  * following subst[y] from the f(y) branch reaches x.
  *
- * `visited` is a S->n_vars bitmap to avoid revisiting (and infinite
+ * `visited` (S->reach_mark, stamped S->reach_epoch) avoids revisiting (and infinite
  * recursion through pre-existing cycles in subst, although those
  * shouldn't exist if every prior insertion was guarded by this check). */
 static int subst_reaches_var(dvs_bbsolver_t *S,
                              dvs_expr_t ref,
                              uint32_t target_var,
-                             uint8_t *visited) {
+                             uint32_t *visited) {
     if (ref == EXPR_NULL) return 0;
+    if (dvs_stack_low(&S->sg)) return 1;   /* cannot rule a cycle out */
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
@@ -299,12 +416,21 @@ static int subst_reaches_var(dvs_bbsolver_t *S,
         ExprVar *v = (ExprVar *)kp;
         if (v->var_id == target_var) return 1;
         if (v->var_id >= S->n_vars) return 0;
-        if (visited[v->var_id]) return 0;
-        visited[v->var_id] = 1;
+        if (visited[v->var_id] == S->reach_epoch) return 0;
+        visited[v->var_id] = S->reach_epoch;
+        /* A built variable's bits are fixed: bit-blasting never resolves
+         * through its substitution again, so no cycle passes through it.
+         * (Only a session builds variables between substitution passes.) */
+        if (S->vars[v->var_id].bv_built) return 0;
         /* If this variable has its own substitution, look through it. */
         if (S->subst[v->var_id] != EXPR_NULL) {
             return subst_reaches_var(S, S->subst[v->var_id], target_var, visited);
         }
+        if (S->slice_head)
+            for (uint32_t i = S->slice_head[v->var_id]; i != BB_NO_SLICE;
+                 i = S->slices[i].next)
+                if (subst_reaches_var(S, S->slices[i].eref, target_var, visited))
+                    return 1;
         return 0;
     }
     case EXPR_BINARY: {
@@ -359,6 +485,127 @@ static int subst_reaches_var(dvs_bbsolver_t *S,
     }
 }
 
+/* Start a subst_reaches_var query: a fresh epoch over n_vars stamps.
+ * Returns S->reach_mark, or NULL when it cannot be allocated. */
+static uint32_t *reach_begin(dvs_bbsolver_t *S) {
+    if (S->reach_cap < S->n_vars) {
+        uint32_t *m = (uint32_t *)calloc(S->n_vars, sizeof(uint32_t));
+        if (!m) return NULL;
+        free(S->reach_mark);
+        S->reach_mark = m;
+        S->reach_cap = S->n_vars;
+        S->reach_epoch = 0;
+    }
+    if (++S->reach_epoch == 0) {
+        memset(S->reach_mark, 0, S->reach_cap * sizeof(uint32_t));
+        S->reach_epoch = 1;
+    }
+    return S->reach_mark;
+}
+
+/* Walk `ref` down to its variables, not looking through substitutions. With
+ * `flag`, mark each in rhs_var and return 0; otherwise return whether
+ * `target` occurs. */
+static int expr_direct_vars(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t target,
+                            int flag) {
+    if (ref == EXPR_NULL) return 0;
+    if (dvs_stack_low(&S->sg)) {
+        /* Cannot finish: a query answers "occurs"; a marking walk leaves
+         * rhs_var incomplete, so drop it (subst_cycles then always walks). */
+        if (!flag) return 1;
+        free(S->rhs_var);
+        S->rhs_var = NULL;
+        return 0;
+    }
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp) return 0;
+    switch (*kp) {
+    case EXPR_VAR: {
+        uint32_t id = ((ExprVar *)kp)->var_id;
+        if (!flag) return id == target;
+        if (S->rhs_var && id < S->n_vars) S->rhs_var[id] = 1;
+        return 0;
+    }
+    case EXPR_BINARY: {
+        ExprBinary *b = (ExprBinary *)kp;
+        return expr_direct_vars(S, b->lhs, target, flag)
+            || expr_direct_vars(S, b->rhs, target, flag);
+    }
+    case EXPR_UNARY:
+        return expr_direct_vars(S, ((ExprUnary *)kp)->operand, target, flag);
+    case EXPR_ITE: {
+        ExprITE *e = (ExprITE *)kp;
+        return expr_direct_vars(S, e->cond, target, flag)
+            || expr_direct_vars(S, e->then_e, target, flag)
+            || expr_direct_vars(S, e->else_e, target, flag);
+    }
+    case EXPR_IN_RANGE: {
+        ExprInRange *r = (ExprInRange *)kp;
+        return expr_direct_vars(S, r->value, target, flag)
+            || expr_direct_vars(S, r->lo, target, flag)
+            || expr_direct_vars(S, r->hi, target, flag);
+    }
+    case EXPR_IN_SET: {
+        ExprInSet *iset = (ExprInSet *)kp;
+        if (expr_direct_vars(S, iset->value, target, flag)) return 1;
+        dvs_expr_t *elems = expr_in_set_elems(S->problem, ref);
+        for (uint32_t i = 0; i < iset->n_elems; i++)
+            if (expr_direct_vars(S, elems[i], target, flag)) return 1;
+        return 0;
+    }
+    case EXPR_IN_RANGES: {
+        ExprInRanges *irs = (ExprInRanges *)kp;
+        if (expr_direct_vars(S, irs->value, target, flag)) return 1;
+        dvs_expr_t *los = expr_in_ranges_los(S->problem, ref);
+        dvs_expr_t *his = expr_in_ranges_his(S->problem, ref);
+        for (uint32_t i = 0; i < irs->n_ranges; i++)
+            if (expr_direct_vars(S, los[i], target, flag) ||
+                expr_direct_vars(S, his[i], target, flag)) return 1;
+        return 0;
+    }
+    case EXPR_EXTEND:
+        return expr_direct_vars(S, ((ExprExtend *)kp)->operand, target, flag);
+    case EXPR_SV_CAST:
+        return expr_direct_vars(S, ((ExprSvCast *)kp)->operand, target, flag);
+    case EXPR_EXTRACT:
+        return expr_direct_vars(S, ((ExprExtract *)kp)->operand, target, flag);
+    case EXPR_CONCAT: {
+        ExprConcat *c = (ExprConcat *)kp;
+        return expr_direct_vars(S, c->hi, target, flag)
+            || expr_direct_vars(S, c->lo, target, flag);
+    }
+    default: return 0;
+    }
+}
+
+/* Would var := eref close a cycle in the substitution graph? Everything
+ * eref reaches is a variable of eref itself or of some recorded right side,
+ * so a variable in no right side is reached only by occurring in eref. */
+static int subst_cycles(dvs_bbsolver_t *S, dvs_expr_t eref, uint32_t var) {
+    if (S->rhs_var && !S->rhs_var[var]) return expr_direct_vars(S, eref, var, 0);
+    uint32_t *mark = reach_begin(S);
+    return !mark || subst_reaches_var(S, eref, var, mark);
+}
+
+/* May a substitution define `var`? Not once its bits are built (a session's
+ * earlier batch referenced it), nor below the innermost scope's variables. */
+static int subst_definable(const dvs_bbsolver_t *S, uint32_t var) {
+    return var >= S->sub_floor && !S->vars[var].bv_built;
+}
+
+/* Bookkeeping for a recorded substitution of `var` by `eref`. */
+static void note_subst(dvs_bbsolver_t *S, dvs_expr_t eref, uint32_t var) {
+    if (S->rhs_var) expr_direct_vars(S, eref, 0, 1);
+    if (!S->sess) return;
+    if (S->n_new_subst == S->cap_new_subst) {
+        uint32_t c = S->cap_new_subst ? 2 * S->cap_new_subst : 256;
+        uint32_t *p = (uint32_t *)realloc(S->new_subst, c * sizeof(*p));
+        if (!p) { S->had_error = 1; return; }
+        S->new_subst = p; S->cap_new_subst = c;
+    }
+    S->new_subst[S->n_new_subst++] = var;
+}
+
 /* Attempt to register a substitution var(vref) := eref. Returns 1 if
  * a new substitution was recorded. Rejects if eref transitively
  * (through the current subst graph) reaches the var being substituted —
@@ -368,17 +615,73 @@ static int try_record_subst(dvs_bbsolver_t *S, dvs_expr_t vref, dvs_expr_t eref)
     if (!vk || *vk != EXPR_VAR) return 0;
     ExprVar *v = (ExprVar *)vk;
     if (v->var_id >= S->n_vars) return 0;
+    if (!subst_definable(S, v->var_id)) return 0;
     if (S->subst[v->var_id] != EXPR_NULL) return 0;
+    if (S->slice_head && S->slice_head[v->var_id] != BB_NO_SLICE) return 0;
     /* `v == e` DEFINES v only when e is no wider than v (v then equals e
      * extended by e's own signedness). A wider e makes it a comparison in e's
      * width -- v is extended, e's high bits must match -- not a definition. */
     if (bb_self_width(S, eref, 0) > S->vars[v->var_id].width) return 0;
     /* Transitive cycle check: would substituting create a cycle in the
      * subst graph reachable from this var? */
-    memset(S->resolving, 0, S->n_vars);
-    if (subst_reaches_var(S, eref, v->var_id, S->resolving)) return 0;
+    if (subst_cycles(S, eref, v->var_id)) return 0;
     S->subst[v->var_id] = eref;
     S->n_substs++;
+    note_subst(S, eref, v->var_id);
+    return 1;
+}
+
+/* `ref`, looking through whole substitutions, as (extract var hi lo) of an
+ * unsubstituted variable. */
+static int as_var_slice(dvs_bbsolver_t *S, dvs_expr_t ref,
+                        uint32_t *var, uint16_t *hi, uint16_t *lo) {
+    for (int guard = 0; guard < 64 && ref != EXPR_NULL; guard++) {
+        ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+        if (!kp) return 0;
+        if (*kp == EXPR_VAR) {
+            uint32_t id = ((ExprVar *)kp)->var_id;
+            if (id >= S->n_vars || S->subst[id] == EXPR_NULL) return 0;
+            ref = S->subst[id];
+            continue;
+        }
+        if (*kp != EXPR_EXTRACT) return 0;
+        const ExprExtract *x = (const ExprExtract *)kp;
+        ExprKind *ok = (ExprKind *)POOL_PTR(S->problem, x->operand);
+        if (!ok || *ok != EXPR_VAR) return 0;
+        uint32_t id = ((ExprVar *)ok)->var_id;
+        if (id >= S->n_vars || !S->vars[id].defined) return 0;
+        if (S->subst[id] != EXPR_NULL) return 0;
+        if (x->hi_bit < x->lo_bit || x->hi_bit >= S->vars[id].width) return 0;
+        *var = id; *hi = x->hi_bit; *lo = x->lo_bit;
+        return 1;
+    }
+    return 0;
+}
+
+/* Attempt to register a slice substitution: `sref` is (extract var hi lo)
+ * and bits [hi:lo] of var := eref. The same gates as a whole substitution
+ * (no wider than the slice, no cycle through the substitution graph), and
+ * the var's slices must not overlap. */
+static int try_record_slice(dvs_bbsolver_t *S, dvs_expr_t sref, dvs_expr_t eref) {
+    if (!S->slice_head) return 0;
+    uint32_t id; uint16_t hi, lo;
+    if (!as_var_slice(S, sref, &id, &hi, &lo)) return 0;
+    if (!subst_definable(S, id)) return 0;
+    if (bb_self_width(S, eref, 0) > (uint32_t)(hi - lo + 1)) return 0;
+    for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
+        if (!(hi < S->slices[i].lo || lo > S->slices[i].hi)) return 0;
+    if (subst_cycles(S, eref, id)) return 0;
+    if (S->n_slices == S->cap_slices) {
+        uint32_t c = S->cap_slices ? 2 * S->cap_slices : 64;
+        bb_slice_t *p = (bb_slice_t *)realloc(S->slices, c * sizeof(*p));
+        if (!p) return 0;
+        S->slices = p; S->cap_slices = c;
+    }
+    bb_slice_t *sl = &S->slices[S->n_slices];
+    sl->eref = eref; sl->hi = hi; sl->lo = lo; sl->next = S->slice_head[id];
+    S->slice_head[id] = S->n_slices++;
+    S->n_substs++;
+    note_subst(S, eref, id);
     return 1;
 }
 
@@ -423,6 +726,8 @@ static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
             if (b->op == DVS_BIN_EQ) {
                 if (try_record_subst(S, b->lhs, b->rhs)) continue;  /* consumed */
                 if (try_record_subst(S, b->rhs, b->lhs)) continue;  /* consumed */
+                if (try_record_slice(S, b->lhs, b->rhs)) continue;  /* consumed */
+                if (try_record_slice(S, b->rhs, b->lhs)) continue;  /* consumed */
             }
         }
         all_consumed = 0;   /* this leaf was not consumable as a substitution */
@@ -430,6 +735,177 @@ static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
     #undef CS_PUSH
     free(stk);
     return all_consumed;
+}
+
+/* Is `ref` a node that only widens what it wraps with zeros? Returns the
+ * wrapped node, or EXPR_NULL. A substituted variable counts: its uses are
+ * uses of its definition. */
+static dvs_expr_t fanout_inner(dvs_bbsolver_t *S, dvs_expr_t ref) {
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp) return EXPR_NULL;
+    switch (*kp) {
+    case EXPR_EXTEND: {
+        const ExprExtend *e = (const ExprExtend *)kp;
+        return (!e->sign_extend && e->to_bits >= e->from_bits) ? e->operand : EXPR_NULL;
+    }
+    case EXPR_CONCAT: {
+        const ExprConcat *c = (const ExprConcat *)kp;
+        ExprKind *hk = (ExprKind *)POOL_PTR(S->problem, c->hi);
+        return (hk && *hk == EXPR_CONST && ((const ExprConst *)hk)->value == 0)
+            ? c->lo : EXPR_NULL;
+    }
+    case EXPR_VAR: {
+        uint32_t id = ((const ExprVar *)kp)->var_id;
+        return (S->subst && id < S->n_vars) ? S->subst[id] : EXPR_NULL;
+    }
+    default:
+        return EXPR_NULL;
+    }
+}
+
+/* Size uses[] and fo_seen[] to the memo cache (a session's grows). */
+static int fanout_reserve(dvs_bbsolver_t *S) {
+    uint32_t cap = S->cache_cap, old = S->uses ? S->uses_cap : 0;
+    if (S->uses && old >= cap) return 1;
+    uint8_t *u = (uint8_t *)realloc(S->uses, cap);
+    if (u) S->uses = u;
+    uint8_t *f = u ? (uint8_t *)realloc(S->fo_seen, cap) : NULL;
+    if (f) S->fo_seen = f;
+    if (!u || !f) {
+        free(S->uses); free(S->fo_seen);
+        S->uses = NULL; S->fo_seen = NULL; S->uses_cap = 0;
+        return 0;
+    }
+    memset(u + old, 0, cap - old);
+    memset(f + old, 0, cap - old);
+    S->uses_cap = cap;
+    return 1;
+}
+
+/* Count the fanout of every node reachable from `roots` (skipping those with
+ * skip[i] set) into S->uses. Nodes counted by an earlier call are not
+ * descended again, so a session counts each batch's new nodes once.
+ * Iterative: the DAG can be deep. */
+static void count_fanout_from(dvs_bbsolver_t *S, const dvs_expr_t *roots,
+                              const uint8_t *skip, uint32_t n_roots) {
+    if (!S->cache_cap || getenv("DV_BB_SUM_NO_FANOUT")) return;
+    if (!fanout_reserve(S)) return;
+    uint32_t cap = S->uses_cap;
+    uint8_t *seen = S->fo_seen;
+    dvs_expr_t *stk = NULL;
+    size_t n = 0, scap = 0;
+    #define FO_EDGE(C) do {                                                    \
+        dvs_expr_t c_ = (C);                                                   \
+        for (int g_ = 0; g_ < 64 && c_ != EXPR_NULL; g_++) {                   \
+            if (c_ >= cap) break;                                              \
+            if (S->uses[c_] < 255) S->uses[c_]++;                              \
+            dvs_expr_t in_ = fanout_inner(S, c_);                              \
+            if (in_ != EXPR_NULL) { c_ = in_; continue; }                      \
+            if (!seen[c_]) {                                                   \
+                seen[c_] = 1;                                                  \
+                if (n == scap) { size_t nc_ = scap ? 2 * scap : 256;           \
+                    dvs_expr_t *t_ = (dvs_expr_t *)realloc(stk, nc_ * sizeof(*t_)); \
+                    if (!t_) goto fail;                                        \
+                    stk = t_; scap = nc_; }                                    \
+                stk[n++] = c_;                                                 \
+            }                                                                  \
+            break;                                                             \
+        }                                                                      \
+    } while (0)
+    for (uint32_t i = 0; i < n_roots; i++)
+        if (!(skip && skip[i])) FO_EDGE(roots[i]);
+    while (n > 0) {
+        dvs_expr_t r = stk[--n];
+        ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, r);
+        if (!kp) continue;
+        switch (*kp) {
+        case EXPR_BINARY:
+            FO_EDGE(((ExprBinary *)kp)->lhs);
+            FO_EDGE(((ExprBinary *)kp)->rhs);
+            break;
+        case EXPR_UNARY:   FO_EDGE(((ExprUnary *)kp)->operand); break;
+        case EXPR_EXTEND:  FO_EDGE(((ExprExtend *)kp)->operand); break;
+        case EXPR_SV_CAST: FO_EDGE(((ExprSvCast *)kp)->operand); break;
+        case EXPR_EXTRACT: {
+            /* An extract of a sliced variable reads only the slices it
+             * overlaps (Yosys reads each register out of the state). */
+            const ExprExtract *x = (const ExprExtract *)kp;
+            ExprKind *ok = (ExprKind *)POOL_PTR(S->problem, x->operand);
+            uint32_t id = (ok && *ok == EXPR_VAR) ? ((ExprVar *)ok)->var_id : UINT32_MAX;
+            if (S->slice_head && id < S->n_vars && S->slice_head[id] != BB_NO_SLICE) {
+                for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
+                    if (!(x->hi_bit < S->slices[i].lo || x->lo_bit > S->slices[i].hi))
+                        FO_EDGE(S->slices[i].eref);
+            } else {
+                FO_EDGE(x->operand);
+            }
+            break;
+        }
+        case EXPR_CONCAT:
+            FO_EDGE(((ExprConcat *)kp)->hi);
+            FO_EDGE(((ExprConcat *)kp)->lo);
+            break;
+        case EXPR_ITE:
+            FO_EDGE(((ExprITE *)kp)->cond);
+            FO_EDGE(((ExprITE *)kp)->then_e);
+            FO_EDGE(((ExprITE *)kp)->else_e);
+            break;
+        case EXPR_IN_RANGE:
+            FO_EDGE(((ExprInRange *)kp)->value);
+            FO_EDGE(((ExprInRange *)kp)->lo);
+            FO_EDGE(((ExprInRange *)kp)->hi);
+            break;
+        case EXPR_IN_SET: {
+            ExprInSet *iset = (ExprInSet *)kp;
+            FO_EDGE(iset->value);
+            dvs_expr_t *el = expr_in_set_elems(S->problem, r);
+            for (uint32_t i = 0; i < iset->n_elems; i++) FO_EDGE(el[i]);
+            break;
+        }
+        case EXPR_IN_RANGES: {
+            ExprInRanges *irs = (ExprInRanges *)kp;
+            FO_EDGE(irs->value);
+            dvs_expr_t *los = expr_in_ranges_los(S->problem, r);
+            dvs_expr_t *his = expr_in_ranges_his(S->problem, r);
+            for (uint32_t i = 0; i < irs->n_ranges; i++) { FO_EDGE(los[i]); FO_EDGE(his[i]); }
+            break;
+        }
+        case EXPR_VAR: {
+            /* A sliced variable: every use of it may read every slice. */
+            uint32_t id = ((ExprVar *)kp)->var_id;
+            if (S->slice_head && id < S->n_vars)
+                for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
+                    FO_EDGE(S->slices[i].eref);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    #undef FO_EDGE
+    free(stk);
+    return;
+fail:
+    free(stk);
+    free(S->uses); free(S->fo_seen);
+    S->uses = NULL; S->fo_seen = NULL; S->uses_cap = 0;
+}
+
+/* Fanout over the constraints that are still encoded (see S->uses). */
+static void count_fanout(dvs_bbsolver_t *S) {
+    uint32_t n = 0;
+    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL; n++)
+        cur = ((ConstraintSpec *)POOL_PTR(S->problem, cur))->next;
+    dvs_expr_t *roots = (dvs_expr_t *)malloc((n ? n : 1) * sizeof(dvs_expr_t));
+    if (!roots) return;
+    uint32_t i = 0;
+    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL; i++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        roots[i] = cs->root;
+        cur = cs->next;
+    }
+    count_fanout_from(S, roots, S->n_constraints == n ? S->constraint_skip : NULL, n);
+    free(roots);
 }
 
 /* Pre-pass: scan all top-level constraints, populate S->subst, mark
@@ -449,6 +925,12 @@ static void run_subst_pass(dvs_bbsolver_t *S) {
     S->constraint_skip = (uint8_t *)xalloc(S->alloc, n * sizeof(uint8_t));
     if (!S->subst || !S->resolving || !S->constraint_skip) return;
     for (uint32_t i = 0; i < S->n_vars; i++) S->subst[i] = EXPR_NULL;
+    S->rhs_var = (uint8_t *)calloc(S->n_vars, 1);
+    if (getenv("DV_BB_NO_SLICE") == NULL) {
+        S->slice_head = (uint32_t *)malloc(S->n_vars * sizeof(uint32_t));
+        if (S->slice_head)
+            for (uint32_t i = 0; i < S->n_vars; i++) S->slice_head[i] = BB_NO_SLICE;
+    }
     memset(S->resolving, 0, S->n_vars);
     memset(S->constraint_skip, 0, n);
 
@@ -500,6 +982,8 @@ static dvs_bv_t bv_for_var(dvs_bbsolver_t *S, uint32_t var_id) {
             }
             /* fall through on error to allocate fresh */
         }
+        int sliced = S->slice_head && S->slice_head[var_id] != BB_NO_SLICE
+                     && !S->resolving[var_id];
 
         /* Bit-fix folding is a 64-bit-domain optimization: the [lo,hi] range and
          * the fixed/unknown masks are uint64. For width > 64 it cannot represent
@@ -520,6 +1004,29 @@ static dvs_bv_t bv_for_var(dvs_bbsolver_t *S, uint32_t var_id) {
             v->bv = dvs_bb_constant_dom(S->bb, v->width, d.lo, unknown_mask);
         } else {
             v->bv = dvs_bb_constant(S->bb, v->width);
+        }
+        if (sliced) {
+            /* Replace each substituted slice's fresh bits by its expression's.
+             * MSB first: bit `hi` is at index width-1-hi. */
+            S->resolving[var_id] = 1;
+            dvs_aig_node_t *bits =
+                (dvs_aig_node_t *)malloc(v->width * sizeof(dvs_aig_node_t));
+            if (!bits) { S->resolving[var_id] = 0; S->had_error = 1; return v->bv; }
+            memcpy(bits, v->bv.bits, v->width * sizeof(dvs_aig_node_t));
+            for (uint32_t i = S->slice_head[var_id]; i != BB_NO_SLICE;
+                 i = S->slices[i].next) {
+                const bb_slice_t *sl = &S->slices[i];
+                uint16_t sw = (uint16_t)(sl->hi - sl->lo + 1);
+                dvs_bv_t e = bb_expr(S, sl->eref, sw);
+                if (S->had_error) break;
+                if (e.size < sw)      e = ext_ref(S, e, sl->eref, sw);
+                else if (e.size > sw) e = dvs_bb_extract(S->bb, e, sw - 1, 0);
+                memcpy(bits + (v->width - 1 - sl->hi), e.bits,
+                       sw * sizeof(dvs_aig_node_t));
+            }
+            S->resolving[var_id] = 0;
+            if (!S->had_error) v->bv = dvs_bb_value_bits(S->bb, v->width, bits);
+            free(bits);
         }
         v->bv_built = 1;
     }
@@ -563,7 +1070,7 @@ static dvs_bv_t bb_const(dvs_bbsolver_t *S, const ExprConst *c, uint16_t hint) {
     return bb_value_i64(S, w, c->value, c->is_signed);
 }
 
-static dvs_bv_t bb_var_expr(dvs_bbsolver_t *S, const ExprVar *v) {
+static BB_NOINLINE dvs_bv_t bb_var_expr(dvs_bbsolver_t *S, const ExprVar *v) {
     return bv_for_var(S, v->var_id);
 }
 
@@ -601,7 +1108,61 @@ static dvs_bv_t bb_shift(dvs_bbsolver_t *S, int shl, dvs_bv_t l, dvs_bv_t r) {
     return shl ? dvs_bb_shl(S->bb, l, r) : dvs_bb_shr(S->bb, l, r);
 }
 
-static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref,
+/* Bit offsets (from the LSB) where `ref`, placed at `off`, is a concat of
+ * two parts; appended to cuts[*n], at most `cap`. */
+static void bb_concat_cuts(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t off,
+                           uint32_t *cuts, uint32_t *n, uint32_t cap, int depth) {
+    if (ref == EXPR_NULL || depth > 64 || *n >= cap) return;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (kp && *kp == EXPR_VAR) {               /* through a substituted var */
+        uint32_t id = ((const ExprVar *)kp)->var_id;
+        if (S->subst && id < S->n_vars && S->subst[id] != EXPR_NULL)
+            bb_concat_cuts(S, S->subst[id], off, cuts, n, cap, depth + 1);
+        return;
+    }
+    if (!kp || *kp != EXPR_CONCAT) return;
+    const ExprConcat *c = (const ExprConcat *)kp;
+    cuts[(*n)++] = off + c->lo_width;
+    bb_concat_cuts(S, c->lo, off, cuts, n, cap, depth + 1);
+    bb_concat_cuts(S, c->hi, off + c->lo_width, cuts, n, cap, depth + 1);
+}
+
+static int bb_cut_cmp(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* l == r through the word-level facts (dvs_bbword), one concat part at a
+ * time: each side's concat structure splits the comparison so a part such
+ * as a reduced checksum byte meets its counterpart. */
+static dvs_bv_t bb_word_eq(dvs_bbsolver_t *S, dvs_expr_t lref, dvs_expr_t rref,
+                           dvs_bv_t l, dvs_bv_t r) {
+    enum { MAX_CUTS = 64 };
+    uint32_t cuts[2 * MAX_CUTS + 2], n = 0;
+    bb_concat_cuts(S, lref, 0, cuts, &n, MAX_CUTS, 0);
+    bb_concat_cuts(S, rref, 0, cuts + n, &n, n + MAX_CUTS, 0);
+    if (n == 0) return dvs_bbword_eq(S->word, S->bb, l, r);
+    qsort(cuts, n, sizeof(uint32_t), bb_cut_cmp);
+    uint64_t before = dvs_bbword_num_decided(S->word) + dvs_bbword_num_peeled(S->word);
+    dvs_bv_t all = dvs_bb_value_u64(S->bb, 1, 1);
+    uint32_t lo = 0;
+    for (uint32_t i = 0; i <= n; i++) {
+        uint32_t hi = i < n ? cuts[i] : l.size;
+        if (hi <= lo || hi > l.size) continue;
+        dvs_bv_t part = dvs_bbword_eq(S->word, S->bb,
+                                      dvs_bb_extract(S->bb, l, hi - 1, lo),
+                                      dvs_bb_extract(S->bb, r, hi - 1, lo));
+        all = dvs_bb_and(S->bb, all, part);
+        lo = hi;
+    }
+    /* Nothing known about any part: compare whole, so the gates are as before
+     * (the parts' gates are left unused). */
+    if (dvs_bbword_num_decided(S->word) + dvs_bbword_num_peeled(S->word) == before)
+        return dvs_bb_eq(S->bb, l, r);
+    return all;
+}
+
+static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref,
                           uint16_t hint) {
     /* Comparison / logical ops always produce 1-bit; arithmetic / bitwise
      * widen lhs and rhs to a common width = max(lhs, rhs, hint). */
@@ -682,7 +1243,7 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
         uint16_t w = max_w(l.size, r.size);
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
-        dvs_bv_t eq = dvs_bb_eq(S->bb, l, r);
+        dvs_bv_t eq = bb_word_eq(S, b->lhs, b->rhs, l, r);
         if (b->op == DVS_BIN_NEQ) eq = dvs_bb_not(S->bb, eq);
         return eq;
     }
@@ -726,8 +1287,11 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
         if (S->had_error) return l;
         dvs_bv_t r = bb_expr(S, b->rhs, l.size);
         if (S->had_error) return r;
-        if (!arith)
-            return bb_shift(S, b->op == DVS_BIN_LSHIFT, l, r);
+        if (!arith) {
+            dvs_bv_t sh = bb_shift(S, b->op == DVS_BIN_LSHIFT, l, r);
+            if (b->op != DVS_BIN_LSHIFT) dvs_bbword_note_shr(S->word, l, r, sh);
+            return sh;
+        }
         /* Arithmetic shift: ~(~x >> s) when x is negative, x >> s otherwise
          * -- which also gives all sign bits for s >= width. */
         dvs_bv_t neg = dvs_bb_not(S->bb, bb_shift(S, 0, dvs_bb_not(S->bb, l), r));
@@ -749,12 +1313,17 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
         switch (b->op) {
-        case DVS_BIN_ADD:  return dvs_bb_add(S->bb, l, r);
+        case DVS_BIN_ADD: {
+            dvs_bv_t sum = dvs_bbsum_add(S->sum, S->bb, l, r,
+                                 S->uses && ref < S->uses_cap && S->uses[ref] <= 1);
+            dvs_bbword_note_add(S->word, l, r, sum);
+            return sum;
+        }
         case DVS_BIN_SUB:  return dvs_bb_sub(S->bb, l, r);
-        case DVS_BIN_MUL:  return dvs_bb_mul(S->bb, l, r);
+        case DVS_BIN_MUL:  return dvs_bbword_mul(S->word, S->bb, l, r);
         case DVS_BIN_BAND: return dvs_bb_and(S->bb, l, r);
         case DVS_BIN_BOR:  return dvs_bb_or (S->bb, l, r);
-        case DVS_BIN_BXOR: return dvs_bb_xor(S->bb, l, r);
+        case DVS_BIN_BXOR: return dvs_bbword_xor(S->word, S->bb, l, r);
         default: break;
         }
         return err_bv(S, "unreachable arith");
@@ -776,9 +1345,12 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
         if (hint > w) w = hint;
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
-        if (!sgn)
-            return (b->op == DVS_BIN_DIV) ? dvs_bb_udiv(S->bb, l, r)
-                                      : dvs_bb_urem(S->bb, l, r);
+        if (!sgn) {
+            if (b->op == DVS_BIN_DIV) return dvs_bb_udiv(S->bb, l, r);
+            dvs_bv_t m = dvs_bb_urem(S->bb, l, r);
+            dvs_bbword_note_urem(S->word, l, r, m);
+            return m;
+        }
         /* Signed: truncate toward zero. Divide the magnitudes; the quotient
          * is negative when the signs differ, the remainder takes the
          * dividend's sign. MIN / -1 wraps to MIN, its remainder is 0. */
@@ -802,7 +1374,7 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
     }
 }
 
-static dvs_bv_t bb_unary(dvs_bbsolver_t *S, const ExprUnary *u, uint16_t hint) {
+static BB_NOINLINE dvs_bv_t bb_unary(dvs_bbsolver_t *S, const ExprUnary *u, uint16_t hint) {
     switch (u->op) {
     case DVS_UN_NOT: {
         dvs_bv_t a = bb_predicate(S, u->operand);
@@ -823,7 +1395,7 @@ static dvs_bv_t bb_unary(dvs_bbsolver_t *S, const ExprUnary *u, uint16_t hint) {
     return err_bv(S, "unknown dvs_unop_t");
 }
 
-static dvs_bv_t bb_ite(dvs_bbsolver_t *S, const ExprITE *e, uint16_t hint) {
+static BB_NOINLINE dvs_bv_t bb_ite(dvs_bbsolver_t *S, const ExprITE *e, uint16_t hint) {
     dvs_bv_t c = bb_predicate(S, e->cond);
     if (S->had_error) return c;
     dvs_bv_t t = bb_expr(S, e->then_e, hint);
@@ -837,7 +1409,7 @@ static dvs_bv_t bb_ite(dvs_bbsolver_t *S, const ExprITE *e, uint16_t hint) {
     return dvs_bb_ite(S->bb, c.bits[0], t, f);
 }
 
-static dvs_bv_t bb_in_range(dvs_bbsolver_t *S, const ExprInRange *r) {
+static BB_NOINLINE dvs_bv_t bb_in_range(dvs_bbsolver_t *S, const ExprInRange *r) {
     /* in_range(value, lo, hi) := value >= lo AND value <= hi.
      * For signedness, peek at `value` like in cmp. */
     dvs_bv_t v = bb_expr(S, r->value, 0);
@@ -861,7 +1433,7 @@ static dvs_bv_t bb_in_range(dvs_bbsolver_t *S, const ExprInRange *r) {
     return dvs_bb_and(S->bb, ge_lo, le_hi);
 }
 
-static dvs_bv_t bb_in_set(dvs_bbsolver_t *S, dvs_expr_t ref) {
+static BB_NOINLINE dvs_bv_t bb_in_set(dvs_bbsolver_t *S, dvs_expr_t ref) {
     ExprInSet *node = (ExprInSet *)POOL_PTR(S->problem, ref);
     dvs_expr_t *elems = expr_in_set_elems(S->problem, ref);
     dvs_bv_t v = bb_expr(S, node->value, 0);
@@ -885,7 +1457,7 @@ static dvs_bv_t bb_in_set(dvs_bbsolver_t *S, dvs_expr_t ref) {
     return acc;
 }
 
-static dvs_bv_t bb_in_ranges(dvs_bbsolver_t *S, dvs_expr_t ref) {
+static BB_NOINLINE dvs_bv_t bb_in_ranges(dvs_bbsolver_t *S, dvs_expr_t ref) {
     /* OR over ranges of (value >= lo_i AND value <= hi_i). */
     ExprInRanges *node = (ExprInRanges *)POOL_PTR(S->problem, ref);
     dvs_expr_t *los = expr_in_ranges_los(S->problem, ref);
@@ -913,7 +1485,7 @@ static dvs_bv_t bb_in_ranges(dvs_bbsolver_t *S, dvs_expr_t ref) {
     return acc;
 }
 
-static dvs_bv_t bb_extend(dvs_bbsolver_t *S, const ExprExtend *e) {
+static BB_NOINLINE dvs_bv_t bb_extend(dvs_bbsolver_t *S, const ExprExtend *e) {
     /* Also EXPR_SV_CAST (same layout): the bits are the same, only the
      * signedness the result is read with differs, and bb_signed knows it. */
     dvs_bv_t op = bb_expr(S, e->operand, e->from_bits);
@@ -924,15 +1496,18 @@ static dvs_bv_t bb_extend(dvs_bbsolver_t *S, const ExprExtend *e) {
     } else if (op.size < e->from_bits) {
         op = ext_ref(S, op, e->operand, e->from_bits);
     }
-    if (e->to_bits < e->from_bits)
-        return dvs_bb_extract(S->bb, op, e->to_bits - 1, 0);
+    if (e->to_bits < e->from_bits) {
+        dvs_bv_t lo = dvs_bb_extract(S->bb, op, e->to_bits - 1, 0);
+        dvs_bbword_note_extract(S->word, op, e->to_bits - 1, 0, lo);
+        return lo;
+    }
     uint32_t n = (uint32_t)e->to_bits - (uint32_t)e->from_bits;
     if (n == 0) return op;
     return e->sign_extend ? dvs_bb_sign_ext(S->bb, op, n)
                           : dvs_bb_zero_ext(S->bb, op, n);
 }
 
-static dvs_bv_t bb_extract(dvs_bbsolver_t *S, const ExprExtract *e) {
+static BB_NOINLINE dvs_bv_t bb_extract(dvs_bbsolver_t *S, const ExprExtract *e) {
     /* operand width must be at least hi_bit + 1 — infer from operand. */
     dvs_bv_t op = bb_expr(S, e->operand, 0);
     if (S->had_error) return op;
@@ -940,10 +1515,12 @@ static dvs_bv_t bb_extract(dvs_bbsolver_t *S, const ExprExtract *e) {
         /* zero-extend operand up to hi_bit+1 bits */
         op = zext_to(S, op, e->hi_bit + 1);
     }
-    return dvs_bb_extract(S->bb, op, e->hi_bit, e->lo_bit);
+    dvs_bv_t x = dvs_bb_extract(S->bb, op, e->hi_bit, e->lo_bit);
+    dvs_bbword_note_extract(S->word, op, e->hi_bit, e->lo_bit, x);
+    return x;
 }
 
-static dvs_bv_t bb_concat(dvs_bbsolver_t *S, const ExprConcat *e) {
+static BB_NOINLINE dvs_bv_t bb_concat(dvs_bbsolver_t *S, const ExprConcat *e) {
     dvs_bv_t lo = bb_expr(S, e->lo, e->lo_width);
     if (S->had_error) return lo;
     if (lo.size > e->lo_width) {
@@ -970,6 +1547,11 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width) 
     int memoize = (*kp != EXPR_CONST) && !S->no_memo;
     if (memoize && ref < S->cache_cap && S->cache[ref].bv.size != 0) {
         return S->cache[ref].bv;
+    }
+    /* Nested deeper than the stack can hold: unsupported, as for SUM below. */
+    if (dvs_stack_low(&S->sg)) {
+        S->had_unsupported = S->too_deep = 1;
+        return dvs_bb_value_u64(S->bb, 1, 0);
     }
 
     dvs_bv_t out;
@@ -1010,7 +1592,9 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width) 
         S->had_unsupported = 1;
         return dvs_bb_value_u64(S->bb, 1, 0);
     default:
-        return err_bv(S, "unknown ExprKind");
+        fprintf(stderr, "[dvs_bbsolver] error: unknown ExprKind %d\n", (int)*kp);
+        S->had_error = 1;
+        { dvs_bv_t e = { NULL, 0 }; return e; }
     }
 
     if (memoize && !S->had_error && ref < S->cache_cap) {
@@ -1136,6 +1720,8 @@ static dvs_bbsolver_t *bbsolver_new_ex(dvs_alloc_t *alloc, dvs_problem_t *proble
     S->sat = bb_new_sat(alloc, prefer_cadical);
     S->cnf = dvs_aig_cnf_new(alloc, S->aig, S->sat);
     S->bb  = dvs_bitblast_new(alloc, S->aig);
+    S->sum = dvs_bbsum_new(alloc);
+    S->word = dvs_bbword_new(alloc);
     if (!S->aig || !S->sat || !S->cnf || !S->bb) {
         dvs_bbsolver_free(S);
         return NULL;
@@ -1193,6 +1779,8 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     if (!S) return;
     if (S->orig_problem) dvs_sv_release(S->orig_problem, S->problem);
     if (S->bb)  dvs_bitblast_free(S->bb);
+    dvs_bbsum_free(S->sum);
+    dvs_bbword_free(S->word);
     if (S->cnf) dvs_aig_cnf_free(S->cnf);
     if (S->sat) dvs_sat_free(S->sat);
     if (S->aig) dvs_aig_free(S->aig);
@@ -1200,6 +1788,15 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     xfree(S->alloc, S->cache, S->cache_cap * sizeof(bb_cache_entry_t));
     xfree(S->alloc, S->subst, S->n_vars * sizeof(dvs_expr_t));
     xfree(S->alloc, S->resolving, S->n_vars * sizeof(uint8_t));
+    free(S->reach_mark);
+    free(S->rhs_var);
+    free(S->slice_head);
+    free(S->uses);
+    free(S->fo_seen);
+    free(S->frames);
+    free(S->new_subst);
+    free(S->assert_tags);
+    free(S->slices);
     xfree(S->alloc, S->constraint_skip, S->n_constraints * sizeof(uint8_t));
     xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(dvs_aig_node_t));
     free(S->node_val);
@@ -1284,7 +1881,9 @@ static int _prop_cone(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t 
  * are applied sequentially, so each is verified against the running model and
  * coupled constraints (e.g. a sum bound) are never violated -- the result stays
  * a valid solution, just a more diverse one. node_val[] holds that model for the
- * readback.
+ * readback. Each flip is a Gibbs step for the uniform distribution (the bit
+ * takes a random value where both values satisfy, else stays), so a model the
+ * simulation drew uniformly stays uniform.
  *
  * Cost per candidate bit is one *incremental* re-evaluation: only the flipped
  * bit's fanout cone is repropagated (built once as the fo_off/fo_adj CSR index),
@@ -1304,6 +1903,9 @@ static void _diversify(dvs_bbsolver_t *S) {
     dvs_aig_node_t *L = (dvs_aig_node_t *)malloc((size_t)(N + 1) * sizeof(dvs_aig_node_t));
     dvs_aig_node_t *R = (dvs_aig_node_t *)malloc((size_t)(N + 1) * sizeof(dvs_aig_node_t));
     if (!nv || !L || !R) { free(nv); free(L); free(R); return; }
+    /* The model to start from: a simulation's (node_val), else the SAT solver's. */
+    int8_t *base_nv = S->node_val;
+    S->node_val = NULL;
 
     /* Cache AND children (0 = input/const) and build the initial valuation in
      * topological (ascending id) order -- children always have a smaller id. */
@@ -1314,9 +1916,11 @@ static void _diversify(dvs_bbsolver_t *S) {
             nv[id] = (int8_t)(_lit_val(nv, L[id]) & _lit_val(nv, R[id]));
         } else {
             L[id] = 0; R[id] = 0;
-            nv[id] = (int8_t)(dvs_aig_cnf_value(S->cnf, (dvs_aig_node_t)id) == 1);
+            nv[id] = base_nv ? base_nv[id]
+                             : (int8_t)(dvs_aig_cnf_value(S->cnf, (dvs_aig_node_t)id) == 1);
         }
     }
+    free(base_nv);
 
     /* Build the fanout index (CSR): fo_adj[fo_off[c]..fo_off[c+1]) lists the AND
      * nodes that reference node c as a child. Constants (|child| <= 1, i.e.
@@ -1523,9 +2127,8 @@ static int _bb_encode(dvs_bbsolver_t *S) {
     int subst_enabled = getenv("DV_BB_NO_SUBST") == NULL;
 
     if (subst_enabled) run_subst_pass(S);
-    /* run_subst_pass uses S->resolving as a scratch visited bitmap
-     * during cycle detection. Reset it before the bit-blast path
-     * starts using it as the recursion guard in bv_for_var. */
+    count_fanout(S);
+    /* bv_for_var uses S->resolving as its recursion guard; start clear. */
     if (S->resolving) memset(S->resolving, 0, S->n_vars);
 
     /* Encode each constraint as a top-level assertion. Skip constraints
@@ -1588,7 +2191,8 @@ static int _bb_encode(dvs_bbsolver_t *S) {
      * — and thus readback — reflects the substitution. */
     if (S->subst) {
         for (uint32_t i = 0; i < S->n_vars; i++) {
-            if (S->vars[i].defined && S->subst[i] != EXPR_NULL) {
+            if (S->vars[i].defined && (S->subst[i] != EXPR_NULL ||
+                (S->slice_head && S->slice_head[i] != BB_NO_SLICE))) {
                 /* A substituted var's bv is a *computed* expression (AND/XOR
                  * gates), unlike a normal var whose bits are AIG inputs (always
                  * readable). Its gate bits are only recoverable if encoded into
@@ -1833,6 +2437,177 @@ static int bb_run_portfolio(dvs_bbsolver_t *S, uint32_t n_port, uint64_t seed,
     return result;
 }
 
+/* Bit-parallel simulation (docs/fw_hdl_implementation_plan.md, pieces 3.3,
+ * 3.4; dvs_aigsim.h) around the SAT solve:
+ *
+ *  - an exhaustive sweep of the assertions' input cone decides the problem
+ *    outright when it costs at most DV_SIM_MAX_WORK 64-lane gate evaluations
+ *    (default 1.5e6, about 0.5 ms at ~3e9 a second; decision D6). Bigger
+ *    sweeps race SAT instead: a 22-input BMC step swept in 2.5 ms where SAT
+ *    needs 1 ms (tier2 fsm_onehot_bmc_d1);
+ *  - otherwise a few hundred random assignments look for a cheap model;
+ *  - otherwise, when the sweep costs at most DV_SIM_RACE_WORK (default 6e9,
+ *    about 2 s), it runs on a second thread beside SAT and the first verdict
+ *    wins. Parity-heavy proofs (CRC, affine maps) defeat CDCL but not a sweep.
+ *
+ * Every verdict is exact. DV_SIM_CHECK=1 confirms each simulation verdict with
+ * SAT and aborts on a disagreement (the fuzz tests set it). */
+typedef struct {
+    dvs_aigsim_t *sim;
+    dvs_sat_t    *sat;
+    volatile int  stop;       /* SAT finished: the sweep gives up      */
+    volatile int  sat_stop;   /* the sweep finished: SAT gives up      */
+    int           verdict;
+    uint64_t      seed;
+} bb_sweep_arg;
+
+static void *bb_sweep_worker(void *arg) {
+    bb_sweep_arg *w = (bb_sweep_arg *)arg;
+    w->verdict = dvs_aigsim_exhaustive(w->sim, &w->stop, w->seed);
+    if (w->verdict != DVS_AIGSIM_UNDECIDED) {
+        w->sat_stop = 1;            /* CaDiCaL polls the terminate callback */
+        dvs_sat_interrupt(w->sat);  /* kissat needs the explicit poke       */
+    }
+    return NULL;
+}
+
+static int bb_sweep_terminate(void *state) {
+    return *(volatile int *)state;
+}
+
+static uint64_t _env_u64(const char *name, uint64_t dflt) {
+    const char *e = getenv(name);
+    return e && *e ? strtoull(e, NULL, 10) : dflt;
+}
+
+static double _ms_since(const struct timespec *t0) {
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    return (t1.tv_sec - t0->tv_sec) * 1000.0 + (t1.tv_nsec - t0->tv_nsec) / 1e6;
+}
+
+/* A simulation verdict as a bit-blast result; installs the model on SAT. */
+static int _sim_result(dvs_bbsolver_t *S, dvs_aigsim_t *sim, int r) {
+    if (r == DVS_AIGSIM_UNSAT) return DVS_BB_UNSAT;
+    if (r != DVS_AIGSIM_SAT) return DVS_BB_UNKNOWN;
+    int8_t *nv = dvs_aigsim_model(sim);
+    if (!nv) return DVS_BB_UNKNOWN;
+    free(S->node_val);
+    S->node_val = nv;
+    return DVS_BB_SAT;
+}
+
+/* Solve under the live session scopes' selectors (none outside a session). */
+static int bb_sat_solve(dvs_bbsolver_t *S) {
+    for (uint32_t i = 0; i < S->n_frames; i++)
+        dvs_sat_assume(S->sat, (dvs_sat_lit_t)S->frames[i].sel);
+    return dvs_sat_solve(S->sat);
+}
+
+static void _sim_check(dvs_bbsolver_t *S, int verdict) {
+    if (!getenv("DV_SIM_CHECK") || verdict == DVS_BB_UNKNOWN) return;
+    int sat = bb_sat_solve(S);
+    if ((sat == DVS_BB_SAT || sat == DVS_BB_UNSAT) && sat != verdict) {
+        fprintf(stderr, "bb-sim: MISMATCH simulation %s, SAT %s\n",
+                verdict == DVS_BB_SAT ? "sat" : "unsat", sat == DVS_BB_SAT ? "sat" : "unsat");
+        abort();
+    }
+}
+
+/* Simulation, then SAT. Returns the DVS_BB_* verdict. */
+static int _solve_with_sim(dvs_bbsolver_t *S) {
+    if (!S->presim || S->asserts_lost || !S->n_asserts) return bb_sat_solve(S);
+    int log = getenv("DV_LOG") != NULL;
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    const char *aff_env = getenv("DV_AFFINE");
+    if (!aff_env || strcmp(aff_env, "0") != 0) {
+        dvs_affine_stats_t ast;
+        int8_t *nv = NULL;
+        int ar = dvs_affine_check(S->aig, S->assert_nodes, S->n_asserts,
+                                  _env_u64("DV_AFFINE_MAX_WORK", 0), &nv, &ast);
+        if (log)
+            fprintf(stderr, "bb-affine: gates=%u tables=%u inputs=%u opaque=%u eqs=%u clauses=%u "
+                    "rank=%u -> %s (%s) in %.2f ms\n", ast.xors, ast.tables, ast.inputs, ast.opaque,
+                    ast.equations, ast.clauses, ast.rank,
+                    ar == DVS_AFFINE_SAT ? "sat" : ar == DVS_AFFINE_UNSAT ? "unsat" : "undecided",
+                    ast.why, _ms_since(&t0));
+        if (ar != DVS_AFFINE_UNDECIDED) {
+            int rc = ar == DVS_AFFINE_UNSAT ? DVS_BB_UNSAT : DVS_BB_SAT;
+            if (nv) { free(S->node_val); S->node_val = nv; }
+            _sim_check(S, rc);
+            return rc;
+        }
+    }
+    dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
+    if (!sim) return bb_sat_solve(S);
+    uint64_t work = dvs_aigsim_exhaustive_work(sim);
+    uint64_t per_pass = (uint64_t)dvs_aigsim_gates(sim) + S->n_asserts;
+    const char *how;
+    int r = DVS_AIGSIM_UNDECIDED, rc;
+
+    if (work <= _env_u64("DV_SIM_MAX_WORK", 1500000ull)) {
+        how = "exhaustive";
+        r = dvs_aigsim_exhaustive(sim, NULL, S->seed);
+    } else {
+        how = "random";
+        uint64_t blocks = 1000000ull / (per_pass ? per_pass : 1);
+        r = dvs_aigsim_random(sim, (uint32_t)(blocks < 8 ? blocks : 8), S->seed);
+    }
+    rc = _sim_result(S, sim, r);
+    if (rc != DVS_BB_UNKNOWN) {
+        if (log)
+            fprintf(stderr, "bb-sim: %s inputs=%u gates=%u vectors=%llu -> %s in %.2f ms\n",
+                    how, dvs_aigsim_inputs(sim), dvs_aigsim_gates(sim),
+                    (unsigned long long)dvs_aigsim_vectors(sim),
+                    rc == DVS_BB_SAT ? "sat" : "unsat", _ms_since(&t0));
+        dvs_aigsim_free(sim);
+        _sim_check(S, rc);
+        return rc;
+    }
+
+    /* Race the sweep against SAT. */
+    dvs_thread_t th;
+    bb_sweep_arg arg = { sim, S->sat, 0, 0, DVS_AIGSIM_UNDECIDED, S->seed };
+    int raced = work <= _env_u64("DV_SIM_RACE_WORK", 6000000000ull)
+             && dvs_thread_create(&th, bb_sweep_worker, &arg) == 0;
+    if (raced) dvs_sat_set_terminate(S->sat, (void *)&arg.sat_stop, bb_sweep_terminate);
+    rc = bb_sat_solve(S);
+    const char *winner = "sat-solver";
+    if (raced) {
+        arg.stop = 1;
+        dvs_thread_join(&th, NULL);
+        dvs_sat_set_terminate(S->sat, NULL, NULL);
+        if (arg.verdict != DVS_AIGSIM_UNDECIDED) {
+            int sr = arg.verdict == DVS_AIGSIM_SAT ? DVS_BB_SAT : DVS_BB_UNSAT;
+            if (rc == DVS_BB_SAT || rc == DVS_BB_UNSAT) {
+                /* Both finished. They must agree; SAT's model is installed. */
+                if (sr != rc) {
+                    fprintf(stderr, "bb-sim: MISMATCH sweep %s, SAT %s\n",
+                            sr == DVS_BB_SAT ? "sat" : "unsat", rc == DVS_BB_SAT ? "sat" : "unsat");
+                    if (getenv("DV_SIM_CHECK")) abort();
+                    rc = DVS_BB_UNKNOWN;
+                }
+            } else {
+                winner = "sweep";
+                rc = _sim_result(S, sim, arg.verdict);
+            }
+        }
+    }
+    if (log)
+        fprintf(stderr, "bb-sim: %s inputs=%u gates=%u work=%llu%s -> %s by %s in %.2f ms\n",
+                how, dvs_aigsim_inputs(sim), dvs_aigsim_gates(sim), (unsigned long long)work,
+                raced ? " raced" : "",
+                rc == DVS_BB_SAT ? "sat" : rc == DVS_BB_UNSAT ? "unsat" : "unknown",
+                winner, _ms_since(&t0));
+    dvs_aigsim_free(sim);
+    return rc;
+}
+
+void dvs_bbsolver_set_presim(dvs_bbsolver_t *S, int on) {
+    if (S) S->presim = on;
+}
+
 int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || !S->problem) return DVS_BB_ERROR;
 
@@ -1863,12 +2638,18 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
         double enc_ms = (t1.tv_sec - t0.tv_sec) * 1000.0
                       + (t1.tv_nsec - t0.tv_nsec) / 1e6;
         fprintf(stderr,
-                "[bb-encode] bb=%.2fms ands=%llu vars=%llu clauses=%llu substs=%llu\n",
+                "[bb-encode] bb=%.2fms ands=%llu vars=%llu clauses=%llu substs=%llu"
+                " slices=%u sums=%llu/%llu word=%llu/%llu/%llu\n",
                 enc_ms,
                 (unsigned long long)dvs_aig_num_ands(S->aig),
                 (unsigned long long)dvs_aig_cnf_num_vars(S->cnf),
                 (unsigned long long)dvs_aig_cnf_num_clauses(S->cnf),
-                (unsigned long long)S->n_substs);
+                (unsigned long long)S->n_substs, S->n_slices,
+                (unsigned long long)dvs_bbsum_num_flattened(S->sum),
+                (unsigned long long)dvs_bbsum_num_adds(S->sum),
+                (unsigned long long)dvs_bbword_num_cancelled(S->word),
+                (unsigned long long)dvs_bbword_num_peeled(S->word),
+                (unsigned long long)dvs_bbword_num_decided(S->word));
         fflush(stderr);
     }
 
@@ -1911,7 +2692,10 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
         dvs_sat_set_light_search(S->sat, ncl < thresh);
     }
 
-    int rc = dvs_sat_solve(S->sat);
+    /* A model the simulation finds is installed as node_val. */
+    free(S->node_val);
+    S->node_val = NULL;
+    int rc = _solve_with_sim(S);
     if (stats_enabled) {
         clock_gettime(CLOCK_MONOTONIC, &t2);
         double bb_ms = (t1.tv_sec - t0.tv_sec) * 1000.0
@@ -1928,7 +2712,8 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     }
     S->last_result = rc;
     /* On SAT, diversify the don't-care bits toward seeded-random targets (no-op
-     * for seed 0). Sound: only flips that keep every assertion true are kept. */
+     * for seed 0). Sound: only flips that keep every assertion true are kept.
+     * It starts from the simulation's model when that is the one found. */
     if (rc == DVS_BB_SAT) _diversify(S);
     return rc;
 }
@@ -1944,6 +2729,14 @@ int dvs_bbsolver_prepare(dvs_bbsolver_t *S, uint64_t seed) {
 
 int dvs_bbsolver_is_incremental(const dvs_bbsolver_t *S) {
     return (S && S->sat) ? dvs_sat_is_incremental(S->sat) : 0;
+}
+
+const char *dvs_bbsolver_unknown_reason(const dvs_bbsolver_t *S) {
+    if (!S) return "incomplete: the bit-blast engine could not start (out of memory?)";
+    if (S->too_deep) return "incomplete: an expression nests deeper than the stack allows";
+    if (S->had_unsupported) return "unsupported: a construct the bit-blast engine does not encode";
+    if (S->had_error) return "incomplete: the bit-blast encoding failed (out of memory?)";
+    return "incomplete: the SAT search stopped without a verdict (conflict limit)";
 }
 
 uint32_t dvs_bbsolver_split_lits(dvs_bbsolver_t *S, int32_t *out, uint32_t cap) {
@@ -1970,8 +2763,12 @@ uint32_t dvs_bbsolver_split_lits(dvs_bbsolver_t *S, int32_t *out, uint32_t cap) 
 /* Flatten a DVS_BIN_OR chain rooted at `ref` into out[] (up to `cap`), counting
  * ALL leaves even past `cap` so the caller can detect an over-wide disjunction
  * that it cannot represent exhaustively. `n` is the running count. */
+/* A disjunct count no caller accepts: the or nests deeper than the stack. */
+#define BB_OR_TOO_DEEP 0x7FFFFFFFu
+
 static uint32_t bb_flatten_or(dvs_bbsolver_t *S, dvs_expr_t ref,
                               dvs_expr_t *out, uint32_t cap, uint32_t n) {
+    if (n >= BB_OR_TOO_DEEP || dvs_stack_low(&S->sg)) return BB_OR_TOO_DEEP;
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (kp && *kp == EXPR_BINARY && ((ExprBinary *)kp)->op == DVS_BIN_OR) {
         ExprBinary *b = (ExprBinary *)kp;
@@ -2175,15 +2972,43 @@ int dvs_bbsolver_rediversify(dvs_bbsolver_t *S, uint64_t seed) {
  * assert's bounds loop both index by var_id < S->n_vars, so this keeps them in
  * range. The memo cache bounds-checks out-of-range refs itself, so it needs no
  * growth (new lemma nodes are simply re-blasted without memoization). */
+/* Fill each table entry from `from` up that is not yet defined from the
+ * first `walk` entries of the problem's variable list. */
+static void bb_fill_vars(dvs_bbsolver_t *S, uint32_t from, uint32_t walk) {
+    uint32_t k = 0;
+    for (dvs_expr_t cur = S->problem->vars_head; cur != EXPR_NULL && k++ < walk; ) {
+        VarSpec *vs = (VarSpec *)POOL_PTR(S->problem, cur);
+        if (vs->var_id >= from && vs->var_id < S->n_vars && !S->vars[vs->var_id].defined) {
+            bb_var_t *v = &S->vars[vs->var_id];
+            v->width = vs->width; v->is_signed = vs->is_signed;
+            v->defined = 1; v->lo = vs->lo; v->hi = vs->hi;
+        }
+        cur = vs->next;
+    }
+}
+
 static void bb_grow_vars(dvs_bbsolver_t *S) {
-    uint32_t max_id = 0; int any = 0;
-    for (dvs_expr_t cur = S->problem->vars_head; cur != EXPR_NULL; ) {
+    /* A session walks only the variables added since its last sync (the
+     * list is newest first and only grows between pops); after a pop, all
+     * of them, to refill the entries the pop cleared (ids are reused). */
+    uint32_t walk = UINT32_MAX;
+    if (S->sess && !S->refill && S->problem->n_vars >= S->seen_vars)
+        walk = S->problem->n_vars - S->seen_vars;
+    uint32_t max_id = 0, k = 0; int any = 0;
+    for (dvs_expr_t cur = S->problem->vars_head; cur != EXPR_NULL && k < walk; k++) {
         VarSpec *vs = (VarSpec *)POOL_PTR(S->problem, cur);
         if (!any || vs->var_id > max_id) { max_id = vs->var_id; any = 1; }
         cur = vs->next;
     }
     uint32_t need = any ? max_id + 1 : 0;
-    if (need <= S->n_vars) return;
+    if (need <= S->n_vars) {
+        if (S->sess) {
+            bb_fill_vars(S, 0, walk);
+            S->seen_vars = S->problem->n_vars;
+            S->refill = 0;
+        }
+        return;
+    }
     uint32_t old = S->n_vars;
     bb_var_t *nv = (bb_var_t *)xalloc(S->alloc, need * sizeof(bb_var_t));
     if (!nv) return;   /* OOM: leave as-is; assert's var_id<n_vars guard holds */
@@ -2200,6 +3025,17 @@ static void bb_grow_vars(dvs_bbsolver_t *S) {
             for (uint32_t i = old; i < need; i++) ns[i] = EXPR_NULL;
             xfree(S->alloc, S->subst, old * sizeof(dvs_expr_t));
             S->subst = ns;
+        } else {
+            return;
+        }
+    }
+    if (S->slice_head) {
+        uint32_t *nh = (uint32_t *)realloc(S->slice_head, need * sizeof(uint32_t));
+        if (nh) {
+            for (uint32_t i = old; i < need; i++) nh[i] = BB_NO_SLICE;
+            S->slice_head = nh;
+        } else {
+            return;   /* OOM: leave n_vars as-is so every index stays in range */
         }
     }
     if (S->resolving) {
@@ -2209,17 +3045,25 @@ static void bb_grow_vars(dvs_bbsolver_t *S) {
             memset(nr + old, 0, need - old);
             xfree(S->alloc, S->resolving, old * sizeof(uint8_t));
             S->resolving = nr;
+        } else {
+            return;
+        }
+    }
+    if (S->rhs_var) {
+        uint8_t *nr = (uint8_t *)realloc(S->rhs_var, need);
+        if (nr) {
+            memset(nr + old, 0, need - old);
+            S->rhs_var = nr;
+        } else {
+            free(S->rhs_var);       /* exact fallback: always walk */
+            S->rhs_var = NULL;
         }
     }
     S->n_vars = need;
-    for (dvs_expr_t cur = S->problem->vars_head; cur != EXPR_NULL; ) {
-        VarSpec *vs = (VarSpec *)POOL_PTR(S->problem, cur);
-        if (vs->var_id >= old && vs->var_id < need) {
-            bb_var_t *v = &S->vars[vs->var_id];
-            v->width = vs->width; v->is_signed = vs->is_signed;
-            v->defined = 1; v->lo = vs->lo; v->hi = vs->hi;
-        }
-        cur = vs->next;
+    bb_fill_vars(S, S->sess ? 0 : old, walk);
+    if (S->sess) {
+        S->seen_vars = S->problem->n_vars;
+        S->refill = 0;
     }
 }
 
@@ -2323,6 +3167,172 @@ int dvs_bbsolver_resolve_raw(dvs_bbsolver_t *S) {
     S->node_val = NULL;   /* value readback -> raw cnf model (seed 0) */
     int rc = dvs_sat_solve(S->sat);
     S->last_result = rc;
+    return rc;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Session mode (docs/fw_hdl_implementation_plan.md, piece 6.1).
+ *
+ * One instance serves every check-sat of an SMT-LIB session. Constraints are
+ * added in batches; a batch added inside a scope (sess_push) is asserted as
+ * (-sel | c) and solved under the assumption sel, and the scope's pop adds
+ * -sel for good. Selectors are AIG inputs, so they share the AIG's id space
+ * with every other SAT variable.
+ *
+ * Substitution (`v == e` defines v) works batch by batch: v must not be
+ * built yet (an earlier batch did not read it) and, inside a scope, must
+ * belong to the innermost scope, whose pop forgets it. The caller reuses
+ * variable ids after a pop, so pop clears those entries; expression offsets
+ * are never reused (the builder does not reclaim its pool), so the memo cache
+ * stays valid.
+ * ------------------------------------------------------------------------- */
+
+int dvs_bbsolver_sess_begin(dvs_bbsolver_t *S) {
+    if (!S || S->sess || S->orig_problem || S->subst || S->n_asserts
+            || !dvs_sat_is_incremental(S->sat))
+        return -1;
+    uint32_t n = S->n_vars ? S->n_vars : 1;
+    S->subst = (dvs_expr_t *)xalloc(S->alloc, n * sizeof(dvs_expr_t));
+    S->resolving = (uint8_t *)xalloc(S->alloc, n);
+    S->rhs_var = (uint8_t *)calloc(n, 1);
+    if (!S->subst || !S->resolving || !S->rhs_var) return -1;
+    for (uint32_t i = 0; i < n; i++) S->subst[i] = EXPR_NULL;
+    memset(S->resolving, 0, n);
+    if (getenv("DV_BB_NO_SLICE") == NULL) {
+        S->slice_head = (uint32_t *)malloc(n * sizeof(uint32_t));
+        if (!S->slice_head) return -1;
+        for (uint32_t i = 0; i < n; i++) S->slice_head[i] = BB_NO_SLICE;
+    }
+    S->sess = 1;
+    return 0;
+}
+
+uint32_t dvs_bbsolver_sess_depth(const dvs_bbsolver_t *S) {
+    return S ? S->n_frames : 0;
+}
+
+int dvs_bbsolver_sess_push(dvs_bbsolver_t *S, uint32_t var_mark) {
+    if (!S || !S->sess) return -1;
+    if (S->n_frames && var_mark < S->frames[S->n_frames - 1].var_mark) return -1;
+    if (S->n_frames == S->cap_frames) {
+        uint32_t c = S->cap_frames ? 2 * S->cap_frames : 8;
+        bb_frame_t *f = (bb_frame_t *)realloc(S->frames, c * sizeof(*f));
+        if (!f) return -1;
+        S->frames = f; S->cap_frames = c;
+    }
+    bb_frame_t *f = &S->frames[S->n_frames];
+    f->sel = dvs_aig_mk_input(S->aig);
+    dvs_aig_cnf_encode(S->cnf, f->sel, /*top_level=*/0);
+    f->var_mark  = var_mark;
+    f->n_asserts = S->n_asserts;
+    f->n_slices  = S->n_slices;
+    S->n_frames++;
+    S->sub_floor = var_mark;
+    return 0;
+}
+
+int dvs_bbsolver_sess_pop(dvs_bbsolver_t *S) {
+    if (!S || !S->sess || !S->n_frames) return -1;
+    bb_frame_t *f = &S->frames[--S->n_frames];
+    dvs_sat_add_unit(S->sat, (dvs_sat_lit_t)-f->sel);
+    if (!S->asserts_lost) {
+        /* Drop the scope's entries; keep the permanent ones made inside it
+         * (bounds of a variable from outside the scope). */
+        uint32_t k = f->n_asserts, depth = S->n_frames + 1;
+        for (uint32_t i = f->n_asserts; i < S->n_asserts; i++)
+            if (S->assert_tags[i] < depth) {
+                S->assert_nodes[k] = S->assert_nodes[i];
+                S->assert_tags[k++] = S->assert_tags[i];
+            }
+        S->n_asserts = k;
+    }
+    for (uint32_t v = f->var_mark; v < S->n_vars; v++) {
+        memset(&S->vars[v], 0, sizeof(S->vars[v]));
+        S->subst[v] = EXPR_NULL;
+        S->resolving[v] = 0;
+        if (S->rhs_var) S->rhs_var[v] = 0;
+        if (S->slice_head) S->slice_head[v] = BB_NO_SLICE;
+    }
+    S->n_slices  = f->n_slices;
+    S->sub_floor = S->n_frames ? S->frames[S->n_frames - 1].var_mark : 0;
+    S->refill = 1;
+    free(S->node_val);
+    S->node_val = NULL;
+    S->last_result = DVS_BB_UNKNOWN;
+    return 0;
+}
+
+/* The innermost scope owning variable `v`, plus one (0: none). */
+static uint32_t sess_owner(const dvs_bbsolver_t *S, uint32_t v) {
+    for (uint32_t i = S->n_frames; i-- > 0; )
+        if (S->frames[i].var_mark <= v) return i + 1;
+    return 0;
+}
+
+int dvs_bbsolver_sess_add(dvs_bbsolver_t *S, const dvs_expr_t *roots, uint32_t n) {
+    if (!S || !S->sess) return DVS_BB_ERROR;
+    if (S->had_error)       return DVS_BB_ERROR;
+    if (S->had_unsupported) return DVS_BB_UNKNOWN;
+    if (S->problem->sources_head != EXPR_NULL) return DVS_BB_UNKNOWN;
+    uint8_t *skip = (uint8_t *)calloc(n ? n : 1, 1);
+    if (!skip) return DVS_BB_ERROR;
+    S->n_new_subst = 0;
+    /* Newest first, as run_subst_pass walks the constraint list: a
+     * transition's `(= w15 w16)` then comes before the bindings of w15 and
+     * w16, so slices go from the next state to the current one and the
+     * transition folds away. Oldest first left 2048 of crc32x16's
+     * equalities to the affine pass at every check. (subst_reaches_var
+     * stops at built variables, so the walk stays inside the batch.) */
+    if (getenv("DV_BB_NO_SUBST") == NULL)
+        for (uint32_t i = n; i-- > 0; ) skip[i] = (uint8_t)collect_substs_from(S, roots[i]);
+    count_fanout_from(S, roots, skip, n);
+    memset(S->resolving, 0, S->n_vars);
+
+    S->assert_frame = S->n_frames;
+    for (uint32_t i = 0; i < n && !S->had_error && !S->had_unsupported; i++) {
+        if (skip[i]) continue;
+        dvs_bv_t pred = bb_predicate(S, roots[i]);
+        if (S->had_error || S->had_unsupported) break;
+        assert_top(S, pred.bits[0]);
+    }
+    free(skip);
+    /* A substituted variable's bits are gates: encode them so the model
+     * reads them (see the same pass in _bb_encode). */
+    for (uint32_t i = 0; i < S->n_new_subst && !S->had_error; i++) {
+        dvs_bv_t bv = bv_for_var(S, S->new_subst[i]);
+        if (S->had_error) break;
+        for (uint32_t bit = 0; bit < bv.size; bit++)
+            dvs_aig_cnf_encode(S->cnf, bv.bits[bit], /*top_level=*/0);
+    }
+    for (uint32_t v = 0; v < S->n_vars && !S->had_error; v++) {
+        if (S->vars[v].defined && S->vars[v].bv_built && !S->vars[v].bounds_asserted) {
+            S->assert_frame = sess_owner(S, v);
+            assert_var_bounds(S, v);
+            S->vars[v].bounds_asserted = 1;
+        }
+    }
+    S->assert_frame = 0;
+    if (S->had_error)       { S->last_result = DVS_BB_ERROR;   return DVS_BB_ERROR; }
+    if (S->had_unsupported) { S->last_result = DVS_BB_UNKNOWN; return DVS_BB_UNKNOWN; }
+    return 0;
+}
+
+int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
+    if (!S || !S->sess) return DVS_BB_ERROR;
+    if (S->had_error)       return DVS_BB_ERROR;
+    if (S->had_unsupported) return DVS_BB_UNKNOWN;
+    S->seed = seed;
+    dvs_sat_set_seed(S->sat, seed);
+    {
+        const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
+        uint64_t thresh = mcl && *mcl ? strtoull(mcl, NULL, 10) : 2000000;
+        dvs_sat_set_light_search(S->sat, dvs_aig_cnf_num_clauses(S->cnf) < thresh);
+    }
+    free(S->node_val);
+    S->node_val = NULL;
+    int rc = _solve_with_sim(S);
+    S->last_result = rc;
+    if (rc == DVS_BB_SAT) _diversify(S);
     return rc;
 }
 

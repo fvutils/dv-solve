@@ -37,7 +37,7 @@ def _setup_lib(lib):
     lib.solve_problem_init.argtypes = [c.c_void_p, c.c_size_t]
     lib.problem_add_var.restype  = c.c_uint32
     lib.problem_add_var.argtypes = [c.c_void_p, c.c_uint32,
-                                    c.c_uint8, c.c_uint8,
+                                    c.c_uint16, c.c_uint8,
                                     c.c_int64, c.c_int64]
     lib.problem_add_constraint.restype  = c.c_uint32
     lib.problem_add_constraint.argtypes = [c.c_void_p, c.c_uint32]
@@ -76,7 +76,7 @@ def _setup_lib(lib):
     lib.dvs_builder_free_problem.argtypes = [c.c_void_p, c.c_void_p, c.c_size_t]
     lib.dvs_builder_add_var.restype  = c.c_uint32
     lib.dvs_builder_add_var.argtypes = [c.c_void_p, c.c_uint32,
-                                    c.c_uint8, c.c_uint8,
+                                    c.c_uint16, c.c_uint8,
                                     c.c_int64, c.c_int64]
     lib.dvs_builder_add_constraint.restype  = c.c_uint32
     lib.dvs_builder_add_constraint.argtypes = [c.c_void_p, c.c_uint32]

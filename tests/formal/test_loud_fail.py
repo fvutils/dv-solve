@@ -42,7 +42,7 @@ def test_unsupported_op_yields_unknown_and_stays_alive():
     out = _run(
         "(set-logic QF_BV)"
         "(declare-fun x () (_ BitVec 8))"
-        "(assert (= x (bvnand x #x02)))"   # bvnand: unsupported bitwise op
+        "(assert (= x ((_ int2bv 8) (bv2nat x))))"   # Int conversions: unsupported
         "(check-sat)"                       # -> unknown (tainted)
         "(reset)"                           # clears taint
         "(declare-fun y () (_ BitVec 8))"
@@ -59,7 +59,7 @@ def test_unsupported_sort_yields_unknown():
     """An unsupported sort taints the context the same way."""
     out = _run(
         "(set-logic QF_ABV)"
-        "(declare-fun s () (_ BitVec 200))"  # width > 64: unsupported sort
+        "(declare-fun s () (_ BitVec 65536))"  # wider than the maximum
         "(assert (= s s))"
         "(check-sat)"
         "(exit)\n"
@@ -74,7 +74,7 @@ def test_taint_unwinds_on_pop():
         "(declare-fun x () (_ BitVec 8))"
         "(assert (bvugt x #x00))"
         "(push 1)"
-        "(assert (= x (bvnand x #x02)))"    # bvnand taints only the pushed scope
+        "(assert (= x ((_ int2bv 8) (bv2nat x))))"  # taints only the pushed scope
         "(check-sat)"                        # -> unknown
         "(pop 1)"                            # un-taints
         "(check-sat)"                        # -> sat (outer scope is clean)

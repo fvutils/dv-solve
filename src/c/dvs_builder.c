@@ -52,6 +52,19 @@ static void _free_blocks(dvs_builder_t *b, BuilderBlock *blk) {
     }
 }
 
+/** Append blk to the block index (blocks are added in offset order). */
+static int _index_block(dvs_builder_t *b, BuilderBlock *blk) {
+    if (b->n_blocks == b->cap_blocks) {
+        uint32_t cap = b->cap_blocks ? 2 * b->cap_blocks : 16;
+        BuilderBlock **nb = (BuilderBlock **)realloc(b->blocks, cap * sizeof(*nb));
+        if (!nb) return -1;
+        b->blocks = nb;
+        b->cap_blocks = cap;
+    }
+    b->blocks[b->n_blocks++] = blk;
+    return 0;
+}
+
 /**
  * Write data into the current block at the given offset within the block.
  * Caller must ensure the space is available.
@@ -89,7 +102,8 @@ dvs_builder_t *dvs_builder_create(uint32_t block_size, dvs_alloc_t *alloc) {
 
     /* Allocate the first block */
     b->first = _new_block(b, block_size);
-    if (!b->first) {
+    if (!b->first || _index_block(b, b->first)) {
+        if (b->first) _free_blocks(b, b->first);
         _release(b, b, sizeof(*b));
         return NULL;
     }
@@ -107,6 +121,7 @@ void dvs_builder_reset(dvs_builder_t *b) {
         b->first->base_offset = 0;
         b->first->used = 0;
     }
+    b->n_blocks         = b->first ? 1 : 0;
     b->current          = b->first;
     b->virtual_used     = 0;
     b->n_vars           = 0;
@@ -126,6 +141,7 @@ void dvs_builder_reset(dvs_builder_t *b) {
 void dvs_builder_destroy(dvs_builder_t *b) {
     if (!b) return;
     _free_blocks(b, b->first);
+    free(b->blocks);
     _release(b, b, sizeof(*b));
 }
 
@@ -135,6 +151,12 @@ void dvs_builder_destroy(dvs_builder_t *b) {
 
 dvs_expr_t dvs_builder_alloc(dvs_builder_t *b, uint32_t bytes, uint32_t align) {
     if (align < 1) align = 1;
+
+    /* A reference is a 32-bit pool offset (EXPR_NULL is its top value). Refuse
+     * an allocation past that rather than let the offset wrap: blocks would
+     * then overlap, and finalize copies past the problem it sized. */
+    uint64_t end = ((uint64_t)b->virtual_used + align - 1) / align * align + bytes;
+    if (end + POOL_HEADER_SZ >= (uint64_t)EXPR_NULL) return EXPR_NULL;
 
     uint32_t aligned = _align_up(b->virtual_used, align);
     uint32_t padding = aligned - b->virtual_used;
@@ -154,6 +176,10 @@ dvs_expr_t dvs_builder_alloc(dvs_builder_t *b, uint32_t bytes, uint32_t align) {
 
         BuilderBlock *blk = _new_block(b, cap);
         if (!blk) return EXPR_NULL;
+        if (_index_block(b, blk)) {
+            _free_blocks(b, blk);
+            return EXPR_NULL;
+        }
 
         blk->base_offset = aligned;
         if (b->current)
@@ -189,11 +215,17 @@ uint32_t dvs_builder_virtual_used(const dvs_builder_t *b) {
 void *dvs_builder_ref_ptr(const dvs_builder_t *b, dvs_expr_t ref) {
     if (ref == EXPR_NULL) return NULL;
     uint32_t voff = ref - POOL_HEADER_SZ;
-    for (BuilderBlock *blk = b->first; blk; blk = blk->next) {
-        if (voff >= blk->base_offset &&
-            voff < blk->base_offset + blk->used) {
+    /* Last block whose base_offset <= voff. */
+    uint32_t lo = 0, hi = b->n_blocks;
+    while (hi - lo > 1) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (b->blocks[mid]->base_offset <= voff) lo = mid;
+        else hi = mid;
+    }
+    if (lo < b->n_blocks) {
+        BuilderBlock *blk = b->blocks[lo];
+        if (voff >= blk->base_offset && voff < blk->base_offset + blk->used)
             return _block_ptr_at(blk, voff - blk->base_offset);
-        }
     }
     return NULL;
 }
@@ -243,6 +275,68 @@ dvs_problem_t *dvs_builder_finalize(dvs_builder_t *b, size_t *out_size) {
     }
 
     if (out_size) *out_size = total;
+    return sp;
+}
+
+/* Copy pool bytes [from, to) from the blocks into the problem's pool region,
+ * zeroing what no block covers. */
+static void _copy_range(dvs_builder_t *b, dvs_problem_t *sp, uint32_t from, uint32_t to) {
+    uint8_t *pool_base = (uint8_t *)&sp->pool + sizeof(dvs_pool_t);
+    memset(pool_base + from, 0, to - from);
+    /* The last block starting at or below `from` (blocks are in offset order). */
+    uint32_t lo = 0, hi = b->n_blocks;
+    while (hi - lo > 1) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (b->blocks[mid]->base_offset <= from) lo = mid; else hi = mid;
+    }
+    for (uint32_t i = lo; i < b->n_blocks; i++) {
+        BuilderBlock *blk = b->blocks[i];
+        if (blk->base_offset >= to) break;
+        uint32_t s = blk->base_offset > from ? blk->base_offset : from;
+        uint32_t e = blk->base_offset + blk->used;
+        if (e > to) e = to;
+        if (e > s)
+            memcpy(pool_base + s, BUILDER_BLOCK_DATA(blk) + (s - blk->base_offset), e - s);
+    }
+}
+
+dvs_problem_t *dvs_builder_finalize_append(dvs_builder_t *b, dvs_problem_t *prev,
+                                           size_t *size) {
+    uint32_t used = b->virtual_used;
+    uint32_t old = prev ? prev->pool.used : 0;
+    if (!prev || b->alloc || old > used || !b->n_blocks) {
+        /* First time (or a custom allocator): a full copy with headroom. */
+        uint32_t extra = used / 2 > 4096 ? used / 2 : 4096;
+        if (b->alloc || !b->n_blocks) return dvs_builder_finalize(b, size);
+        dvs_problem_t *sp = dvs_builder_finalize_reserve(b, size, extra);
+        if (sp) {
+            sp->pool.used = used;
+            if (size) *size = sizeof(dvs_problem_t) + sp->pool.capacity;
+        }
+        return sp;
+    }
+    dvs_problem_t *sp = prev;
+    if (used > prev->pool.capacity) {
+        uint32_t cap = used + (used / 2 > 4096 ? used / 2 : 4096);
+        sp = (dvs_problem_t *)realloc(prev, sizeof(dvs_problem_t) + cap);
+        if (!sp) return NULL;                 /* prev is still valid */
+        sp->pool.capacity = cap;
+    }
+    _copy_range(b, sp, old, used);
+    sp->pool.used        = used;
+    sp->n_vars           = b->n_vars;
+    sp->n_constraints    = b->n_constraints;
+    sp->n_sources        = b->n_sources;
+    sp->vars_head        = b->vars_head;
+    sp->constraints_head = b->constraints_head;
+    sp->sources_head     = b->sources_head;
+    sp->n_alldiffs       = b->n_alldiffs;
+    sp->allDiff_head     = b->allDiff_head;
+    sp->n_softs          = b->n_softs;
+    sp->softs_head       = b->softs_head;
+    sp->n_dists          = b->n_dists;
+    sp->dists_head       = b->dists_head;
+    if (size) *size = sizeof(dvs_problem_t) + sp->pool.capacity;
     return sp;
 }
 
@@ -380,7 +474,7 @@ void dvs_builder_free_problem(dvs_builder_t *b, dvs_problem_t *sp, size_t size) 
 /* ------------------------------------------------------------------ */
 
 dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value,
-                                 uint8_t is_signed, uint8_t width) {
+                                 uint8_t is_signed, uint16_t width) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprConst),
                                 (uint32_t)_Alignof(ExprConst));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -392,7 +486,7 @@ dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value,
     n->kind      = EXPR_CONST;
     n->is_signed = is_signed;
     n->width     = width;
-    n->_pad[0] = n->_pad[1] = 0;
+    n->_p8       = 0;
     n->value     = value;
     return ref;
 }
@@ -521,7 +615,7 @@ dvs_expr_t dvs_builder_expr_in_ranges(dvs_builder_t *b, dvs_expr_t value,
 }
 
 dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
-                            uint8_t from_bits, uint8_t to_bits,
+                            uint16_t from_bits, uint16_t to_bits,
                             uint8_t sign_extend) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprExtend),
                                 (uint32_t)_Alignof(ExprExtend));
@@ -534,13 +628,13 @@ dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
     n->sign_extend = sign_extend;
     n->from_bits   = from_bits;
     n->to_bits     = to_bits;
-    n->_pad        = 0;
+    n->_p8 = 0; n->_p16 = 0;
     n->operand     = operand;
     return ref;
 }
 
 dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand,
-                                 uint8_t to_bits, uint8_t to_signed) {
+                                 uint16_t to_bits, uint8_t to_signed) {
     if (to_bits == 0) return EXPR_NULL;
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprCast),
                                 (uint32_t)_Alignof(ExprCast));
@@ -552,13 +646,13 @@ dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand,
     n->kind      = EXPR_CAST;
     n->to_bits   = to_bits;
     n->to_signed = to_signed ? 1 : 0;
-    n->_pad[0]   = n->_pad[1] = 0;
+    n->_p8 = 0;
     n->operand   = operand;
     return ref;
 }
 
 dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
-                             uint8_t from_bits, uint8_t to_bits,
+                             uint16_t from_bits, uint16_t to_bits,
                              uint8_t sign_extend, uint8_t dst_signed) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprSvCast),
                                 (uint32_t)_Alignof(ExprSvCast));
@@ -572,12 +666,13 @@ dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
     n->from_bits   = from_bits;
     n->to_bits     = to_bits;
     n->dst_signed  = dst_signed;
+    n->_p16        = 0;
     n->operand     = operand;
     return ref;
 }
 
 dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand,
-                             uint8_t hi_bit, uint8_t lo_bit) {
+                             uint16_t hi_bit, uint16_t lo_bit) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprExtract),
                                 (uint32_t)_Alignof(ExprExtract));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -588,13 +683,12 @@ dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand,
     n->kind    = EXPR_EXTRACT;
     n->hi_bit  = hi_bit;
     n->lo_bit  = lo_bit;
-    n->_pad[0] = n->_pad[1] = 0;
     n->operand = operand;
     return ref;
 }
 
 dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi,
-                            dvs_expr_t lo, uint8_t lo_width) {
+                            dvs_expr_t lo, uint16_t lo_width) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprConcat),
                                 (uint32_t)_Alignof(ExprConcat));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -604,7 +698,7 @@ dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi,
     ExprConcat *n = (ExprConcat *)_block_ptr_at(b->current, local);
     n->kind     = EXPR_CONCAT;
     n->lo_width = lo_width;
-    n->_pad[0] = n->_pad[1] = n->_pad[2] = 0;
+    n->_p16 = 0;
     n->hi       = hi;
     n->lo       = lo;
     return ref;
@@ -680,7 +774,7 @@ dvs_expr_t dvs_builder_expr_clog2(dvs_builder_t *b, dvs_expr_t result,
 /* ------------------------------------------------------------------ */
 
 dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id,
-                        uint8_t width, uint8_t is_signed,
+                        uint16_t width, uint8_t is_signed,
                         int64_t lo, int64_t hi) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(VarSpec),
                                 (uint32_t)_Alignof(VarSpec));
@@ -694,7 +788,6 @@ dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id,
     v->width      = width;
     v->is_signed  = is_signed;
     v->is_aux     = 0;
-    v->_pad       = 0;
     v->lo         = lo;
     v->hi         = hi;
     b->vars_head  = ref;

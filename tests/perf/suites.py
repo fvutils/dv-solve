@@ -17,22 +17,44 @@ _REPO = _HERE.parents[1]
 _LOGIC = re.compile(rb"\(\s*set-logic\s+([A-Z_]+)\s*\)")
 
 
-def load(name: str) -> dict:
+def load(name: str, split: str | None = None) -> dict:
     """The suite spec plus `fixtures` [{path, sha, cat, logic}] and `hash`.
 
     A randomization suite (`"kind": "rand"`) lists benchmarks defined in
-    tests/perf/rand_benches.py instead of fixture files; see load_rand()."""
+    tests/perf/rand_benches.py instead of fixture files; see load_rand().
+
+    A suite with an `index` (a generator's index.json: {"instances": [{path,
+    split, status}]}, paths relative to the index) can be cut to one split:
+    `dev` (tuning is allowed on it), `held` (published numbers) or `all`
+    (the default, or the spec's `split`). Fixtures the index does not list,
+    such as captured ones, belong to every split. The split is part of the
+    suite name in the manifest, so trend lines never mix splits."""
     spec = json.loads((_HERE / "suites" / f"{name}.json").read_text(encoding="utf-8"))
     if spec.get("kind") == "rand":
         return load_rand(spec)
+    split = split or spec.get("split", "all")
+    index = {}
+    if spec.get("index"):
+        ip = _REPO / spec["index"]
+        index = {str((ip.parent / e["path"]).relative_to(_REPO)): e
+                 for e in json.loads(ip.read_text(encoding="utf-8"))["instances"]}
+    if split != "all":
+        spec["suite"] = f"{spec['suite']}:{split}"
     fixtures = []
     for c in spec["categories"]:
         for p in sorted(_REPO.glob(c["glob"])):
+            rel = str(p.relative_to(_REPO))
+            e = index.get(rel)
+            if e and split != "all" and e["split"] != split:
+                continue
             data = p.read_bytes()
             m = _LOGIC.search(data)
-            fixtures.append({"path": str(p.relative_to(_REPO)), "cat": c["name"],
-                             "sha": hashlib.sha256(data).hexdigest()[:16],
-                             "logic": m.group(1).decode() if m else None})
+            fx = {"path": rel, "cat": c["name"],
+                  "sha": hashlib.sha256(data).hexdigest()[:16],
+                  "logic": m.group(1).decode() if m else None}
+            if e:
+                fx["status"] = e["status"]
+            fixtures.append(fx)
     spec["fixtures"] = fixtures
     spec["hash"] = manifest_hash(spec)
     return spec
@@ -49,7 +71,8 @@ def manifest_record(spec: dict) -> dict:
     return {"hash": spec["hash"], "suite": spec["suite"],
             "weights": {c["name"]: c["weight"] for c in spec["categories"]},
             "about": {c["name"]: c.get("about", "") for c in spec["categories"]},
-            "fixtures": [{k: f[k] for k in ("path", "sha", "cat")} for f in spec["fixtures"]]}
+            "fixtures": [{k: f[k] for k in ("path", "sha", "cat", "status") if k in f}
+                         for f in spec["fixtures"]]}
 
 
 def load_rand(spec: dict) -> dict:

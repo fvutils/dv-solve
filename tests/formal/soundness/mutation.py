@@ -84,6 +84,41 @@ MUTANTS = {
     "frontend-compiled-flag": ("src/c/smt2/smt2_frontend.c",
         "        if (rc >= 0) {\n            /* rc > 0 (some constraints left uncompiled;",
         "        if (rc == 0) {\n            /* rc > 0 (some constraints left uncompiled;"),
+    # A translator mis-lowering: the compiled problem is self-consistent, so
+    # only the model check (smt2_eval.c, fw-hdl plan 2.5) sees the wrong sat.
+    "smt2-bvxor-as-bvor": ("src/c/smt2/smt2_frontend.c",
+        '    BINOP_CASE("bvxor", DVS_BIN_BXOR)',
+        '    BINOP_CASE("bvxor", DVS_BIN_BOR)'),
+    # The exhaustive sweep answers unsat with no SAT call (fw-hdl plan 3.3), so
+    # a wrong lane pattern skips assignments: a wrong unsat.
+    "aigsim-lane-pattern": ("src/c/dvs_aigsim.c",
+        "0xF0F0F0F0F0F0F0F0ull", "0xF0F0F0F0F0F0F0F1ull"),
+    # Affine analysis answers unsat with no SAT call (fw-hdl plan 4.1), so a
+    # loose XOR matcher turns ANDs into XORs: wrong answers.
+    "affine-xor-match": ("src/c/dvs_affine.c",
+        "(v1 == -u1 && v2 == -u2) || (v1 == -u2 && v2 == -u1)",
+        "(v1 == -u1 || v2 == -u2) || (v1 == -u2 && v2 == -u1)"),
+    # A table is taken as affine after checking only part of its truth table.
+    "affine-table-lanes": ("src/c/dvs_affine.c",
+        "if (e != f[w]) return 0;", "if ((e ^ f[w]) & 0xFFFFull) return 0;"),
+    # An extract index narrowed to 8 bits again (the pre-6.6 node format).
+    "wide-extract-index": ("src/c/dvs_builder.c",
+        "    n->lo_bit  = lo_bit;", "    n->lo_bit  = (uint8_t)lo_bit;"),
+    # A define-fun memo key that ignores which let binding an argument names.
+    "fun-memo-let-key": ("src/c/smt2/smt2_frontend.c",
+        "? ((uint64_t)e->cached_ref << 24) |", "? ((uint64_t)0 << 24) |"),
+    "bbsum-no-wrap-check": ("src/c/dvs_bbsum.c",
+        "if (ent[k] && !(ent[k]->single && (ent[k]->exact || w <= ent[k]->width)))",
+        "if (ent[k] && !(ent[k]->single))"),
+    "slice-overlap": ("src/c/dvs_bbsolver.c",
+        "        if (!(hi < S->slices[i].lo || lo > S->slices[i].hi)) return 0;",
+        "        if (0) return 0;"),
+    "bbword-eq-no-bound": ("src/c/dvs_bbword.c",
+        "} else if (d > 1 && ba < d && bb_ < d) {",
+        "} else if (d > 1) {"),
+    "bbword-lin-peel-noninvertible": ("src/c/dvs_bbword.c",
+        "sa->poly == sb->poly &&\n                   (sa->poly & 1)",
+        "sa->poly == sb->poly"),
     "bvadd-wrap-width": ("src/c/dvs_prop_templates.c",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvadd_64);",
         "return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width > 1 ? width - 1 : width, priority, _fire_bvadd_64);"),
@@ -134,7 +169,10 @@ def _apply(src_root: Path, name: str) -> bool:
 PYTESTS = ["tests/formal/test_lcg_soundness.py", "tests/formal/test_bool_ite_constraint.py",
            "tests/formal/test_incremental_protocol.py", "tests/formal/soundness/test_regressions.py",
            "tests/unit/test_gated_constraints.py", "tests/unit/test_lcg_builder.py",
-           "tests/unit/test_wide_watch.py", "tests/unit/test_lcg_array_select.py"]
+           "tests/unit/test_wide_watch.py", "tests/unit/test_lcg_array_select.py",
+           "tests/formal/test_aig_sim.py", "tests/formal/test_affine.py",
+           "tests/formal/test_wide_sorts.py", "tests/formal/test_fun_memo.py",
+           "tests/formal/test_sum_norm.py", "tests/formal/test_word_facts.py"]
 
 
 def _pinned(exe: Path) -> bool:

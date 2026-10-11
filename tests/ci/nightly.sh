@@ -27,6 +27,13 @@ mkdir -p "$OUT/regressions"
 
 tests/ci/run_tests.sh
 
+echo "::group::front-end fuzzers, scaled up"
+# Evaluator and translator against z3 (docs/fw_hdl_implementation_plan.md
+# 2.6), and the parser fuzzer (0.5): the per-push run uses 200 and 300 seeds.
+EVAL_FUZZ_N=3000 PARSER_FUZZ_N=2000 python3 -m pytest -q -p no:cacheprovider \
+    tests/formal/test_eval_fuzz.py tests/formal/test_parser_fuzz.py
+echo "::endgroup::"
+
 pip_install() {
   python3 -m pip install -q "$@" 2>/dev/null || python3 -m pip install -q --break-system-packages "$@"
 }

@@ -46,13 +46,14 @@ def test_bad_variable_ids_are_refused(decl, refs):
         SolveCtx(_problem(decl, refs))
 
 
-def test_expression_wider_than_255_bits_is_refused():
+def test_expression_wider_than_65535_bits_is_refused():
     b = SolveProblemBuilder()
-    for i in range(4):
+    n = 65536 // 64 + 1
+    for i in range(n):
         b.add_var(i, 64, False, 0, 2**63 - 1)
     e = b.expr_var(0)
-    for i in range(1, 4):
-        e = b.expr_concat(e, b.expr_var(i), 64)       # 256 bits
+    for i in range(1, n):
+        e = b.expr_concat(e, b.expr_var(i), 64)       # 65600 bits
     b.add_constraint(b.expr_binary(BIN_EQ, e, b.expr_const(5)))
     with pytest.raises(CompileUnsupportedError):
         SolveCtx(b.finalize()[0])
@@ -70,15 +71,18 @@ def _deep_problem(depth):
 
 
 def test_too_deep_expression_is_refused():
+    # Elaboration and compile stop where the thread's stack runs low: 400,000
+    # levels is far beyond an 8 MB main thread (about 100,000 is refused).
     with pytest.raises(CompileUnsupportedError):
-        SolveCtx(_deep_problem(25000))
+        SolveCtx(_deep_problem(400000))
 
 
-def test_deep_expression_under_the_limit_does_not_crash():
-    # Just under the depth limit, on the main thread: Linux's 8 MB stack
-    # compiles it, Windows' smaller one must refuse it rather than overflow.
+def test_deep_expression_does_not_crash():
+    # 25,000 levels, on the main thread: Linux's 8 MB stack compiles it,
+    # a smaller one (Windows' 1 MB) must refuse it rather than overflow. The
+    # fixed 20,000-level limit applies only where the stack cannot be measured.
     try:
-        SolveCtx(_deep_problem(19990))
+        SolveCtx(_deep_problem(25000))
     except CompileUnsupportedError:
         pass
 

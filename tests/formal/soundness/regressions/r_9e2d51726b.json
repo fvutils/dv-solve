@@ -1,0 +1,36 @@
+{
+ "why": "seed=811 i=847 door=builder[again] expect=unsat got=sat bad-model",
+ "widths": {
+  "x": 6
+ },
+ "cons": [
+  [
+   "bvult",
+   "bool",
+   [
+    "var",
+    "x",
+    6
+   ],
+   [
+    "var",
+    "x",
+    6
+   ]
+  ],
+  [
+   "=",
+   "bool",
+   [
+    "var",
+    "x",
+    6
+   ],
+   [
+    "const",
+    0,
+    6
+   ]
+  ]
+ ]
+}

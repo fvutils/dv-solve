@@ -1,0 +1,36 @@
+{
+ "why": "seed=707 i=15 door=builder[again] expect=sat got=unsat",
+ "widths": {
+  "x": 32,
+  "y": 32
+ },
+ "cons": [
+  [
+   "bvule",
+   "bool",
+   [
+    "bvxor",
+    32,
+    [
+     "bvnot",
+     32,
+     [
+      "var",
+      "x",
+      32
+     ]
+    ],
+    [
+     "var",
+     "x",
+     32
+    ]
+   ],
+   [
+    "var",
+    "x",
+    32
+   ]
+  ]
+ ]
+}

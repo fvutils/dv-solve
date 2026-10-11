@@ -43,7 +43,7 @@ def test_ite_value_on_wide_unsigned(width):
     x, y = ("var", "x", width), ("var", "y", width)
     p = Problem({"x": width, "y": width},
                 [("bvule", "bool", x, ("ite", width, ("true",), x, y))])
-    assert [o.got for o in doors.builder(p)] == ["sat", "sat"]
+    assert [o.got for o in doors.builder(p)] == ["sat", "sat", "sat"]   # lcg 0, 1, again
 
 
 @pytest.mark.parametrize("cmp,expect", [("bvsgt", "unsat"), ("bvsge", "sat"),

@@ -178,7 +178,7 @@ void dvs_builder_reset(dvs_builder_t *b);
  * @param lo, hi     The variable's value must lie in [lo, hi].
  */
 dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id,
-                               uint8_t width, uint8_t is_signed,
+                               uint16_t width, uint8_t is_signed,
                                int64_t lo, int64_t hi);
 
 /** Require the Boolean expression `root` to hold. */
@@ -237,7 +237,7 @@ dvs_expr_t dvs_builder_expr_in_ranges(dvs_builder_t *b, dvs_expr_t value,
 /** Zero-extend (sign_extend 0) or sign-extend `operand` from `from_bits`
  *  to `to_bits`. */
 dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
-                                   uint8_t from_bits, uint8_t to_bits,
+                                   uint16_t from_bits, uint16_t to_bits,
                                    uint8_t sign_extend);
 
 /** A cast of `operand` to a `to_bits`-bit integer, signed when `to_signed`:
@@ -247,15 +247,15 @@ dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
  *  The value is truncated to `to_bits`, or extended by the operand's own
  *  signedness, and then read as signed or unsigned. */
 dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand,
-                                 uint8_t to_bits, uint8_t to_signed);
+                                 uint16_t to_bits, uint8_t to_signed);
 
 /** `operand[hi_bit:lo_bit]`. */
 dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand,
-                                    uint8_t hi_bit, uint8_t lo_bit);
+                                    uint16_t hi_bit, uint16_t lo_bit);
 
 /** `{hi, lo}`, where `lo` is `lo_width` bits wide. */
 dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi,
-                                   dvs_expr_t lo, uint8_t lo_width);
+                                   dvs_expr_t lo, uint16_t lo_width);
 
 /** The constraint `result == var_refs[0] + var_refs[1] + ...`. Pass it to
  *  dvs_builder_add_constraint(). */

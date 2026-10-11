@@ -1,0 +1,22 @@
+{
+ "why": "seed=811 i=460 door=protocol[k=3 pin x=61] solved anyway expect=unsat got=sat bad-model",
+ "widths": {
+  "x": 6
+ },
+ "cons": [
+  [
+   "bvugt",
+   "bool",
+   [
+    "var",
+    "x",
+    6
+   ],
+   [
+    "var",
+    "x",
+    6
+   ]
+  ]
+ ]
+}

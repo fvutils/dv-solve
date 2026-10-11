@@ -3,8 +3,9 @@
     python3 -m tests.perf.tools fetch --dest DIR   # download, verify sha256, unpack
 
 Tarballs are pinned by URL and sha256 in tools.lock.json; pip tools (z3) in
-solvers.lock. `path(name)` looks in $DVS_PERF_TOOLS (where `fetch` unpacked)
-and then in the ivpm-managed packages/ directory of a developer checkout, and
+solvers.lock. `path(name)` looks in $DVS_PERF_TOOLS (where `fetch` unpacked;
+default perf-builds/tools), then in the ivpm-managed packages/ directory of a
+developer checkout, and
 `check()` refuses a binary whose version is not the pinned one, so a run can
 never silently measure a different solver.
 """
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tarfile
 import urllib.request
+import zipfile
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -27,7 +29,12 @@ LOCK = json.loads((_HERE / "tools.lock.json").read_text(encoding="utf-8"))
 # Developer checkouts get these from ivpm (ivpm.yaml); same bundles, older layout.
 _LOCAL = {"bitwuzla": _REPO / "packages/verilator-bin/bin/bitwuzla",
           "verilator": _REPO / "packages/verilator-bin/bin/verilator",
-          "boolector": _REPO / "packages/yosys-bin/bin/boolector"}
+          "boolector": _REPO / "packages/yosys-bin/bin/boolector",
+          "yosys": _REPO / "packages/yosys/bin/yosys",
+          "yosys-abc": _REPO / "packages/yosys/bin/yosys-abc"}
+DEFAULT_ROOT = _REPO / "perf-builds" / "tools"
+# Every pinned SMT solver, in the order reports list them.
+SOLVERS = ("z3", "bitwuzla", "boolector", "cvc5", "yices")
 
 
 def lock_sha() -> str:
@@ -47,9 +54,9 @@ def _pinned():
 def path(name: str):
     for n, rel, _ in _pinned():
         if n == name:
-            root = os.environ.get("DVS_PERF_TOOLS")
-            if root and (Path(root) / rel).exists():
-                return Path(root) / rel
+            root = Path(os.environ.get("DVS_PERF_TOOLS") or DEFAULT_ROOT)
+            if (root / rel).exists():
+                return root / rel
     if name == "z3":
         z = shutil.which("z3")
         return Path(z) if z else None
@@ -61,14 +68,18 @@ def version(name: str):
     p = path(name)
     if p is None:
         return None
+    # yosys-abc has no --version; `-q version` prints "UC Berkeley, ABC 1.01 (...)"
+    argv = [str(p), "-q", "version"] if name == "yosys-abc" else [str(p), "--version"]
     try:
-        out = subprocess.run([str(p), "--version"], capture_output=True, text=True,
-                             timeout=30).stdout.split()
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=30).stdout.split()
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if name in ("z3", "verilator"):          # "Z3 version 5.1.0 - 64 bit", "Verilator 5.046 ..."
-        return out[2] if name == "z3" and len(out) > 2 else (out[1] if len(out) > 1 else None)
-    return out[0] if out else None
+    # word holding the version: "Z3 version 5.1.0 - 64 bit", "Verilator 5.046 ...",
+    # "cvc5 1.4.1 [git ...]", "Yices 2.6.5", "Yosys 0.69 (git ...)"; bitwuzla and
+    # boolector print the bare version
+    at = {"z3": 2, "yosys-abc": 3}.get(name, 1 if name in (
+        "verilator", "cvc5", "yices", "yosys") else 0)
+    return out[at] if len(out) > at else None
 
 
 def check(names) -> dict:
@@ -92,28 +103,34 @@ def fetch(dest: Path) -> None:
             continue
         if all((dest / rel).exists() for rel, _ in spec["provides"].values()):
             continue
-        tgz = dest / f"{pkg}.tar.gz"
-        with urllib.request.urlopen(spec["url"], timeout=300) as r, open(tgz, "wb") as f:
+        arc = dest / f"{pkg}.download"
+        with urllib.request.urlopen(spec["url"], timeout=300) as r, open(arc, "wb") as f:
             shutil.copyfileobj(r, f)
-        digest = hashlib.sha256(tgz.read_bytes()).hexdigest()
+        digest = hashlib.sha256(arc.read_bytes()).hexdigest()
         if digest != spec["sha256"]:
-            tgz.unlink()
+            arc.unlink()
             raise RuntimeError(f"{pkg}: sha256 {digest} does not match the lock")
-        with tarfile.open(tgz) as t:
-            t.extractall(dest)
-        tgz.unlink()
+        if zipfile.is_zipfile(arc):          # cvc5's release, yices' wheel
+            with zipfile.ZipFile(arc) as z:
+                z.extractall(dest)
+            for rel, _ in spec["provides"].values():    # zip drops the mode bits
+                (dest / rel).chmod(0o755)
+        else:
+            with tarfile.open(arc) as t:
+                t.extractall(dest)
+        arc.unlink()
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="pinned perf tools")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("fetch").add_argument("--dest", required=True)
+    sub.add_parser("fetch").add_argument("--dest", default=str(DEFAULT_ROOT))
     sub.add_parser("check")
     a = ap.parse_args(argv)
     if a.cmd == "fetch":
         fetch(Path(a.dest))
         os.environ["DVS_PERF_TOOLS"] = a.dest
-    print(json.dumps(check(["z3", "bitwuzla", "boolector"])))
+    print(json.dumps(check([*SOLVERS, "yosys", "yosys-abc"])))
     return 0
 
 

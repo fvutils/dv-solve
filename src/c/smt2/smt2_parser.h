@@ -20,12 +20,17 @@ typedef enum {
     SEXPR_KEYWORD,
     SEXPR_STRING,
     SEXPR_LIST,
+    SEXPR_DECIMAL,      /* text in `sym`; only attribute values use it */
 } SexprKind;
 
 typedef struct Sexpr {
     SexprKind kind;
+    /* SYMBOL written |x| where x is also a simple symbol: `sym` holds x (the
+     * two spellings name the same symbol, SMT-LIB 2.6 §3.1), and printing
+     * puts the bars back so a get-value key echoes as written. */
+    uint8_t   quoted;
     union {
-        struct { const char *str; uint32_t len; }        sym;   /* SYMBOL/KEYWORD/STRING */
+        struct { const char *str; uint32_t len; }        sym;   /* SYMBOL/KEYWORD/STRING/DECIMAL */
         uint64_t                                         numval;/* NUMERAL */
         /* BITVEC: `value` is the low 64 bits. A literal wider than 64 bits
          * also carries its full value in `limbs` (little-endian, ceil(width/64)
@@ -68,6 +73,10 @@ void  sexpr_arena_reset(SexprArena *arena);
  * Returns NULL on EOF or parse error.  All Sexpr nodes and their
  * backing storage are allocated from the arena.
  */
+/* Parse the next s-expression. Returns NULL at end of input, and also for
+ * malformed input: then lex->err_msg (with err_line/err_col) says what is
+ * wrong, and the lexer has skipped to the end of the malformed s-expression so
+ * the next call resumes at the following one. */
 Sexpr *sexpr_parse(Smt2Lexer *lex, SexprArena *arena);
 
 /* ------------------------------------------------------------------ */

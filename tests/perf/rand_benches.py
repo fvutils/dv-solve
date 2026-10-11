@@ -96,6 +96,23 @@ def _bit_mask():
         "`(x & 'hf) == 5`: 16 solutions spread by the high bits"
 
 
+def _crc_filter():
+    """fw-hdl's check (docs/fw_hdl_requests.md, "Not a request: sampling
+    diversity"): a letter whose CRC-32 has its two low bits clear. A hash-like
+    filter: neighbouring letters are rarely both solutions, so a sampler that
+    walks from one solution by single-bit flips finds no others."""
+    m = V("m", 8)
+    c = B("bvxor", 32, C(0xFFFFFFFF, 32), ZX(m, 32))      # one byte, table-less
+    for _ in range(8):
+        mask = ("bvneg", 32, B("bvand", 32, c, C(1, 32)))
+        c = B("bvxor", 32, B("bvlshr", 32, c, C(1, 32)), B("bvand", 32, C(0xEDB88320, 32), mask))
+    c = ("bvnot", 32, c)
+    return ({"m": 8},
+            [P("bvuge", m, C(ord("A"), 8)), P("bvule", m, C(ord("Z"), 8)),
+             P("=", B("bvand", 32, c, C(3, 32)), C(0, 32))],
+            None, "`m inside {[\"A\":\"Z\"]}` with `crc32(m)[1:0] == 0`: 6 solutions")
+
+
 # ---- wide benchmarks: binned ------------------------------------------------
 # `bins` is (key, truth): key(model) names a bin, truth maps every bin to its
 # share of the solution space.
@@ -134,6 +151,7 @@ ENUMERABLE = {
     "countones": _countones, "ot_aon_wkup": _ot_aon_wkup, "range_1000": _range_1000,
     "disjoint_ranges": _disjoint_ranges, "sum_eq_const": _sum_eq_const,
     "a_lt_b": _a_lt_b, "dep_range": _dep_range, "bit_mask": _bit_mask,
+    "crc_filter": _crc_filter,
 }
 WIDE = {"addr_aligned": _addr_aligned, "packet": _packet}
 

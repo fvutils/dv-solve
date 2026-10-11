@@ -13,6 +13,7 @@
 #include "dvs_trail.h"   /* TrailEntry, LevelMark */
 #include "dvs_propagator.h"  /* PropQueue */
 #include "dvs_search.h"      /* DecisionRecord */
+#include "dvs_stackinfo.h"   /* dvs_stack_guard_t */
 
 /** Maximum decision depth for the embedded solver profile. The search pushes
  *  one level per decided variable, so this also caps the number of decision
@@ -86,6 +87,15 @@ typedef struct dvs_ctx_s {
      * made in them) starts above 0, and nothing the search does may undo
      * what lies at or below this level. Set by the search at entry. */
     uint32_t           search_base;
+    /* A solve sealed search_base and left its search on the trail: the
+     * decisions of a model (kept for get_value), or of a search that timed
+     * out. That state is not the caller's: the next call that builds on the
+     * caller's state (solve, pin, checkpoint, add, exclude, propagate_only)
+     * first backtracks to search_base (dvs_search_discard). Cleared by reset
+     * and restore, which undo it themselves. Left in place, a solve after a
+     * timed-out solve sealed the dead search as its root and answered unsat
+     * on a satisfiable problem (B109). */
+    uint8_t            search_sealed;
     uint64_t           trail_count;
     uint64_t           conflict_count;
     uint64_t           rng_state;
@@ -123,6 +133,11 @@ typedef struct dvs_ctx_s {
     uint8_t           *keep_state;
     uint32_t           keep_cap;
     uint8_t            keep_on;       /* keeping applies to this solve now */
+    /* A seeded solve's count of failed value decisions per var (saturating),
+     * which gates bound decisions (see _bound_decision). */
+    uint8_t           *value_fails;
+    uint32_t           value_fails_cap;
+    uint8_t            value_fails_on; /* counting applies to this solve now */
     DvsModLink        *mod_links;
     uint32_t           n_mod_links;
     uint32_t           mod_links_cap;
@@ -193,6 +208,9 @@ typedef struct dvs_ctx_s {
     /* The oracle check attached by dvs_solver_set_oracle(), or NULL
      * (dvs_oracle.c). */
     struct dvs_octx_s *oracle;
+    /* Compile's recursive passes stop (decline the constraint) when the
+     * stack runs low (dvs_stackinfo.h). A cache; any value is safe. */
+    dvs_stack_guard_t  stack_guard;
     dvs_pool_t         pool;          /* MUST be last field            */
     /* static pool data region follows immediately                      */
 } dvs_ctx_t;

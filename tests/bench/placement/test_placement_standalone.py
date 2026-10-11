@@ -33,7 +33,7 @@ def _make_ctx(lib, var_specs, buf_size=1 << 20):
 
     for vid, w, s, lo, hi in var_specs:
         lib.problem_add_var(sp, ctypes.c_uint32(vid),
-                            ctypes.c_uint8(w), ctypes.c_uint8(s),
+                            ctypes.c_uint16(w), ctypes.c_uint8(s),
                             ctypes.c_int64(lo), ctypes.c_int64(hi))
 
     all_ids = [vs[0] for vs in var_specs]

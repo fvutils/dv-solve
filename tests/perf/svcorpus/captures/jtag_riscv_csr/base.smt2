@@ -1,0 +1,11 @@
+; First query of a Verilator randomize() capture of harness.sv
+  (set-option :produce-models true)
+  (set-option :produce-unsat-assumptions true)
+  (set-logic QF_ABV)
+  (define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+  (define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+  (declare-fun do_write () (_ BitVec 1))
+  (declare-fun op () (_ BitVec 2))
+  (assert (= #b1 (__Vbv (=> (__Vbool (__Vbv (= ((_ zero_extend 31) do_write) #x00000001))) (__Vbool (__Vbv (= op #b10)))))))
+  (assert (= #b1 (__Vbv (=> (__Vbool (__Vbv (= ((_ zero_extend 31) do_write) #x00000000))) (__Vbool (__Vbv (= op #b01)))))))
+  (check-sat)

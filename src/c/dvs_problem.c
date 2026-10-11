@@ -80,7 +80,7 @@ void solve_problem_destroy(dvs_problem_t *sp) {
 /* ------------------------------------------------------------------ */
 
 dvs_expr_t expr_const_sized(dvs_problem_t *sp, int64_t value, uint8_t is_signed,
-                         uint8_t width) {
+                         uint16_t width) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprConst),
                               (uint32_t)_Alignof(ExprConst));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -88,7 +88,7 @@ dvs_expr_t expr_const_sized(dvs_problem_t *sp, int64_t value, uint8_t is_signed,
     n->kind      = EXPR_CONST;
     n->is_signed = is_signed;
     n->width     = width;
-    n->_pad[0]   = n->_pad[1] = 0;
+    n->_p8      = 0;
     n->value     = value;
     return ref;
 }
@@ -171,7 +171,7 @@ dvs_expr_t expr_in_set(dvs_problem_t *sp, dvs_expr_t value,
 }
 
 dvs_expr_t expr_extend(dvs_problem_t *sp, dvs_expr_t operand,
-                    uint8_t from_bits, uint8_t to_bits, uint8_t sign_extend) {
+                    uint16_t from_bits, uint16_t to_bits, uint8_t sign_extend) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprExtend),
                               (uint32_t)_Alignof(ExprExtend));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -180,13 +180,13 @@ dvs_expr_t expr_extend(dvs_problem_t *sp, dvs_expr_t operand,
     n->sign_extend  = sign_extend;
     n->from_bits    = from_bits;
     n->to_bits      = to_bits;
-    n->_pad         = 0;
+    n->_p8 = 0; n->_p16 = 0;
     n->operand      = operand;
     return ref;
 }
 
 dvs_expr_t expr_cast(dvs_problem_t *sp, dvs_expr_t operand,
-                  uint8_t to_bits, uint8_t to_signed) {
+                  uint16_t to_bits, uint8_t to_signed) {
     if (to_bits == 0) return EXPR_NULL;
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprCast),
                               (uint32_t)_Alignof(ExprCast));
@@ -195,13 +195,13 @@ dvs_expr_t expr_cast(dvs_problem_t *sp, dvs_expr_t operand,
     n->kind      = EXPR_CAST;
     n->to_bits   = to_bits;
     n->to_signed = to_signed ? 1 : 0;
-    n->_pad[0]   = n->_pad[1] = 0;
+    n->_p8 = 0;
     n->operand   = operand;
     return ref;
 }
 
 dvs_expr_t expr_extract(dvs_problem_t *sp, dvs_expr_t operand,
-                     uint8_t hi_bit, uint8_t lo_bit) {
+                     uint16_t hi_bit, uint16_t lo_bit) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprExtract),
                               (uint32_t)_Alignof(ExprExtract));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -209,20 +209,19 @@ dvs_expr_t expr_extract(dvs_problem_t *sp, dvs_expr_t operand,
     n->kind    = EXPR_EXTRACT;
     n->hi_bit  = hi_bit;
     n->lo_bit  = lo_bit;
-    n->_pad[0] = n->_pad[1] = 0;
     n->operand = operand;
     return ref;
 }
 
 dvs_expr_t expr_concat(dvs_problem_t *sp, dvs_expr_t hi, dvs_expr_t lo,
-                    uint8_t lo_width) {
+                    uint16_t lo_width) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprConcat),
                               (uint32_t)_Alignof(ExprConcat));
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprConcat *n = (ExprConcat *)POOL_PTR(sp, ref);
     n->kind     = EXPR_CONCAT;
     n->lo_width = lo_width;
-    n->_pad[0] = n->_pad[1] = n->_pad[2] = 0;
+    n->_p16 = 0;
     n->hi       = hi;
     n->lo       = lo;
     return ref;
@@ -284,7 +283,7 @@ dvs_expr_t expr_clog2(dvs_problem_t *sp, dvs_expr_t result, dvs_expr_t operand) 
 /* ------------------------------------------------------------------ */
 
 dvs_expr_t problem_add_var(dvs_problem_t *sp, uint32_t var_id,
-                        uint8_t width, uint8_t is_signed,
+                        uint16_t width, uint8_t is_signed,
                         int64_t lo, int64_t hi) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(VarSpec),
                               (uint32_t)_Alignof(VarSpec));
@@ -295,7 +294,6 @@ dvs_expr_t problem_add_var(dvs_problem_t *sp, uint32_t var_id,
     v->width      = width;
     v->is_signed  = is_signed;
     v->is_aux     = 0;
-    v->_pad       = 0;
     v->lo         = lo;
     v->hi         = hi;
     sp->vars_head = ref;

@@ -109,7 +109,7 @@ Free the builder. Problems it finalized are not freed.
 Empty the builder so it can build another problem, keeping its memory.
 ```
 
-```{c:function} dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id, uint8_t width, uint8_t is_signed, int64_t lo, int64_t hi)
+```{c:function} dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id, uint16_t width, uint8_t is_signed, int64_t lo, int64_t hi)
 Declare a variable.
 
 :param var_id: The variable's id. A problem with *n* variables uses the ids
@@ -216,12 +216,12 @@ is compiled.
 `value inside {[los[0]:his[0]], [los[1]:his[1]], ...}`.
 ```
 
-```{c:function} dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand, uint8_t from_bits, uint8_t to_bits, uint8_t sign_extend)
+```{c:function} dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand, uint16_t from_bits, uint16_t to_bits, uint8_t sign_extend)
 Extend `operand` from `from_bits` to `to_bits` bits: with zeros when
 `sign_extend` is 0, with copies of the sign bit when it is 1.
 ```
 
-```{c:function} dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand, uint8_t to_bits, uint8_t to_signed)
+```{c:function} dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand, uint16_t to_bits, uint8_t to_signed)
 A cast of `operand` to a `to_bits`-bit integer, signed when `to_signed`:
 SystemVerilog's `T'(operand)`. When `to_bits` is wider than the operand, the
 operand is evaluated at `to_bits`, so a 64-bit cast of the product of two
@@ -230,11 +230,11 @@ operand is evaluated at `to_bits`, so a 64-bit cast of the product of two
 unsigned.
 ```
 
-```{c:function} dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand, uint8_t hi_bit, uint8_t lo_bit)
+```{c:function} dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand, uint16_t hi_bit, uint16_t lo_bit)
 `operand[hi_bit:lo_bit]`.
 ```
 
-```{c:function} dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi, dvs_expr_t lo, uint8_t lo_width)
+```{c:function} dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi, dvs_expr_t lo, uint16_t lo_width)
 `{hi, lo}`, where `lo` is `lo_width` bits wide.
 ```
 

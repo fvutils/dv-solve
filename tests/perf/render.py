@@ -303,8 +303,10 @@ RARMS = {
     "dv-api@head": "dv-solve API",
     "dv-swizzle@head": "Verilator + dv-solve",
     "dv-swizzle-nohash@head": "Verilator + dv-solve, parity ignored",
+    "dv-seed@head": "dv-solve, SMT-LIB2 :random-seed",
     "z3-swizzle": "Verilator + z3 {z3}",
     "bitwuzla-swizzle": "Verilator + bitwuzla {bitwuzla}",
+    "z3-seed": "z3 {z3}, SMT-LIB2 :random-seed",
     "dv-swizzle@anchor": "Verilator + dv-solve {anchor}",
 }
 RREF = "z3-swizzle"          # what a Verilator user gets by default

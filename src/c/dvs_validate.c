@@ -15,6 +15,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include "dvs_ctx.h"
 #include "dvs_problem.h"
 #include "dvs_sv.h"
@@ -130,6 +131,13 @@ static const Variable *_var_of(const dvs_ctx_t *ctx, uint32_t id) {
     return &ctx->vars[r];
 }
 
+/* Nested deeper than the stack can hold: the constraint is skipped, as one
+ * with a node the validator does not evaluate is. The guard is a cache, so
+ * writing it through the const context is harmless. */
+static int _deep(const dvs_ctx_t *ctx) {
+    return dvs_stack_low((dvs_stack_guard_t *)&ctx->stack_guard);
+}
+
 static int _vis_arith(dvs_binop_t op) {
     switch (op) {
     case DVS_BIN_ADD: case DVS_BIN_SUB: case DVS_BIN_MUL: case DVS_BIN_DIV: case DVS_BIN_MOD:
@@ -144,7 +152,7 @@ static int _vis_arith(dvs_binop_t op) {
 static VTy _vtype(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
                   int *skip) {
     VTy t = { 1, 0 };
-    if (ref == EXPR_NULL) { *skip = 1; return t; }
+    if (ref == EXPR_NULL || _deep(ctx)) { *skip = 1; return t; }
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
     switch (k) {
     case EXPR_VAR: {
@@ -260,7 +268,7 @@ static int _cmp(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_binop_t op,
 static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
               uint16_t W, uint8_t S, int *skip) {
     if (*skip) return 0;
-    if (ref == EXPR_NULL || W > V_MAXW) { *skip = 1; return 0; }
+    if (ref == EXPR_NULL || W > V_MAXW || _deep(ctx)) { *skip = 1; return 0; }
     VU M = _mask_for(W);
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
     switch (k) {
@@ -470,17 +478,34 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
     }
 }
 
-/* Compact expression-tree dumper for diagnostics. Prints a single-line
- * s-expression with var values inlined; truncated at depth 8. */
+/* Compact expression-tree dumper for diagnostics: a single-line
+ * s-expression, truncated at depth 16 and at the buffer size. It builds the
+ * whole line in memory so a caller can emit it with one write (parallel
+ * solver processes then do not interleave their lines). With `show_vals`
+ * each variable prints its current value (`v3[w8]=5`); without, it prints
+ * its id and width only (`v3[w8]`). */
+typedef struct { char *buf; size_t n, len; } DumpBuf;
+
+static void _dput(DumpBuf *d, const char *fmt, ...) {
+    if (d->len + 1 >= d->n) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(d->buf + d->len, d->n - d->len, fmt, ap);
+    va_end(ap);
+    if (w < 0) return;
+    d->len += (size_t)w;
+    if (d->len >= d->n) d->len = d->n - 1;
+}
+
 static void _dump_expr(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
-                        dvs_expr_t ref, FILE *err, int depth) {
-    if (depth > 16) { fprintf(err, "..."); return; }
-    if (ref == EXPR_NULL) { fprintf(err, "<null>"); return; }
+                        dvs_expr_t ref, DumpBuf *d, int show_vals, int depth) {
+    if (depth > 16) { _dput(d, "..."); return; }
+    if (ref == EXPR_NULL) { _dput(d, "<null>"); return; }
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
     switch (k) {
     case EXPR_CONST: {
         ExprConst *ec = (ExprConst *)dvs_pool_ptr(&sp->pool, ref);
-        fprintf(err, "%lld", (long long)ec->value);
+        _dput(d, "%lld", (long long)ec->value);
         return;
     }
     case EXPR_VAR: {
@@ -492,12 +517,12 @@ static void _dump_expr(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
                     resolved = ctx->var_alias[resolved];
             }
             const Variable *v = &ctx->vars[resolved];
-            fprintf(err, "v%u%s[w%u]=%lld", ev->var_id,
-                    resolved != ev->var_id ? "*" : "",
-                    ctx->vars[ev->var_id].width,
-                    (long long)var_lo64(ctx, v));
+            _dput(d, "v%u%s[w%u]", ev->var_id,
+                  resolved != ev->var_id ? "*" : "",
+                  ctx->vars[ev->var_id].width);
+            if (show_vals) _dput(d, "=%lld", (long long)var_lo64(ctx, v));
         } else {
-            fprintf(err, "v%u<oob>", ev->var_id);
+            _dput(d, "v%u<oob>", ev->var_id);
         }
         return;
     }
@@ -509,68 +534,108 @@ static void _dump_expr(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
         };
         const char *n = (eb->op < (int)(sizeof(names)/sizeof(names[0])))
                         ? names[eb->op] : "?";
-        fprintf(err, "(%s ", n);
-        _dump_expr(ctx, sp, eb->lhs, err, depth+1);
-        fprintf(err, " ");
-        _dump_expr(ctx, sp, eb->rhs, err, depth+1);
-        fprintf(err, ")");
+        _dput(d, "(%s ", n);
+        _dump_expr(ctx, sp, eb->lhs, d, show_vals, depth+1);
+        _dput(d, " ");
+        _dump_expr(ctx, sp, eb->rhs, d, show_vals, depth+1);
+        _dput(d, ")");
         return;
     }
     case EXPR_UNARY: {
         ExprUnary *eu = (ExprUnary *)dvs_pool_ptr(&sp->pool, ref);
         static const char *names[] = { "neg", "not", "~" };
         const char *n = (eu->op < 3) ? names[eu->op] : "?";
-        fprintf(err, "(%s ", n);
-        _dump_expr(ctx, sp, eu->operand, err, depth+1);
-        fprintf(err, ")");
+        _dput(d, "(%s ", n);
+        _dump_expr(ctx, sp, eu->operand, d, show_vals, depth+1);
+        _dput(d, ")");
         return;
     }
     case EXPR_ITE: {
         ExprITE *ei = (ExprITE *)dvs_pool_ptr(&sp->pool, ref);
-        fprintf(err, "(ite ");
-        _dump_expr(ctx, sp, ei->cond, err, depth+1);
-        fprintf(err, " ");
-        _dump_expr(ctx, sp, ei->then_e, err, depth+1);
-        fprintf(err, " ");
-        _dump_expr(ctx, sp, ei->else_e, err, depth+1);
-        fprintf(err, ")");
+        _dput(d, "(ite ");
+        _dump_expr(ctx, sp, ei->cond, d, show_vals, depth+1);
+        _dput(d, " ");
+        _dump_expr(ctx, sp, ei->then_e, d, show_vals, depth+1);
+        _dput(d, " ");
+        _dump_expr(ctx, sp, ei->else_e, d, show_vals, depth+1);
+        _dput(d, ")");
+        return;
+    }
+    case EXPR_IN_RANGE: {
+        ExprInRange *er = (ExprInRange *)dvs_pool_ptr(&sp->pool, ref);
+        _dput(d, "(inside ");
+        _dump_expr(ctx, sp, er->value, d, show_vals, depth+1);
+        _dput(d, " [");
+        _dump_expr(ctx, sp, er->lo, d, show_vals, depth+1);
+        _dput(d, ":");
+        _dump_expr(ctx, sp, er->hi, d, show_vals, depth+1);
+        _dput(d, "])");
+        return;
+    }
+    case EXPR_IN_SET: {
+        ExprInSet *es = (ExprInSet *)dvs_pool_ptr(&sp->pool, ref);
+        const dvs_expr_t *el = (const dvs_expr_t *)(es + 1);
+        _dput(d, "(inside ");
+        _dump_expr(ctx, sp, es->value, d, show_vals, depth+1);
+        _dput(d, " {");
+        for (uint32_t i = 0; i < es->n_elems; i++) {
+            if (i) _dput(d, " ");
+            if (i == 8) { _dput(d, "...+%u", es->n_elems - 8); break; }
+            _dump_expr(ctx, sp, el[i], d, show_vals, depth+1);
+        }
+        _dput(d, "})");
+        return;
+    }
+    case EXPR_IN_RANGES: {
+        ExprInRanges *er = (ExprInRanges *)dvs_pool_ptr(&sp->pool, ref);
+        _dput(d, "(inside ");
+        _dump_expr(ctx, sp, er->value, d, show_vals, depth+1);
+        _dput(d, " ranges%u)", er->n_ranges);
         return;
     }
     case EXPR_EXTEND: {
         ExprExtend *ee = (ExprExtend *)dvs_pool_ptr(&sp->pool, ref);
-        fprintf(err, "(%sext[%u->%u] ", ee->sign_extend ? "s" : "z",
-                ee->from_bits, ee->to_bits);
-        _dump_expr(ctx, sp, ee->operand, err, depth+1);
-        fprintf(err, ")");
+        _dput(d, "(%sext[%u->%u] ", ee->sign_extend ? "s" : "z",
+              ee->from_bits, ee->to_bits);
+        _dump_expr(ctx, sp, ee->operand, d, show_vals, depth+1);
+        _dput(d, ")");
         return;
     }
     case EXPR_CAST: {
         ExprCast *ec = (ExprCast *)dvs_pool_ptr(&sp->pool, ref);
-        fprintf(err, "(cast[%s%u] ", ec->to_signed ? "s" : "u", ec->to_bits);
-        _dump_expr(ctx, sp, ec->operand, err, depth+1);
-        fprintf(err, ")");
+        _dput(d, "(cast[%s%u] ", ec->to_signed ? "s" : "u", ec->to_bits);
+        _dump_expr(ctx, sp, ec->operand, d, show_vals, depth+1);
+        _dput(d, ")");
         return;
     }
     case EXPR_EXTRACT: {
         ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ref);
-        fprintf(err, "(extract[%u:%u] ", ex->hi_bit, ex->lo_bit);
-        _dump_expr(ctx, sp, ex->operand, err, depth+1);
-        fprintf(err, ")");
+        _dput(d, "(extract[%u:%u] ", ex->hi_bit, ex->lo_bit);
+        _dump_expr(ctx, sp, ex->operand, d, show_vals, depth+1);
+        _dput(d, ")");
         return;
     }
     case EXPR_CONCAT: {
         ExprConcat *ec = (ExprConcat *)dvs_pool_ptr(&sp->pool, ref);
-        fprintf(err, "(concat[lo%u] ", ec->lo_width);
-        _dump_expr(ctx, sp, ec->hi, err, depth+1);
-        fprintf(err, " ");
-        _dump_expr(ctx, sp, ec->lo, err, depth+1);
-        fprintf(err, ")");
+        _dput(d, "(concat[lo%u] ", ec->lo_width);
+        _dump_expr(ctx, sp, ec->hi, d, show_vals, depth+1);
+        _dput(d, " ");
+        _dump_expr(ctx, sp, ec->lo, d, show_vals, depth+1);
+        _dput(d, ")");
         return;
     }
     default:
-        fprintf(err, "<kind=%d>", k);
+        _dput(d, "<kind=%d>", k);
         return;
     }
+}
+
+void dvs_expr_dump(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
+                   dvs_expr_t ref, int show_vals, char *buf, size_t n) {
+    if (!buf || n == 0) return;
+    DumpBuf d = { buf, n, 0 };
+    buf[0] = 0;
+    _dump_expr(ctx, sp, ref, &d, show_vals, 0);
 }
 
 int dvs_solver_validate_model(dvs_ctx_t *ctx, dvs_problem_t *sp, FILE *err) {
@@ -589,11 +654,11 @@ int dvs_solver_validate_model(dvs_ctx_t *ctx, dvs_problem_t *sp, FILE *err) {
                 int op = -1;
                 if (rk == EXPR_BINARY) op = ((ExprBinary *)dvs_pool_ptr(&sp->pool, cs->root))->op;
                 else if (rk == EXPR_UNARY) op = ((ExprUnary *)dvs_pool_ptr(&sp->pool, cs->root))->op;
+                char line[1024];
+                dvs_expr_dump(ctx, sp, cs->root, 1, line, sizeof line);
                 fprintf(err,
-                    "model-validation: constraint #%u (id=%u, kind=%d op=%d) violated: ",
-                    idx, cs->constraint_id, rk, op);
-                _dump_expr(ctx, sp, cs->root, err, 0);
-                fprintf(err, "\n");
+                    "model-validation: constraint #%u (id=%u, kind=%d op=%d) violated: %s\n",
+                    idx, cs->constraint_id, rk, op, line);
             }
         }
         cref = cs->next;

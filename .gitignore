@@ -238,3 +238,6 @@ docs/site/results/_gen/
 # Perf runs: tag builds, riscv-dv generators and work dirs; local run records
 perf-builds/
 perf-out/
+
+# Private working notes (may reference internal tool paths / licensed-tool results); never committed
+docs/notes/

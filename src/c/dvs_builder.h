@@ -37,6 +37,9 @@ typedef struct BuilderBlock {
 struct dvs_builder_s {
     BuilderBlock *first;            /* head of block list              */
     BuilderBlock *current;          /* tail (active block)             */
+    BuilderBlock **blocks;          /* every block, by base_offset     */
+    uint32_t      n_blocks;
+    uint32_t      cap_blocks;
     uint32_t      virtual_used;     /* running total logical offset    */
     uint32_t      block_size;       /* capacity for new blocks         */
     dvs_alloc_t  *alloc;            /* backing allocator (NULL=malloc) */
@@ -72,6 +75,19 @@ struct dvs_builder_s {
  */
 dvs_problem_t *dvs_builder_finalize_reserve(dvs_builder_t *b, size_t *size,
                                        uint32_t extra_bytes);
+
+/**
+ * Bring `prev`, a problem this function returned earlier for the same builder,
+ * up to date: copy only the pool bytes added since, growing it (realloc) when
+ * its capacity is short. Valid because the pool is append-only between
+ * resets: nothing rewrites a byte a finalize has copied (rewind drops list
+ * items without reclaiming their bytes). With prev NULL, a full copy with
+ * headroom. Returns the (possibly moved) problem; on failure NULL, and prev is
+ * untouched. The caller frees it with free(); with a custom allocator this is
+ * a plain dvs_builder_finalize.
+ */
+dvs_problem_t *dvs_builder_finalize_append(dvs_builder_t *b, dvs_problem_t *prev,
+                                           size_t *size);
 
 /**
  * A position in the builder's item lists (vars, constraints, sources,
@@ -139,13 +155,13 @@ void *dvs_builder_ref_ptr(const dvs_builder_t *b, dvs_expr_t ref);
 /** A sized constant of `width` bits (see ExprConst in dvs_problem.h).
  *  width 0 is the same as dvs_builder_expr_const (an unsized literal). */
 dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value,
-                                 uint8_t is_signed, uint8_t width);
+                                 uint8_t is_signed, uint16_t width);
 /** INTERNAL (not part of the documented surface): an explicit
  *  width/signedness conversion node, EXPR_SV_CAST (see dvs_problem.h). Used
  *  by front ends that build explicit problems, e.g. the SMT-LIB2 front end
  *  reading an unsigned bit pattern as signed for `bvashr`. */
 dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
-                             uint8_t from_bits, uint8_t to_bits,
+                             uint16_t from_bits, uint16_t to_bits,
                              uint8_t sign_extend, uint8_t dst_signed);
 
 /** Build an array-select expression: result = base[index]. */

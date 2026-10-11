@@ -4,6 +4,7 @@
 #include "dvs_ctx.h"
 #include "dvs_trail.h"
 #include "dvs_lcg.h"
+#include "dvs_search.h"
 
 /* ------------------------------------------------------------------ */
 /* Internal: wake all watchers on a variable                          */
@@ -273,6 +274,10 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
         if (p->flags & PROP_FLAG_ENTAILED) continue;
 
         if ((++ctx->prop_ticks & 0x3FFu) == 0 && _prop_over_budget(ctx)) {
+            /* Put back the propagator just taken: an abandoned propagation
+             * must leave the queue whole, or whoever carries on from here
+             * (a solve after a pin) never runs it. */
+            prop_enqueue(ctx, prop_ref);
             ctx->prop_aborted = 1;
             return PROP_CONFLICT;
         }
@@ -307,6 +312,14 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
             /* Stash the conflicting propagator for downstream conflict
              * analysis (dvs_analyze_conflict). */
             ctx->conflict_prop_ref = prop_ref;
+            /* Keep it queued. A backtrack clears the queue; without one
+             * (a root conflict, a refuted pin) the next propagation must
+             * find the conflict again. A propagator can fail without
+             * emptying a domain (the ite's, on two disjoint branches), and
+             * dropped here, the next solve started from the contradictory
+             * bounds with nothing queued to object and returned a model
+             * that broke the constraint (B104). */
+            prop_enqueue(ctx, prop_ref);
             return PROP_CONFLICT;
         }
         if (r == PROP_ENTAILED) p->flags |= PROP_FLAG_ENTAILED;
@@ -319,5 +332,14 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
 /* ------------------------------------------------------------------ */
 
 PropResult dvs_solver_propagate_only(dvs_ctx_t *ctx) {
-    return dvs_solver_propagate(ctx);
+    dvs_search_discard(ctx);
+    PropResult r = dvs_solver_propagate(ctx);
+    /* Abandoned at the trail cap, not refuted: no conflict to report, and
+     * the flag must not outlive the call (every later propagation would
+     * fail on it). */
+    if (r == PROP_CONFLICT && ctx->prop_aborted) {
+        ctx->prop_aborted = 0;
+        return PROP_OK;
+    }
+    return r;
 }

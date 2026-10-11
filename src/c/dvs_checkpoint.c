@@ -1,5 +1,6 @@
 #include <string.h>
 #include "dvs_ctx.h"
+#include "dvs_search.h"
 #include "dvs_oracle_hooks.h"
 #include "dvs_lcg.h"
 #include "dvs_propagator.h"
@@ -19,6 +20,7 @@ int dvs_solver_checkpoint(dvs_ctx_t *ctx) {
 
 static int _solver_checkpoint(dvs_ctx_t *ctx) {
     if (ctx->n_checkpoints >= MAX_CHECKPOINTS) return -1;
+    dvs_search_discard(ctx);
 
     uint32_t cp = ctx->n_checkpoints++;
     CheckpointMark *m = &ctx->checkpoints[cp];
@@ -60,6 +62,7 @@ void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
 
 static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
     if (cp >= ctx->n_checkpoints) return;
+    ctx->search_sealed = 0;            /* the backtrack below undoes it */
 
     CheckpointMark *m = &ctx->checkpoints[cp];
 

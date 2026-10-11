@@ -36,7 +36,7 @@ def _check(asserts: str) -> str:
     "(assert (ite (= z z) (bvuge y x) (bvugt (_ bv1 3) (_ bv4 3))))",
     "(assert (ite (= z (_ bv5 6)) false (bvuge y x)))",
     "(assert (ite (= z (_ bv5 6)) (bvuge y x) (bvult y x)))",
-    "(assert (ite (= x (_ bv2 3)) (= y z) (= y x)))",
+    "(assert (ite (= x (_ bv2 3)) (= y ((_ extract 2 0) z)) (= y x)))",
 ])
 def test_satisfiable_ite_constraint(asserts):
     assert _check(asserts) == "sat"

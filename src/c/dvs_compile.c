@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "dvs_ctx.h"
+#include "dvs_search.h"
 #include "dvs_oracle_hooks.h"
 #include "dvs_diffcycle.h"
 #include "dvs_propagator.h"
@@ -293,7 +294,7 @@ static int _is_var_maybe_extend(dvs_problem_t *sp, dvs_expr_t ref,
 /* Look up a variable's declaration in the problem. Returns 0 if `vid` has no
  * VarSpec (an aux the compiler minted, which has no declared signedness here). */
 static int _var_decl(dvs_problem_t *sp, uint32_t vid,
-                     uint8_t *out_width, uint8_t *out_signed) {
+                     uint16_t *out_width, uint8_t *out_signed) {
     for (dvs_expr_t cur = sp->vars_head; cur != EXPR_NULL; ) {
         VarSpec *v = (VarSpec *)dvs_pool_ptr(&sp->pool, cur);
         if (v->var_id == vid) {
@@ -330,7 +331,7 @@ static int _or_leaf_var(dvs_problem_t *sp, dvs_expr_t ref, uint32_t *out_vid) {
     int sign_ext;
     if (!_is_var_maybe_extend(sp, ref, &vid, &inner_w, &sign_ext)) return 0;
     if (inner_w > 0) {
-        uint8_t w, sgn;
+        uint16_t w; uint8_t sgn;
         if (sign_ext) return 0;
         if (!_var_decl(sp, vid, &w, &sgn)) return 0;
         if (sgn) return 0;
@@ -413,10 +414,11 @@ static int _try_fold_extend_cmp(uint32_t op, int64_t cv,
  *     to (cmp v masked_const) when the constant fits in v's width
  *   - (cmp const (zero_extend v))  symmetrically */
 static int _classify_or_leaf(dvs_problem_t *sp, dvs_expr_t ref,
-                              OrClause *out, int *truth_known, int *truth) {
+                              OrClause *out, int *truth_known, int *truth,
+                              int depth) {
     *truth_known = 0;
     *truth = 0;
-    if (ref == EXPR_NULL) return 0;
+    if (ref == EXPR_NULL || depth > 64) return 0;   /* 64 wrappers: unsupported */
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
 
     /* A constant leaf: SV elaboration folds a comparison its variable's range
@@ -434,7 +436,7 @@ static int _classify_or_leaf(dvs_problem_t *sp, dvs_expr_t ref,
         OrClause inner;
         int it_known = 0, it_truth = 0;
         int rc = _classify_or_leaf(sp, eu->operand, &inner,
-                                    &it_known, &it_truth);
+                                    &it_known, &it_truth, depth + 1);
         if (it_known) {
             *truth_known = 1;
             *truth = !it_truth;
@@ -457,12 +459,12 @@ static int _classify_or_leaf(dvs_problem_t *sp, dvs_expr_t ref,
         int64_t tc, fc;
         if (_is_const(sp, ei->then_e, &tc) && _is_const(sp, ei->else_e, &fc)) {
             if (tc == 1 && fc == 0)
-                return _classify_or_leaf(sp, ei->cond, out, truth_known, truth);
+                return _classify_or_leaf(sp, ei->cond, out, truth_known, truth, depth + 1);
             if (tc == 0 && fc == 1) {
                 OrClause inner;
                 int it_known = 0, it_truth = 0;
                 int rc = _classify_or_leaf(sp, ei->cond, &inner,
-                                            &it_known, &it_truth);
+                                            &it_known, &it_truth, depth + 1);
                 if (it_known) {
                     *truth_known = 1;
                     *truth = !it_truth;
@@ -570,18 +572,22 @@ static dvs_expr_t _strip_bool1(dvs_problem_t *sp, dvs_expr_t ref) {
  * shape we cannot handle.
  */
 static int _flatten_or(dvs_problem_t *sp, dvs_expr_t ref,
-                        OrClause *out, int max_clauses, int *any_true) {
-    if (ref == EXPR_NULL) return -1;
+                        OrClause *out, int max_clauses, int *any_true,
+                        int depth) {
+    /* An OR nested deeper than max_clauses has more leaves than fit. */
+    if (ref == EXPR_NULL || depth > max_clauses) return -1;
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
 
     if (k == EXPR_BINARY) {
         ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
         if (e->op == DVS_BIN_OR) {
-            int n_left = _flatten_or(sp, e->lhs, out, max_clauses, any_true);
+            int n_left = _flatten_or(sp, e->lhs, out, max_clauses, any_true,
+                                     depth + 1);
             if (n_left < 0) return -1;
             if (*any_true) return n_left;
             int n_right = _flatten_or(sp, e->rhs, out + n_left,
-                                       max_clauses - n_left, any_true);
+                                       max_clauses - n_left, any_true,
+                                       depth + 1);
             if (n_right < 0) return -1;
             return n_left + n_right;
         }
@@ -590,7 +596,7 @@ static int _flatten_or(dvs_problem_t *sp, dvs_expr_t ref,
     /* Non-OR leaf */
     OrClause leaf;
     int truth_known = 0, truth = 0;
-    int rc = _classify_or_leaf(sp, ref, &leaf, &truth_known, &truth);
+    int rc = _classify_or_leaf(sp, ref, &leaf, &truth_known, &truth, 0);
     if (truth_known) {
         if (truth) *any_true = 1;
         return 0;   /* either short-circuit, or drop the false leaf */
@@ -1107,9 +1113,9 @@ static int _compile_binexpr_eq_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
  * Returns the guard var ID, or EXPR_NULL when the shape is too complex
  * for the current materialiser to handle. */
 static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
-                               dvs_expr_t ref, uint8_t width);
+                               dvs_expr_t ref, uint16_t width);
 static uint32_t _const_to_var_like(dvs_ctx_t *ctx, dvs_problem_t *sp,
-                                   dvs_expr_t ref, uint8_t width, uint32_t peer,
+                                   dvs_expr_t ref, uint16_t width, uint32_t peer,
                                    int is_cmp);
 
 /** Create an AUX variable under the SAME tier policy as a declared variable.
@@ -1185,7 +1191,7 @@ static int _is_bool_op(dvs_binop_t op) {
  * A bare constant returns 0 ("no width of its own") so it takes the width of
  * whatever it is combined with rather than forcing everything to 32.
  */
-static uint8_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
+static uint16_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
                             int depth) {
     if (ref == EXPR_NULL || depth > 32) return 0;
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
@@ -1194,20 +1200,25 @@ static uint8_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
         ExprVar *ev = (ExprVar *)dvs_pool_ptr(&sp->pool, ref);
         uint32_t vid = _resolve(ctx, ev->var_id);
         if (vid >= ctx->n_vars_capacity) return 0;
-        return (uint8_t)ctx->vars[vid].width;
+        return ctx->vars[vid].width;
     }
     case EXPR_CONST:
         /* A sized constant has its own width; an unsized one adapts. */
         return ((ExprConst *)dvs_pool_ptr(&sp->pool, ref))->width;
     case EXPR_EXTEND: {
         ExprExtend *ee = (ExprExtend *)dvs_pool_ptr(&sp->pool, ref);
-        return (uint8_t)ee->to_bits;
+        return ee->to_bits;
     }
     case EXPR_SV_CAST:
         return ((ExprSvCast *)dvs_pool_ptr(&sp->pool, ref))->to_bits;
     case EXPR_EXTRACT: {
         ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ref);
-        return (uint8_t)(ex->hi_bit - ex->lo_bit + 1);
+        return (uint16_t)(ex->hi_bit - ex->lo_bit + 1);
+    }
+    case EXPR_CONCAT: {
+        ExprConcat *ec = (ExprConcat *)dvs_pool_ptr(&sp->pool, ref);
+        uint16_t hw = _expr_width(ctx, sp, ec->hi, depth + 1);
+        return hw ? (uint16_t)(hw + ec->lo_width) : 0;
     }
     case EXPR_UNARY: {
         ExprUnary *eu = (ExprUnary *)dvs_pool_ptr(&sp->pool, ref);
@@ -1215,8 +1226,8 @@ static uint8_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
     }
     case EXPR_ITE: {
         ExprITE *ei = (ExprITE *)dvs_pool_ptr(&sp->pool, ref);
-        uint8_t tw = _expr_width(ctx, sp, ei->then_e, depth + 1);
-        uint8_t ew = _expr_width(ctx, sp, ei->else_e, depth + 1);
+        uint16_t tw = _expr_width(ctx, sp, ei->then_e, depth + 1);
+        uint16_t ew = _expr_width(ctx, sp, ei->else_e, depth + 1);
         return tw > ew ? tw : ew;
     }
     case EXPR_BINARY: {
@@ -1226,8 +1237,8 @@ static uint8_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
          * the shift amount is unrelated and must not widen it. */
         if (eb->op == DVS_BIN_LSHIFT || eb->op == DVS_BIN_RSHIFT || eb->op == DVS_BIN_ASHR)
             return _expr_width(ctx, sp, eb->lhs, depth + 1);
-        uint8_t lw = _expr_width(ctx, sp, eb->lhs, depth + 1);
-        uint8_t rw = _expr_width(ctx, sp, eb->rhs, depth + 1);
+        uint16_t lw = _expr_width(ctx, sp, eb->lhs, depth + 1);
+        uint16_t rw = _expr_width(ctx, sp, eb->rhs, depth + 1);
         return lw > rw ? lw : rw;
     }
     default:
@@ -1458,12 +1469,32 @@ static uint32_t _reify_cmp_var_var(dvs_ctx_t *ctx, dvs_binop_t op,
 }
 
 static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) {
-    if (ref == EXPR_NULL) return EXPR_NULL;
+    if (ref == EXPR_NULL || dvs_stack_low(&ctx->stack_guard)) return EXPR_NULL;
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
 
     if (k == EXPR_VAR) {
         ExprVar *ev = (ExprVar *)dvs_pool_ptr(&sp->pool, ref);
-        return _resolve(ctx, ev->var_id);
+        uint32_t vid = _resolve(ctx, ev->var_id);
+        /* A guard is 0/1. A variable whose domain is wider is true when
+         * nonzero, so it gets a guard `g <-> v != 0`. Returned as is, a 2-bit
+         * v = 2 made `!v` (1 - g) come out -1 and `!v || a` wrong-unsat
+         * (B98). Domains only narrow, so one inside [0,1] now stays there. */
+        Variable *v = &ctx->vars[vid];
+        if (var_lo64(ctx, v) >= 0 && var_hi64(ctx, v) <= 1) return vid;
+        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        uint32_t z = ctx->n_vars;
+        if (_init_aux_tiered(ctx, &ctx->vars[z], v->width,
+                             (uint8_t)(VAR_AUX | (v->flags & VAR_SIGNED)), 0, 0) != 0)
+            return EXPR_NULL;
+        ctx->n_vars = z + 1;
+        if (ctx->watcher_heads) ctx->watcher_heads[z] = EXPR_NULL;
+        uint32_t g = _new_guard(ctx);
+        if (g == EXPR_NULL) return EXPR_NULL;
+        if (_var_needs_wide(ctx, vid) || _var_needs_wide(ctx, z))
+            prop_add_reification_eq_64(ctx, g, vid, z, 0);
+        else
+            prop_add_reification_eq_32(ctx, g, vid, z, 0);
+        return _invert_guard(ctx, g);
     }
     if (k == EXPR_CONST) {
         if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
@@ -1517,7 +1548,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         else
             val_ref = ((ExprInRanges *)dvs_pool_ptr(&sp->pool, ref))->value;
 
-        uint8_t w = _expr_width(ctx, sp, val_ref, 0);
+        uint16_t w = _expr_width(ctx, sp, val_ref, 0);
         if (w == 0) w = 32;
         if (w > 64) return EXPR_NULL;
         uint32_t v_id = _value_to_var(ctx, sp, val_ref, w);
@@ -1609,6 +1640,22 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         return _or_guards(ctx, _bool_to_var(ctx, sp, eb->lhs),
                                _bool_to_var(ctx, sp, eb->rhs));
 
+    /* A bitwise operator over two 1-bit values is the Boolean connective of
+     * their truths (one bit: nonzero is the bit). svcorpus OR leaves arrive as
+     * `or(b1 & b2, ite(...))` over __Vbv-lifted guards; without this arm the
+     * whole disjunction was left uncompiled. */
+    if ((eb->op == DVS_BIN_BAND || eb->op == DVS_BIN_BOR || eb->op == DVS_BIN_BXOR)
+            && _expr_width(ctx, sp, eb->lhs, 0) == 1
+            && _expr_width(ctx, sp, eb->rhs, 0) == 1) {
+        uint32_t gl = _bool_to_var(ctx, sp, eb->lhs);
+        if (gl == EXPR_NULL) return EXPR_NULL;
+        uint32_t gr = _bool_to_var(ctx, sp, eb->rhs);
+        if (gr == EXPR_NULL) return EXPR_NULL;
+        if (eb->op == DVS_BIN_BAND) return _and_guards(ctx, gl, gr);
+        if (eb->op == DVS_BIN_BOR)  return _or_guards(ctx, gl, gr);
+        return _reify_cmp_var_var(ctx, DVS_BIN_NEQ, gl, gr);
+    }
+
     /* Comparison: turn into a reified guard. Supported shapes are
      * (cmp var const), (cmp const var), and (cmp var var). For non-EQ
      * comparisons we canonicalise to `x ≤ y` (the form reification_32
@@ -1646,7 +1693,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
             }
         }
         cmp_vid = _resolve(ctx, cmp_vid);
-        uint8_t cv_w = ctx->vars[cmp_vid].width;
+        uint16_t cv_w = ctx->vars[cmp_vid].width;
 
         /* Compile-time fold of an inequality that is trivially true/false at the
          * var's UNSIGNED range boundary [0, 2^w-1]. Critical for `var >= 0`
@@ -1784,9 +1831,9 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
     switch (eb->op) {
     case DVS_BIN_EQ: case DVS_BIN_NEQ: case DVS_BIN_LT:
     case DVS_BIN_LTE: case DVS_BIN_GT: case DVS_BIN_GTE: {
-        uint8_t lw = _expr_width(ctx, sp, eb->lhs, 0);
-        uint8_t rw = _expr_width(ctx, sp, eb->rhs, 0);
-        uint8_t w = lw > rw ? lw : rw;
+        uint16_t lw = _expr_width(ctx, sp, eb->lhs, 0);
+        uint16_t rw = _expr_width(ctx, sp, eb->rhs, 0);
+        uint16_t w = lw > rw ? lw : rw;
         if (w == 0) w = 32;
         if (w > 64) return EXPR_NULL;   /* tier-2 operands: decline */
         uint32_t a_id = _value_to_var(ctx, sp, eb->lhs, w);
@@ -1807,9 +1854,42 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
  * a DVS_BIN_EQ(var, const) comparison (including deeply nested ITE chains).
  * Returns the var_id on success, EXPR_NULL on failure.
  * `width` hints the bit-width for new const/result vars (0 → 32). */
+/* Fold a tree of `~` and `-` over one SIZED constant. On success sets the
+ * value (in the constant's type: masked when unsigned, sign-extended when
+ * signed; the raw bits at 64), its width and signedness, and returns 1. Both
+ * operators wrap in that type, as model validation evaluates them. */
+static int _fold_const_unary(const dvs_problem_t *sp, dvs_expr_t ref,
+                             int64_t *v, uint16_t *w, uint8_t *s) {
+    if (ref == EXPR_NULL) return 0;
+    ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
+    uint64_t u;
+    if (k == EXPR_CONST) {
+        const ExprConst *ec = (const ExprConst *)dvs_pool_ptr(&sp->pool, ref);
+        if (ec->width == 0 || ec->width > 64) return 0;
+        *w = ec->width;
+        *s = ec->is_signed ? 1 : 0;
+        u = (uint64_t)ec->value;
+    } else if (k == EXPR_UNARY) {
+        const ExprUnary *eu = (const ExprUnary *)dvs_pool_ptr(&sp->pool, ref);
+        if (eu->op != DVS_UN_INVERT && eu->op != DVS_UN_NEG) return 0;
+        int64_t a;
+        if (!_fold_const_unary(sp, eu->operand, &a, w, s)) return 0;
+        u = eu->op == DVS_UN_INVERT ? ~(uint64_t)a : (uint64_t)0 - (uint64_t)a;
+    } else {
+        return 0;
+    }
+    if (*w < 64) {
+        uint64_t m = (1ULL << *w) - 1;
+        u &= m;
+        if (*s && ((u >> (*w - 1)) & 1u)) u |= ~m;
+    }
+    *v = (int64_t)u;
+    return 1;
+}
+
 static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
-                               dvs_expr_t ref, uint8_t width) {
-    if (ref == EXPR_NULL) return EXPR_NULL;
+                               dvs_expr_t ref, uint16_t width) {
+    if (ref == EXPR_NULL || dvs_stack_low(&ctx->stack_guard)) return EXPR_NULL;
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
 
     if (k == EXPR_VAR) {
@@ -1821,13 +1901,64 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         if (ec->width) return _const_singleton_var(ctx, sp, ref, ec->width);
         if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
         uint32_t cv_id = ctx->n_vars;
-        uint8_t w = width ? width : 32;
+        uint16_t w = width ? width : 32;
         if (_init_aux_tiered(ctx, &ctx->vars[cv_id], w, VAR_AUX,
                              ec->value, ec->value) != 0)
             return EXPR_NULL;   /* B24 */
         ctx->n_vars = cv_id + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
         return cv_id;
+    }
+    if (k == EXPR_UNARY) {
+        /* `~c` / `-c` over a sized constant: fold it to a constant. The SMT2
+         * lowering of bvudiv (and so bvsdiv) gives a zero divisor the value
+         * `~0`, and with no arm here every division by a variable was left
+         * uncompiled. Folded exactly as model validation evaluates it: in the
+         * constant's own type, wrapped. A sized constant only, and only at
+         * the requested width: an unsized one takes its width from context
+         * (SV elaboration has already rewritten those). */
+        ExprUnary *eu = (ExprUnary *)dvs_pool_ptr(&sp->pool, ref);
+        int64_t fv; uint16_t fw; uint8_t fs;
+        if (_fold_const_unary(sp, ref, &fv, &fw, &fs)) {
+            if (width && width != fw) return EXPR_NULL;
+            if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+            uint32_t cv_id = ctx->n_vars;
+            if (_init_aux_tiered(ctx, &ctx->vars[cv_id], fw,
+                                 (uint8_t)(VAR_AUX | (fs ? VAR_SIGNED : 0)), fv, fv) != 0)
+                return EXPR_NULL;
+            ctx->n_vars = cv_id + 1;
+            if (ctx->watcher_heads) ctx->watcher_heads[cv_id] = EXPR_NULL;
+            return cv_id;
+        }
+        /* `~x` of a value: the bnot propagator, the same link a top-level
+         * `r == ~x` gets. r takes x's width and signedness. bnot reverses the
+         * order exactly: ~x == -x-1 when signed, (2^w-1) - x when unsigned --
+         * at 64 bits too, since the bound patterns are then ordered unsigned
+         * (var_b_lt). */
+        if (eu->op == DVS_UN_INVERT) {
+            uint32_t a_id = _value_to_var(ctx, sp, eu->operand, width);
+            if (a_id == EXPR_NULL) return EXPR_NULL;
+            const Variable *av = &ctx->vars[a_id];
+            uint16_t w = av->width;
+            if ((width && width != w) || w == 0 || w > 64) return EXPR_NULL;
+            if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+            uint32_t r_id = ctx->n_vars;
+            int64_t lo, hi;
+            if (av->flags & VAR_SIGNED) {
+                hi = (w >= 64) ? INT64_MAX : ((int64_t)1 << (w - 1)) - 1;
+                lo = -hi - 1;
+            } else {
+                lo = 0; hi = (w >= 64) ? (int64_t)UINT64_MAX : (int64_t)((1ULL << w) - 1);
+            }
+            if (_init_aux_tiered(ctx, &ctx->vars[r_id], w,
+                                 (uint8_t)(VAR_AUX | (av->flags & VAR_SIGNED)), lo, hi) != 0)
+                return EXPR_NULL;
+            ctx->n_vars = r_id + 1;
+            if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
+            prop_add_bounds_bnot_64(ctx, r_id, a_id, 0);
+            return r_id;
+        }
+        return EXPR_NULL;
     }
     if (k == EXPR_ITE) {
         ExprITE *ite = (ExprITE *)dvs_pool_ptr(&sp->pool, ref);
@@ -1859,7 +1990,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                                 _is_var(sp, cmp->rhs, &cmp_vid);
                     if (is_vc || is_cv) {
                         cmp_vid = _resolve(ctx, cmp_vid);
-                        uint8_t cv_w = ctx->vars[cmp_vid].width;
+                        uint16_t cv_w = ctx->vars[cmp_vid].width;
                         /* Guard boolean [0,1] — VAR_AUX: determined by propagation */
                         uint32_t gid = ctx->n_vars;
                         _init_tier0(&ctx->vars[gid], 1, VAR_AUX, 0, 1);
@@ -1909,7 +2040,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         /* Create result var for this ITE — VAR_AUX: determined by propagation */
         if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
         uint32_t r_id = ctx->n_vars;
-        uint8_t w = width ? width : 32;
+        uint16_t w = width ? width : 32;
         int64_t max_val = (w >= 64) ? (int64_t)UINT64_MAX
                         : (int64_t)((1ULL << w) - 1);
         if (_init_aux_tiered(ctx, &ctx->vars[r_id], w, VAR_AUX, 0, max_val) != 0)
@@ -1921,7 +2052,8 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
     }
     if (k == EXPR_EXTRACT) {
         ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ref);
-        uint8_t out_w = (uint8_t)(ex->hi_bit - ex->lo_bit + 1);
+        if (ex->hi_bit > 63) return EXPR_NULL;   /* wider than a CDCL var */
+        uint16_t out_w = (uint16_t)(ex->hi_bit - ex->lo_bit + 1);
         uint32_t src_id = _value_to_var(ctx, sp, ex->operand, 0);
         if (src_id == EXPR_NULL) return EXPR_NULL;
         if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
@@ -1940,6 +2072,35 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         }
         return r_id;
     }
+    if (k == EXPR_CONCAT) {
+        /* {hi, lo} as a value -- `{i[31], i[7], i[30:25], i[11:8]} != 0`, a
+         * RISC-V branch offset -- through the propagator `var == {hi, lo}`
+         * already uses. Both parts must be unsigned variables of exactly
+         * their widths (the propagator reads their values as bits), and the
+         * result below 64 bits (it reasons in signed int64). */
+        ExprConcat cat = *(ExprConcat *)dvs_pool_ptr(&sp->pool, ref);
+        uint16_t lo_w = cat.lo_width;
+        uint16_t hi_w = _expr_width(ctx, sp, cat.hi, 0);
+        if (hi_w == 0 && width > lo_w) hi_w = (uint16_t)(width - lo_w);
+        if (lo_w == 0 || hi_w == 0 || hi_w + lo_w > 63) return EXPR_NULL;
+        uint32_t hi_id = _value_to_var(ctx, sp, cat.hi, hi_w);
+        uint32_t lo_id = _value_to_var(ctx, sp, cat.lo, lo_w);
+        if (hi_id == EXPR_NULL || lo_id == EXPR_NULL) return EXPR_NULL;
+        if (ctx->vars[hi_id].width != hi_w || ctx->vars[lo_id].width != lo_w
+                || (ctx->vars[hi_id].flags & VAR_SIGNED)
+                || (ctx->vars[lo_id].flags & VAR_SIGNED))
+            return EXPR_NULL;
+        if (ctx->n_vars >= ctx->n_vars_capacity) return EXPR_NULL;
+        uint32_t r_id = ctx->n_vars;
+        uint16_t out_w = (uint16_t)(hi_w + lo_w);
+        if (_init_aux_tiered(ctx, &ctx->vars[r_id], out_w, VAR_AUX,
+                             0, (int64_t)((1ULL << out_w) - 1)) != 0)
+            return EXPR_NULL;
+        ctx->n_vars = r_id + 1;
+        if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
+        prop_add_bounds_concat_64(ctx, r_id, hi_id, lo_id, (uint8_t)lo_w, 0);
+        return r_id;
+    }
     if (k == EXPR_EXTEND || k == EXPR_SV_CAST) {
         /* ExprExtend and ExprSvCast share a layout. The result takes the low
          * `from_bits` bits of the operand, extends them to `to_bits` (sign or
@@ -1950,7 +2111,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         uint8_t dst_signed = (k == EXPR_SV_CAST)
             ? ((ExprSvCast *)dvs_pool_ptr(&sp->pool, ref))->dst_signed
             : src_signed;
-        uint8_t from = ee.from_bits, to = ee.to_bits;
+        uint16_t from = ee.from_bits, to = ee.to_bits;
         if (from == 0 || to == 0 || to > 64 || from > to) return EXPR_NULL;
         uint32_t src_id = _value_to_var(ctx, sp, ee.operand, from);
         if (src_id == EXPR_NULL) return EXPR_NULL;
@@ -2070,7 +2231,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
          * or const, under `==`. Everything else -- nested arithmetic, arithmetic
          * under `<`, arithmetic in an OR leaf -- reached no propagator and the
          * constraint was reported uncompiled. */
-        uint8_t w = width;
+        uint16_t w = width;
         if (w == 0) w = _expr_width(ctx, sp, ref, 0);
         if (w == 0) w = 32;
         if (w > 64) return EXPR_NULL;   /* tier-2 operands: decline, don't guess */
@@ -2087,7 +2248,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                         eb->op == DVS_BIN_ASHR);
         ExprKind lk_b = *(ExprKind *)dvs_pool_ptr(&sp->pool, eb->lhs);
         ExprKind rk_b = *(ExprKind *)dvs_pool_ptr(&sp->pool, eb->rhs);
-        uint8_t b_w = is_shift ? 0 : w;
+        uint16_t b_w = is_shift ? 0 : w;
         uint32_t a_id, b_id;
         if (!is_shift && lk_b == EXPR_CONST && rk_b != EXPR_CONST) {
             b_id = _value_to_var(ctx, sp, eb->rhs, b_w);
@@ -2167,7 +2328,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
  * wrapped to a signed -5). Those decline (EXPR_NULL) exactly as before.
  */
 static uint32_t _const_to_var_like(dvs_ctx_t *ctx, dvs_problem_t *sp,
-                                   dvs_expr_t ref, uint8_t width, uint32_t peer,
+                                   dvs_expr_t ref, uint16_t width, uint32_t peer,
                                    int is_cmp) {
     ExprConst *ec = (ExprConst *)dvs_pool_ptr(&sp->pool, ref);
     if (ec->width) return _const_singleton_var(ctx, sp, ref, ec->width);
@@ -2176,7 +2337,7 @@ static uint32_t _const_to_var_like(dvs_ctx_t *ctx, dvs_problem_t *sp,
     if ((ctx->vars[peer].flags & VAR_SIGNED) || (is_cmp && ec->value < 0))
         flags |= VAR_SIGNED;
     uint32_t cv_id = ctx->n_vars;
-    uint8_t w = width ? width : 32;
+    uint16_t w = width ? width : 32;
     if (_init_aux_tiered(ctx, &ctx->vars[cv_id], w, flags,
                          ec->value, ec->value) != 0) {
         int ok = 0;
@@ -2201,6 +2362,7 @@ static uint32_t _const_to_var_like(dvs_ctx_t *ctx, dvs_problem_t *sp,
  * Returns 1 if compiled, 0 if could not be handled, -1 if UNSAT. */
 static int _compile_neg_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t root) {
     if (root == EXPR_NULL) return -1;   /* (not nothing) = false = unsat */
+    if (dvs_stack_low(&ctx->stack_guard)) return 0;   /* too deep: decline */
 
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, root);
     if (k == EXPR_CONST) {
@@ -2210,6 +2372,8 @@ static int _compile_neg_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t
     if (k == EXPR_VAR) {
         ExprVar *ev = (ExprVar *)dvs_pool_ptr(&sp->pool, root);
         uint32_t vid = _resolve(ctx, ev->var_id);
+        /* == 0, not <= 0: a signed var is true when negative (B98). */
+        if (ctx_tighten_lb64(ctx, vid, 0) == PROP_CONFLICT) return -1;
         if (ctx_tighten_ub64(ctx, vid, 0) == PROP_CONFLICT) return -1;
         return 1;
     }
@@ -2260,9 +2424,57 @@ static int _compile_neg_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t
     return 0;
 }
 
+/* _flatten_or for a tree _flatten_or rejects: a leaf that is not a
+ * comparison (`b1 & b2`, a 1-bit ite over guards, a nested and) is reified to
+ * a guard g by _bool_to_var and enters the clause as `g >= 1`. The
+ * disjunction itself stays one DisjClause, whose watches propagate the last
+ * open leaf; the guard's own propagators carry that into the leaf's operands.
+ * Same contract as _flatten_or. */
+static int _flatten_or_reify(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
+                             OrClause *out, int max_clauses, int *any_true,
+                             int depth) {
+    if (ref == EXPR_NULL || depth > max_clauses) return -1;
+    ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
+    if (k == EXPR_BINARY) {
+        ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
+        if (e->op == DVS_BIN_OR) {
+            int n_left = _flatten_or_reify(ctx, sp, e->lhs, out, max_clauses,
+                                           any_true, depth + 1);
+            if (n_left < 0) return -1;
+            if (*any_true) return n_left;
+            int n_right = _flatten_or_reify(ctx, sp, e->rhs, out + n_left,
+                                            max_clauses - n_left, any_true,
+                                            depth + 1);
+            if (n_right < 0) return -1;
+            return n_left + n_right;
+        }
+    }
+    if (max_clauses < 1) return -1;
+    OrClause leaf;
+    int truth_known = 0, truth = 0;
+    int rc = _classify_or_leaf(sp, ref, &leaf, &truth_known, &truth, 0);
+    if (truth_known) {
+        if (truth) *any_true = 1;
+        return 0;
+    }
+    if (rc != 1) {
+        uint32_t g = _bool_to_var(ctx, sp, ref);
+        if (g == EXPR_NULL) return -1;
+        leaf.var_id = g;
+        leaf.op = DVS_BIN_GTE;
+        leaf.constant = 1;
+        leaf.rhs_var_id = UINT32_MAX;
+    }
+    out[0] = leaf;
+    return 1;
+}
+
 /* Returns 1 if the constraint was compiled, 0 if it could not be handled. */
 static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t root) {
     if (root == EXPR_NULL) return 1; /* vacuously handled */
+    /* Nesting deeper than the stack can hold: decline, so the constraint is
+     * left to the bit-blaster or reported unknown, never crashes. */
+    if (dvs_stack_low(&ctx->stack_guard)) return 0;
 
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, root);
 
@@ -2306,7 +2518,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                             OrClause probe[MAX_OR_CLAUSES];
                             int any_true = 0;
                             if (_flatten_or(sp, body, probe, MAX_OR_CLAUSES,
-                                            &any_true) >= 0)
+                                            &any_true, 0) >= 0)
                                 return _compile_constraint(ctx, sp, body);
                         }
                     }
@@ -2329,9 +2541,11 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
             }
             ExprKind ik = *(ExprKind *)dvs_pool_ptr(&sp->pool, inner);
             if (ik == EXPR_VAR) {
-                /* (not var): var must be 0. */
+                /* (not var): var must be 0 -- not merely <= 0, since a
+                 * signed var is true when negative (B98). */
                 ExprVar *iv = (ExprVar *)dvs_pool_ptr(&sp->pool, inner);
                 uint32_t vid = _resolve(ctx, iv->var_id);
+                if (ctx_tighten_lb64(ctx, vid, 0) == PROP_CONFLICT) return -1;
                 if (ctx_tighten_ub64(ctx, vid, 0) == PROP_CONFLICT) return -1;
                 return 1;
             }
@@ -2399,6 +2613,9 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
     if (k == EXPR_VAR) {
         ExprVar *ev = (ExprVar *)dvs_pool_ptr(&sp->pool, root);
         uint32_t v_id = _resolve(ctx, ev->var_id);
+        /* A signed var is also true when negative: != 0, not >= 1 (B98). */
+        if (ctx->vars[v_id].flags & VAR_SIGNED)
+            return _compile_var_const_cmp(ctx, DVS_BIN_NEQ, v_id, 0, 0);
         if (ctx_tighten_lb64(ctx, v_id, 1) == PROP_CONFLICT) return -1;
         return 1;
     }
@@ -2480,7 +2697,12 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
         if (e->op == DVS_BIN_OR) {
             OrClause clauses[MAX_OR_CLAUSES];
             int any_true = 0;
-            int n = _flatten_or(sp, root, clauses, MAX_OR_CLAUSES, &any_true);
+            int n = _flatten_or(sp, root, clauses, MAX_OR_CLAUSES, &any_true, 0);
+            if (n < 0) {
+                any_true = 0;
+                n = _flatten_or_reify(ctx, sp, root, clauses, MAX_OR_CLAUSES,
+                                      &any_true, 0);
+            }
             if (any_true) {
                 /* OR is entailed — no propagator needed. */
                 return 1;
@@ -3032,7 +3254,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                 uint32_t r_id = _resolve(ctx, ev->var_id);
                 ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ex_side);
                 uint32_t operand_id;
-                if (_is_var(sp, ex->operand, &operand_id)) {
+                if (ex->hi_bit < 64 && _is_var(sp, ex->operand, &operand_id)) {
                     operand_id = _resolve(ctx, operand_id);
                     if (_var_needs_wide(ctx, r_id) || _var_needs_wide(ctx, operand_id)) {
                         prop_add_bit_slice_64(ctx, r_id, operand_id,
@@ -3069,9 +3291,9 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                  * has a real var to watch on each side. Without this,
                  * a (concat #b0 v27) (very common in yosys output)
                  * silently dropped the binding constraint. */
-                uint8_t r_w = ctx->vars[r_id].width;
-                uint8_t lo_w = cat->lo_width;
-                uint8_t hi_w = (r_w >= lo_w) ? (uint8_t)(r_w - lo_w) : 0;
+                uint16_t r_w = ctx->vars[r_id].width;
+                uint16_t lo_w = cat->lo_width;
+                uint16_t hi_w = (r_w >= lo_w) ? (uint16_t)(r_w - lo_w) : 0;
                 /* Soundness guard: the concat bounds propagator reasons in
                  * signed int64 (`hi << lo_w`, arithmetic `r >> lo_w`, `>= 0`
                  * guards). A full 64-bit result range [0, 2^64-1] lands in the
@@ -3150,7 +3372,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                 /* Fallback: handle ITE with comparison cond or nested ITE
                  * branches by recursively materialising the ITE chain. */
                 {
-                    uint8_t val_w = (uint8_t)(r_id < ctx->n_vars_capacity
+                    uint16_t val_w = (uint8_t)(r_id < ctx->n_vars_capacity
                                               ? ctx->vars[r_id].width : 32);
                     uint32_t ite_var = _value_to_var(ctx, sp, ite_side, val_w);
                     if (ite_var != EXPR_NULL) {
@@ -3276,13 +3498,15 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
     /* ---- EXPR_IN_SET: value in {elem0, elem1, ...} ---- */
     if (k == EXPR_IN_SET) {
         ExprInSet *eis = (ExprInSet *)dvs_pool_ptr(&sp->pool, root);
-        uint32_t vid;
-        if (!_is_var(sp, eis->value, &vid)) return 0;
-        vid = _resolve(ctx, vid);
-
         dvs_expr_t *elem_refs = (dvs_expr_t *)(eis + 1);
         uint32_t ne = eis->n_elems;
         if (ne == 0) return -1;  /* empty set -> UNSAT */
+        /* A non-constant element (`x inside {y, 5}`) or value: reify below. */
+        for (uint32_t i = 0; i < ne; i++)
+            if (!_is_const(sp, elem_refs[i], &(int64_t){0})) goto reify_root;
+        uint32_t vid;
+        if (!_is_var(sp, eis->value, &vid)) goto reify_root;
+        vid = _resolve(ctx, vid);
 
         /* Extract constant values from the element ExprRefs */
         int32_t *vals = (int32_t *)__builtin_alloca(ne * sizeof(int32_t));
@@ -3309,9 +3533,6 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
     /* ---- EXPR_IN_RANGES: value in [lo0,hi0] U ... U [lo{n-1},hi{n-1}] ---- */
     if (k == EXPR_IN_RANGES) {
         ExprInRanges *eir = (ExprInRanges *)dvs_pool_ptr(&sp->pool, root);
-        uint32_t vid;
-        if (!_is_var(sp, eir->value, &vid)) return 0;
-        vid = _resolve(ctx, vid);
         uint32_t nr = eir->n_ranges;
         if (nr == 0) return -1;  /* empty union -> UNSAT */
 
@@ -3320,9 +3541,13 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
         int64_t *los = (int64_t *)__builtin_alloca(nr * sizeof(int64_t));
         int64_t *his = (int64_t *)__builtin_alloca(nr * sizeof(int64_t));
         for (uint32_t i = 0; i < nr; i++) {
-            if (!_is_const(sp, lo_refs[i], &los[i])) return 0;
-            if (!_is_const(sp, hi_refs[i], &his[i])) return 0;
+            /* A non-constant bound (`x in [y:20]`): reify below. */
+            if (!_is_const(sp, lo_refs[i], &los[i])) goto reify_root;
+            if (!_is_const(sp, hi_refs[i], &his[i])) goto reify_root;
         }
+        uint32_t vid;
+        if (!_is_var(sp, eir->value, &vid)) goto reify_root;
+        vid = _resolve(ctx, vid);
 
         /* A single range degenerates to plain bound tightening (and lets the
          * value picker use the contiguous interval directly). */
@@ -3340,10 +3565,11 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
         ExprInRange *eir = (ExprInRange *)dvs_pool_ptr(&sp->pool, root);
         uint32_t vid;
         int64_t lo_val, hi_val;
-        if (!_is_var(sp, eir->value, &vid)) return 0;
+        /* A non-constant bound or value (`x in [y:20]`): reify below. */
+        if (!_is_var(sp, eir->value, &vid)) goto reify_root;
         vid = _resolve(ctx, vid);
-        if (!_is_const(sp, eir->lo, &lo_val)) return 0;
-        if (!_is_const(sp, eir->hi, &hi_val)) return 0;
+        if (!_is_const(sp, eir->lo, &lo_val)) goto reify_root;
+        if (!_is_const(sp, eir->hi, &hi_val)) goto reify_root;
 
         /* Compile-time bound tightening */
         if (ctx_tighten_lb64(ctx, vid, lo_val) == PROP_CONFLICT) return -1;
@@ -3495,7 +3721,7 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                             ite_s = inner->rhs;
                         if (ite_s != EXPR_NULL) {
                             v_id = _resolve(ctx, v_id);
-                            uint8_t val_w = (uint8_t)(v_id < ctx->n_vars_capacity
+                            uint16_t val_w = (uint8_t)(v_id < ctx->n_vars_capacity
                                                       ? ctx->vars[v_id].width : 32);
                             uint32_t ite_var = _value_to_var(ctx, sp, ite_s, val_w);
                             if (ite_var != EXPR_NULL) {
@@ -3529,9 +3755,9 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
         switch (e_gc->op) {
         case DVS_BIN_EQ: case DVS_BIN_NEQ: case DVS_BIN_LT:
         case DVS_BIN_LTE: case DVS_BIN_GT: case DVS_BIN_GTE: {
-            uint8_t lw = _expr_width(ctx, sp, e_gc->lhs, 0);
-            uint8_t rw = _expr_width(ctx, sp, e_gc->rhs, 0);
-            uint8_t w = lw > rw ? lw : rw;
+            uint16_t lw = _expr_width(ctx, sp, e_gc->lhs, 0);
+            uint16_t rw = _expr_width(ctx, sp, e_gc->rhs, 0);
+            uint16_t w = lw > rw ? lw : rw;
             if (w == 0) w = 32;
             if (w > 64) break;   /* tier-2: decline rather than mis-encode */
             /* A constant side is materialised against the OTHER side's
@@ -3594,7 +3820,10 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
      * Like the generic comparison above, this must stay last -- every handler
      * before it either encodes its shape more tightly or, for the ones that
      * return 0, has already decided the shape is better left to the complete
-     * engine. */
+     * engine. The membership handlers jump here for a value, element or bound
+     * that is not a plain variable or constant: _bool_to_var lowers the
+     * membership to reified comparisons. */
+reify_root:
     {
         uint32_t g = _bool_to_var(ctx, sp, root);
         if (g != EXPR_NULL) {
@@ -3613,7 +3842,9 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
  * eq(x,y) + ne(x,y) via alias resolution before search. */
 static void _collect_eq_aliases(const dvs_ctx_t *ctx, uint32_t *alias,
                                 dvs_problem_t *sp, dvs_expr_t ref) {
-    if (ref == EXPR_NULL) return;
+    /* The aliases are an optimisation: past the stack, collect no more. */
+    if (ref == EXPR_NULL
+        || dvs_stack_low((dvs_stack_guard_t *)&ctx->stack_guard)) return;
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
     if (k != EXPR_BINARY) return;
     ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
@@ -3657,6 +3888,22 @@ static int _elab_error_code(int err) {
     }
 }
 
+/* DV_LOG: name each constraint the compile leaves uncompiled, one line each
+ * (`cdcl-uncompiled: <expr>`). The search ignores such a constraint and the
+ * model-validation net checks it afterwards. Like the SMT2 driver's
+ * diagnostics, the line goes to stderr, or is appended to the file DV_LOG
+ * names when its value contains '/' or '.'. */
+static void _log_uncompiled(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
+                            dvs_expr_t root) {
+    const char *log = getenv("DV_LOG");
+    if (!log || !*log) return;
+    char line[1024];
+    dvs_expr_dump(ctx, sp, root, 0, line, sizeof line);
+    FILE *f = (strchr(log, '/') || strchr(log, '.')) ? fopen(log, "a") : NULL;
+    fprintf(f ? f : stderr, "cdcl-uncompiled: %s\n", line);
+    if (f) fclose(f);
+}
+
 #ifdef DVS_STEP_CHECK
 dvs_problem_t *dvs_sc_problem;   /* the step checker validates models against it */
 int dvs_sc_uncompiled;           /* and needs to know if compile left some out */
@@ -3669,7 +3916,9 @@ static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     int err = 0;
     dvs_problem_t *esp = dvs_sv_elaborate(sp, NULL, NULL, &err);
     if (err) return _elab_error_code(err);
-    int rc = _solver_compile_body(ctx, esp);
+    dvs_problem_t *msp = dvs_sv_rewrite_masks(esp, NULL, NULL);
+    int rc = _solver_compile_body(ctx, msp);
+    dvs_sv_release(esp, msp);
     dvs_sv_release(sp, esp);
 #ifdef DVS_STEP_CHECK
     dvs_sc_uncompiled = rc > 0;
@@ -3910,7 +4159,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         uint32_t props_before_c = ctx->n_props;
         int r = _compile_constraint(ctx, sp, cs->root);
         if (r < 0) return -2;  /* -2 = UNSAT detected at compile time */
-        if (r == 0) n_uncompiled++;
+        if (r == 0) { n_uncompiled++; _log_uncompiled(ctx, sp, cs->root); }
         /* Tag all newly created propagators with this constraint's ID */
         if (cs->constraint_id && ctx->prop_constraint_id) {
             for (uint32_t pi = props_before_c;
@@ -4237,12 +4486,15 @@ static int _solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
     int err = 0;
     dvs_problem_t *esp = dvs_sv_elaborate(aux_sp, _ctx_var_type, ctx, &err);
     if (err) return _elab_error_code(err);
-    int rc = _solver_add_constraint_body(ctx, esp);
+    dvs_problem_t *msp = dvs_sv_rewrite_masks(esp, _ctx_var_type, ctx);
+    int rc = _solver_add_constraint_body(ctx, msp);
+    dvs_sv_release(esp, msp);
     dvs_sv_release(aux_sp, esp);
     return rc;
 }
 
 int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
+    dvs_search_discard(ctx);
     int rc = _solver_add_constraint(ctx, aux_sp);
     if (ctx && ctx->oracle) dvs_oracle_on_add(ctx, aux_sp, rc);
     return rc;
@@ -4368,7 +4620,7 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
         ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&aux_sp->pool, cref);
         int r = _compile_constraint(ctx, aux_sp, cs->root);
         if (r < 0) return -2;  /* UNSAT at compile time */
-        if (r == 0) n_uncompiled++;
+        if (r == 0) { n_uncompiled++; _log_uncompiled(ctx, aux_sp, cs->root); }
         cref = cs->next;
     }
 
@@ -4394,6 +4646,29 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
             if (dvs_scope_log_bound(ctx, t->var_id, is_lb,
                                     is_lb ? var_lo64(ctx, tv) : var_hi64(ctx, tv)) != 0)
                 return -1;
+        }
+    }
+
+    /* ---- At the root, the bounds compile set join the reset snapshot ----
+     * Outside every checkpoint the constraint is permanent, but a bound
+     * tightening has no propagator to re-derive it: the next reset restored
+     * the snapshot and dropped it, so `(assert (= a #x5)) (check-sat)
+     * (check-sat)` answered the second from a context without it. New
+     * variables are snapshotted whole below. */
+    if (ctx->n_checkpoints == 0 && ctx->initial_vars) {
+        for (TrailEntry *t = ctx->trail_top; t && t != add_trail_top; t = t->prev) {
+            if (t->kind != TRAIL_LB && t->kind != TRAIL_UB) continue;
+            uint32_t id = t->var_id;
+            if (id >= init_base_n_vars || id >= ctx->initial_n_vars) continue;
+            const Variable *v = &ctx->vars[id];
+            Variable *iv = &ctx->initial_vars[id];
+            if (VAR_IS_TIER0(v->flags)) {
+                iv->lo = v->lo;
+                iv->hi = v->hi;
+            } else if (VAR_IS_TIER1(v->flags) && v->holes_offset && iv->holes_offset) {
+                *(WideBounds64 *)dvs_pool_ptr(&ctx->pool, iv->holes_offset) =
+                    *(const WideBounds64 *)dvs_pool_ptr(&ctx->pool, v->holes_offset);
+            }
         }
     }
 

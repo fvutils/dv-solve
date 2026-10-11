@@ -86,7 +86,7 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
 
     lib.problem_add_var.restype  = c.c_uint32
     lib.problem_add_var.argtypes = [c.c_void_p, c.c_uint32,
-                                    c.c_uint8, c.c_uint8,
+                                    c.c_uint16, c.c_uint8,
                                     c.c_int64, c.c_int64]
     lib.problem_add_constraint.restype  = c.c_uint32
     lib.problem_add_constraint.argtypes = [c.c_void_p, c.c_uint32]
@@ -107,7 +107,7 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.expr_const.restype  = c.c_uint32
     lib.expr_const.argtypes = [c.c_void_p, c.c_int64, c.c_uint8]
     lib.expr_const_sized.restype  = c.c_uint32
-    lib.expr_const_sized.argtypes = [c.c_void_p, c.c_int64, c.c_uint8, c.c_uint8]
+    lib.expr_const_sized.argtypes = [c.c_void_p, c.c_int64, c.c_uint8, c.c_uint16]
     lib.expr_var.restype  = c.c_uint32
     lib.expr_var.argtypes = [c.c_void_p, c.c_uint32]
     lib.expr_binary.restype  = c.c_uint32
@@ -123,12 +123,12 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
                                 c.c_uint32, c.c_void_p]
     lib.expr_extend.restype  = c.c_uint32
     lib.expr_extend.argtypes = [c.c_void_p, c.c_uint32,
-                                c.c_uint8, c.c_uint8, c.c_uint8]
+                                c.c_uint16, c.c_uint16, c.c_uint8]
     lib.expr_extract.restype  = c.c_uint32
     lib.expr_extract.argtypes = [c.c_void_p, c.c_uint32,
-                                 c.c_uint8, c.c_uint8]
+                                 c.c_uint16, c.c_uint16]
     lib.expr_cast.restype  = c.c_uint32
-    lib.expr_cast.argtypes = [c.c_void_p, c.c_uint32, c.c_uint8, c.c_uint8]
+    lib.expr_cast.argtypes = [c.c_void_p, c.c_uint32, c.c_uint16, c.c_uint8]
 
     # SolveCtx
     lib.dvs_solver_create.restype  = c.c_void_p
@@ -312,7 +312,7 @@ def _wire_builder_argtypes(lib: ctypes.CDLL) -> None:
     lib.dvs_builder_expr_const.argtypes = [c.c_void_p, c.c_int64, c.c_uint8]
     lib.dvs_builder_expr_const_sized.restype  = c.c_uint32
     lib.dvs_builder_expr_const_sized.argtypes = [c.c_void_p, c.c_int64, c.c_uint8,
-                                             c.c_uint8]
+                                             c.c_uint16]
 
     lib.dvs_builder_expr_var.restype  = c.c_uint32
     lib.dvs_builder_expr_var.argtypes = [c.c_void_p, c.c_uint32]
@@ -342,15 +342,15 @@ def _wire_builder_argtypes(lib: ctypes.CDLL) -> None:
 
     lib.dvs_builder_expr_extend.restype  = c.c_uint32
     lib.dvs_builder_expr_extend.argtypes = [c.c_void_p, c.c_uint32,
-                                        c.c_uint8, c.c_uint8, c.c_uint8]
+                                        c.c_uint16, c.c_uint16, c.c_uint8]
 
     lib.dvs_builder_expr_cast.restype  = c.c_uint32
     lib.dvs_builder_expr_cast.argtypes = [c.c_void_p, c.c_uint32,
-                                          c.c_uint8, c.c_uint8]
+                                          c.c_uint16, c.c_uint8]
 
     lib.dvs_builder_expr_extract.restype  = c.c_uint32
     lib.dvs_builder_expr_extract.argtypes = [c.c_void_p, c.c_uint32,
-                                         c.c_uint8, c.c_uint8]
+                                         c.c_uint16, c.c_uint16]
 
     # Without explicit argtypes, ctypes passes the 64-bit builder pointer as a
     # C int, truncating it — harmless only when the builder happens to sit at a
@@ -363,11 +363,11 @@ def _wire_builder_argtypes(lib: ctypes.CDLL) -> None:
     # Regression-guarded by pyvsc ve/unit/test_dvsolve_ctypes_wiring.py.
     lib.dvs_builder_expr_concat.restype  = c.c_uint32
     lib.dvs_builder_expr_concat.argtypes = [c.c_void_p, c.c_uint32,
-                                        c.c_uint32, c.c_uint8]
+                                        c.c_uint32, c.c_uint16]
 
     lib.dvs_builder_add_var.restype  = c.c_uint32
     lib.dvs_builder_add_var.argtypes = [c.c_void_p, c.c_uint32,
-                                    c.c_uint8, c.c_uint8,
+                                    c.c_uint16, c.c_uint8,
                                     c.c_int64, c.c_int64]
 
     lib.dvs_builder_add_constraint.restype  = c.c_uint32

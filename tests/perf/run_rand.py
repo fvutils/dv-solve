@@ -12,6 +12,9 @@ Arms (docs/results_publishing_design.md §2.1):
 - `dv-api`: dv-solve's own API (the Python builder over the C library), one
   compiled context, reset and solved with a new seed each call: what SV DPI
   and zuspec users get.
+- `<solver>-seed`: one process per draw, a plain SMT-LIB2 script that sets
+  `(set-option :random-seed k)`: what fw-hdl does for stimulus
+  (docs/fw_hdl_implementation_plan.md piece 6.4).
 
 Every model is checked against the benchmark's constraints with the IR's
 evaluator; a model that violates them makes the run invalid.
@@ -21,6 +24,8 @@ from __future__ import annotations
 import math
 import os
 import random
+import resource
+import subprocess
 import time
 import zlib
 from collections import Counter
@@ -28,7 +33,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tests.formal.soundness.ir import ev, solutions
+from tests.formal.soundness.ir import ev, smt, solutions
 from tests.perf import vlt_protocol
 from tests.perf.rand_benches import Bench
 from tests.perf.run_sat import _pin_worker, physical_cores
@@ -39,7 +44,7 @@ _REPO = Path(__file__).resolve().parents[2]
 @dataclass
 class Arm:
     name: str
-    kind: str                 # uniform | swizzle | api
+    kind: str                 # uniform | swizzle | api | seed
     argv: list = field(default_factory=list)
     env: dict = field(default_factory=dict)
     build: str = "ref"        # head | anchor | ref
@@ -56,12 +61,14 @@ def make_arms(head: Path, anchor: Path | None, tools: dict) -> list:
             # is worse than the parity constraints' shows on the page.
             Arm("dv-swizzle-nohash@head", "swizzle",
                 [str(head), "--interactive", "--mode=verilator", "--verilator-hash=ignore"],
-                build="head")]
+                build="head"),
+            Arm("dv-seed@head", "seed", [str(head)], build="head")]
     if anchor is not None:
         arms.append(Arm("dv-swizzle@anchor", "swizzle",
                         [str(anchor), "--interactive", "--mode=verilator"], build="anchor"))
     if "z3" in tools:
         arms.append(Arm("z3-swizzle", "swizzle", [tools["z3"], "-in"]))
+        arms.append(Arm("z3-seed", "seed", [tools["z3"], "-in"]))
     if "bitwuzla" in tools:
         arms.append(Arm("bitwuzla-swizzle", "swizzle", [tools["bitwuzla"]]))
     return arms
@@ -141,6 +148,35 @@ def _swizzle(b: Bench, arm: Arm, n: int, seed: int) -> dict:
     return r
 
 
+def seed_script(b: Bench, k: int) -> str:
+    """One draw: the benchmark as a QF_BV script under `:random-seed k`."""
+    return ("(set-option :produce-models true)\n"
+            f"(set-option :random-seed {k})\n(set-logic QF_BV)\n"
+            + "".join(f"(declare-fun {n} () (_ BitVec {b.widths[n]}))\n" for n in b.names)
+            + "".join(f"(assert {smt(c)})\n" for c in b.cons)
+            + "(check-sat)\n(get-value (" + " ".join(b.names) + "))\n")
+
+
+def _seeded(b: Bench, arm: Arm, n: int, seed: int) -> dict:
+    rng = random.Random(seed)
+    env = {**os.environ, **arm.env}
+    models, cpu, wall = [], [], []
+    for _ in range(n):
+        ru0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+        w0 = time.perf_counter()
+        p = subprocess.run(arm.argv, input=seed_script(b, rng.getrandbits(31) + 1),
+                           capture_output=True, text=True, env=env,
+                           timeout=vlt_protocol.CALL_BUDGET_S, preexec_fn=vlt_protocol._limits)
+        wall.append(time.perf_counter() - w0)
+        ru1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+        cpu.append(ru1.ru_utime - ru0.ru_utime + ru1.ru_stime - ru0.ru_stime)
+        if not p.stdout.startswith("sat"):
+            raise RuntimeError(f"{arm.name}: {p.stdout[:80]!r}")
+        m = {k: vlt_protocol._value(lit, dec) for k, lit, dec in vlt_protocol._VAL.findall(p.stdout)}
+        models.append(tuple(m[k] for k in b.names))
+    return {"models": models, "cpu_s": cpu, "wall_s": wall, "checks": n}
+
+
 # ---- metrics ----------------------------------------------------------------
 
 def _pct(xs: list, q: float) -> float:
@@ -205,6 +241,8 @@ def run_one(job: tuple) -> dict:
             r = _uniform(b, n, seed, space)
         elif arm.kind == "api":
             r = _api(b, n, seed, arm.env)
+        elif arm.kind == "seed":
+            r = _seeded(b, arm, n, seed)
         else:
             r = _swizzle(b, arm, n, seed)
     except Exception as e:                  # recorded, never fatal to the suite

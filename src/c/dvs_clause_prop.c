@@ -76,43 +76,71 @@ static PropResult _check_clause(ClauseDB *db, dvs_ctx_t *ctx,
 /* Event-driven notifications                                          */
 /* ------------------------------------------------------------------ */
 
-/* Reentrancy guard: prevent recursive clause notifications */
-static int _in_clause_prop = 0;
+/* A tightening made while a clause is being checked (a unit clause
+ * propagating) does not start a nested notification: it is queued in
+ * db->pend and its watch list is checked once the running notification
+ * finishes, until the queue is empty. Dropping it instead -- as this did
+ * until 2026-10-10 -- lost every clause-to-clause chain: a clause made unit
+ * or false by another clause's propagation went unnoticed until some later
+ * change to one of its variables, and conflict analysis then met clauses
+ * that were false below the current level (no UIP: chronological
+ * backtrack) or re-learnt clauses already in the database (plan 3.1;
+ * qc_satadd_w4: 271,664 + 66,478 of 413k conflicts).
+ *
+ * The queue holds var_id*2 + (1 for an upper-bound event). If it fills,
+ * pend_over makes the drain rescan every clause instead. The flag and the
+ * queue are per database (B115: a process-wide static once stayed set and
+ * turned learnt-clause propagation off for every solver). */
+
+PropResult clause_propagate(ClauseDB *db, dvs_ctx_t *ctx);
+
+static PropResult _check_watch(ClauseDB *db, dvs_ctx_t *ctx, WatchEntry *we) {
+    for (; we; we = we->next)
+        if (_check_clause(db, ctx, we->clause_idx) == PROP_CONFLICT)
+            return PROP_CONFLICT;
+    return PROP_OK;
+}
+
+static PropResult _notify(ClauseDB *db, dvs_ctx_t *ctx, uint32_t var_id, int ub_event) {
+    if (var_id >= db->n_watch_vars) return PROP_OK;
+    if (db->in_notify) {
+        if (db->n_pend < db->pend_cap)
+            db->pend[db->n_pend++] = var_id * 2u + (ub_event ? 1u : 0u);
+        else
+            db->pend_over = 1;
+        return PROP_OK;
+    }
+    db->in_notify = 1;
+    /* An LB rise falsifies `var <= v` literals (the UB watch list); a UB
+     * fall falsifies `var >= v` literals (the LB watch list). */
+    PropResult res = _check_watch(db, ctx, ub_event ? db->watch_lb[var_id]
+                                                    : db->watch_ub[var_id]);
+    while (res != PROP_CONFLICT && (db->n_pend || db->pend_over)) {
+        if (db->n_pend) {
+            uint32_t e = db->pend[--db->n_pend];
+            uint32_t v = e >> 1;
+            res = _check_watch(db, ctx, (e & 1u) ? db->watch_lb[v] : db->watch_ub[v]);
+        } else {
+            db->pend_over = 0;
+            res = clause_propagate(db, ctx);
+        }
+    }
+    db->n_pend = 0;          /* after a conflict the search backtracks */
+    db->pend_over = 0;
+    db->in_notify = 0;
+    return res;
+}
 
 PropResult clause_notify_lb(ClauseDB *db, dvs_ctx_t *ctx,
                               uint32_t var_id, int64_t new_lb) {
-    if (_in_clause_prop) return PROP_OK;  /* skip recursive calls */
-    _in_clause_prop = 1;
-    /* When LB of var_id rises, literals "var_id <= v" with v < new_lb
-     * become false.  These are UB literals (is_lb=0) with bound < new_lb.
-     * Check clauses on the UB watch list for this variable. */
-    if (var_id >= db->n_watch_vars) return PROP_OK;
-    WatchEntry *we = db->watch_ub[var_id];
-    while (we) {
-        PropResult pr = _check_clause(db, ctx, we->clause_idx);
-        if (pr == PROP_CONFLICT) { _in_clause_prop = 0; return PROP_CONFLICT; }
-        we = we->next;
-    }
-    _in_clause_prop = 0;
-    return PROP_OK;
+    (void)new_lb;
+    return _notify(db, ctx, var_id, 0);
 }
 
 PropResult clause_notify_ub(ClauseDB *db, dvs_ctx_t *ctx,
                               uint32_t var_id, int64_t new_ub) {
-    if (_in_clause_prop) return PROP_OK;
-    _in_clause_prop = 1;
-    /* When UB of var_id falls, literals "var_id >= v" with v > new_ub
-     * become false.  These are LB literals (is_lb=1) with bound > new_ub.
-     * Check clauses on the LB watch list for this variable. */
-    if (var_id >= db->n_watch_vars) return PROP_OK;
-    WatchEntry *we = db->watch_lb[var_id];
-    while (we) {
-        PropResult pr = _check_clause(db, ctx, we->clause_idx);
-        if (pr == PROP_CONFLICT) { _in_clause_prop = 0; return PROP_CONFLICT; }
-        we = we->next;
-    }
-    _in_clause_prop = 0;
-    return PROP_OK;
+    (void)new_ub;
+    return _notify(db, ctx, var_id, 1);
 }
 
 /* ------------------------------------------------------------------ */

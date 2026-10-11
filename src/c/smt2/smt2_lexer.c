@@ -40,6 +40,8 @@ static Smt2Token _make_token(Smt2TokenKind kind, const char *start,
     t.length   = length;
     t.numval   = 0;
     t.bv_width = 0;
+    t.line     = 0;
+    t.col      = 0;
     return t;
 }
 
@@ -71,11 +73,34 @@ static void _skip_ws(Smt2Lexer *lex) {
 static Smt2Token _lex_numeral(Smt2Lexer *lex) {
     const char *start = lex->buf + lex->pos;
     uint64_t val = 0;
+    int overflow = 0;
     while (!_at_end(lex) && isdigit((unsigned char)_peek_char(lex))) {
-        val = val * 10 + (uint64_t)(_peek_char(lex) - '0');
+        uint64_t d = (uint64_t)(_peek_char(lex) - '0');
+        if (val > (UINT64_MAX - d) / 10) overflow = 1;
+        val = val * 10 + d;
         _advance(lex);
     }
+    /* A decimal, `2.6` (as in `:smt-lib-version 2.6`): numeral '.' digits. */
+    if (_peek_char(lex) == '.') {
+        _advance(lex);
+        int digits = 0;
+        while (!_at_end(lex) && isdigit((unsigned char)_peek_char(lex))) {
+            _advance(lex);
+            digits++;
+        }
+        int bad = !digits || !_is_delimiter(_peek_char(lex));
+        while (!_is_delimiter(_peek_char(lex))) _advance(lex);
+        uint32_t dlen = (uint32_t)(lex->buf + lex->pos - start);
+        return _make_token(bad ? TOK_ERROR : TOK_DECIMAL, start, dlen);
+    }
+    /* `12ab` is not a numeral followed by a symbol: no symbol starts with a
+     * digit, so it is one malformed token. */
+    if (!_is_delimiter(_peek_char(lex))) {
+        while (!_is_delimiter(_peek_char(lex))) _advance(lex);
+        overflow = 1;
+    }
     uint32_t len = (uint32_t)(lex->buf + lex->pos - start);
+    if (overflow) return _make_token(TOK_ERROR, start, len);
     Smt2Token t  = _make_token(TOK_NUMERAL, start, len);
     t.numval     = val;
     return t;
@@ -92,6 +117,14 @@ static Smt2Token _lex_bitvec(Smt2Lexer *lex) {
     if (_at_end(lex))
         return _make_token(TOK_ERROR, start, 1);
 
+    /* A malformed literal is one token up to the next delimiter, so the error
+     * shows all of it and lexing resumes after it. */
+#define BV_ERROR() do {                                                   \
+        while (!_is_delimiter(_peek_char(lex))) _advance(lex);          \
+        return _make_token(TOK_ERROR, start,                             \
+                           (uint32_t)(lex->buf + lex->pos - start));     \
+    } while (0)
+
     char fmt = _peek_char(lex);
     _advance(lex); /* skip 'b' or 'x' */
 
@@ -106,9 +139,7 @@ static Smt2Token _lex_bitvec(Smt2Lexer *lex) {
             width++;
             _advance(lex);
         }
-        if (width == 0)
-            return _make_token(TOK_ERROR, start,
-                               (uint32_t)(lex->buf + lex->pos - start));
+        if (width == 0) BV_ERROR();
     } else if (fmt == 'x' || fmt == 'X') {
         while (!_at_end(lex)) {
             char c = _peek_char(lex);
@@ -121,13 +152,13 @@ static Smt2Token _lex_bitvec(Smt2Lexer *lex) {
             width += 4;
             _advance(lex);
         }
-        if (width == 0)
-            return _make_token(TOK_ERROR, start,
-                               (uint32_t)(lex->buf + lex->pos - start));
+        if (width == 0) BV_ERROR();
     } else {
-        return _make_token(TOK_ERROR, start,
-                           (uint32_t)(lex->buf + lex->pos - start));
+        BV_ERROR();
     }
+    /* `#xFG`, `#b012`: a bad digit ends the literal mid-token. */
+    if (!_is_delimiter(_peek_char(lex))) BV_ERROR();
+#undef BV_ERROR
 
     uint32_t len = (uint32_t)(lex->buf + lex->pos - start);
     Smt2Token t  = _make_token(TOK_BITVEC_LIT, start, len);
@@ -209,10 +240,30 @@ void smt2_lexer_init(Smt2Lexer *lex, const char *buf, size_t len) {
     lex->pos     = 0;
     lex->line    = 1;
     lex->col     = 1;
+    lex->depth   = 0;
+    lex->cmd_line = lex->cmd_col = 0;
+    lex->err_msg = NULL;
+    lex->err_line = lex->err_col = 0;
+    lex->err_buf[0] = '\0';
 }
+
+static Smt2Token _lexer_next(Smt2Lexer *lex);
 
 Smt2Token smt2_lexer_next(Smt2Lexer *lex) {
     _skip_ws(lex);
+    uint32_t line = lex->line, col = lex->col;
+    Smt2Token t = _lexer_next(lex);
+    t.line = line;
+    t.col  = col;
+    if (t.kind == TOK_LPAREN) {
+        if (lex->depth++ == 0) { lex->cmd_line = line; lex->cmd_col = col; }
+    } else if (t.kind == TOK_RPAREN && lex->depth > 0) {
+        lex->depth--;
+    }
+    return t;
+}
+
+static Smt2Token _lexer_next(Smt2Lexer *lex) {
 
     if (_at_end(lex))
         return _make_token(TOK_EOF, lex->buf + lex->pos, 0);
@@ -259,12 +310,17 @@ Smt2Token smt2_lexer_peek(Smt2Lexer *lex) {
     size_t   saved_pos  = lex->pos;
     uint32_t saved_line = lex->line;
     uint32_t saved_col  = lex->col;
+    uint32_t saved_depth = lex->depth;
+    uint32_t saved_cl = lex->cmd_line, saved_cc = lex->cmd_col;
 
     Smt2Token tok = smt2_lexer_next(lex);
 
     lex->pos  = saved_pos;
     lex->line = saved_line;
     lex->col  = saved_col;
+    lex->depth = saved_depth;
+    lex->cmd_line = saved_cl;
+    lex->cmd_col  = saved_cc;
     return tok;
 }
 
@@ -277,10 +333,23 @@ const char *smt2_token_kind_name(Smt2TokenKind kind) {
     case TOK_BITVEC_LIT: return "BITVEC_LIT";
     case TOK_STRING:     return "STRING";
     case TOK_KEYWORD:    return "KEYWORD";
+    case TOK_DECIMAL:    return "DECIMAL";
     case TOK_EOF:        return "EOF";
     case TOK_ERROR:      return "ERROR";
     }
     return "UNKNOWN";
+}
+
+const char *smt2_token_error(const Smt2Token *tok) {
+    if (tok->kind != TOK_ERROR || tok->length == 0) return "invalid token";
+    switch (tok->start[0]) {
+    case '#': return "invalid bit-vector literal";
+    case '"': return "unterminated string literal";
+    case '|': return "unterminated quoted symbol";
+    default:
+        if (isdigit((unsigned char)tok->start[0])) return "invalid numeral";
+        return "invalid token";
+    }
 }
 
 int smt2_token_eq(const Smt2Token *tok, const char *str) {
