@@ -81,6 +81,14 @@ def test_seq_pick_keeps_the_sequential_draw():
     assert _chi2(draws, GRID_CELLS) > 300
 
 
+def test_defined_variable_is_not_drawn():
+    # z == x + y is fixed by x and y; drawing it too would almost never agree
+    # and the tier would turn itself off.
+    draws = _draws(_grid(extra_sum=True), 6000)
+    assert all(z == x + y for x, y, z in draws)
+    assert _chi2([(x, y) for x, y, _ in draws], GRID_CELLS) < 99
+
+
 def test_a_lt_b_marginal():
     def build(b):
         b.add_var(0, 8, False, 0, 255)
@@ -108,7 +116,7 @@ def test_low_acceptance_problem_still_solves():
     assert len({x for x, _ in draws}) > 100
 
 
-@pytest.mark.parametrize("build", [_grid()])
+@pytest.mark.parametrize("build", [_grid(), _grid(extra_sum=True)])
 def test_reused_context_matches_fresh(build):
     # Whether the tier runs is decided by a fixed-seed probe, so a reused
     # context (reset + solve) gives the same values as a fresh one.

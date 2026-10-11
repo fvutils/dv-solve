@@ -128,6 +128,8 @@ typedef struct dvs_ctx_s {
     int64_t           *box_val;
     uint32_t           box_cap;
     uint8_t            box_state;
+    uint8_t           *box_skip;      /* [n_decl_vars] 1: defined by an
+                                       * equality, not drawn by the tier */
     uint32_t           n_decl_vars;   /* vars the problem declared; compile
                                        * adds its own after them         */
     DvsModLink        *mod_links;

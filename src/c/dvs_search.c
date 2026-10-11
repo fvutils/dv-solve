@@ -826,7 +826,8 @@ static int _box_try(dvs_ctx_t *ctx, uint32_t base) {
         const Variable *v = &ctx->vars[i];
         int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
         if ((v->flags & VAR_AUX) || lo == hi
-                || (ctx->var_alias && ctx->var_alias[i] != i)) continue;
+                || (ctx->var_alias && ctx->var_alias[i] != i)
+                || (ctx->box_skip && ctx->box_skip[i])) continue;
         int64_t x = _rand_range64(ctx, lo, hi);
         if (_is_hole(ctx, i, x)) return 0;
         ctx->box_val[i] = x;
@@ -838,7 +839,8 @@ static int _box_try(dvs_ctx_t *ctx, uint32_t base) {
     for (uint32_t i = 0; i < n && pr == PROP_OK; i++) {
         const Variable *v = &ctx->vars[i];
         if ((v->flags & VAR_AUX)
-                || (ctx->var_alias && ctx->var_alias[i] != i)) continue;
+                || (ctx->var_alias && ctx->var_alias[i] != i)
+                || (ctx->box_skip && ctx->box_skip[i])) continue;
         if (var_lo64(ctx, v) == var_hi64(ctx, v)) continue;
         pr = ctx_tighten_lb64(ctx, i, ctx->box_val[i]);
         if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, i, ctx->box_val[i]);
@@ -909,6 +911,7 @@ static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base) {
         if (v->flags & VAR_AUX) continue;
         if (ctx->var_alias && ctx->var_alias[i] != i) continue;
         if (var_lo64(ctx, v) == var_hi64(ctx, v)) continue;
+        if (ctx->box_skip && ctx->box_skip[i]) continue;
         if (ctx->dist_offsets && i < ctx->n_vars_capacity
                 && ctx->dist_offsets[i] != 0)
             return 0;

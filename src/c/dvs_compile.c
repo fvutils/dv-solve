@@ -3903,6 +3903,39 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         }
     }
 
+    /* Variables the box-rejection tier need not draw (see _box_sample in
+     * dvs_search.c): `v == <expression>` defines v from other variables, so
+     * pinning those fixes it. A front-end lifts every arithmetic operand into
+     * such a variable; drawing it independently would almost never agree. */
+    {
+        uint32_t nd = ctx->n_decl_vars;
+        uint8_t *bs = nd ? (uint8_t *)realloc(ctx->box_skip, nd) : NULL;
+        if (bs) memset(bs, 0, nd);
+        ctx->box_skip = bs;
+        for (dvs_expr_t c = sp->constraints_head; bs && c != EXPR_NULL; ) {
+            ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+            ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, cs->root);
+            if (k == EXPR_BINARY) {
+                ExprBinary *eb = (ExprBinary *)dvs_pool_ptr(&sp->pool, cs->root);
+                uint32_t id, id2;
+                uint16_t iw;
+                int sx;
+                int64_t cv;
+                if (eb->op == DVS_BIN_EQ) {
+                    if (_is_var_maybe_extend(sp, eb->lhs, &id, &iw, &sx) && id < nd
+                            && !_is_var_maybe_extend(sp, eb->rhs, &id2, &iw, &sx)
+                            && !_is_const(sp, eb->rhs, &cv))
+                        bs[id] = 1;
+                    else if (_is_var_maybe_extend(sp, eb->rhs, &id, &iw, &sx) && id < nd
+                            && !_is_var_maybe_extend(sp, eb->lhs, &id2, &iw, &sx)
+                            && !_is_const(sp, eb->lhs, &cv))
+                        bs[id] = 1;
+                }
+            }
+            c = cs->next;
+        }
+    }
+
     /* ---- Walk ConstraintSpec list → create propagators ---- */
     int n_uncompiled = 0;
     dvs_expr_t cref = sp->constraints_head;
