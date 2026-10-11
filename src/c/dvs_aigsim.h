@@ -48,11 +48,14 @@ uint64_t dvs_aigsim_exhaustive_work(const dvs_aigsim_t *s);
 
 /** Sweep every assignment. Returns DVS_AIGSIM_SAT, DVS_AIGSIM_UNSAT, or
  *  DVS_AIGSIM_UNDECIDED when *stop became non-zero (polled every pass; NULL
- *  never stops) or there are more than 32 inputs. */
-int dvs_aigsim_exhaustive(dvs_aigsim_t *s, const volatile int *stop);
+ *  never stops) or there are more than 32 inputs. Seed 0 stops at the first
+ *  satisfying assignment (the lowest); any other seed sweeps them all and
+ *  keeps one chosen uniformly at random, a sample rather than a witness. */
+int dvs_aigsim_exhaustive(dvs_aigsim_t *s, const volatile int *stop, uint64_t seed);
 
 /** Up to `blocks` passes of random assignments. DVS_AIGSIM_SAT or
- *  DVS_AIGSIM_UNDECIDED. */
+ *  DVS_AIGSIM_UNDECIDED. The first satisfying assignment of independent
+ *  uniform draws is itself uniform over the solutions. */
 int dvs_aigsim_random(dvs_aigsim_t *s, uint32_t blocks, uint64_t seed);
 
 /** After DVS_AIGSIM_SAT: a malloc'd valuation of every AIG node (indexed by

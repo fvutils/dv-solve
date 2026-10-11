@@ -2,8 +2,8 @@
   "solver": "bitwuzla",
   "benchmark": "wide_datapath_128_bmc_d1",
   "result": "unsat",
-  "solve_time_ms": 3.148942021653056,
-  "peak_memory_kb": 267776,
+  "solve_time_ms": 1.9919609767384827,
+  "peak_memory_kb": 12213748,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

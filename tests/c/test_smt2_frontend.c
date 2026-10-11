@@ -8,6 +8,7 @@
 #include "smt2/smt2_lexer.h"
 #include "smt2/smt2_parser.h"
 #include "smt2/smt2_frontend.h"
+#include "dvs_thread.h"
 
 static int _passed = 0;
 static int _failed = 0;
@@ -616,6 +617,78 @@ static void test_bvadd_const_wrap_to_zero_sat(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Translator stack guard on a small thread                           */
+/* ------------------------------------------------------------------ */
+
+/* The translator and the core's passes (CDCL compile, bit-blast) each recurse
+ * once per nesting level and stop at the calling thread's own stack limit, so
+ * a library caller on a small thread gets `unknown` for input too deep for
+ * it, never a crash, and still solves input that fits. 1 MB is a Windows
+ * thread's default stack. */
+typedef struct { uint32_t depth; char out[256]; } DeepArgs;
+
+static void *_deep_worker(void *p) {
+    DeepArgs *a = (DeepArgs *)p;
+    size_t n = (size_t)a->depth * 8 + 256;
+    char *src = (char *)malloc(n), *q = src;
+    q += sprintf(q, "(set-logic QF_BV)(declare-const a (_ BitVec 8))(assert (= ");
+    for (uint32_t i = 0; i < a->depth; i++) q += sprintf(q, "(bvnot ");
+    q += sprintf(q, "a");
+    for (uint32_t i = 0; i < a->depth; i++) *q++ = ')';
+    sprintf(q, " #x05))(check-sat)");
+    /* On the heap: a 1 MB thread is the point of the test. */
+    Smt2Frontend *fe = (Smt2Frontend *)calloc(1, sizeof *fe);
+    smt2_frontend_init(fe, stderr, stderr);
+    _run_capture(fe, src, a->out, sizeof a->out);
+    smt2_frontend_destroy(fe);
+    free(fe);
+    free(src);
+    return NULL;
+}
+
+static void _deep_on_small_thread(uint32_t depth, char *out, size_t outsz) {
+    DeepArgs a;
+    a.depth = depth;
+    a.out[0] = '\0';
+    dvs_thread_t t;
+    if (dvs_thread_create_stack(&t, _deep_worker, &a, (size_t)1 << 20) != 0) {
+        snprintf(out, outsz, "thread");
+        return;
+    }
+    dvs_thread_join(&t, NULL);
+    snprintf(out, outsz, "%s", a.out);
+}
+
+static void test_deep_nesting_small_thread(void) {
+    char out[256];
+    _deep_on_small_thread(200, out, sizeof out);
+    ASSERT_TRUE(strstr(out, "sat") != NULL);
+    ASSERT_TRUE(strstr(out, "unsat") == NULL && strstr(out, "unknown") == NULL);
+    _deep_on_small_thread(100000, out, sizeof out);
+    ASSERT_TRUE(strstr(out, "unknown") != NULL);
+}
+
+/* Between those depths the translator accepts nesting that a core pass may
+ * not hold; that pass must decline (unknown), not overflow. The limit depends
+ * on the compiler's frame sizes, so sweep across it on each engine. */
+static void test_deep_nesting_small_thread_engines(void) {
+    static const char *engines[] = { "bitblast", "cdcl" };
+    char out[256];
+    for (int e = 0; e < 2; e++) {
+        setenv("DV_ENGINE", engines[e], 1);
+        _deep_on_small_thread(200, out, sizeof out);
+        ASSERT_TRUE(strstr(out, "sat") != NULL && strstr(out, "unsat") == NULL
+                    && strstr(out, "unknown") == NULL);
+        for (uint32_t d = 400; d <= 6400; d = d * 5 / 4) {
+            _deep_on_small_thread(d, out, sizeof out);
+            ASSERT_TRUE(strstr(out, "unsat") == NULL);
+            ASSERT_TRUE(strstr(out, "sat") != NULL || strstr(out, "unknown") != NULL);
+        }
+    }
+    unsetenv("DV_ENGINE");
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -655,6 +728,8 @@ int main(void) {
     /* Phase 6 follow-up #1: modular bvadd-with-constant */
     RUN(test_bvadd_const_no_wrap_chain_unsat);
     RUN(test_bvadd_const_wrap_to_zero_sat);
+    RUN(test_deep_nesting_small_thread);
+    RUN(test_deep_nesting_small_thread_engines);
 
     printf("\n%d passed, %d failed\n", _passed, _failed);
     return _failed ? 1 : 0;

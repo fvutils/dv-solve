@@ -145,15 +145,52 @@ static int dvs__stack_bounds(uintptr_t *lo_out, size_t *size_out) {
 
 /* ------------------------------ Both backends ---------------------------- */
 
-uintptr_t dvs_stack_floor(size_t margin) {
-    uintptr_t lo;
-    size_t size;
-    if (!dvs__stack_bounds(&lo, &size) || size <= margin) return 0;
-    return lo + margin;
+#if defined(_MSC_VER)
+#  define DVS__TLS __declspec(thread)
+#else
+#  define DVS__TLS _Thread_local
+#endif
+
+/* The calling thread's stack, looked up once per thread: on Linux the main
+ * thread's bounds come from parsing /proc/self/maps, too slow to repeat on
+ * every compile. Valid only while `at` (an address on the caller's stack) lies
+ * inside it; a caller running on a stack the thread library did not allocate
+ * -- a simulator's coroutine, say -- gets 0, since the thread's reported
+ * bounds say nothing about that stack. */
+static DVS__TLS uintptr_t dvs__tls_lo;
+static DVS__TLS size_t    dvs__tls_size;
+
+static int dvs__stack_here(uintptr_t at, uintptr_t *lo, size_t *size) {
+    if (!(dvs__tls_size && at - dvs__tls_lo < dvs__tls_size)) {
+        uintptr_t l;
+        size_t s;
+        if (!dvs__stack_bounds(&l, &s) || !(at - l < s)) return 0;
+        dvs__tls_lo = l;
+        dvs__tls_size = s;
+    }
+    *lo = dvs__tls_lo;
+    *size = dvs__tls_size;
+    return 1;
 }
 
 size_t dvs_stack_size(void) {
+    char here;
     uintptr_t lo;
     size_t size;
-    return dvs__stack_bounds(&lo, &size) ? size : 0;
+    return dvs__stack_here((uintptr_t)&here, &lo, &size) ? size : 0;
+}
+
+int dvs_stack_guard_slow(dvs_stack_guard_t *g, uintptr_t at) {
+    uintptr_t lo;
+    size_t size;
+    /* Below the floor of the stack we already know: out of room. */
+    if (g->span && at < g->floor && g->floor - at <= DVS_STACK_MARGIN) return 1;
+    if (!dvs__stack_here(at, &lo, &size) || size <= DVS_STACK_MARGIN) {
+        g->floor = 0;                 /* unknown: never refuse */
+        g->span = UINTPTR_MAX;
+        return 0;
+    }
+    g->floor = lo + DVS_STACK_MARGIN;
+    g->span = size - DVS_STACK_MARGIN;
+    return at < g->floor;
 }

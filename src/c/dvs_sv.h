@@ -95,6 +95,31 @@ int dvs_sv_elaborate_more(dvs_problem_t **elab, const dvs_problem_t *orig,
                           uint32_t *synced_used, dvs_expr_t root,
                           dvs_expr_t *out_root);
 
+/* Internal to libdv_solve: kept out of the shared library's exported symbols. */
+#if defined(__GNUC__) && !defined(_WIN32)
+#define DVS_HIDDEN __attribute__((visibility("hidden")))
+#else
+#define DVS_HIDDEN
+#endif
+
+/** Rewrite constant-mask comparisons of an EXPLICIT problem (the output of
+ * dvs_sv_elaborate, or an SMT-LIB2 problem) into bit-field comparisons, which
+ * the CDCL engine propagates in both directions:
+ *
+ *   (x & M) == V        ->  x[h:l] == V[h:l]  for each run [h:l] of M, ANDed
+ *   (x & M) != V        ->  the same with !=, ORed
+ *   (x | M) == V / !=   ->  the same over the runs of ~M
+ *   (x & M) == (y & M)  ->  x[h:l] == y[h:l]  for each run
+ *   (x & M) < <= > >= K ->  x[h:l] against K / 2^l, rounded, when M is one
+ *                           run and both sides are unsigned
+ *
+ * where x, y are a variable, possibly zero-extended, truncated or shifted
+ * right by a constant, at most 64 bits wide. Each rewrite is an equivalence.
+ * Best effort: on any shape it does not recognise, or any error, the problem
+ * is returned as it was. Return value and release as for dvs_sv_elaborate. */
+DVS_HIDDEN dvs_problem_t *dvs_sv_rewrite_masks(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
+                                              void *ud);
+
 /** Release a problem returned by dvs_sv_elaborate (no-op when it is `orig`). */
 void dvs_sv_release(dvs_problem_t *orig, dvs_problem_t *elab);
 

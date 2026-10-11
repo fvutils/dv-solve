@@ -452,6 +452,11 @@ typedef struct {
      * non-zero from an earlier bail is harmless (only ever increments/compares)
      * but it is reset to 0 at the start of every top-level expression. */
     uint32_t             translate_depth;
+    /* The translator stops when the stack runs low (stack_guard), or, where
+     * the stack cannot be measured, at translate_max_depth (set at each
+     * top-level translate). */
+    uint32_t             translate_max_depth;
+    dvs_stack_guard_t    stack_guard;
 
     /* Set when a construct is lowered into a composed expression the CDCL
      * engine cannot solve soundly (e.g. signed bvsdiv/bvsrem lower to an ITE of

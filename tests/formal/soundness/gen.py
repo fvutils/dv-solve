@@ -111,8 +111,75 @@ class Gen:
         self.pool.append(t)
         return t
 
+    def mask_const(self, w):
+        """A mask: low bits, one run, a scattered pattern, or anything."""
+        rng, m = self.rng, (1 << w) - 1
+        r = rng.random()
+        if r < 0.3:
+            k = rng.randrange(1, w + 1)
+            v, b = (1 << k) - 1, "low"
+        elif r < 0.6:
+            lo = rng.randrange(w)
+            hi = rng.randrange(lo, w)
+            v, b = ((1 << (hi + 1)) - 1) & ~((1 << lo) - 1), "run"
+        elif r < 0.8:
+            v, b = rng.choice([0x5555555555555555, 0x3333333333333333,
+                               0x0F0F0F0F0F0F0F0F]) & m, "scattered"
+        else:
+            v, b = rng.randrange(1 << w), "any"
+        self.bins.add("mask:" + b)
+        return ("const", v, w)
+
+    def mask_operand(self, w, depth):
+        """What a mask is applied to: a variable, or one zero-extended,
+        sliced or shifted right by a constant."""
+        rng = self.rng
+        r = rng.random()
+        v = self.var(w)
+        if r < 0.4 and v is not None:
+            return v
+        iws = sorted(set(self.widths.values()))
+        if r < 0.6:
+            iw = rng.choice(iws)
+            if iw < w and self.var(iw) is not None:
+                self.bins.add("mask-operand:zero_extend")
+                return ("zero_extend", w, self.var(iw))
+            if iw > w and self.var(iw) is not None:
+                self.bins.add("mask-operand:extract")
+                lo = rng.randrange(iw - w + 1)
+                return ("extract", w, lo + w - 1, lo, self.var(iw))
+        if r < 0.85 and v is not None:
+            self.bins.add("mask-operand:lshr")
+            return ("bvlshr", w, v, ("const", rng.randrange(w), w))
+        return self.bv(w, depth)
+
+    def mask_compare(self, depth):
+        """(x & M) or (x | M) against a constant, or two ANDs with one mask:
+        the shapes compile rewrites into bit-field comparisons."""
+        rng = self.rng
+        w = rng.choice(sorted(set(self.widths.values())))
+        op = rng.choice(["bvand", "bvand", "bvor"])
+        m = self.mask_const(w)
+        x = self.mask_operand(w, depth)
+        a = (op, w, x, m) if rng.random() < 0.7 else (op, w, m, x)
+        if op == "bvand" and rng.random() < 0.15:
+            self.bins.add("mask:masked-pair")
+            b = ("bvand", w, self.mask_operand(w, depth), m)
+            return (rng.choice(["=", "distinct"]), "bool", a, b)
+        mv, r = m[1], rng.random()
+        if r < 0.5:      # a value the masked operand can take
+            v = (rng.randrange(1 << w) & mv) if op == "bvand" else (rng.randrange(1 << w) | mv)
+        else:
+            v = rng.randrange(1 << w)
+        cmp = rng.choice(self.cmp_ops)
+        self.bins.add(f"mask-cmp:{op}:{cmp}")
+        c = ("const", v, w)
+        return (cmp, "bool", a, c) if rng.random() < 0.7 else (cmp, "bool", c, a)
+
     def boolean(self, depth):
         rng = self.rng
+        if rng.random() < 0.12:
+            return self.mask_compare(depth)
         if depth <= 0 or rng.random() < 0.7:
             w = rng.choice(sorted(set(self.widths.values())))
             op = rng.choice(self.cmp_ops)
@@ -147,10 +214,74 @@ class Gen:
         self.bins.add("bool:and")
         return ("and", "bool", self.boolean(depth - 1), self.boolean(depth - 1))
 
+    def field_word(self, depth):
+        """Constraints on the fields of one word -- x[h:l] from a partition
+        of x's bits, in a set, excluded, ordered or linked to other terms --
+        the shape compile splits into field variables."""
+        rng = self.rng
+        names = [n for n, w in self.widths.items() if w >= 3]
+        if not names:
+            return []
+        n = rng.choice(names)
+        w = self.widths[n]
+        x = ("var", n, w)
+        cuts = sorted(rng.sample(range(1, w), min(w - 1, rng.randint(1, 4))))
+        b = [0] + cuts + [w]
+        fields = [(b[i + 1] - 1, b[i]) for i in range(len(b) - 1)]
+        if rng.random() < 0.2:                  # one field across a cut
+            self.bins.add("field:overlap")
+            h, l = rng.choice(fields)
+            fields.append((min(w - 1, h + 1), l))
+        elif len(fields) > 2 and rng.random() < 0.5:   # a run of fields, nested
+            self.bins.add("field:nested")
+            i = rng.randrange(len(fields) - 1)
+            j = rng.randrange(i + 1, len(fields))
+            fields.append((fields[j][0], fields[i][1]))
+        out = []
+        for _ in range(rng.randint(2, 4)):
+            h, l = rng.choice(fields)
+            fw = h - l + 1
+            f = ("extract", fw, h, l, x)
+            r = rng.random()
+            if r < 0.3:
+                kind = "set"
+                vals = rng.sample(range(1 << fw), min(1 << fw, rng.randint(2, 5)))
+                c = ("or", "bool", *[("=", "bool", f, ("const", v, fw)) for v in vals])
+            elif r < 0.45:
+                kind = "exclude"
+                c = ("distinct", "bool", f, self.const(fw))
+            elif r < 0.65:
+                kind = "order"
+                c = (rng.choice(["bvult", "bvule", "bvugt", "bvuge"]), "bool", f, self.const(fw))
+            elif r < 0.8:
+                kind = "link"
+                c = (rng.choice(self.cmp_ops), "bool", f, self.bv(fw, depth))
+            else:
+                kind = "eq"
+                c = ("=", "bool", f, self.const(fw))
+            if rng.random() < 0.15:
+                kind += "-neg"
+                c = ("not", "bool", c)
+            self.bins.add("field:" + kind)
+            out.append(c)
+        if rng.random() < 0.2 and len(fields) > 1:  # fields gathered, reordered
+            self.bins.add("field:concat")
+            (h1, l1), (h2, l2) = rng.sample(fields, 2)
+            cw = h1 - l1 + h2 - l2 + 2
+            cat = ("concat", cw, ("extract", h1 - l1 + 1, h1, l1, x),
+                   ("extract", h2 - l2 + 1, h2, l2, x))
+            out.append((rng.choice(self.cmp_ops), "bool", cat, self.const(cw)))
+        if rng.random() < 0.3:
+            self.bins.add("field:whole-word")
+            out.append((rng.choice(self.cmp_ops), "bool", x, self.const(w)))
+        return out
+
     def problem(self) -> Problem:
         rng = self.rng
         depth = rng.randrange(1, 4)
         cons = [self.boolean(depth) for _ in range(rng.randrange(1, 7))]
+        if rng.random() < 0.15:
+            cons += self.field_word(depth)
         names = list(self.widths)
         if len(names) > 1 and rng.random() < 0.15:
             a, b = rng.sample(names, 2)

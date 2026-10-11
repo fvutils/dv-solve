@@ -164,8 +164,8 @@ static void _perr_oom(Smt2Lexer *lex) {
     _perr(lex, lex->line, lex->col, "out of memory while parsing", NULL);
 }
 
-/** Parse one atom or list starting at the already-lexed `tok` (recursive). */
-static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
+/** Build the atom for the already-lexed `tok` (any token but '('). */
+static Sexpr *_parse_atom(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
 
     switch (tok.kind) {
     case TOK_EOF:
@@ -234,53 +234,79 @@ static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
         s->sym.len = tok.length;
         return s;
     }
-    case TOK_LPAREN: {
-        /* Parse list: children until ')' */
-        SexprList children;
-        _list_init(&children);
+    case TOK_LPAREN:
+        break;   /* lists are _parse_tok's */
+    }
+    return NULL;
+}
 
-        for (;;) {
-            Smt2Token next = smt2_lexer_next(lex);
-            if (next.kind == TOK_RPAREN) break;
-            if (next.kind == TOK_EOF) {
-                _perr(lex, lex->cmd_line, lex->cmd_col,
-                      "unexpected end of input: '(' is never closed", NULL);
-                _list_free(&children);
-                return NULL;
+/** Move a finished list's children into an arena list node. */
+static Sexpr *_finish_list(Smt2Lexer *lex, SexprArena *arena, SexprList *children) {
+    Sexpr *s = _alloc_sexpr(arena);
+    if (!s) { _perr_oom(lex); return NULL; }
+    s->kind       = SEXPR_LIST;
+    s->list.count = children->count;
+    s->list.items = NULL;
+    if (children->count > 0) {
+        size_t sz = children->count * sizeof(Sexpr *);
+        Sexpr **arr = (Sexpr **)sexpr_arena_alloc(arena, sz, _Alignof(Sexpr *));
+        if (!arr) { _perr_oom(lex); return NULL; }
+        memcpy(arr, children->items, sz);
+        s->list.items = arr;
+    }
+    return s;
+}
+
+/** Parse one atom or list starting at the already-lexed `tok`.
+ *
+ *  Iterative: each open list is a frame on a heap stack, so nesting depth is
+ *  bounded by memory, not by the calling thread's stack (recursion here took
+ *  336 bytes a level and overflowed a 1 MB thread at about 3000 levels). */
+static Sexpr *_parse_tok(Smt2Lexer *lex, SexprArena *arena, Smt2Token tok) {
+    if (tok.kind != TOK_LPAREN) return _parse_atom(lex, arena, tok);
+
+    SexprList *st = NULL;
+    uint32_t n = 0, cap = 0;
+    for (;;) {
+        if (tok.kind == TOK_LPAREN) {
+            if (n == cap) {
+                uint32_t ncap = cap ? cap * 2 : 16;
+                SexprList *t = (SexprList *)realloc(st, ncap * sizeof *st);
+                if (!t) { _perr_oom(lex); goto fail; }
+                /* A frame still on its inline buffer pointed into the old
+                 * array. Only an inline frame has capacity SEXPR_LIST_INLINE
+                 * (the first growth doubles it onto the heap). */
+                for (uint32_t i = 0; i < n; i++)
+                    if (t[i].capacity == SEXPR_LIST_INLINE) t[i].items = t[i].inline_items;
+                st = t;
+                cap = ncap;
             }
-            Sexpr *child = _parse_tok(lex, arena, next);
-            if (!child) {
-                _list_free(&children);
-                return NULL;
-            }
-            if (_list_push(&children, child) < 0) {
-                _perr_oom(lex);
-                _list_free(&children);
-                return NULL;
-            }
+            _list_init(&st[n++]);
+            tok = smt2_lexer_next(lex);
+            continue;
         }
-
-        Sexpr *s = _alloc_sexpr(arena);
-        if (!s) { _perr_oom(lex); _list_free(&children); return NULL; }
-        s->kind       = SEXPR_LIST;
-        s->list.count = children.count;
-
-        /* Copy the pointer array into the arena */
-        if (children.count > 0) {
-            size_t sz = children.count * sizeof(Sexpr *);
-            Sexpr **arr = (Sexpr **)sexpr_arena_alloc(arena, sz,
-                                                       _Alignof(Sexpr *));
-            if (!arr) { _perr_oom(lex); _list_free(&children); return NULL; }
-            memcpy(arr, children.items, sz);
-            s->list.items = arr;
+        Sexpr *done;
+        if (tok.kind == TOK_RPAREN) {
+            done = _finish_list(lex, arena, &st[n - 1]);
+            _list_free(&st[--n]);
+            if (!done) goto fail;
+            if (n == 0) { free(st); return done; }
+        } else if (tok.kind == TOK_EOF) {
+            _perr(lex, lex->cmd_line, lex->cmd_col,
+                  "unexpected end of input: '(' is never closed", NULL);
+            goto fail;
         } else {
-            s->list.items = NULL;
+            done = _parse_atom(lex, arena, tok);
+            if (!done) goto fail;
         }
-        _list_free(&children);
-        return s;
+        if (_list_push(&st[n - 1], done) < 0) { _perr_oom(lex); goto fail; }
+        tok = smt2_lexer_next(lex);
     }
-    }
-    return NULL; /* unreachable */
+
+fail:
+    for (uint32_t i = 0; i < n; i++) _list_free(&st[i]);
+    free(st);
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ */

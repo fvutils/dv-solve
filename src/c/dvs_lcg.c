@@ -67,7 +67,9 @@ int clause_db_init(ClauseDB *db, uint32_t n_vars) {
     db->n_watch_vars = n_vars;
     db->watch_lb = (WatchEntry **)calloc(n_vars, sizeof(WatchEntry *));
     db->watch_ub = (WatchEntry **)calloc(n_vars, sizeof(WatchEntry *));
-    if (!db->watch_lb || !db->watch_ub) {
+    db->pend_cap = 2u * n_vars + 64u;
+    db->pend = (uint32_t *)malloc(db->pend_cap * sizeof(uint32_t));
+    if (!db->watch_lb || !db->watch_ub || !db->pend) {
         clause_db_destroy(db);
         return -1;
     }
@@ -87,6 +89,7 @@ void clause_db_destroy(ClauseDB *db) {
     free(db->clauses);
     free(db->watch_lb);
     free(db->watch_ub);
+    free(db->pend);
     free(db->arena);
     memset(db, 0, sizeof(*db));
 }
@@ -265,6 +268,8 @@ void lcg_reset(LCGCtx *lcg) {
     if (db->watch_lb) memset(db->watch_lb, 0, db->n_watch_vars * sizeof(WatchEntry *));
     if (db->watch_ub) memset(db->watch_ub, 0, db->n_watch_vars * sizeof(WatchEntry *));
     db->arena_used     = 0;
+    db->n_pend         = 0;
+    db->pend_over      = 0;
     db->n_propagations = 0;
     db->n_conflicts    = 0;
 
@@ -300,12 +305,35 @@ void lcg_destroy(LCGCtx *lcg) {
     memset(lcg, 0, sizeof(*lcg));
 }
 
-/* Debug counters for analyzer bail-outs. Printed by smt2 frontend when
- * DV_LCG_STATS is set.  Tagged: A=other_no_explain, B=other_explain_fail,
- * C=neither_at_cur_level, D=propagator_conflict_no_var,
- * E=cannot_determine_source, F=cur_no_explain, G=cur_explain_fail,
- * H=resolution_no_explain, I=resolution_explain_fail. */
+/* Debug counters for analyzer bail-outs, by index. Printed by the smt2
+ * front end when DV_LCG_STATS is set (its named fields predate some of
+ * these; the `bail[]` line lists them by index):
+ *   2  empty-domain conflict with no current-level literal
+ *   3  propagator conflict on a propagator that watches nothing
+ *   4  conflict with neither a clause nor a propagator recorded
+ *   5  propagator conflict with no current-level literal (by kind: _bail_kind)
+ *   7  resolution reached an entry whose propagator has no explainer
+ *   8  explainer refused
+ *  11  explainer cited a bound that does not hold (or a bad var)
+ *  12  learnt clause buffer full        14  rewind failed
+ *  15  clause conflict with no current-level literal */
 uint64_t lcg_dbg_bail[16];
+
+/* DV_LCG_STATS: the propagator-conflict seeds that found no current-level
+ * literal (bail [5]), by propagator kind. Plan 3.1. */
+#define LCG_BAIL_KINDS 48
+const char *lcg_dbg_bail_kind[LCG_BAIL_KINDS];
+uint64_t    lcg_dbg_bail_kind_n[LCG_BAIL_KINDS];
+
+static void _bail_kind(const char *name) {
+    for (int i = 0; i < LCG_BAIL_KINDS; i++) {
+        if (lcg_dbg_bail_kind[i] == name || !lcg_dbg_bail_kind[i]) {
+            lcg_dbg_bail_kind[i] = name;
+            lcg_dbg_bail_kind_n[i]++;
+            return;
+        }
+    }
+}
 
 static Literal _mk_lit(uint32_t var_id, uint8_t is_lb, int64_t bound) {
     Literal l;
@@ -641,7 +669,7 @@ static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *ou
         }
         ctx->conflict_clause_idx = EXPR_NULL;
         if (n_at_cur_level == 0) {
-            lcg_dbg_bail[3]++; return -1;
+            lcg_dbg_bail[15]++; return -1;
         }
     } else if (ctx->conflict_prop_ref != EXPR_NULL) {
         if (_tron()) {
@@ -682,7 +710,9 @@ static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *ou
         /* If nothing got added at current level, we can't form a UIP.
          * Fall back to chronological backtracking. */
         if (n_at_cur_level == 0) {
-            lcg_dbg_bail[3]++; return -1;
+            lcg_dbg_bail[5]++;
+            _bail_kind(prop_fire_name(cp->fire));
+            return -1;
         }
     } else {
         lcg_dbg_bail[4]++;

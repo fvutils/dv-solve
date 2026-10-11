@@ -70,7 +70,8 @@ typedef struct {
     int (*opaque_const)(void *ctx, const char *name, uint32_t len);
     /* The definition of a define-sort alias, or NULL. */
     const Sexpr *(*sort_alias)(void *ctx, const char *name, uint32_t len);
-    /* Deepest term nesting to evaluate; deeper fails rather than overflow. */
+    /* Deepest term nesting to evaluate; deeper fails rather than overflow.
+     * Evaluation also fails when the stack runs low (dvs_stack_low). */
     uint32_t max_depth;
 } Smt2EvalHost;
 

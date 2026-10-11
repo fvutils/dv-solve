@@ -102,6 +102,10 @@ void dvs_solver_set_seed(dvs_ctx_t *ctx, uint64_t seed);
  */
 int dvs_solver_soft_active(const dvs_ctx_t *ctx, uint32_t assumption_idx);
 
+/* Undo what the last solve's search left above its root (ctx->search_sealed):
+ * the caller's state as it was when that solve started. A no-op otherwise. */
+void dvs_search_discard(dvs_ctx_t *ctx);
+
 /**
  * Batch solve: reset + solve + read values, repeated n_solves times.
  *

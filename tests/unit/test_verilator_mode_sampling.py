@@ -147,3 +147,70 @@ def test_verilator_mode_randomizes_a_large_array():
     assert len({tuple(sorted(m.items())) for m in ms}) > 40
     assert len({m["d0"] for m in ms}) > 5
     assert len({m["idx"] for m in ms}) == 4
+
+
+# ---- spread under Verilator's randomize() protocol --------------------------
+
+def _route_log(script: str) -> str:
+    r = subprocess.run([str(_EXE), "--interactive", "--mode=verilator"], input=script,
+                       capture_output=True, text=True, timeout=60,
+                       env={**os.environ, "DV_LOG": "1"})
+    return r.stderr
+
+
+def test_parity_round_is_not_enumeration():
+    """B95: Verilator 5.046's parity asserts (`(= #b1 (bvxor <bits>))`, no `#b0`
+    seed) were taken for 5.052+ UniGen2 enumeration, which turns diversify off;
+    Verilator keeps the solver's own model after them, so every randomize()
+    came back skewed."""
+    log = _route_log(_PRE + _HASH1 + _HASH0)
+    assert "(enumeration)" not in log, log
+
+
+def test_unigen2_hash_is_enumeration():
+    """The UniGen2 shape keeps the enumeration route: its chains start with #b0."""
+    seeded = ("(assert (= #b1 (bvxor #b0 ((_ extract 0 0) x) ((_ extract 1 1) x))))"
+              "(check-sat)")
+    log = _route_log(_PRE + "(push 1)" + seeded)
+    assert "(enumeration)" in log, log
+
+
+def _vlt_draws(name: str, n: int) -> tuple:
+    from tests.perf.run_rand import truth
+    b = Bench(name)
+    r = vlt_protocol.sample([str(_EXE), "--interactive", "--mode=verilator"],
+                            b.widths, b.smt_vlt(), n, 20261009)
+    tr = truth(b)
+    ms = r["models"]
+    assert all(m in tr for m in ms)          # every model satisfies the constraints
+    return ms, tr
+
+
+@pytest.mark.parametrize("name,n", [("countones", 1400), ("sum_eq_const", 2000),
+                                    ("ot_aon_wkup", 2000)])
+def test_verilator_protocol_draws_are_uniform(name, n):
+    """Under Verilator's protocol (base solve, up to four parity rounds) the
+    draws pass chi-square against a uniform draw. B95 failed all three, and so
+    did bound decisions from a seeded solve's first decision on a variable
+    (ot_aon_wkup, p < 0.001)."""
+    stats = pytest.importorskip("scipy.stats")
+    from collections import Counter
+    ms, tr = _vlt_draws(name, n)
+    cnt = Counter(ms)
+    chi2 = sum((cnt.get(k, 0) - n * p) ** 2 / (n * p) for k, p in tr.items())
+    assert stats.chi2.sf(chi2, len(tr) - 1) > 1e-3
+
+
+def test_verilator_protocol_gappy_domain():
+    """`x inside {[10:20],[100:150]}`: bound decisions drew each side by its
+    interval's width, not its solutions (JSD 0.048 at n=2000; a true uniform
+    draw shows about 0.004, the fixed build about 0.017)."""
+    import math
+    from collections import Counter
+    n = 2000
+    ms, tr = _vlt_draws("disjoint_ranges", n)
+    cnt = Counter(ms)
+    p = {k: cnt.get(k, 0) / n for k in tr}
+    kl = lambda a, c: sum(a[k] * math.log2(a[k] / c[k]) for k in tr if a[k] > 0)  # noqa: E731
+    mid = {k: (p[k] + tr[k]) / 2 for k in tr}
+    assert 0.5 * kl(p, mid) + 0.5 * kl(tr, mid) < 0.03

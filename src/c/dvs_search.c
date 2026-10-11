@@ -713,12 +713,27 @@ static int _split_upper_first(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
  * is narrowed by bounds; every other decision stays a value decision, which
  * keeps the decision depth small. The side is chosen as a split's is (random,
  * size-weighted, in diversity mode), and always narrows the domain.
+ *
+ * A seeded solve makes value decisions on a variable until
+ * DVS_BOUND_DECISION_TRIES of them have failed in this solve. A failed value
+ * decision teaches `x != v` and the next draw is uniform over what is left --
+ * rejection sampling, which keeps the result uniform. A failed bound decision
+ * drops a side chosen by the weight of its interval, not of its solutions, so
+ * bounding from the first decision skewed every gappy domain; and activity
+ * outlives a reset, so in a randomize() loop nearly every variable had some
+ * (`x inside {[10:20],[100:150]}`, `ot_aon_wkup` under Verilator's protocol:
+ * chi-square p < 0.001). Sparse domains, where draws keep failing, still
+ * switch to bounds after a few tries.
  * Returns 0 (value decision), 1 (x <= v) or 2 (x >= v). */
 #define DVS_BOUND_DECISION_MIN 64u
+#define DVS_BOUND_DECISION_TRIES 32u
 static uint8_t _bound_decision(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
                                uint32_t x, int64_t v) {
     const LCGCtx *L = (const LCGCtx *)ctx->lcg;
     if (!L || !L->enabled || x >= L->vsids.n_vars || !(L->vsids.activity[x] > 0.0))
+        return 0;
+    if (ctx->value_fails_on && x < ctx->value_fails_cap
+            && ctx->value_fails[x] < DVS_BOUND_DECISION_TRIES)
         return 0;
     const Variable *xv = &ctx->vars[x];
     int64_t lo = var_lo64(ctx, xv), hi = var_hi64(ctx, xv);
@@ -878,6 +893,19 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         }
     }
 
+    /* Failed value decisions (see _bound_decision) are per seeded solve. */
+    ctx->value_fails_on = 0;
+    if (opts && opts->seed != 0 && ctx->n_vars > 0) {
+        if (ctx->value_fails_cap < ctx->n_vars) {
+            uint8_t *vf = (uint8_t *)realloc(ctx->value_fails, ctx->n_vars);
+            if (vf) { ctx->value_fails = vf; ctx->value_fails_cap = ctx->n_vars; }
+        }
+        if (ctx->value_fails_cap >= ctx->n_vars) {
+            memset(ctx->value_fails, 0, ctx->n_vars);
+            ctx->value_fails_on = 1;
+        }
+    }
+
     /* Default restart parameters: 100 conflicts per restart,
      * 10000 max restarts.  Caller can override via opts. */
     uint32_t max_conflicts  = (opts && opts->max_conflicts > 0)
@@ -921,6 +949,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
     ctx->level_marks[base].trail_top   = ctx->trail_top;
     ctx->level_marks[base].trail_count = ctx->trail_count;
     ctx->level_marks[base].stack_mark  = dvs_stack_push(ctx->dynamic);
+    ctx->search_sealed = 1;
 
     /* Pre-search bounds shaving (L2): tighten domains beyond what
      * individual propagator fixed-point can achieve. */
@@ -1018,6 +1047,9 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         /* The decision just made conflicted: its value is not kept. */
         if (pr == PROP_CONFLICT && ctx->keep_on && x_id < ctx->keep_cap)
             ctx->keep_state[x_id] = KEEP_DEAD;
+        if (pr == PROP_CONFLICT && !bound && ctx->value_fails_on
+                && x_id < ctx->value_fails_cap && ctx->value_fails[x_id] < 255)
+            ctx->value_fails[x_id]++;
 
         /* ── Conflict loop ── */
         while (pr == PROP_CONFLICT) {
@@ -1316,7 +1348,14 @@ dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     return r;
 }
 
+void dvs_search_discard(dvs_ctx_t *ctx) {
+    if (!ctx || !ctx->search_sealed) return;
+    ctx->search_sealed = 0;
+    trail_backtrack(ctx, ctx->search_base);
+}
+
 static dvs_result_t _solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
+    dvs_search_discard(ctx);
     dvs_result_t r = _solver_solve_relax(ctx, opts);
     /* The propagation deadline belongs to this solve only: a later pin or
      * incremental add must not abort on it. */
@@ -1490,6 +1529,7 @@ void dvs_solver_reset(dvs_ctx_t *ctx) {
 
 static void _solver_reset(dvs_ctx_t *ctx) {
     if (!ctx || !ctx->initial_vars || ctx->initial_n_vars == 0) return;
+    ctx->search_sealed = 0;            /* undone below */
     if (ctx->n_checkpoints > 0 && ctx->prop_refs) {
         _reset_in_scope(ctx);
         return;
@@ -1581,6 +1621,7 @@ int dvs_solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
 
 static int _solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx || var_id >= ctx->n_vars) return -1;
+    dvs_search_discard(ctx);
     var_id = _alias_root(ctx, var_id);
     if (ctx->n_checkpoints > 0 &&
         (dvs_scope_log_bound(ctx, var_id, 1, value) != 0 ||
@@ -1593,6 +1634,15 @@ static int _solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (r == PROP_CONFLICT) return -1;
 
     r = dvs_solver_propagate(ctx);
+    if (r == PROP_CONFLICT && ctx->prop_aborted) {
+        /* Abandoned at the trail cap (a strict compare climbing one value a
+         * round, B61), not refuted: the pin stands and the solve carries on
+         * the propagation under its own deadline. Reported as a conflict,
+         * a satisfiable pin read as unsat, and the flag failed every pin
+         * after it until the next solve (B103). */
+        ctx->prop_aborted = 0;
+        return 0;
+    }
     if (r == PROP_CONFLICT) return -1;
 
     return 0;
@@ -1746,6 +1796,7 @@ static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
 static int _solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
 
 int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
+    dvs_search_discard(ctx);
     int rc = _solver_exclude_value(ctx, var_id, value);
     if (ctx && ctx->oracle) dvs_oracle_on_exclude(ctx, var_id, value, rc);
     return rc;

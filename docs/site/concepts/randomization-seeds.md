@@ -26,6 +26,9 @@ values. In Python, pass `fair_pick=True` to `solve()`. It changes how the
 solver breaks ties between equally good choices, so that the values of every
 variable, not just the first one decided, are spread evenly.
 
+{doc}`../internals/randomization` explains how each engine draws its
+solutions, and where the result is exactly uniform and where it is not.
+
 ## Weighted distributions
 
 `add_dist` gives a variable a weighted distribution, like SystemVerilog's

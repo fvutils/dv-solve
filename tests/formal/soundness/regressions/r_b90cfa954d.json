@@ -1,0 +1,47 @@
+{
+ "why": "seed=707 i=1711 door=protocol[k=7 pin x=3654776311] expect=sat got=unsat",
+ "widths": {
+  "x": 33,
+  "y": 33,
+  "z": 32
+ },
+ "cons": [
+  [
+   "bvult",
+   "bool",
+   [
+    "ite",
+    33,
+    [
+     "bvult",
+     "bool",
+     [
+      "const",
+      0,
+      32
+     ],
+     [
+      "var",
+      "z",
+      32
+     ]
+    ],
+    [
+     "var",
+     "x",
+     33
+    ],
+    [
+     "var",
+     "y",
+     33
+    ]
+   ],
+   [
+    "var",
+    "y",
+    33
+   ]
+  ]
+ ]
+}

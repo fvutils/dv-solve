@@ -15,6 +15,7 @@
 #include <string.h>
 #include "dv_solve.h"
 #include "dvs_sv.h"
+#include "dvs_stackinfo.h"
 
 typedef struct { uint16_t w; uint8_t s; } ETy;
 
@@ -69,6 +70,7 @@ typedef struct {
     unsigned   flags;
     char      *why;
     size_t     why_n;
+    dvs_stack_guard_t sg;  /* nesting past the stack: unsupported */
 } E;
 
 static void *_P(E *e, dvs_expr_t r) {
@@ -80,6 +82,13 @@ static void _fail(E *e, const char *msg) {
     if (!(e->flags & DVS_EMIT_F_UNSUPPORTED) && e->why && e->why_n)
         snprintf(e->why, e->why_n, "%s", msg);
     e->flags |= DVS_EMIT_F_UNSUPPORTED;
+}
+
+/* Nested deeper than the stack can hold: give up on this problem. */
+static int _deep(E *e) {
+    if (!dvs_stack_low(&e->sg)) return 0;
+    _fail(e, "expression nested too deeply");
+    return 1;
 }
 
 static int _is_arith(dvs_binop_t op) {
@@ -133,6 +142,7 @@ static int _var_type(E *e, uint32_t id, ETy *t) {
 static ETy _type(E *e, dvs_expr_t ref) {
     ETy t = { 1, 0 };
     if (ref == EXPR_NULL) { _fail(e, "null expression"); return t; }
+    if (_deep(e)) return t;
     uint32_t mv;
     if (_map_get(&e->types, (uint64_t)ref + 1, &mv)) {
         t.w = (uint16_t)(mv >> 8); t.s = (uint8_t)(mv & 1);
@@ -472,6 +482,7 @@ static int _shared(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, int mode, DvsOBu
 }
 
 static void _bool(E *e, dvs_expr_t ref, DvsOBuf *o) {
+    if (_deep(e)) { dvs_ob_str(o, "false"); return; }
     if (_shared(e, ref, 0, 0, 1, o)) return;
     _bool_raw(e, ref, o);
 }
@@ -479,6 +490,7 @@ static void _bool(E *e, dvs_expr_t ref, DvsOBuf *o) {
 /* The truth of any node in its own type. */
 static void _truth(E *e, dvs_expr_t ref, DvsOBuf *o) {
     if (ref == EXPR_NULL) { _fail(e, "null expression"); dvs_ob_str(o, "false"); return; }
+    if (_deep(e)) { dvs_ob_str(o, "false"); return; }
     if (_is_boolish(e, ref)) { _bool(e, ref, o); return; }
     ETy t = _type(e, ref);
     dvs_ob_str(o, "(not (= ");
@@ -680,6 +692,7 @@ static void _val_raw(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
 static void _val(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
     if (W == 0) W = 1;
     if (ref == EXPR_NULL) { _fail(e, "null expression"); dvs_smt2_emit_value(o, 0, W); return; }
+    if (_deep(e)) { dvs_smt2_emit_value(o, 0, W); return; }
     if (_shared(e, ref, W, S, 0, o)) return;
     _val_raw(e, ref, W, S, o);
 }
@@ -689,7 +702,7 @@ static void _val(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
 /* ------------------------------------------------------------------ */
 
 static void _count(E *e, dvs_expr_t ref) {
-    if (ref == EXPR_NULL) return;
+    if (ref == EXPR_NULL || _deep(e)) return;
     uint32_t n = 0;
     int seen = _map_get(&e->uses, (uint64_t)ref + 1, &n);
     _map_put(&e->uses, (uint64_t)ref + 1, n + 1);

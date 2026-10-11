@@ -19,6 +19,17 @@
 #include "dvs_sat.h"
 #include "dvs_sv.h"
 #include "dvs_thread.h"
+#include "dvs_stackinfo.h"
+
+/* The per-kind blasters stay out of bb_expr, so a level of nesting costs
+ * bb_expr's frame plus the one kind's, not the union of all of them. */
+#if defined(_MSC_VER)
+#define BB_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__)
+#define BB_NOINLINE __attribute__((noinline))
+#else
+#define BB_NOINLINE
+#endif
 
 /* ----------------------------- types -------------------------------------- */
 
@@ -63,6 +74,10 @@ typedef struct {
 
 struct dvs_bbsolver_s {
     dvs_alloc_t    *alloc;
+    /* The expression walks below stop when the stack runs low: blasting
+     * reports the problem unsupported (so another engine, or "unknown",
+     * answers), the cycle checks answer "may cycle". */
+    dvs_stack_guard_t sg;
     dvs_problem_t   *problem;
     /* The caller's problem when `problem` is an SV-elaborated copy we own
      * (dvs_sv_elaborate); NULL when `problem` is the caller's. */
@@ -138,6 +153,8 @@ struct dvs_bbsolver_s {
      * had_error: maps to DVS_BB_UNKNOWN so the caller defers to its fallback
      * rather than treating the result as a real verdict. */
     int             had_unsupported;
+    /* had_unsupported because an expression nests deeper than the stack. */
+    int             too_deep;
 
     /* DSE-2 soft-aware serve. soft_keep[i] (indexed by softs_head walk order)
      * selects which soft constraints to encode as *hard* top-level assertions
@@ -250,7 +267,9 @@ static uint16_t max_w(uint16_t a, uint16_t b) { return a > b ? a : b; }
  * in, and what a narrower operand is extended by. (An SMT-LIB problem has no
  * signed leaves at all, so everything there is unsigned, as before.) */
 static int bb_signed(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
-    if (ref == EXPR_NULL || depth > 4096) return 0;
+    if (ref == EXPR_NULL) return 0;
+    /* Too deep to tell: guessing would extend by the wrong signedness. */
+    if (dvs_stack_deep(&S->sg, depth, 4096)) { S->had_unsupported = 1; return 0; }
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
@@ -298,7 +317,8 @@ static int bb_signed(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
 
 /* Self-determined width of `ref` (0 = an unsized constant, which adapts). */
 static uint16_t bb_self_width(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
-    if (ref == EXPR_NULL || depth > 4096) return 0;
+    if (ref == EXPR_NULL) return 0;
+    if (dvs_stack_deep(&S->sg, depth, 4096)) { S->had_unsupported = 1; return 0; }
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
@@ -387,6 +407,7 @@ static int subst_reaches_var(dvs_bbsolver_t *S,
                              uint32_t target_var,
                              uint32_t *visited) {
     if (ref == EXPR_NULL) return 0;
+    if (dvs_stack_low(&S->sg)) return 1;   /* cannot rule a cycle out */
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
@@ -488,13 +509,21 @@ static uint32_t *reach_begin(dvs_bbsolver_t *S) {
 static int expr_direct_vars(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t target,
                             int flag) {
     if (ref == EXPR_NULL) return 0;
+    if (dvs_stack_low(&S->sg)) {
+        /* Cannot finish: a query answers "occurs"; a marking walk leaves
+         * rhs_var incomplete, so drop it (subst_cycles then always walks). */
+        if (!flag) return 1;
+        free(S->rhs_var);
+        S->rhs_var = NULL;
+        return 0;
+    }
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
     case EXPR_VAR: {
         uint32_t id = ((ExprVar *)kp)->var_id;
         if (!flag) return id == target;
-        if (id < S->n_vars) S->rhs_var[id] = 1;
+        if (S->rhs_var && id < S->n_vars) S->rhs_var[id] = 1;
         return 0;
     }
     case EXPR_BINARY: {
@@ -1041,7 +1070,7 @@ static dvs_bv_t bb_const(dvs_bbsolver_t *S, const ExprConst *c, uint16_t hint) {
     return bb_value_i64(S, w, c->value, c->is_signed);
 }
 
-static dvs_bv_t bb_var_expr(dvs_bbsolver_t *S, const ExprVar *v) {
+static BB_NOINLINE dvs_bv_t bb_var_expr(dvs_bbsolver_t *S, const ExprVar *v) {
     return bv_for_var(S, v->var_id);
 }
 
@@ -1133,7 +1162,7 @@ static dvs_bv_t bb_word_eq(dvs_bbsolver_t *S, dvs_expr_t lref, dvs_expr_t rref,
     return all;
 }
 
-static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref,
+static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref,
                           uint16_t hint) {
     /* Comparison / logical ops always produce 1-bit; arithmetic / bitwise
      * widen lhs and rhs to a common width = max(lhs, rhs, hint). */
@@ -1345,7 +1374,7 @@ static dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref
     }
 }
 
-static dvs_bv_t bb_unary(dvs_bbsolver_t *S, const ExprUnary *u, uint16_t hint) {
+static BB_NOINLINE dvs_bv_t bb_unary(dvs_bbsolver_t *S, const ExprUnary *u, uint16_t hint) {
     switch (u->op) {
     case DVS_UN_NOT: {
         dvs_bv_t a = bb_predicate(S, u->operand);
@@ -1366,7 +1395,7 @@ static dvs_bv_t bb_unary(dvs_bbsolver_t *S, const ExprUnary *u, uint16_t hint) {
     return err_bv(S, "unknown dvs_unop_t");
 }
 
-static dvs_bv_t bb_ite(dvs_bbsolver_t *S, const ExprITE *e, uint16_t hint) {
+static BB_NOINLINE dvs_bv_t bb_ite(dvs_bbsolver_t *S, const ExprITE *e, uint16_t hint) {
     dvs_bv_t c = bb_predicate(S, e->cond);
     if (S->had_error) return c;
     dvs_bv_t t = bb_expr(S, e->then_e, hint);
@@ -1380,7 +1409,7 @@ static dvs_bv_t bb_ite(dvs_bbsolver_t *S, const ExprITE *e, uint16_t hint) {
     return dvs_bb_ite(S->bb, c.bits[0], t, f);
 }
 
-static dvs_bv_t bb_in_range(dvs_bbsolver_t *S, const ExprInRange *r) {
+static BB_NOINLINE dvs_bv_t bb_in_range(dvs_bbsolver_t *S, const ExprInRange *r) {
     /* in_range(value, lo, hi) := value >= lo AND value <= hi.
      * For signedness, peek at `value` like in cmp. */
     dvs_bv_t v = bb_expr(S, r->value, 0);
@@ -1404,7 +1433,7 @@ static dvs_bv_t bb_in_range(dvs_bbsolver_t *S, const ExprInRange *r) {
     return dvs_bb_and(S->bb, ge_lo, le_hi);
 }
 
-static dvs_bv_t bb_in_set(dvs_bbsolver_t *S, dvs_expr_t ref) {
+static BB_NOINLINE dvs_bv_t bb_in_set(dvs_bbsolver_t *S, dvs_expr_t ref) {
     ExprInSet *node = (ExprInSet *)POOL_PTR(S->problem, ref);
     dvs_expr_t *elems = expr_in_set_elems(S->problem, ref);
     dvs_bv_t v = bb_expr(S, node->value, 0);
@@ -1428,7 +1457,7 @@ static dvs_bv_t bb_in_set(dvs_bbsolver_t *S, dvs_expr_t ref) {
     return acc;
 }
 
-static dvs_bv_t bb_in_ranges(dvs_bbsolver_t *S, dvs_expr_t ref) {
+static BB_NOINLINE dvs_bv_t bb_in_ranges(dvs_bbsolver_t *S, dvs_expr_t ref) {
     /* OR over ranges of (value >= lo_i AND value <= hi_i). */
     ExprInRanges *node = (ExprInRanges *)POOL_PTR(S->problem, ref);
     dvs_expr_t *los = expr_in_ranges_los(S->problem, ref);
@@ -1456,7 +1485,7 @@ static dvs_bv_t bb_in_ranges(dvs_bbsolver_t *S, dvs_expr_t ref) {
     return acc;
 }
 
-static dvs_bv_t bb_extend(dvs_bbsolver_t *S, const ExprExtend *e) {
+static BB_NOINLINE dvs_bv_t bb_extend(dvs_bbsolver_t *S, const ExprExtend *e) {
     /* Also EXPR_SV_CAST (same layout): the bits are the same, only the
      * signedness the result is read with differs, and bb_signed knows it. */
     dvs_bv_t op = bb_expr(S, e->operand, e->from_bits);
@@ -1478,7 +1507,7 @@ static dvs_bv_t bb_extend(dvs_bbsolver_t *S, const ExprExtend *e) {
                           : dvs_bb_zero_ext(S->bb, op, n);
 }
 
-static dvs_bv_t bb_extract(dvs_bbsolver_t *S, const ExprExtract *e) {
+static BB_NOINLINE dvs_bv_t bb_extract(dvs_bbsolver_t *S, const ExprExtract *e) {
     /* operand width must be at least hi_bit + 1 — infer from operand. */
     dvs_bv_t op = bb_expr(S, e->operand, 0);
     if (S->had_error) return op;
@@ -1491,7 +1520,7 @@ static dvs_bv_t bb_extract(dvs_bbsolver_t *S, const ExprExtract *e) {
     return x;
 }
 
-static dvs_bv_t bb_concat(dvs_bbsolver_t *S, const ExprConcat *e) {
+static BB_NOINLINE dvs_bv_t bb_concat(dvs_bbsolver_t *S, const ExprConcat *e) {
     dvs_bv_t lo = bb_expr(S, e->lo, e->lo_width);
     if (S->had_error) return lo;
     if (lo.size > e->lo_width) {
@@ -1518,6 +1547,11 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width) 
     int memoize = (*kp != EXPR_CONST) && !S->no_memo;
     if (memoize && ref < S->cache_cap && S->cache[ref].bv.size != 0) {
         return S->cache[ref].bv;
+    }
+    /* Nested deeper than the stack can hold: unsupported, as for SUM below. */
+    if (dvs_stack_low(&S->sg)) {
+        S->had_unsupported = S->too_deep = 1;
+        return dvs_bb_value_u64(S->bb, 1, 0);
     }
 
     dvs_bv_t out;
@@ -1847,7 +1881,9 @@ static int _prop_cone(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t 
  * are applied sequentially, so each is verified against the running model and
  * coupled constraints (e.g. a sum bound) are never violated -- the result stays
  * a valid solution, just a more diverse one. node_val[] holds that model for the
- * readback.
+ * readback. Each flip is a Gibbs step for the uniform distribution (the bit
+ * takes a random value where both values satisfy, else stays), so a model the
+ * simulation drew uniformly stays uniform.
  *
  * Cost per candidate bit is one *incremental* re-evaluation: only the flipped
  * bit's fanout cone is repropagated (built once as the fo_off/fo_adj CSR index),
@@ -2422,11 +2458,12 @@ typedef struct {
     volatile int  stop;       /* SAT finished: the sweep gives up      */
     volatile int  sat_stop;   /* the sweep finished: SAT gives up      */
     int           verdict;
+    uint64_t      seed;
 } bb_sweep_arg;
 
 static void *bb_sweep_worker(void *arg) {
     bb_sweep_arg *w = (bb_sweep_arg *)arg;
-    w->verdict = dvs_aigsim_exhaustive(w->sim, &w->stop);
+    w->verdict = dvs_aigsim_exhaustive(w->sim, &w->stop, w->seed);
     if (w->verdict != DVS_AIGSIM_UNDECIDED) {
         w->sat_stop = 1;            /* CaDiCaL polls the terminate callback */
         dvs_sat_interrupt(w->sat);  /* kissat needs the explicit poke       */
@@ -2511,7 +2548,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
 
     if (work <= _env_u64("DV_SIM_MAX_WORK", 1500000ull)) {
         how = "exhaustive";
-        r = dvs_aigsim_exhaustive(sim, NULL);
+        r = dvs_aigsim_exhaustive(sim, NULL, S->seed);
     } else {
         how = "random";
         uint64_t blocks = 1000000ull / (per_pass ? per_pass : 1);
@@ -2531,7 +2568,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
 
     /* Race the sweep against SAT. */
     dvs_thread_t th;
-    bb_sweep_arg arg = { sim, S->sat, 0, 0, DVS_AIGSIM_UNDECIDED };
+    bb_sweep_arg arg = { sim, S->sat, 0, 0, DVS_AIGSIM_UNDECIDED, S->seed };
     int raced = work <= _env_u64("DV_SIM_RACE_WORK", 6000000000ull)
              && dvs_thread_create(&th, bb_sweep_worker, &arg) == 0;
     if (raced) dvs_sat_set_terminate(S->sat, (void *)&arg.sat_stop, bb_sweep_terminate);
@@ -2696,6 +2733,7 @@ int dvs_bbsolver_is_incremental(const dvs_bbsolver_t *S) {
 
 const char *dvs_bbsolver_unknown_reason(const dvs_bbsolver_t *S) {
     if (!S) return "incomplete: the bit-blast engine could not start (out of memory?)";
+    if (S->too_deep) return "incomplete: an expression nests deeper than the stack allows";
     if (S->had_unsupported) return "unsupported: a construct the bit-blast engine does not encode";
     if (S->had_error) return "incomplete: the bit-blast encoding failed (out of memory?)";
     return "incomplete: the SAT search stopped without a verdict (conflict limit)";
@@ -2725,8 +2763,12 @@ uint32_t dvs_bbsolver_split_lits(dvs_bbsolver_t *S, int32_t *out, uint32_t cap) 
 /* Flatten a DVS_BIN_OR chain rooted at `ref` into out[] (up to `cap`), counting
  * ALL leaves even past `cap` so the caller can detect an over-wide disjunction
  * that it cannot represent exhaustively. `n` is the running count. */
+/* A disjunct count no caller accepts: the or nests deeper than the stack. */
+#define BB_OR_TOO_DEEP 0x7FFFFFFFu
+
 static uint32_t bb_flatten_or(dvs_bbsolver_t *S, dvs_expr_t ref,
                               dvs_expr_t *out, uint32_t cap, uint32_t n) {
+    if (n >= BB_OR_TOO_DEEP || dvs_stack_low(&S->sg)) return BB_OR_TOO_DEEP;
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (kp && *kp == EXPR_BINARY && ((ExprBinary *)kp)->op == DVS_BIN_OR) {
         ExprBinary *b = (ExprBinary *)kp;

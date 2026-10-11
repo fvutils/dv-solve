@@ -9,7 +9,10 @@ The fuzzer draws small problems over the whole operator set, so the sweep
 decides most of them, and checks every answer two ways: against z3, and
 against dv-solve's own SAT path (DV_SIM_CHECK=1 makes the solver re-solve each
 simulation verdict with SAT and abort on a disagreement). Half the seeds force
-the race (DV_SIM_MAX_WORK=0).
+the race (DV_SIM_MAX_WORK=0). Every third sets `:random-seed`, which makes the
+sweep sample a model uniformly instead of stopping at the first (piece 6.4);
+the front end's model check turns a model that breaks an assertion into
+`unknown`, which fails here.
 
 Scale with AIG_SIM_N (default 300).
 """
@@ -96,8 +99,10 @@ class _Gen:
         w = self.r.choice([vw for _, vw in self.vars] + [self.r.randint(1, 8)])
         return f"({self.r.choice(_CMP)} {self.term(w, d)} {self.term(w, d)})"
 
-    def problem(self) -> str:
+    def problem(self, seeded: int = 0) -> str:
         lines = ["(set-logic QF_BV)"]
+        if seeded:
+            lines[:0] = ["(set-option :produce-models true)", f"(set-option :random-seed {seeded})"]
         lines += [f"(declare-const {v} (_ BitVec {w}))" for v, w in self.vars]
         lines += [f"(assert {self.pred(3)})" for _ in range(self.r.randint(1, 3))]
         lines.append("(check-sat)")
@@ -122,7 +127,7 @@ def test_sim_agrees_with_z3(seed: int, tmp_path: Path) -> None:
         pytest.skip("dv-solve-smt2 not built")
     if not _Z3.is_available():
         pytest.skip("z3 not available")
-    smt2 = _Gen(seed).problem()
+    smt2 = _Gen(seed).problem(seeded=seed + 1 if seed % 3 == 0 else 0)
     f = tmp_path / f"sim_{seed}.smt2"
     f.write_text(smt2)
     want = _Z3.solve(f, timeout_s=30).result

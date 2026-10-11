@@ -98,6 +98,14 @@ typedef struct {
     WatchEntry **watch_lb;   /* watch_lb[var_id] -> linked list */
     WatchEntry **watch_ub;   /* watch_ub[var_id] -> linked list */
     uint32_t     n_watch_vars;
+    /* A clause notification is running: a tightening it makes does not start
+     * another (clause_notify_lb / _ub) but is queued in `pend` and checked
+     * when the running one finishes. Per database, not per process. */
+    uint8_t      in_notify;
+    uint8_t      pend_over;  /* the queue overflowed: rescan every clause */
+    uint32_t    *pend;       /* queued events: var_id*2 + (1 = ub event)   */
+    uint32_t     n_pend;
+    uint32_t     pend_cap;
 
     /* Allocation arena for clauses and watch entries */
     uint8_t  *arena;

@@ -7,6 +7,7 @@
  * functions -- costs its DAG size, not its tree size. */
 
 #include "smt2/smt2_eval.h"
+#include "dvs_stackinfo.h"
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -92,6 +93,7 @@ struct Smt2Eval {
     Smt2EvalHost  host;
     SexprArena    arena;
     uint32_t      depth;
+    dvs_stack_guard_t sg;
     char          err[200];
     int           failed;
     Memo         *memo;
@@ -1270,7 +1272,8 @@ static const Smt2Value *_list(Smt2Eval *ev, const Sexpr *s, const Env *env) {
 
 static const Smt2Value *_ev(Smt2Eval *ev, const Sexpr *s, const Env *env) {
     if (ev->failed) return NULL;
-    if (ev->depth >= ev->host.max_depth) return _fail(ev, "term nested too deeply");
+    if (ev->depth >= ev->host.max_depth || dvs_stack_low(&ev->sg))
+        return _fail(ev, "term nested too deeply");
     ev->depth++;
     const Smt2Value *r = NULL;
     switch (s->kind) {

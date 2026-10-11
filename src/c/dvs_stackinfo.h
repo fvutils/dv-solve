@@ -15,21 +15,38 @@
 extern "C" {
 #endif
 
-/* The lowest address the calling thread's stack may grow down to while still
- * leaving `margin` bytes free, or 0 if the platform cannot tell. Recursive
- * passes compare the address of a local against it (dvs_stack_exhausted) and
- * refuse the input rather than overflow: a fixed depth limit cannot be right
- * for every stack -- 1 MB on a Windows thread, 512 KB on a macOS secondary
- * thread, whatever the caller gave its own threads. */
-uintptr_t dvs_stack_floor(size_t margin);
-
 /* The calling thread's whole stack size in bytes, or 0 if unknown. */
 size_t dvs_stack_size(void);
 
-/* Nonzero when the caller's stack has reached `floor` (0 never has). */
-static inline int dvs_stack_exhausted(uintptr_t floor) {
+/* Stack a guarded pass leaves free below its deepest checked frame, for the
+ * non-recursive work it does there (gate building, propagation, malloc). */
+#define DVS_STACK_MARGIN ((size_t)128 * 1024)
+
+/* A recursive pass's stack check. Embed one, zero-initialised, in the pass's
+ * state and call dvs_stack_low() once per level: it is a subtract and a
+ * compare while the pass stays on one thread's stack, and looks the stack up
+ * again (cheaply, per thread) when it does not. On a stack the platform cannot
+ * describe, it never refuses -- the pass then has only its own limits. */
+typedef struct dvs_stack_guard {
+    uintptr_t floor;   /* lowest address a guarded frame may reach */
+    uintptr_t span;    /* stack top - floor; 0 = not looked up yet */
+} dvs_stack_guard_t;
+
+int dvs_stack_guard_slow(dvs_stack_guard_t *g, uintptr_t at);
+
+/* Nonzero when fewer than DVS_STACK_MARGIN bytes of stack are left: the pass
+ * must give up (answer "unknown", decline the constraint) rather than recurse. */
+static inline int dvs_stack_low(dvs_stack_guard_t *g) {
     char here;
-    return floor && (uintptr_t)&here < floor;
+    uintptr_t at = (uintptr_t)&here;
+    if (at - g->floor < g->span) return 0;
+    return dvs_stack_guard_slow(g, at);
+}
+
+/* dvs_stack_low(), plus a fixed `limit` on `depth` that applies only where the
+ * stack cannot be measured. */
+static inline int dvs_stack_deep(dvs_stack_guard_t *g, long depth, long limit) {
+    return dvs_stack_low(g) || (depth > limit && g->span == UINTPTR_MAX);
 }
 
 #ifdef __cplusplus

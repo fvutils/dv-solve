@@ -241,6 +241,15 @@ def builder(p: Problem, time_limit_ms: int = 10000) -> list:
                 m = {n: ctx.get_value(ids[n]) & ((1 << w) - 1) for n, w in p.widths.items()}
                 ok = all(ev(c, m) for c in p.cons)
             res.append(Outcome(f"builder[lcg={lcg}]", exp, got, ok))
+        # Again with no reset: whatever the last solve left (a root conflict
+        # included) must not change the answer (B104).
+        rc = ctx.solve(seed=2)
+        got = {SOLVE_OK: "sat", SOLVE_UNSAT: "unsat"}.get(rc, "unknown")
+        ok = True
+        if got == "sat":
+            m = {n: ctx.get_value(ids[n]) & ((1 << w) - 1) for n, w in p.widths.items()}
+            ok = all(ev(c, m) for c in p.cons)
+        res.append(Outcome("builder[again]", exp, got, ok))
     return res
 
 
@@ -310,6 +319,16 @@ def protocol(p: Problem, seeds: int = PROTOCOL_SEEDS) -> list:
             cp = ctx.checkpoint()
             if pin is not None and not ctx.pin(ids[pin[0]], pin[1]):
                 res.append(Outcome(door, exp, "unsat"))
+                # The refused pin stands until the restore: a solve now must
+                # not answer with a model that breaks it (B104).
+                rc = ctx.solve(seed=seed, max_restarts=5)
+                got = {SOLVE_OK: "sat", SOLVE_UNSAT: "unsat"}.get(rc, "unknown")
+                ok = True
+                if got == "sat":
+                    m = {n: ctx.get_value(ids[n]) & ((1 << w) - 1)
+                         for n, w in p.widths.items()}
+                    ok = all(ev(c, m) for c in cons)
+                res.append(Outcome(door + " solved anyway", exp, got, ok))
                 ctx.restore(cp)
                 continue
             inner = ctx.checkpoint()

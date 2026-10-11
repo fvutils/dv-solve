@@ -4,7 +4,9 @@ The SMT2 translator (`_translate_tagged` <-> `_translate_list_tagged`) recurses 
 C frame per nesting level, so a deeply-nested expression used to overflow the C
 stack and crash (signal 11). Fixed 2026-07-21 by (a) a stack-sized depth guard that
 bails to ``unknown`` past a safe depth and (b) running the solve on a 1 GiB-stack
-pthread so legitimately-deep formulas solve instead of crashing.
+pthread so legitimately-deep formulas solve instead of crashing. Since 2026-10-10
+the guard measures the stack the thread has left rather than assuming its size,
+and a translator level takes ~0.5 KB instead of ~10 KB (perf-out/stack_frames).
 
 Contract asserted here (soundness, not performance):
   * NO input, at any nesting depth, may crash (rc 139 / -11). Ever.
@@ -85,8 +87,18 @@ def test_moderate_depth_solves(use_let: bool) -> None:
     assert verdict == "unsat", f"expected unsat at depth 2000, got {verdict!r}"
 
 
+@pytest.mark.parametrize("use_let", [False, True], ids=["bvadd", "let"])
+def test_deep_chain_solves(use_let: bool) -> None:
+    """200000 levels fit the CLI's 1 GiB stack at the translator's ~0.5 KB a
+    level (the solver core's passes guard their own stack); the old fixed
+    16 KB a level stopped near 46000 and answered unknown."""
+    verdict, rc = _run(_chain(200000, use_let=use_let))
+    assert rc not in (139, -11), f"CRASHED (rc={rc})"
+    assert verdict == "unsat", f"expected unsat at depth 200000, got {verdict!r}"
+
+
 def test_pathological_depth_defers_not_crashes() -> None:
     """An absurdly deep chain trips the guard -> unknown (sound), never a crash."""
-    verdict, rc = _run(_chain(200000, use_let=False))
+    verdict, rc = _run(_chain(4000000, use_let=False))
     assert rc not in (139, -11), f"CRASHED (rc={rc}) — guard failed to fire"
     assert verdict == "unknown", f"expected unknown from the depth guard, got {verdict!r}"

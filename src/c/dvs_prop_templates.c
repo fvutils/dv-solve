@@ -4528,6 +4528,10 @@ void contra_register_explanations(dvs_ctx_t *ctx) {
         { _fire_unary_neg_64,       explain_unary_neg },
         { _fire_ite_value_64,       explain_ite_value },
         { _fire_in_set_64,          explain_in_set },
+        /* Membership in constant ranges narrows x from x's own bounds alone,
+         * exactly as a constant set does. With no explainer every conflict
+         * through it fell back to chronological backtracking. */
+        { _fire_in_ranges_64,       explain_in_set },
         { _fire_bit_slice_64,       explain_bit_slice },
         { _fire_bounds_band_64,     explain_bounds_band },
         { _fire_bounds_bor_64,      explain_bounds_bor },

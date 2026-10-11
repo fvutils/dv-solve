@@ -375,6 +375,12 @@ void solve_problem_reset(dvs_problem_t *sp);
  */
 void solve_problem_destroy(dvs_problem_t *sp);
 
+/* Write a one-line s-expression of `ref` into `buf` (always NUL-terminated,
+ * truncated to `n`), for diagnostics. `show_vals` adds each variable's
+ * current value. Defined in dvs_validate.c. */
+void dvs_expr_dump(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
+                   dvs_expr_t ref, int show_vals, char *buf, size_t n);
+
 /* ------------------------------------------------------------------ */
 /* Expression builders — return EXPR_NULL on pool overflow             */
 /* ------------------------------------------------------------------ */

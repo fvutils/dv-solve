@@ -452,7 +452,7 @@ def test_shared_definitions_cost_dag_size():
 
 
 def test_deep_let_and_depth_guard():
-    """A 20000-deep let evaluates; nesting past the guard is an error, not a crash."""
+    """Deep lets evaluate; nesting past the guard is an error, not a crash."""
     def nest(n):
         return "".join("(let ((x%d (bvadd x%d #x01))) " % (i, i - 1) for i in range(1, n + 1)) \
             + "x%d" % n + ")" * n
@@ -461,7 +461,14 @@ def test_deep_let_and_depth_guard():
     p = subprocess.run([str(_EXE)], input=text, capture_output=True, text=True, timeout=60)
     assert p.returncode == 0, p.stderr[-500:]
     assert _bits(_raw_values(p.stdout, 1)[0]) == format(20000 % 256, "08b")
-    deep = text.replace(nest(20000), nest(300000)) + "(get-value (x0))"
+    # The guard is the evaluating thread's stack (4M levels at most), so a
+    # 300000-deep let evaluates too; a 4.1M-deep term trips it.
+    deep = text.replace(nest(20000), nest(300000))
+    p = subprocess.run([str(_EXE)], input=deep, capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stderr[-500:]
+    assert _bits(_raw_values(p.stdout, 1)[0]) == format(300000 % 256, "08b")
+    n = 4100000
+    deep = text.replace(nest(20000), "(bvadd " * n + "x0" + " #x01)" * n) + "(get-value (x0))"
     p = subprocess.run([str(_EXE)], input=deep, capture_output=True, text=True, timeout=60)
     out = p.stdout.splitlines()
     assert out[1].startswith("(error ") and "nested too deeply" in out[1], out[1][:300]

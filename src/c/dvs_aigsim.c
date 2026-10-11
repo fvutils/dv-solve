@@ -36,6 +36,8 @@ struct dvs_aigsim_s {
     uint64_t       *val;        /* W words per slot                        */
     uint32_t        hit_lane;   /* a lane of the last pass that satisfies  */
     int             has_hit;
+    int             hit_exh;    /* the hit is hit_index, not hit_lane      */
+    uint64_t        hit_index;  /* exhaustive: input k is bit k            */
     uint64_t        vectors;
 };
 
@@ -175,7 +177,7 @@ static void _record_hit(dvs_aigsim_t *s, const uint64_t ok[W]) {
     }
 }
 
-int dvs_aigsim_exhaustive(dvs_aigsim_t *s, const volatile int *stop) {
+int dvs_aigsim_exhaustive(dvs_aigsim_t *s, const volatile int *stop, uint64_t seed) {
     uint32_t n = s->n_inputs;
     if (n > 32) return DVS_AIGSIM_UNDECIDED;
     /* Lane L (word L/64, bit L%64) gives input k bit k of L for k < IN_PASS:
@@ -193,7 +195,7 @@ int dvs_aigsim_exhaustive(dvs_aigsim_t *s, const volatile int *stop) {
         uint32_t lo = (uint32_t)w * 64;
         mask[w] = live >= lo + 64 ? ~0ull : live > lo ? ((1ull << (live - lo)) - 1) : 0;
     }
-    uint64_t ok[W];
+    uint64_t ok[W], st = seed, seen = 0;
     for (uint64_t b = 0; b < passes; b++) {
         if (stop && *stop) return DVS_AIGSIM_UNDECIDED;
         for (uint32_t k = IN_PASS; k < n; k++) {
@@ -205,10 +207,33 @@ int dvs_aigsim_exhaustive(dvs_aigsim_t *s, const volatile int *stop) {
         if (any) {
             uint64_t m = 0;
             for (int w = 0; w < W; w++) { ok[w] &= mask[w]; m |= ok[w]; }
-            if (m) { _record_hit(s, ok); return DVS_AIGSIM_SAT; }
+            if (!m) continue;
+            if (!seed) {
+                _record_hit(s, ok);
+                s->hit_exh = 1;
+                s->hit_index = s->hit_lane | (b << IN_PASS);
+                return DVS_AIGSIM_SAT;
+            }
+            /* Reservoir sampling by pass: this pass's c hits replace the kept
+             * one with probability c/seen, then one of them uniformly, so the
+             * assignment left is uniform over every satisfying one. */
+            uint64_t c = 0;
+            for (int w = 0; w < W; w++) c += (uint64_t)__builtin_popcountll(ok[w]);
+            seen += c;
+            uint64_t r = _rng(&st) % seen;
+            if (r >= c) continue;
+            for (int w = 0; w < W; w++) {
+                uint64_t x = ok[w];
+                uint64_t k = (uint64_t)__builtin_popcountll(x);
+                if (r >= k) { r -= k; continue; }
+                while (r--) x &= x - 1;
+                s->has_hit = s->hit_exh = 1;
+                s->hit_index = ((uint64_t)w * 64 + (uint64_t)__builtin_ctzll(x)) | (b << IN_PASS);
+                break;
+            }
         }
     }
-    return DVS_AIGSIM_UNSAT;
+    return seen ? DVS_AIGSIM_SAT : DVS_AIGSIM_UNSAT;
 }
 
 int dvs_aigsim_random(dvs_aigsim_t *s, uint32_t blocks, uint64_t seed) {
@@ -233,7 +258,8 @@ int8_t *dvs_aigsim_model(const dvs_aigsim_t *s) {
     if (!nv) return NULL;
     if (s->N >= 1) nv[1] = 1;                                   /* TRUE */
     for (uint32_t k = 0; k < s->n_inputs; k++)
-        nv[s->inputs[k]] = (int8_t)((s->val[(size_t)(1 + k) * W + w] >> bit) & 1u);
+        nv[s->inputs[k]] = s->hit_exh ? (int8_t)((s->hit_index >> k) & 1u)
+                         : (int8_t)((s->val[(size_t)(1 + k) * W + w] >> bit) & 1u);
     for (uint32_t id = 2; id <= s->N; id++)
         if (s->L[id]) nv[id] = (int8_t)(_bit(nv, s->L[id]) & _bit(nv, s->R[id]));
     /* The lane satisfied every assertion; re-check on the scalar valuation. */

@@ -117,6 +117,7 @@ A SAT solver returns one solution, usually much like the last. To vary them,
 the bit-blaster then flips bits the constraints leave free toward random
 targets drawn from the seed, keeping each flip only if every assertion still
 holds.
+{doc}`randomization` describes how both engines draw random solutions.
 
 ## SAT solvers
 

@@ -594,6 +594,18 @@ static int _parse_bv_sym(const Sexpr *sym, uint64_t *val_out, int *overflow_out)
 /* Limbs needed to hold the widest accepted bit-vector value. */
 #define SMT2_BV_MAX_LIMBS ((SMT2_MAX_BV_BITS + 63) / 64)
 
+/* For a function with a SMT2_BV_MAX_LIMBS buffer (8 KB) that the recursive
+ * translator calls: kept out of line, the buffer exists only while that call
+ * runs. Inlined, it would sit in every nesting level's frame (9.8 KB a level
+ * instead of under 1 KB). */
+#if defined(_MSC_VER)
+#define SMT2_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__)
+#define SMT2_NOINLINE __attribute__((noinline))
+#else
+#define SMT2_NOINLINE
+#endif
+
 /* Parse the `bvN` symbol of `(_ bvN W)` into little-endian 64-bit limbs, as
  * N modulo 2^(64*n_limbs). SMT-LIB's value is N mod 2^W and the caller sizes
  * n_limbs so that W <= 64*n_limbs, so the low W bits are exact even when N
@@ -1128,18 +1140,46 @@ static uint32_t _abs_find_or_create_read(Smt2Frontend *fe, Smt2ArrayValue *node,
 /* TaggedExpr (leaf-kind tracking + optional array payload)           */
 /* ------------------------------------------------------------------ */
 
+/* Every translator level returns one of these, so its size sets the stack
+ * cost of nesting: at 16 bytes the SysV ABI returns it in two registers, while
+ * at 24 bytes each call site got its own stack slot and a level's frame grew by
+ * about 1.2 KB. The fields are TypedExpr's, flattened so leaf_kind fills what
+ * would otherwise be TypedExpr's padding. Build one with _tagged(). */
 typedef struct {
-    TypedExpr        te;
-    int              leaf_kind;  /* 0=complex, 1=var, 2=const */
+    dvs_expr_t       ref;
+    uint16_t         width;
+    uint8_t          leaf_kind;  /* 0=complex, 1=var, 2=const */
     Smt2ArrayValue  *array;      /* non-NULL for array-typed results */
 } TaggedExpr;
 
-static const TaggedExpr TAGGED_NULL = { { EXPR_NULL, 0 }, 0, NULL };
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(void *) != 8 || sizeof(TaggedExpr) == 16,
+               "TaggedExpr must stay 16 bytes: see the comment above");
+#endif
+
+static const TaggedExpr TAGGED_NULL = { EXPR_NULL, 0, 0, NULL };
+
+static inline TaggedExpr _tagged(dvs_expr_t ref, uint32_t width, int leaf_kind,
+                                 Smt2ArrayValue *array) {
+    TaggedExpr t;
+    t.ref       = ref;
+    t.width     = (uint16_t)width;
+    t.leaf_kind = (uint8_t)leaf_kind;
+    t.array     = array;
+    return t;
+}
+
+static inline TypedExpr _typed(TaggedExpr t) {
+    TypedExpr te;
+    te.ref   = t.ref;
+    te.width = t.width;
+    return te;
+}
 
 static TaggedExpr _translate_tagged(Smt2Frontend *fe, const Sexpr *s);
 
-static int _const_index(Smt2Frontend *fe, const Sexpr *s, uint32_t width,
-                        uint64_t *lo, uint64_t *hi) {
+static SMT2_NOINLINE int _const_index(Smt2Frontend *fe, const Sexpr *s, uint32_t width,
+                                      uint64_t *lo, uint64_t *hi) {
     const Sexpr *r = _resolve_sym(fe, s);
     uint64_t l[SMT2_BV_MAX_LIMBS];
     for (uint32_t i = 0; i < SMT2_BV_MAX_LIMBS; i++) l[i] = 0;
@@ -1175,7 +1215,7 @@ static TaggedExpr _abs_select(Smt2Frontend *fe, Smt2ArrayValue *node,
     uint32_t idxv = _idx_varid(fe, idx_ref);
     uint32_t rv = _abs_find_or_create_read(fe, node, idx_ref, idxv, w);
     if (rv == UINT32_MAX) { SMT2_TAINT(fe, "abstract-array read var could not be created"); return TAGGED_NULL; }
-    return (TaggedExpr){ { dvs_builder_expr_var(fe->builder, rv), w }, 1, NULL };
+    return _tagged(dvs_builder_expr_var(fe->builder, rv), w, 1, NULL);
 }
 
 /* Turn a sparse array into an abstract BASE node in place, when something
@@ -1286,11 +1326,11 @@ static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s);
  * unset (library / main-thread use) -> fall back to RLIMIT_STACK. */
 size_t g_smt2_translate_stack_bytes = 0;
 
-/* B12: maximum _translate_tagged recursion depth before we bail to `unknown`
- * rather than overflow the C stack (SIGSEGV). The translator uses ~8.6 KB of
- * stack per nesting level; budget a conservative 16 KB/level and use 70% of the
- * available stack, so the bound is always comfortably below the true overflow
- * point regardless of how the stack was provisioned. Clamp to a sane range so a
+/* B12: maximum _translate_tagged recursion depth where the stack cannot be
+ * measured (where it can, the stack guard is the limit). Without a measured
+ * stack the core's passes have no guard either, so the budget covers them
+ * too: a conservative 16 KB/level against 70% of the stack, comfortably below
+ * the true overflow point however the stack was provisioned. Clamp to a sane range so a
  * missing/unlimited limit can't produce a degenerate bound. Computed once and
  * cached (single-threaded frontend). */
 static uint32_t _translate_depth_limit(void) {
@@ -1328,12 +1368,19 @@ static uint32_t _translate_depth_limit(void) {
  * through here (both _translate_expr and the mutual _translate_tagged <->
  * _translate_list_tagged loop), so one guard makes the whole walk crash-proof:
  * past the limit we set `incomplete` (the check-sat prints `unknown`) instead
- * of recursing into a stack overflow. The counter is balanced (increment paired
- * with decrement on every non-bail path) so it returns to 0 after each
- * top-level translate. */
+ * of recursing into a stack overflow. The limit is the stack the calling
+ * thread has left (dvs_stack_low) where the platform can report it, and the
+ * depth estimate of _translate_depth_limit elsewhere. The core's passes guard
+ * their own recursion, so nesting the translator accepts but they cannot
+ * hold comes back "unknown" from them. The
+ * counter is balanced (increment paired with decrement on every non-bail path)
+ * so it returns to 0 after each top-level translate. */
 static TaggedExpr _translate_tagged(Smt2Frontend *fe, const Sexpr *s) {
-    if (fe->translate_depth >= _translate_depth_limit()) {
-        SMT2_TAINT(fe, "expression nesting exceeded the stack-derived depth limit");
+    if (fe->translate_depth == 0)
+        fe->translate_max_depth = _translate_depth_limit();
+    if (dvs_stack_deep(&fe->stack_guard, fe->translate_depth,
+                       (long)fe->translate_max_depth - 1)) {
+        SMT2_TAINT(fe, "expression nesting exceeded the translator's stack");
         return TAGGED_NULL;
     }
     fe->translate_depth++;
@@ -1345,17 +1392,17 @@ static TaggedExpr _translate_tagged(Smt2Frontend *fe, const Sexpr *s) {
 static TaggedExpr _flatten_to_var(Smt2Frontend *fe, TaggedExpr tg) {
     /* Arrays pass through; they do not need a scalar variable. */
     if (tg.array != NULL) return tg;
-    if (tg.te.ref == EXPR_NULL) return TAGGED_NULL;
+    if (tg.ref == EXPR_NULL) return TAGGED_NULL;
     if (tg.leaf_kind == 1 || tg.leaf_kind == 2) return tg;
 
-    uint32_t aux_id = _fresh_aux(fe, tg.te.width);
+    uint32_t aux_id = _fresh_aux(fe, tg.width);
     dvs_expr_t aux_ref = dvs_builder_expr_var(fe->builder, aux_id);
-    dvs_expr_t eq = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, aux_ref, tg.te.ref);
+    dvs_expr_t eq = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, aux_ref, tg.ref);
     dvs_builder_add_constraint(fe->builder, eq);
 
     TaggedExpr result;
-    result.te.ref   = aux_ref;
-    result.te.width = tg.te.width;
+    result.ref   = aux_ref;
+    result.width = tg.width;
     result.leaf_kind = 1;
     result.array    = NULL;
     return result;
@@ -1365,7 +1412,7 @@ static TaggedExpr _flatten_to_var(Smt2Frontend *fe, TaggedExpr tg) {
 /* Sort-fun application: build/lookup mangled flat variable           */
 /* ------------------------------------------------------------------ */
 
-static TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
+static SMT2_NOINLINE TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
                                   const Sexpr *call) {
     if (call->list.count != (uint32_t)sf->n_params + 1) {
         _term_error(fe, "arity mismatch for '%s' (expected %u, got %u)",
@@ -1404,7 +1451,7 @@ static TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
             av = _declare_array_const(fe, mangled, (uint32_t)mlen, sf->array_sort);
             if (!av) return TAGGED_NULL;
         }
-        return (TaggedExpr){ { EXPR_NULL, 0 }, 0, av->value };
+        return _tagged(EXPR_NULL, 0, 0, av->value);
     }
 
     /* BV/Bool return: look up or create a scalar var. */
@@ -1422,7 +1469,7 @@ static TaggedExpr _apply_sort_fun(Smt2Frontend *fe, Smt2SortFun *sf,
         _builder_touched(fe);
     }
     dvs_expr_t r = dvs_builder_expr_var(fe->builder, v->var_id);
-    return (TaggedExpr){ { r, v->width }, 1, NULL };
+    return _tagged(r, v->width, 1, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1526,8 +1573,8 @@ static void _fun_memo_put(Smt2Frontend *fe, const Smt2FunDef *fd,
     e->fd = fd;
     memcpy(e->keys, keys, sizeof e->keys);
     e->gen = fe->fun_memo_gen;
-    e->ref = r.te.ref;
-    e->width = r.te.width;
+    e->ref = r.ref;
+    e->width = r.width;
     e->leaf_kind = r.leaf_kind;
 }
 
@@ -1535,7 +1582,7 @@ static void _fun_memo_put(Smt2Frontend *fe, const Smt2FunDef *fd,
 /* define-fun inline expansion                                         */
 /* ------------------------------------------------------------------ */
 
-static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
+static SMT2_NOINLINE TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
                                  const Sexpr *call) {
     if (call->list.count != fd->n_params + 1) {
         _term_error(fe, "arity mismatch for define-fun '%s' (expected %u, got %u)",
@@ -1559,7 +1606,7 @@ static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
     if (memo) {
         Smt2FunMemo *e = _fun_memo_slot(fe, fd, keys, SMT2_MEMO_MAX_ARGS);
         if (e && e->gen == fe->fun_memo_gen)
-            return (TaggedExpr){ { e->ref, e->width }, e->leaf_kind, NULL };
+            return _tagged(e->ref, e->width, e->leaf_kind, NULL);
     }
 
     /* Push bindings. Arguments are translated lazily (call-by-name), which is
@@ -1588,7 +1635,7 @@ static TaggedExpr _apply_fun_def(Smt2Frontend *fe, Smt2FunDef *fd,
     fe->subst_depth = saved_depth;
     fe->subst_env   = saved_env;
 
-    if (memo && res.te.ref != EXPR_NULL && !res.array)
+    if (memo && res.ref != EXPR_NULL && !res.array)
         _fun_memo_put(fe, fd, keys, SMT2_MEMO_MAX_ARGS, res);
     return res;
 }
@@ -1607,7 +1654,7 @@ static TaggedExpr _array_select(Smt2Frontend *fe, Smt2ArrayValue *arr,
     if (arr->store_idx_varid != UINT32_MAX) {
         ExprVar *ev = (ExprVar *)dvs_builder_ref_ptr(fe->builder, idx);
         if (ev && ev->kind == EXPR_VAR && ev->var_id == arr->store_idx_varid)
-            return (TaggedExpr){ { arr->store_val, arr->sort.data_width }, 0, NULL };
+            return _tagged(arr->store_val, arr->sort.data_width, 0, NULL);
     }
 
     if (fe->print_stats && n > 64) {
@@ -1621,25 +1668,23 @@ static TaggedExpr _array_select(Smt2Frontend *fe, Smt2ArrayValue *arr,
         dvs_expr_t cond = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, idx, idx_const);
         result = dvs_builder_expr_ite(fe->builder, cond, arr->elems[i], result);
     }
-    return (TaggedExpr){ { result, arr->sort.data_width }, 0, NULL };
+    return _tagged(result, arr->sort.data_width, 0, NULL);
 }
 
 /* ------------------------------------------------------------------ */
 /* Symbol translation                                                  */
 /* ------------------------------------------------------------------ */
 
-static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
+static SMT2_NOINLINE TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
     /* Substitution stack first */
     Smt2Subst *sub_entry = _subst_lookup_entry(fe, s->sym.str, s->sym.len);
     if (sub_entry) {
         if (sub_entry->has_cache && sub_entry->cached_ref != EXPR_NULL) {
-            return (TaggedExpr){ { sub_entry->cached_ref, sub_entry->cached_width },
-                                 sub_entry->cached_leaf_kind, sub_entry->cached_array };
+            return _tagged(sub_entry->cached_ref, sub_entry->cached_width, sub_entry->cached_leaf_kind, sub_entry->cached_array);
         }
         if (sub_entry->has_cache) {
             /* let-binding: value was pre-translated eagerly; return it directly */
-            return (TaggedExpr){ { sub_entry->cached_ref, sub_entry->cached_width },
-                                 sub_entry->cached_leaf_kind, sub_entry->cached_array };
+            return _tagged(sub_entry->cached_ref, sub_entry->cached_width, sub_entry->cached_leaf_kind, sub_entry->cached_array);
         }
         /* define-fun parameter: lazily translate the argument expression,
          * in the caller's environment at the call (B78). */
@@ -1652,11 +1697,11 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
 
     if (sexpr_is_symbol(s, "true")) {
         dvs_expr_t r = _bv_const(fe, 1, 1);
-        return (TaggedExpr){ { r, 1 }, 2, NULL };
+        return _tagged(r, 1, 2, NULL);
     }
     if (sexpr_is_symbol(s, "false")) {
         dvs_expr_t r = _bv_const(fe, 0, 1);
-        return (TaggedExpr){ { r, 1 }, 2, NULL };
+        return _tagged(r, 1, 2, NULL);
     }
 
     /* Zero-arg define-fun? */
@@ -1674,13 +1719,13 @@ static TaggedExpr _translate_symbol_tagged(Smt2Frontend *fe, const Sexpr *s) {
     Smt2Var *v = _find_var(fe, s->sym.str, s->sym.len);
     if (v) {
         dvs_expr_t r = dvs_builder_expr_var(fe->builder, v->var_id);
-        return (TaggedExpr){ { r, v->width }, 1, NULL };
+        return _tagged(r, v->width, 1, NULL);
     }
 
     /* Array variable */
     Smt2ArrayVar *av = _find_array_var(fe, s->sym.str, s->sym.len);
     if (av) {
-        return (TaggedExpr){ { EXPR_NULL, 0 }, 0, av->value };
+        return _tagged(EXPR_NULL, 0, 0, av->value);
     }
 
     _term_error(fe, "unknown variable '%.*s'",
@@ -1711,7 +1756,7 @@ static dvs_expr_t _udivrem_expr(Smt2Frontend *fe, dvs_expr_t A, dvs_expr_t B,
 
 /* Flatten `e` (width `w`) to an aux var; see _flatten_to_var. */
 static dvs_expr_t _fv(Smt2Frontend *fe, dvs_expr_t e, uint16_t w) {
-    return _flatten_to_var(fe, (TaggedExpr){ { e, w }, 0, NULL }).te.ref;
+    return _flatten_to_var(fe, _tagged(e, w, 0, NULL)).ref;
 }
 
 /* -x as 0 - x: the CDCL engine's bvsub propagator wraps mod 2^w; its unary
@@ -1728,9 +1773,12 @@ static dvs_expr_t _neg_expr(Smt2Frontend *fe, dvs_expr_t x, uint16_t w) {
  *
  * One divider, not one per sign quadrant: on bitblast each is a w*w-cell
  * array, and four of them made riscv_loop_instr's `bvsmod` ~3x slower. Every
- * step is its own aux var so the CDCL compile links each one; in that form
- * CDCL answers bvsrem/bvsmod exactly, but its division propagator does not
- * finish bvudiv, so these problems still route to bitblast.
+ * step is its own aux var so the CDCL compile links each one, and CDCL
+ * answers all three exactly. (It once left the quotient uncompiled: the
+ * compile had no arm for the zero-divisor value `~0`; see _udivrem_expr.)
+ * These problems still route to bitblast because model validation evaluates
+ * this same lowering, so it is no independent check of it (B69; plan
+ * docs/cdcl_construct_plan.md phase 6).
  *
  * Reused by bvsdiv/bvsrem and by bvsmod. Returns an dvs_expr_t of width `w`.
  * The caller must set fe->needs_bitblast. */
@@ -1769,16 +1817,16 @@ static int _same_var(Smt2Frontend *fe, dvs_expr_t a, dvs_expr_t b) {
  * one-line riscv-dv constraint under `(=> (__Vbool #b1) ..)` took 667
  * conflicts and fell to bitblast. */
 static int _lit_value(Smt2Frontend *fe, TaggedExpr t, uint64_t *v) {
-    if (t.leaf_kind != 2 || t.array != NULL || t.te.width == 0 || t.te.width > 64) return 0;
-    const ExprConst *ec = (const ExprConst *)dvs_builder_ref_ptr(fe->builder, t.te.ref);
+    if (t.leaf_kind != 2 || t.array != NULL || t.width == 0 || t.width > 64) return 0;
+    const ExprConst *ec = (const ExprConst *)dvs_builder_ref_ptr(fe->builder, t.ref);
     if (!ec || ec->kind != EXPR_CONST) return 0;
-    uint64_t m = t.te.width == 64 ? ~0ull : ((1ull << t.te.width) - 1);
+    uint64_t m = t.width == 64 ? ~0ull : ((1ull << t.width) - 1);
     *v = (uint64_t)ec->value & m;
     return 1;
 }
 
 static TaggedExpr _bool_lit(Smt2Frontend *fe, int v) {
-    return (TaggedExpr){ { _bv_const(fe, v ? 1 : 0, 1), 1 }, 2, NULL };
+    return _tagged(_bv_const(fe, v ? 1 : 0, 1), 1, 2, NULL);
 }
 
 static int _is_app(const Sexpr *e, const char *name) {
@@ -1802,14 +1850,14 @@ static TaggedExpr _flatten_to_var(Smt2Frontend *fe, TaggedExpr te);
 static TaggedExpr _smod_is_zero(Smt2Frontend *fe, const Sexpr *smod) {
     if (smod->list.count != 3) return TAGGED_NULL;
     TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, smod->list.items[1]));
-    if (sa.te.ref == EXPR_NULL) return TAGGED_NULL;
+    if (sa.ref == EXPR_NULL) return TAGGED_NULL;
     TaggedExpr tb = _flatten_to_var(fe, _translate_tagged(fe, smod->list.items[2]));
-    if (tb.te.ref == EXPR_NULL) return TAGGED_NULL;
-    uint16_t w = sa.te.width ? sa.te.width : tb.te.width;
+    if (tb.ref == EXPR_NULL) return TAGGED_NULL;
+    uint16_t w = sa.width ? sa.width : tb.width;
     if (w == 0) return TAGGED_NULL;
     dvs_builder_t *b = fe->builder;
     dvs_expr_t mag[2];
-    dvs_expr_t ops[2] = { sa.te.ref, tb.te.ref };
+    dvs_expr_t ops[2] = { sa.ref, tb.ref };
     for (int i = 0; i < 2; i++) {
         dvs_expr_t msb = _fv(fe, dvs_builder_expr_extract(b, ops[i], w - 1, w - 1), 1);
         mag[i] = _fv(fe, dvs_builder_expr_ite(b, msb, _fv(fe, _neg_expr(fe, ops[i], w), w),
@@ -1817,7 +1865,7 @@ static TaggedExpr _smod_is_zero(Smt2Frontend *fe, const Sexpr *smod) {
     }
     dvs_expr_t rem = _fv(fe, _udivrem_expr(fe, mag[0], mag[1], w, /*is_rem=*/1), w);
     dvs_expr_t r = dvs_builder_expr_binary(b, DVS_BIN_EQ, rem, _bv_const(fe, 0, w));
-    return (TaggedExpr){ { r, 1 }, 0, NULL };
+    return _tagged(r, 1, 0, NULL);
 }
 
 /* Signed comparison `a <op>s b`, lowered via the MSB-flip identity
@@ -1837,11 +1885,11 @@ static TaggedExpr _smod_is_zero(Smt2Frontend *fe, const Sexpr *smod) {
  * and an internal width-0 term are left alone. */
 static int _same_width(Smt2Frontend *fe, const char *op, const Sexpr *sa, TaggedExpr a,
                        const Sexpr *sb, TaggedExpr b) {
-    if (a.te.ref == EXPR_NULL || b.te.ref == EXPR_NULL || a.array || b.array) return 1;
-    if (!a.te.width || !b.te.width || a.te.width == b.te.width) return 1;
+    if (a.ref == EXPR_NULL || b.ref == EXPR_NULL || a.array || b.array) return 1;
+    if (!a.width || !b.width || a.width == b.width) return 1;
     if ((sa && sa->kind == SEXPR_NUMERAL) || (sb && sb->kind == SEXPR_NUMERAL)) return 1;
     _term_error(fe, "%s: sorts (_ BitVec %u) and (_ BitVec %u) are incompatible",
-                op, (unsigned)a.te.width, (unsigned)b.te.width);
+                op, (unsigned)a.width, (unsigned)b.width);
     return 0;
 }
 
@@ -1858,25 +1906,25 @@ static int _too_wide(Smt2Frontend *fe, uint64_t w) {
 
 static int _rewrite_text(const char *op, size_t oplen, uint32_t w, uint64_t k,
                          char *buf, size_t n);
-static TaggedExpr _translate_rewrite(Smt2Frontend *fe, const Sexpr *s, const char *text);
+static const Sexpr *_rewrite_body(Smt2Frontend *fe, const char *op, size_t oplen,
+                                  uint32_t w, uint64_t k);
+static TaggedExpr _apply_rewrite(Smt2Frontend *fe, const Sexpr *s, const Sexpr *body);
 
 static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
                                         dvs_binop_t binop) {
     if (s->list.count != 3) return TAGGED_NULL;
     TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
-    if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
+    if (a.ref == EXPR_NULL) return TAGGED_NULL;
     TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
-    if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
+    if (b.ref == EXPR_NULL) return TAGGED_NULL;
     if (!_same_width(fe, "signed compare", s->list.items[1], a, s->list.items[2], b))
         return TAGGED_NULL;
-    if (_same_var(fe, a.te.ref, b.te.ref))
+    if (_same_var(fe, a.ref, b.ref))
         return _bool_lit(fe, binop == DVS_BIN_LTE || binop == DVS_BIN_GTE);
-    uint16_t sw = a.te.width ? a.te.width : b.te.width;
+    uint16_t sw = a.width ? a.width : b.width;
     if (sw > 64) {                 /* the same identity, as an SMT-LIB rewrite */
         const Sexpr *h = s->list.items[0];
-        char text[512];
-        _rewrite_text(h->sym.str, h->sym.len, sw, 0, text, sizeof text);
-        return _translate_rewrite(fe, s, text);
+        return _apply_rewrite(fe, s, _rewrite_body(fe, h->sym.str, h->sym.len, sw, 0));
     }
     if (sw == 0) {
         _unsupported(fe, "signed compare of width %u",
@@ -1888,25 +1936,25 @@ static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
     dvs_expr_t  bias     = _bv_const(fe, bias_val, sw);
 
     /* variable side: flip then flatten to a var (materialises the bxor) */
-    dvs_expr_t   af  = dvs_builder_expr_binary(fe->builder, DVS_BIN_BXOR, a.te.ref, bias);
-    TaggedExpr aff = _flatten_to_var(fe, (TaggedExpr){ { af, sw }, 0, NULL });
-    if (aff.te.ref == EXPR_NULL) return TAGGED_NULL;
+    dvs_expr_t   af  = dvs_builder_expr_binary(fe->builder, DVS_BIN_BXOR, a.ref, bias);
+    TaggedExpr aff = _flatten_to_var(fe, _tagged(af, sw, 0, NULL));
+    if (aff.ref == EXPR_NULL) return TAGGED_NULL;
 
     /* rhs: fold the flip when constant, else materialise (var-var -> unknown) */
     dvs_expr_t bref;
-    const void *bp = dvs_builder_ref_ptr(fe->builder, b.te.ref);
+    const void *bp = dvs_builder_ref_ptr(fe->builder, b.ref);
     if (bp && *(const ExprKind *)bp == EXPR_CONST) {
         int64_t bval = ((const ExprConst *)bp)->value;
         bref = _bv_const(fe,
                    (int64_t)(((uint64_t)bval ^ (uint64_t)bias_val) & mask), sw);
     } else {
-        dvs_expr_t bf = dvs_builder_expr_binary(fe->builder, DVS_BIN_BXOR, b.te.ref, bias);
-        TaggedExpr bff = _flatten_to_var(fe, (TaggedExpr){ { bf, sw }, 0, NULL });
-        if (bff.te.ref == EXPR_NULL) return TAGGED_NULL;
-        bref = bff.te.ref;
+        dvs_expr_t bf = dvs_builder_expr_binary(fe->builder, DVS_BIN_BXOR, b.ref, bias);
+        TaggedExpr bff = _flatten_to_var(fe, _tagged(bf, sw, 0, NULL));
+        if (bff.ref == EXPR_NULL) return TAGGED_NULL;
+        bref = bff.ref;
     }
-    dvs_expr_t r = dvs_builder_expr_binary(fe->builder, binop, aff.te.ref, bref);
-    return (TaggedExpr){ { r, 1 }, 0, NULL };
+    dvs_expr_t r = dvs_builder_expr_binary(fe->builder, binop, aff.ref, bref);
+    return _tagged(r, 1, 0, NULL);
 }
 
 /* A bit-vector constant wider than 64 bits (W2), given as little-endian limbs.
@@ -1917,7 +1965,8 @@ static TaggedExpr _translate_signed_cmp(Smt2Frontend *fe, const Sexpr *s,
  * The result is tagged complex (leaf_kind 0), never const: the const-fold
  * sites read ExprConst.value as the whole value, which for a wide constant it
  * is not. Like every >64-bit term it is bitblast-only. */
-static TaggedExpr _wide_const(Smt2Frontend *fe, const uint64_t *limbs, uint32_t width) {
+static SMT2_NOINLINE TaggedExpr _wide_const(Smt2Frontend *fe, const uint64_t *limbs,
+                                            uint32_t width) {
     if (width > SMT2_MAX_BV_BITS || !limbs) {
         SMT2_TAINT(fe, "bitvector constant wider than the widest supported sort");
         return TAGGED_NULL;
@@ -1943,7 +1992,7 @@ static TaggedExpr _wide_const(Smt2Frontend *fe, const uint64_t *limbs, uint32_t 
             r = dvs_builder_expr_concat(fe->builder, r, _bv_const(fe, (int64_t)v[i], 64), 64);
     }
     if (r == EXPR_NULL) return TAGGED_NULL;
-    return (TaggedExpr){ { r, (uint16_t)width }, 0, NULL };
+    return _tagged(r, (uint16_t)width, 0, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2016,15 +2065,20 @@ static int _rewrite_text(const char *op, size_t oplen, uint32_t w, uint64_t k,
 /* Translate `s`, an application of an operator _rewrite_text defines, as
  * that definition: like a define-fun call, the operands are bound to ?0 and
  * ?1 and translated in the caller's environment. */
-static TaggedExpr _translate_rewrite(Smt2Frontend *fe, const Sexpr *s, const char *text) {
-    static const char *const params[2] = { "?0", "?1" };
+/* The parsed definition of operator `op` at operand width `w` (index `k`),
+ * cached per text; NULL on failure (tainted). Out of line, with the text
+ * buffer, so the recursion in _apply_rewrite does not carry it. */
+static SMT2_NOINLINE const Sexpr *_rewrite_body(Smt2Frontend *fe, const char *op,
+                                                size_t oplen, uint32_t w, uint64_t k) {
+    char text[512];
+    _rewrite_text(op, oplen, w, k, text, sizeof text);
     const Sexpr *body = NULL;
     for (uint32_t i = 0; i < fe->n_rewrites && !body; i++)
         if (strcmp(fe->rewrites[i].text, text) == 0) body = fe->rewrites[i].body;
     if (!body) {
         size_t len = strlen(text);
         char *t = (char *)sexpr_arena_alloc(&fe->persistent_arena, len + 1, 1);
-        if (!t) return TAGGED_NULL;
+        if (!t) return NULL;
         memcpy(t, text, len + 1);
         Smt2Lexer lex;
         smt2_lexer_init(&lex, t, len);
@@ -2032,13 +2086,21 @@ static TaggedExpr _translate_rewrite(Smt2Frontend *fe, const Sexpr *s, const cha
         if (!body) {
             fprintf(fe->err, "internal error: rewrite '%s' does not parse\n", t);
             SMT2_TAINT(fe, "internal error in an operator rewrite");
-            return TAGGED_NULL;
+            return NULL;
         }
         if (fe->n_rewrites < SMT2_MAX_REWRITES) {
             fe->rewrites[fe->n_rewrites].text = t;
             fe->rewrites[fe->n_rewrites++].body = body;
         }
     }
+    return body;
+}
+
+/* Translate `s` through a rewrite definition, its ?0 / ?1 bound to the
+ * operands. */
+static TaggedExpr _apply_rewrite(Smt2Frontend *fe, const Sexpr *s, const Sexpr *body) {
+    static const char *const params[2] = { "?0", "?1" };
+    if (!body) return TAGGED_NULL;
     uint32_t n = s->list.count - 1;
     if (n > 2 || !_subst_reserve(fe, n)) return TAGGED_NULL;
     uint32_t saved_depth = fe->subst_depth, saved_env = fe->subst_env, env = 0;
@@ -2057,10 +2119,15 @@ static TaggedExpr _translate_rewrite(Smt2Frontend *fe, const Sexpr *s, const cha
 /* An operator _rewrite_text defines (indexed: k is its index): check the
  * arity, find the operand width, translate the definition. NULL `handled`
  * result: not one of them. */
+/* The arity of the operator _rewrite_text defines as `op`, or 0. */
+static SMT2_NOINLINE int _rewrite_arity(const char *op, size_t oplen, uint64_t k) {
+    char text[512];
+    return _rewrite_text(op, oplen, 1, k, text, sizeof text);
+}
+
 static TaggedExpr _try_rewrite(Smt2Frontend *fe, const Sexpr *s, const char *op,
                                size_t oplen, uint64_t k, int *handled) {
-    char text[512];
-    int arity = _rewrite_text(op, oplen, 1, k, text, sizeof text);
+    int arity = _rewrite_arity(op, oplen, k);
     *handled = arity > 0;
     if (!arity) return TAGGED_NULL;
     if (s->list.count != (uint32_t)arity + 1) {
@@ -2069,178 +2136,992 @@ static TaggedExpr _try_rewrite(Smt2Frontend *fe, const Sexpr *s, const char *op,
         return TAGGED_NULL;
     }
     TaggedExpr a = _translate_tagged(fe, s->list.items[1]);   /* for its width */
-    if (a.te.ref == EXPR_NULL || a.array) return TAGGED_NULL;
-    _rewrite_text(op, oplen, a.te.width, k, text, sizeof text);
-    return _translate_rewrite(fe, s, text);
+    if (a.ref == EXPR_NULL || a.array) return TAGGED_NULL;
+    return _apply_rewrite(fe, s, _rewrite_body(fe, op, oplen, a.width, k));
 }
 
-static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
+/* Re-read the `bvN` of `(_ bvN W)` exactly, for W > 64 or N >= 2^64 (mod
+ * 2^128 is exact mod 2^W for every accepted W). Returns 1 with the wide
+ * constant in *wide when W > 64, else 0 with the low 64 bits in *val. */
+static SMT2_NOINLINE int _reread_bv_sym(Smt2Frontend *fe, const Sexpr *op, uint64_t wn,
+                                        uint64_t *val, TaggedExpr *wide) {
+    uint64_t limbs[SMT2_BV_MAX_LIMBS];
+    _parse_bv_sym_limbs(op, limbs, SMT2_BV_MAX_LIMBS);
+    if (wn > 64) { *wide = _wide_const(fe, limbs, (uint32_t)wn); return 1; }
+    *val = limbs[0];
+    return 0;
+}
+
+/* (_ bvN W) */
+static SMT2_NOINLINE TaggedExpr _tr_bv_lit(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count < 3) return TAGGED_NULL;
+    Sexpr *op = s->list.items[1];
+    uint64_t bv_val;
+    int bv_ovf = 0;
+    if (_parse_bv_sym(op, &bv_val, &bv_ovf)) {
+        if (s->list.items[2]->kind != SEXPR_NUMERAL) return TAGGED_NULL;
+        uint64_t wn = s->list.items[2]->numval;
+        if (wn > 64 || bv_ovf) {
+            /* A wide sort, or N >= 2^64: re-read N exactly (mod 2^128,
+             * which is exact mod 2^W for every accepted W). */
+            if (wn > SMT2_MAX_BV_BITS) {
+                SMT2_TAINT(fe, "bitvector constant wider than the widest supported sort");
+                return TAGGED_NULL;
+            }
+            TaggedExpr wide;
+            if (_reread_bv_sym(fe, op, wn, &bv_val, &wide)) return wide;
+        }
+        /* The value is N mod 2^W (as z3 reads it). An unreduced N >= 2^W
+         * made the CDCL engine answer a wrong `unsat` on e.g.
+         * `(= x8 (_ bv300 8))`; reduce it here, for every width. */
+        if (wn > 0 && wn < 64) bv_val &= ((uint64_t)1 << wn) - 1;
+        uint16_t w = (uint16_t)wn;
+        dvs_expr_t r = _bv_const(fe, (int64_t)bv_val, w);
+        return _tagged(r, w, 2, NULL);
+    }
+    _term_error(fe, "unexpected indexed identifier");
+    return TAGGED_NULL;
+}
+
+/* ((_ zero_extend N) expr) / ((_ sign_extend N) expr) / ((_ extract hi lo) expr) */
+static SMT2_NOINLINE TaggedExpr _tr_indexed_app(Smt2Frontend *fe, const Sexpr *s) {
+    Sexpr *head = s->list.items[0];
+    Sexpr *op_sym = head->list.items[1];
+
+    if (sexpr_is_symbol(op_sym, "zero_extend") ||
+        sexpr_is_symbol(op_sym, "sign_extend")) {
+        if (s->list.count != 2) return TAGGED_NULL;
+        uint8_t sign = sexpr_is_symbol(op_sym, "sign_extend") ? 1 : 0;
+        uint64_t ext_n = head->list.items[2]->numval;
+
+        TaggedExpr inner = _translate_tagged(fe, s->list.items[1]);
+        if (inner.ref == EXPR_NULL) return TAGGED_NULL;
+        if (_too_wide(fe, (uint64_t)inner.width + ext_n)) return TAGGED_NULL;
+        uint16_t new_width = inner.width + (uint16_t)ext_n;
+
+        /* The native CDCL compile of `r == sign_extend(a)` bounds a wide
+         * (>=64-bit) unsigned result var with a negative lower bound, which
+         * as an unsigned domain becomes a high sliver -> spurious compile-
+         * time UNSAT (verified: sext(x32)->64 == 5 is wrongly unsat). The
+         * bit-blast engine lowers sign-extend exactly, so force it. */
+        if (sign && new_width >= 64)
+            { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "sext64"; }
+
+        /* Fold zero-extend of a constant: the value is unchanged, but
+         * making it a real EXPR_CONST lets downstream passes (e.g. the
+         * modular bvadd-with-constant routing) recognise it as a
+         * literal. Sign-extend is skipped here -- downstream type
+         * interpretation of signed constants is fragile. */
+        if (!sign && inner.leaf_kind == 2 && new_width < 64) {
+            ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, inner.ref);
+            uint64_t v = (uint64_t)ec->value & (((uint64_t)1 << new_width) - 1);
+            dvs_expr_t cr = _bv_const(fe, (int64_t)v, new_width);
+            return _tagged(cr, new_width, 2, NULL);
+        }
+
+        inner = _flatten_to_var(fe, inner);
+        if (inner.ref == EXPR_NULL) return TAGGED_NULL;
+        dvs_expr_t r = dvs_builder_expr_extend(fe->builder, inner.ref,
+                                        (uint16_t)inner.width,
+                                        new_width, sign);
+        return _tagged(r, new_width, 0, NULL);
+    }
+
+    if (sexpr_is_symbol(op_sym, "extract")) {
+        if (s->list.count != 2 || head->list.count != 4) return TAGGED_NULL;
+        uint64_t hi = head->list.items[2]->numval;
+        uint64_t lo = head->list.items[3]->numval;
+
+        TaggedExpr inner = _translate_tagged(fe, s->list.items[1]);
+        inner = _flatten_to_var(fe, inner);
+        if (inner.ref == EXPR_NULL) return TAGGED_NULL;
+        if (lo > hi || (inner.width && hi >= inner.width)) {
+            _term_error(fe, "extract %llu %llu of a %u-bit term",
+                        (unsigned long long)hi, (unsigned long long)lo,
+                        (unsigned)inner.width);
+            return TAGGED_NULL;
+        }
+
+        dvs_expr_t r = dvs_builder_expr_extract(fe->builder, inner.ref,
+                                                (uint16_t)hi, (uint16_t)lo);
+        return _tagged(r, (uint16_t)(hi - lo + 1), 0, NULL);
+    }
+
+    /* ((_ repeat N) expr) = expr concatenated with itself N times. */
+    if (sexpr_is_symbol(op_sym, "repeat")) {
+        if (s->list.count != 2) return TAGGED_NULL;
+        uint64_t rep_n = head->list.items[2]->numval;
+        if (rep_n == 0) return TAGGED_NULL;
+        TaggedExpr inner = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+        if (inner.ref == EXPR_NULL) return TAGGED_NULL;
+        uint16_t w = inner.width;
+        if (_too_wide(fe, (uint64_t)w * rep_n)) return TAGGED_NULL;
+        dvs_expr_t acc = inner.ref;              /* N==1 is the identity */
+        for (uint64_t i = 1; i < rep_n; i++)
+            acc = dvs_builder_expr_concat(fe->builder, acc, inner.ref, w);
+        return _tagged(acc, (uint16_t)(w * rep_n), 0, NULL);
+    }
+
+    if (op_sym->kind == SEXPR_SYMBOL && head->list.count == 3 &&
+        head->list.items[2]->kind == SEXPR_NUMERAL) {
+        int handled;
+        TaggedExpr r = _try_rewrite(fe, s, op_sym->sym.str, op_sym->sym.len,
+                                    head->list.items[2]->numval, &handled);
+        if (handled) return r;
+    }
+    if (op_sym->kind == SEXPR_SYMBOL)
+        _unsupported(fe, "indexed operator '%.*s'", (int)op_sym->sym.len, op_sym->sym.str);
+    else
+        _unsupported(fe, "indexed operator");
+    return TAGGED_NULL;
+}
+
+/* ((as const (Array M N)) value) */
+static SMT2_NOINLINE TaggedExpr _tr_as_const(Smt2Frontend *fe, const Sexpr *s) {
+    Sexpr *head = s->list.items[0];
+    Smt2ArraySort sort;
+    int r = _parse_array_sort(fe, head->list.items[2], &sort);
+    if (r <= 0) {
+        _term_error(fe, "(as const ...) requires valid Array sort");
+        return TAGGED_NULL;
+    }
+    if (s->list.count != 2) return TAGGED_NULL;
+
+    TaggedExpr val_te = _translate_tagged(fe, s->list.items[1]);
+    if (val_te.ref == EXPR_NULL || val_te.array != NULL) {
+        if (val_te.array) _term_error(fe, "(as const ...) value must be a BV");   /* else: already reported */
+        return TAGGED_NULL;
+    }
+
+    if (_abstract_sort(fe, sort)) {
+        val_te = _flatten_to_var(fe, val_te);
+        Smt2ArrayValue *arr = _anode_new(fe, SMT2_ANODE_CONST, sort);
+        if (!arr) { SMT2_TAINT(fe, "abstract const-array node allocation failed"); return TAGGED_NULL; }
+        arr->store_val = val_te.ref;   /* every read == default */
+        return _tagged(EXPR_NULL, 0, 0, arr);
+    }
+
+    Smt2ArrayValue *arr = _make_array_value(fe, sort);
+    if (!arr) return TAGGED_NULL;
+
+    for (uint32_t i = 0; i < arr->n_elems; i++)
+        arr->elems[i] = val_te.ref;
+
+    return _tagged(EXPR_NULL, 0, 0, arr);
+}
+
+/* (let ((x1 e1) (x2 e2) ...) body) — parallel binding.
+ * SMT-LIB2 parallel semantics: all ei are evaluated in the CURRENT scope
+ * before any xi binding takes effect.  We pre-translate eagerly. */
+/* Phase 1 of a let: evaluate ALL value expressions in the current (outer)
+ * scope before any binding takes effect -- true parallel SMT-LIB2 semantics --
+ * then push the bindings (fe->subst_env). Small lets use an inline buffer;
+ * larger ones heap-allocate. Keeping this off a fixed SMT2_MAX_SUBST-sized
+ * stack array, and out of _tr_let's frame, is what lets deeply nested `let`
+ * recurse (phase 2) cheaply. 0 on failure, reported. */
+static SMT2_NOINLINE int _let_bind(Smt2Frontend *fe, const Sexpr *binds) {
+    uint32_t n = binds->list.count;
+    TaggedExpr    sv[8];
+    const Sexpr  *sn[8];
+    TaggedExpr   *let_vals  = sv;
+    const Sexpr **let_names = sn;
+    int           let_heap  = 0;
+    if (n > 8) {
+        let_vals  = (TaggedExpr *)malloc((size_t)n * sizeof(TaggedExpr));
+        let_names = (const Sexpr **)malloc((size_t)n * sizeof(const Sexpr *));
+        if (!let_vals || !let_names) { free(let_vals); free(let_names); goto let_oom; }
+        let_heap = 1;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        const Sexpr *b = binds->list.items[i];
+        if (b->kind != SEXPR_LIST || b->list.count != 2) goto let_bad;
+        let_names[i] = b->list.items[0];
+        if (let_names[i]->kind != SEXPR_SYMBOL) goto let_bad;
+        let_vals[i] = _translate_tagged(fe, b->list.items[1]);
+    }
+    /* Reserve after phase 1 (nested translations may have grown the stack),
+     * then push all bindings now that every value is evaluated. */
+    if (!_subst_reserve(fe, n)) {
+        if (let_heap) { free(let_vals); free(let_names); }
+        goto let_oom;
+    }
+    uint32_t env = fe->subst_env;
+    for (uint32_t i = 0; i < n; i++) {
+        env = _subst_push(fe, let_names[i]->sym.str, let_names[i]->sym.len, env);
+        Smt2Subst *e        = &fe->subst_stack[env - 1];
+        e->cached_ref       = let_vals[i].ref;
+        e->cached_width     = let_vals[i].width;
+        e->cached_leaf_kind = let_vals[i].leaf_kind;
+        e->cached_array     = let_vals[i].array;
+        e->has_cache        = 1;
+    }
+    fe->subst_env = env;
+    /* Values are copied into the subst stack; release the temp buffers
+     * BEFORE the (possibly very deep) phase-2 recursion. */
+    if (let_heap) { free(let_vals); free(let_names); }
+    return 1;
+let_bad:
+    if (let_heap) { free(let_vals); free(let_names); }
+    _term_error(fe, "malformed let binding");
+    return 0;
+let_oom:
+    fprintf(fe->err, "error: out of memory in let (%u bindings)\n", n);
+    return 0;
+}
+
+static SMT2_NOINLINE TaggedExpr _tr_let(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count != 3) {
+        _term_error(fe, "malformed let (expected 3 elements)");
+        return TAGGED_NULL;
+    }
+    const Sexpr *binds = s->list.items[1];
+    const Sexpr *body  = s->list.items[2];
+    if (binds->kind != SEXPR_LIST) {
+        _term_error(fe, "let: binding list must be a list");
+        return TAGGED_NULL;
+    }
+    uint32_t saved = fe->subst_depth, saved_env = fe->subst_env;
+    TaggedExpr res = TAGGED_NULL;
+    /* Phase 2: translate body with all bindings now in scope. */
+    if (_let_bind(fe, binds)) res = _translate_tagged(fe, body);
+    fe->subst_depth = saved;
+    fe->subst_env   = saved_env;
+    return res;
+}
+
+/* (select A i) */
+static SMT2_NOINLINE TaggedExpr _tr_select(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count != 3) return TAGGED_NULL;
+
+    TaggedExpr arr_te = _translate_tagged(fe, s->list.items[1]);
+    if (arr_te.array == NULL) {
+        if (arr_te.ref != EXPR_NULL) _term_error(fe, "select: first argument is not an array");   /* else: already reported */
+        return TAGGED_NULL;
+    }
+    Smt2ArrayValue *arr = arr_te.array;
+
+    TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
+    if (idx_te.ref == EXPR_NULL || idx_te.array != NULL) {
+        if (idx_te.array) _term_error(fe, "select: index must be a BV");   /* else: already reported */
+        return TAGGED_NULL;
+    }
+
+    /* A nested array, or a slice of one: constant indices only. (select A
+     * k) is a slice view; (select slice j) is A's flat element k ++ j. */
+    if (arr->slice_of || arr->sort.inner_addr) {
+        uint64_t lo, hi;
+        uint32_t w = arr->slice_of ? arr->sort.addr_width
+                   : (uint32_t)(arr->sort.addr_width - arr->sort.inner_addr);
+        if (!_const_index(fe, s->list.items[2], w, &lo, &hi)) {
+            SMT2_TAINT(fe, "symbolic index into a nested array");
+            return TAGGED_NULL;
+        }
+        if (arr->slice_of) {
+            uint64_t klo, khi;
+            _key_concat(arr->slice_lo, arr->slice_hi, lo, hi, arr->sort.addr_width,
+                        &klo, &khi);
+            dvs_expr_t e = _sparse_elem(fe, arr->slice_of, klo, khi, /*create=*/1);
+            if (e == EXPR_NULL) { SMT2_TAINT(fe, "sparse-array element could not be materialized"); return TAGGED_NULL; }
+            return _tagged(e, arr->sort.data_width, 1, NULL);
+        }
+        Smt2ArrayValue *sl = (Smt2ArrayValue *)_cmd_alloc(fe, sizeof(Smt2ArrayValue));
+        if (!sl) { SMT2_TAINT(fe, "nested-array slice allocation failed"); return TAGGED_NULL; }
+        memset(sl, 0, sizeof(*sl));
+        sl->sort.addr_width = arr->sort.inner_addr;
+        sl->sort.data_width = arr->sort.data_width;
+        sl->store_idx_varid = UINT32_MAX;
+        sl->store_val       = EXPR_NULL;
+        sl->slice_of = arr;
+        sl->slice_lo = lo;
+        sl->slice_hi = hi;
+        return _tagged(EXPR_NULL, 0, 0, sl);
+    }
+
+    /* Word-level abstract path (DV_ARRAY): const or symbolic index alike
+     * become a fresh read var; read-over-write / congruence deferred. */
+    if (arr->is_abstract) {
+        idx_te = _flatten_to_var(fe, idx_te);
+        if (idx_te.ref == EXPR_NULL) { SMT2_TAINT(fe, "abstract-array select index not flattenable to a var"); return TAGGED_NULL; }
+        return _abs_select(fe, arr, idx_te.ref);
+    }
+
+    /* Constant index path (rewrite R2 included): check if the sexpr is
+     * a bitvec literal after substitution resolution. */
+    uint64_t k = 0, k_hi = 0;
+    if (_const_index(fe, s->list.items[2], arr->sort.addr_width, &k, &k_hi)) {
+        /* The array element is a VARIABLE (dvs_builder_expr_var), so tag it
+         * leaf_kind == 1 (var), NOT 2 (const). Tagging it const made the
+         * const-fold sites (e.g. zero_extend, boolean connectives) read
+         * the var's dvs_expr_t as an ExprConst and fold it to a garbage
+         * literal (0) -> wrong `unsat` for e.g.
+         * `(= ((_ zero_extend N) (select a i)) k)`. */
+        if (arr->is_sparse) {
+            dvs_expr_t e = _sparse_elem(fe, arr, k, k_hi, /*create=*/1);
+            if (e == EXPR_NULL) { SMT2_TAINT(fe, "sparse-array element could not be materialized"); return TAGGED_NULL; }
+            return _tagged(e, arr->sort.data_width, 1, NULL);
+        }
+        if (k_hi == 0 && k < arr->n_elems)
+            return _tagged(arr->elems[k], arr->sort.data_width, 1, NULL);
+    }
+
+    /* Symbolic index. A sparse (large-address) array cannot resolve one
+     * without enumerating 2^M entries: promote it to the word-level engine,
+     * or, where that is not possible, an honest unknown rather than a wrong
+     * answer. Dense arrays lower to an ITE tree over their elements. */
+    if (arr->is_sparse && _promote_sparse(fe, arr) == 0) {
+        idx_te = _flatten_to_var(fe, idx_te);
+        if (idx_te.ref == EXPR_NULL) { SMT2_TAINT(fe, "abstract-array select index not flattenable to a var"); return TAGGED_NULL; }
+        return _abs_select(fe, arr, idx_te.ref);
+    }
+    if (arr->is_sparse) {
+        fprintf(fe->err, "error: symbolic index into a large (sparse) array "
+                         "is unsupported -> result will be unknown\n");
+        SMT2_TAINT(fe, "symbolic index into a large (sparse) array");
+        return TAGGED_NULL;
+    }
+    idx_te = _flatten_to_var(fe, idx_te);
+    return _array_select(fe, arr, idx_te.ref);
+}
+
+/* (store A i v) */
+static SMT2_NOINLINE TaggedExpr _tr_store(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count != 4) return TAGGED_NULL;
+
+    TaggedExpr arr_te = _translate_tagged(fe, s->list.items[1]);
+    if (arr_te.array == NULL) {
+        if (arr_te.ref != EXPR_NULL) _term_error(fe, "store: first argument is not an array");   /* else: already reported */
+        return TAGGED_NULL;
+    }
+    Smt2ArrayValue *arr = arr_te.array;
+    if (arr->slice_of || arr->sort.inner_addr) {
+        SMT2_TAINT(fe, "store on a nested array");
+        return TAGGED_NULL;
+    }
+    if (arr->is_sparse) _promote_sparse(fe, arr);
+
+    /* Word-level abstract path (DV_ARRAY): build a STORE DAG node instead of
+     * an elementwise ITE array; select resolves it via read-over-write. This
+     * also handles large (sparse) address spaces the dense path bails on. */
+    if (arr->is_abstract) {
+        TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
+        if (idx_te.ref == EXPR_NULL || idx_te.array != NULL) {
+            if (idx_te.array) _term_error(fe, "store: index must be a BV");   /* else: already reported */
+            return TAGGED_NULL;
+        }
+        TaggedExpr val_te = _translate_tagged(fe, s->list.items[3]);
+        if (val_te.ref == EXPR_NULL || val_te.array != NULL) {
+            if (val_te.array) _term_error(fe, "store: value must be a BV");   /* else: already reported */
+            return TAGGED_NULL;
+        }
+        idx_te = _flatten_to_var(fe, idx_te);
+        val_te = _flatten_to_var(fe, val_te);
+        Smt2ArrayValue *node = _anode_store(fe, arr, idx_te.ref,
+                                            val_te.ref);
+        if (!node) { SMT2_TAINT(fe, "abstract-array store node allocation failed"); return TAGGED_NULL; }
+        return _tagged(EXPR_NULL, 0, 0, node);
+    }
+
+    /* store on a sparse (large-address) array needs a lazy read-over-write
+     * copy; not yet implemented, so report unknown rather than guess. */
+    if (arr->is_sparse) {
+        fprintf(fe->err, "error: store on a large (sparse) array is "
+                         "unsupported -> result will be unknown\n");
+        SMT2_TAINT(fe, "store on a large (sparse) array");
+        return TAGGED_NULL;
+    }
+
+    TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
+    if (idx_te.ref == EXPR_NULL || idx_te.array != NULL) {
+        if (idx_te.array) _term_error(fe, "store: index must be a BV");   /* else: already reported */
+        return TAGGED_NULL;
+    }
+
+    TaggedExpr val_te = _translate_tagged(fe, s->list.items[3]);
+    if (val_te.ref == EXPR_NULL || val_te.array != NULL) {
+        if (val_te.array) _term_error(fe, "store: value must be a BV");   /* else: already reported */
+        return TAGGED_NULL;
+    }
+
+    Smt2ArrayValue *new_arr = _make_array_value(fe, arr->sort);
+    if (!new_arr) return TAGGED_NULL;
+
+    /* Constant index path */
+    const Sexpr *idx_s = _resolve_sym(fe, s->list.items[2]);
+    if (idx_s) {
+        uint64_t k = 0;
+        int is_const = 0;
+        if (idx_s->kind == SEXPR_BITVEC && idx_s->bv.width <= 64) {  /* wide: general path */
+            k = idx_s->bv.value; is_const = 1;
+        } else if (idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
+                   sexpr_is_symbol(idx_s->list.items[0], "_")) {
+            uint64_t bv_val;
+            if (_parse_bv_sym(idx_s->list.items[1], &bv_val, NULL)) {
+                k = bv_val; is_const = 1;
+            }
+        }
+        if (is_const) {
+            memcpy(new_arr->elems, arr->elems, arr->n_elems * sizeof(dvs_expr_t));
+            if (k < arr->n_elems)
+                new_arr->elems[k] = val_te.ref;
+            return _tagged(EXPR_NULL, 0, 0, new_arr);
+        }
+    }
+
+    /* Symbolic index: elementwise ITE.  Record R1 metadata (store index
+     * var_id) so a later select at the same index can short-circuit. */
+    idx_te = _flatten_to_var(fe, idx_te);
+    val_te = _flatten_to_var(fe, val_te);
+    {
+        ExprVar *ev = (ExprVar *)dvs_builder_ref_ptr(fe->builder, idx_te.ref);
+        if (ev && ev->kind == EXPR_VAR) {
+            new_arr->store_idx_varid = ev->var_id;
+            new_arr->store_val       = val_te.ref;
+        }
+    }
+    for (uint32_t j = 0; j < arr->n_elems; j++) {
+        dvs_expr_t j_const = _bv_const(fe, (int64_t)j, arr->sort.addr_width);
+        dvs_expr_t cond = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ,
+                                           idx_te.ref, j_const);
+        new_arr->elems[j] = dvs_builder_expr_ite(fe->builder, cond,
+                                              val_te.ref, arr->elems[j]);
+    }
+    return _tagged(EXPR_NULL, 0, 0, new_arr);
+}
+
+/* Binary BV arithmetic (result has same width as operands). These ops are
+ * :left-assoc in SMT-LIB, and Verilator emits them variadically (e.g. (bvor a
+ * b c)). Left-fold over all operands so both the binary and n-ary forms
+ * translate: (op a b c) == (op (op a b) c).
+ *
+ * bvand / bvor with literal operands: drop identities, short-circuit on the
+ * absorbing value, then fold the rest as _tr_binop does. */
+static SMT2_NOINLINE TaggedExpr _tr_band_bor(Smt2Frontend *fe, const Sexpr *s, int is_band) {
+    TaggedExpr acc = TAGGED_NULL;
+    uint16_t w = 0;
+    for (uint32_t i = 1; i < s->list.count; i++) {
+        TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
+        if (b.ref == EXPR_NULL || b.array != NULL) return TAGGED_NULL;
+        if (w && b.width && b.width != w
+                && s->list.items[i]->kind != SEXPR_NUMERAL) {
+            _term_error(fe, "%s: sorts (_ BitVec %u) and (_ BitVec %u) are incompatible",
+                        is_band ? "bvand" : "bvor", (unsigned)w, (unsigned)b.width);
+            return TAGGED_NULL;
+        }
+        if (!w) w = b.width;
+        uint64_t v, ones = w >= 64 ? ~0ull : ((1ull << w) - 1);
+        if (b.width == w && _lit_value(fe, b, &v)) {
+            if (v == (is_band ? 0 : ones))
+                return _tagged(_bv_const(fe, (int64_t)v, w), w, 2, NULL);
+            if (v == (is_band ? ones : 0)) continue;
+        }
+        b = _flatten_to_var(fe, b);
+        if (b.ref == EXPR_NULL) return TAGGED_NULL;
+        if (acc.ref == EXPR_NULL) { acc = b; continue; }
+        acc = _flatten_to_var(fe, acc);
+        if (acc.ref == EXPR_NULL) return TAGGED_NULL;
+        acc.ref = dvs_builder_expr_binary(fe->builder,
+                                             is_band ? DVS_BIN_BAND : DVS_BIN_BOR,
+                                             acc.ref, b.ref);
+        acc.leaf_kind = 0;
+    }
+    if (acc.ref == EXPR_NULL) {     /* every operand was the identity */
+        uint64_t id = is_band ? (w >= 64 ? ~0ull : ((1ull << w) - 1)) : 0;
+        return _tagged(_bv_const(fe, (int64_t)id, w), w, 2, NULL);
+    }
+    _flag_wide_arith(fe, w);
+    return _tagged(acc.ref, w, acc.leaf_kind, NULL);
+}
+
+/* (op a b ...) for a left-assoc BV operator `name`, folded left. */
+static SMT2_NOINLINE TaggedExpr _tr_binop(Smt2Frontend *fe, const Sexpr *s, const char *name,
+                                           dvs_binop_t binop) {
+    if (s->list.count < 3) return TAGGED_NULL;
+    TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+    if (a.ref == EXPR_NULL) return TAGGED_NULL;
+    for (uint32_t _i = 2; _i < s->list.count; _i++) {
+        TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[_i]));
+        if (b.ref == EXPR_NULL) return TAGGED_NULL;
+        if (!_same_width(fe, name, s->list.items[1], a, s->list.items[_i], b))
+            return TAGGED_NULL;
+        /* Re-flatten the accumulator each round. Without this, from the 2nd
+         * operand on the left side is a raw composed node, and the CDCL
+         * compile only links var-var / const-var operands -- so an n-ary op
+         * with arity >= 3 was left UNCOMPILED, the model then violated it,
+         * and validation downgraded a perfectly good `sat` to `unknown`.
+         * That silently disabled `x inside {a,b,c}` (a 3-way bvor) on CDCL.
+         * Same lesson as B4: never reuse a raw composed sub-expr. */
+        a = _flatten_to_var(fe, a);
+        if (a.ref == EXPR_NULL) return TAGGED_NULL;
+        a.ref = dvs_builder_expr_binary(fe->builder, binop, a.ref, b.ref);
+        a.leaf_kind = 0;   /* composed: must be re-flattened next round */
+    }
+    _flag_wide_arith(fe, a.width);
+    return _tagged(a.ref, a.width, 0, NULL);
+}
+
+/* (op a b) for an unsigned comparison `name`. */
+static SMT2_NOINLINE TaggedExpr _tr_cmpop(Smt2Frontend *fe, const Sexpr *s, const char *name,
+                                           dvs_binop_t binop) {
+    if (s->list.count != 3) return TAGGED_NULL;
+    TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+    if (a.ref == EXPR_NULL) return TAGGED_NULL;
+    TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+    if (b.ref == EXPR_NULL) return TAGGED_NULL;
+    if (!_same_width(fe, name, s->list.items[1], a, s->list.items[2], b))
+        return TAGGED_NULL;
+    if (_same_var(fe, a.ref, b.ref))
+        return _bool_lit(fe, binop == DVS_BIN_LTE || binop == DVS_BIN_GTE);
+    dvs_expr_t r = dvs_builder_expr_binary(fe->builder, binop, a.ref, b.ref);
+    return _tagged(r, 1, 0, NULL);
+}
+
+/* Unsigned division and remainder. SMT-LIB defines a zero divisor:
+ * (bvudiv a 0) = all ones, (bvurem a 0) = a. The engines' own DIV/MOD
+ * leave the result unconstrained at a zero divisor (SystemVerilog's x),
+ * so unless the divisor is a nonzero constant, guard it here; without the
+ * guard a model could pick any value and `unsat` problems came back `sat`
+ * (B52). */
+static SMT2_NOINLINE TaggedExpr _tr_udivrem(Smt2Frontend *fe, const Sexpr *s, int is_urem) {
+    if (s->list.count != 3) return TAGGED_NULL;
+    TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+    if (a.ref == EXPR_NULL) return TAGGED_NULL;
+    TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+    if (b.ref == EXPR_NULL) return TAGGED_NULL;
+    if (!_same_width(fe, is_urem ? "bvurem" : "bvudiv", s->list.items[1], a,
+                     s->list.items[2], b))
+        return TAGGED_NULL;
+    uint16_t w = a.width ? a.width : b.width;
+    _flag_wide_arith(fe, w);
+    dvs_expr_t q = _udivrem_expr(fe, a.ref, b.ref, w, is_urem);
+    return _tagged(q, w, 0, NULL);
+}
+
+/* Signed division / remainder (SMT-LIB `bvsdiv` / `bvsrem`, round toward
+ * zero), lowered to the already-supported unsigned bvudiv/bvurem plus sign
+ * muxing. No engine changes: on bitblast the ite/neg/udiv are primitives;
+ * on CDCL each flattened sub-op has a propagator. Verilator emits these for
+ * signed `/` and `%`.
+ *
+ *   sdiv(s,t): quadrant by (sign s, sign t) —
+ *     (+,+) udiv(s,t)      (-,+) -udiv(-s,t)
+ *     (+,-) -udiv(s,-t)    (-,-) udiv(-s,-t)
+ *   srem(s,t): sign follows the dividend s —
+ *     (+,+) urem(s,t)      (-,+) -urem(-s,t)
+ *     (+,-) urem(s,-t)     (-,-) -urem(-s,-t)
+ */
+static SMT2_NOINLINE TaggedExpr _tr_sdivrem(Smt2Frontend *fe, const Sexpr *s, int is_srem) {
+    /* The ITE-of-unsigned-divisions this lowers to is solved exactly by
+     * bitblast but left unpinned (wrong model) by the CDCL bounds
+     * engine, so force bitblast for this problem. */
+    { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "sdiv-srem"; }
+    if (s->list.count != 3) return TAGGED_NULL;
+    TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+    if (sa.ref == EXPR_NULL) return TAGGED_NULL;
+    TaggedExpr tb = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+    if (tb.ref == EXPR_NULL) return TAGGED_NULL;
+    uint16_t w = sa.width ? sa.width : tb.width;
+    if (w == 0) return TAGGED_NULL;
+    dvs_expr_t r = _signed_divrem_expr(fe, sa.ref, tb.ref,
+                                    w, is_srem);
+    return _tagged(r, w, 0, NULL);
+}
+
+/* Signed modulo (SMT-LIB `bvsmod`): result sign follows the DIVISOR t.
+ * Built on the (validated) signed remainder: let r = bvsrem(s,t);
+ *   r == 0                 -> 0
+ *   sign(r) == sign(t)     -> r
+ *   else                   -> r + t   (flip the sign toward the divisor)
+ */
+static SMT2_NOINLINE TaggedExpr _tr_smod(Smt2Frontend *fe, const Sexpr *s) {
+    { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "smod"; }
+    if (s->list.count != 3) return TAGGED_NULL;
+    TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+    if (sa.ref == EXPR_NULL) return TAGGED_NULL;
+    TaggedExpr tb = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+    if (tb.ref == EXPR_NULL) return TAGGED_NULL;
+    uint16_t w = sa.width ? sa.width : tb.width;
+    if (w == 0) return TAGGED_NULL;
+    dvs_expr_t T_ = tb.ref;
+    dvs_expr_t r_expr = _signed_divrem_expr(fe, sa.ref, T_, w, /*is_rem=*/1);
+    /* Materialise the remainder into its own var: bvsmod references it
+     * three times (sign bit, +t, ==0), and re-embedding the raw ITE tree
+     * at each use makes the bitblaster produce inconsistent values for
+     * the shared sub-DAG. One aux var = one bit-blasted value, shared. */
+    TaggedExpr rt = _flatten_to_var(fe, _tagged(r_expr, w, 0, NULL));
+    if (rt.ref == EXPR_NULL) return TAGGED_NULL;
+    dvs_expr_t r = rt.ref;
+    dvs_expr_t msb_r = dvs_builder_expr_extract(fe->builder, r, w - 1, w - 1);
+    dvs_expr_t msb_t = dvs_builder_expr_extract(fe->builder, T_, w - 1, w - 1);
+    dvs_expr_t same_sign = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, msb_r, msb_t);
+    dvs_expr_t r_plus_t = dvs_builder_expr_binary(fe->builder, DVS_BIN_ADD, r, T_);
+    dvs_expr_t adjusted = dvs_builder_expr_ite(fe->builder, same_sign, r, r_plus_t);
+    dvs_expr_t zero = _bv_const(fe, 0, w);
+    dvs_expr_t r_is_zero = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, r, zero);
+    dvs_expr_t result = dvs_builder_expr_ite(fe->builder, r_is_zero, r, adjusted);
+    return _tagged(result, w, 0, NULL);
+}
+
+/* = (equality) -- handles both BV and array operands */
+static SMT2_NOINLINE TaggedExpr _tr_eq(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count != 3) return TAGGED_NULL;
+    for (int i = 1; i <= 2; i++) {
+        const Sexpr *other = s->list.items[3 - i];
+        if (!_is_app(s->list.items[i], "bvsmod") || (other->kind == SEXPR_LIST && !_is_app(other, "_")))
+            continue;
+        uint64_t zv;
+        if (_lit_value(fe, _translate_tagged(fe, other), &zv) && zv == 0)
+            return _smod_is_zero(fe, s->list.items[i]);
+    }
+
+    TaggedExpr a = _translate_tagged(fe, s->list.items[1]);
+    TaggedExpr b = _translate_tagged(fe, s->list.items[2]);
+
+    if (a.array != NULL && b.array != NULL) {
+        if (a.array->slice_of || a.array->sort.inner_addr ||
+            b.array->slice_of || b.array->sort.inner_addr) {
+            SMT2_TAINT(fe, "equality of nested arrays");
+            return TAGGED_NULL;
+        }
+        /* Word-level abstract path: reify onto a boolean var; consistency +
+         * extensionality axioms are emitted at solve time. */
+        if ((a.array->is_abstract || b.array->is_abstract || a.array->is_sparse)
+            && _promote_pair(fe, a.array, b.array)) {
+            dvs_expr_t p = _abs_array_eq(fe, a.array, b.array);
+            if (p == EXPR_NULL) { SMT2_TAINT(fe, "abstract-array equality could not be reified"); return TAGGED_NULL; }
+            return _tagged(p, 1, 1, NULL);
+        }
+        /* Array equality: AND of element-wise equalities */
+        if (a.array->n_elems != b.array->n_elems) {
+            _term_error(fe, "array equality on arrays with different sizes");
+            return TAGGED_NULL;
+        }
+        dvs_expr_t result = EXPR_NULL;
+        for (uint32_t i = 0; i < a.array->n_elems; i++) {
+            dvs_expr_t eq_i = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ,
+                                               a.array->elems[i],
+                                               b.array->elems[i]);
+            result = (result == EXPR_NULL) ? eq_i
+                   : dvs_builder_expr_binary(fe->builder, DVS_BIN_AND, result, eq_i);
+        }
+        return _tagged(result, 1, 0, NULL);
+    }
+    if (a.array != NULL || b.array != NULL) {
+        /* a side that failed to translate has already been reported */
+        if (a.ref != EXPR_NULL || b.ref != EXPR_NULL)
+            _term_error(fe, "type mismatch in equality (array vs scalar)");
+        return TAGGED_NULL;
+    }
+
+    /* BV/Bool equality */
+    if (!_same_width(fe, "=", s->list.items[1], a, s->list.items[2], b)) return TAGGED_NULL;
+    uint64_t av, bv;
+    if (_lit_value(fe, a, &av) && _lit_value(fe, b, &bv) && a.width == b.width)
+        return _bool_lit(fe, av == bv);
+    a = _flatten_to_var(fe, a);
+    if (a.ref == EXPR_NULL) return TAGGED_NULL;
+    b = _flatten_to_var(fe, b);
+    if (b.ref == EXPR_NULL) return TAGGED_NULL;
+    dvs_expr_t r = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, a.ref, b.ref);
+    return _tagged(r, 1, 0, NULL);
+}
+
+/* distinct */
+static SMT2_NOINLINE TaggedExpr _tr_distinct(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count < 3) return TAGGED_NULL;
+    uint32_t n = s->list.count - 1;
+    TaggedExpr *args = (TaggedExpr *)malloc(n * sizeof(TaggedExpr));
+    if (!args) return TAGGED_NULL;
+    for (uint32_t i = 0; i < n; i++) {
+        args[i] = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[i + 1]));
+        if (args[i].ref == EXPR_NULL) { free(args); return TAGGED_NULL; }
+        if (i && !_same_width(fe, "distinct", s->list.items[1], args[0],
+                              s->list.items[i + 1], args[i])) {
+            free(args);
+            return TAGGED_NULL;
+        }
+    }
+    dvs_expr_t result = EXPR_NULL;
+    for (uint32_t i = 0; i < n; i++) {
+        for (uint32_t j = i + 1; j < n; j++) {
+            dvs_expr_t neq = dvs_builder_expr_binary(fe->builder, DVS_BIN_NEQ,
+                                              args[i].ref, args[j].ref);
+            if (result == EXPR_NULL) result = neq;
+            else result = dvs_builder_expr_binary(fe->builder, DVS_BIN_AND, result, neq);
+        }
+    }
+    free(args);
+    return _tagged(result, 1, 0, NULL);
+}
+
+/* bvnot */
+static SMT2_NOINLINE TaggedExpr _tr_bvnot(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count != 2) return TAGGED_NULL;
+    TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+    if (a.ref == EXPR_NULL) return TAGGED_NULL;
+    dvs_expr_t r = dvs_builder_expr_unary(fe->builder, DVS_UN_INVERT, a.ref);
+    _flag_wide_arith(fe, a.width);
+    return _tagged(r, a.width, 0, NULL);
+}
+
+/* bvneg */
+static SMT2_NOINLINE TaggedExpr _tr_bvneg(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count != 2) return TAGGED_NULL;
+    TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+    if (a.ref == EXPR_NULL) return TAGGED_NULL;
+    /* bvneg x is (bvsub 0 x), modulo 2^w. It must NOT lower to DVS_UN_NEG:
+     * the CDCL engine (and the model validator) treat DVS_UN_NEG as integer
+     * negation with no wrap, so for an unsigned x in [0, 2^w) the result
+     * lands in (-2^w, 0] and `(= (bvneg x) K)` was a spurious `unsat` for
+     * every constant K. Built exactly as BINOP_CASE builds bvsub. */
+    TaggedExpr z = _flatten_to_var(fe, _tagged(_bv_const(fe, 0, a.width), a.width, 2, NULL));
+    if (z.ref == EXPR_NULL) return TAGGED_NULL;
+    dvs_expr_t r = dvs_builder_expr_binary(fe->builder, DVS_BIN_SUB, z.ref, a.ref);
+    _flag_wide_arith(fe, a.width);
+    return _tagged(r, a.width, 0, NULL);
+}
+
+/* Boolean connectives, with compile-time const folding: not */
+static SMT2_NOINLINE TaggedExpr _tr_not(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count != 2) return TAGGED_NULL;
+    TaggedExpr a = _translate_tagged(fe, s->list.items[1]);
+    if (a.ref == EXPR_NULL) return TAGGED_NULL;
+    if (a.leaf_kind == 2) {
+        ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, a.ref);
+        int64_t neg = (ec->value != 0) ? 0 : 1;
+        dvs_expr_t cr = _bv_const(fe, neg, 1);
+        return _tagged(cr, 1, 2, NULL);
+    }
+    dvs_expr_t r = dvs_builder_expr_unary(fe->builder, DVS_UN_NOT, a.ref);
+    return _tagged(r, 1, 0, NULL);
+}
+
+/* and */
+static SMT2_NOINLINE TaggedExpr _tr_and(Smt2Frontend *fe, const Sexpr *s) {
+    /* SMT-LIB permits arity >= 1 here; `(and x)` / `(or x)` / `(xor x)` are
+     * the identity and z3 accepts them (nullary `(and)` it rejects, so we do
+     * too). Rejecting the unary form used to taint the assert -> `unknown`,
+     * which silently killed any single-variable model-enumeration loop --
+     * a blocking clause over one variable is exactly `(not (and (= x V)))`.
+     * See docs/solver_bug_backlog.md B16. */
+    if (s->list.count < 2) return TAGGED_NULL;
+    /* Collect non-trivial operands; short-circuit on any literal false. */
+    TaggedExpr acc = _tagged(EXPR_NULL, 1, 0, NULL);
+    for (uint32_t i = 1; i < s->list.count; i++) {
+        TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
+        if (b.ref == EXPR_NULL) return TAGGED_NULL;
+        if (b.leaf_kind == 2) {
+            ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, b.ref);
+            if (ec->value == 0) {
+                /* (and ... false ...) -> false */
+                dvs_expr_t cr = _bv_const(fe, 0, 1);
+                return _tagged(cr, 1, 2, NULL);
+            }
+            /* (and ... true ...) -> drop this operand */
+            continue;
+        }
+        if (acc.ref == EXPR_NULL) { acc = b; acc.width = 1; }
+        else {
+            acc.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_AND,
+                                             acc.ref, b.ref);
+            acc.leaf_kind = 0;
+        }
+    }
+    if (acc.ref == EXPR_NULL) {
+        /* All operands were literal true */
+        dvs_expr_t cr = _bv_const(fe, 1, 1);
+        return _tagged(cr, 1, 2, NULL);
+    }
+    acc.width = 1;
+    return acc;
+}
+
+/* or */
+static SMT2_NOINLINE TaggedExpr _tr_or(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count < 2) return TAGGED_NULL;   /* arity >= 1; see `and` */
+    /* Collect non-trivial operands; short-circuit on any literal true. */
+    TaggedExpr acc = _tagged(EXPR_NULL, 1, 0, NULL);
+    for (uint32_t i = 1; i < s->list.count; i++) {
+        TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
+        if (b.ref == EXPR_NULL) return TAGGED_NULL;
+        if (b.leaf_kind == 2) {
+            ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, b.ref);
+            if (ec->value != 0) {
+                /* (or ... true ...) -> true */
+                dvs_expr_t cr = _bv_const(fe, 1, 1);
+                return _tagged(cr, 1, 2, NULL);
+            }
+            /* (or ... false ...) -> drop this operand */
+            continue;
+        }
+        if (acc.ref == EXPR_NULL) { acc = b; acc.width = 1; }
+        else {
+            acc.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_OR,
+                                             acc.ref, b.ref);
+            acc.leaf_kind = 0;
+        }
+    }
+    if (acc.ref == EXPR_NULL) {
+        /* All operands were literal false */
+        dvs_expr_t cr = _bv_const(fe, 0, 1);
+        return _tagged(cr, 1, 2, NULL);
+    }
+    acc.width = 1;
+    return acc;
+}
+
+/* xor */
+static SMT2_NOINLINE TaggedExpr _tr_xor(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count < 2) return TAGGED_NULL;   /* arity >= 1; see `and` */
+    TaggedExpr acc = _translate_tagged(fe, s->list.items[1]);
+    if (acc.ref == EXPR_NULL) return TAGGED_NULL;
+    for (uint32_t i = 2; i < s->list.count; i++) {
+        TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
+        if (b.ref == EXPR_NULL) return TAGGED_NULL;
+        acc.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_BXOR,
+                                         acc.ref, b.ref);
+        acc.leaf_kind = 0;
+    }
+    acc.width = 1;
+    return acc;
+}
+
+/* => */
+static SMT2_NOINLINE TaggedExpr _tr_implies(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count < 3) return TAGGED_NULL;
+    /* SMT-LIB =>: right-associative. (=> a b c) == (=> a (=> b c)) */
+    TaggedExpr last = _translate_tagged(fe, s->list.items[s->list.count - 1]);
+    if (last.ref == EXPR_NULL) return TAGGED_NULL;
+    for (int i = (int)s->list.count - 2; i >= 1; i--) {
+        TaggedExpr a = _translate_tagged(fe, s->list.items[i]);
+        if (a.ref == EXPR_NULL) return TAGGED_NULL;
+        uint64_t av, lv;
+        if (_lit_value(fe, a, &av) || (_lit_value(fe, last, &lv) && lv)) {
+            if (_lit_value(fe, a, &av) && !av) last = _bool_lit(fe, 1);  /* false => _ */
+            continue;                       /* true => b is b; a => true is true */
+        }
+        dvs_expr_t not_a = dvs_builder_expr_unary(fe->builder, DVS_UN_NOT, a.ref);
+        last.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_OR, not_a, last.ref);
+        last.leaf_kind = 0;
+    }
+    last.width = 1;
+    return last;
+}
+
+/* ite -- handles both BV and array branches */
+static SMT2_NOINLINE TaggedExpr _tr_ite(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count != 4) return TAGGED_NULL;
+    TaggedExpr c = _translate_tagged(fe, s->list.items[1]);
+    if (c.ref == EXPR_NULL) return TAGGED_NULL;
+    TaggedExpr t = _translate_tagged(fe, s->list.items[2]);
+    TaggedExpr e = _translate_tagged(fe, s->list.items[3]);
+    uint64_t cv;
+    if (_lit_value(fe, c, &cv)) return cv ? t : e;
+
+    if (t.array != NULL && e.array != NULL) {
+        if (t.array->slice_of || t.array->sort.inner_addr ||
+            e.array->slice_of || e.array->sort.inner_addr) {
+            SMT2_TAINT(fe, "ite over nested arrays");
+            return TAGGED_NULL;
+        }
+        /* Word-level abstract path: an ITE DAG node; select resolves it to
+         * ite(cond, read(then,i), read(else,i)). */
+        if ((t.array->is_abstract || e.array->is_abstract || t.array->is_sparse)
+            && _promote_pair(fe, t.array, e.array)) {
+            Smt2ArrayValue *node = _anode_ite(fe, c.ref, t.array, e.array);
+            if (!node) { SMT2_TAINT(fe, "abstract-array ite node allocation failed"); return TAGGED_NULL; }
+            return _tagged(EXPR_NULL, 0, 0, node);
+        }
+        if (t.array->n_elems != e.array->n_elems) {
+            _term_error(fe, "ite branches are arrays of different sizes");
+            return TAGGED_NULL;
+        }
+        Smt2ArrayValue *arr = _make_array_value(fe, t.array->sort);
+        if (!arr) return TAGGED_NULL;
+        for (uint32_t i = 0; i < t.array->n_elems; i++) {
+            arr->elems[i] = dvs_builder_expr_ite(fe->builder, c.ref,
+                                              t.array->elems[i],
+                                              e.array->elems[i]);
+        }
+        return _tagged(EXPR_NULL, 0, 0, arr);
+    }
+
+    /* BV ite */
+    if (!_same_width(fe, "ite", s->list.items[2], t, s->list.items[3], e)) return TAGGED_NULL;
+    t = _flatten_to_var(fe, t);
+    if (t.ref == EXPR_NULL) return TAGGED_NULL;
+    e = _flatten_to_var(fe, e);
+    if (e.ref == EXPR_NULL) return TAGGED_NULL;
+    dvs_expr_t r = dvs_builder_expr_ite(fe->builder, c.ref, t.ref, e.ref);
+    _flag_wide_arith(fe, t.width);
+    return _tagged(r, t.width, 0, NULL);
+}
+
+/* concat. SMT-LIB's is binary; Verilator's solver interface (and z3)
+ * also write it n-ary, (concat a b c) == (concat (concat a b) c). Refusing
+ * that left the whole assertion uncompiled, and the check-sat `unknown`. */
+static SMT2_NOINLINE TaggedExpr _tr_concat(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count < 3) return TAGGED_NULL;
+    TaggedExpr acc = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+    if (acc.ref == EXPR_NULL) return TAGGED_NULL;
+    for (uint32_t i = 2; i < s->list.count; i++) {
+        TaggedExpr lo = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[i]));
+        if (lo.ref == EXPR_NULL) return TAGGED_NULL;
+        if (_too_wide(fe, (uint64_t)acc.width + lo.width)) return TAGGED_NULL;
+        dvs_expr_t r = dvs_builder_expr_concat(fe->builder, acc.ref, lo.ref,
+                                        lo.width);
+        acc = _tagged(r, (uint16_t)(acc.width + lo.width), 0, NULL);
+        if (i + 1 < s->list.count) {
+            acc = _flatten_to_var(fe, acc);
+            if (acc.ref == EXPR_NULL) return TAGGED_NULL;
+        }
+    }
+    return acc;
+}
+
+/* ---- bvashr: arithmetic shift right ----
+ * SMT-LIB values are unsigned bit patterns, while DVS_BIN_ASHR is arithmetic
+ * only for a SIGNED left operand (SystemVerilog `>>>`). So read the
+ * pattern as signed at its own width (an explicit cast -- the problem is
+ * flagged explicit and never SV-elaborated), shift, and read the result
+ * back as an unsigned pattern. The amount stays an unsigned w-bit value;
+ * any amount >= w leaves only sign bits, exactly as SMT-LIB defines. */
+static SMT2_NOINLINE TaggedExpr _tr_bvashr(Smt2Frontend *fe, const Sexpr *s) {
+    if (s->list.count != 3) return TAGGED_NULL;
+    TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
+    if (a.ref == EXPR_NULL) return TAGGED_NULL;
+    TaggedExpr k = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
+    if (k.ref == EXPR_NULL) return TAGGED_NULL;
+    uint16_t w = a.width;
+    if (w == 0 || k.width != w) {
+        _term_error(fe, "bvashr operands must share a width");
+        return TAGGED_NULL;
+    }
+    dvs_expr_t as = dvs_builder_expr_sv_cast(fe->builder, a.ref,
+                                      (uint16_t)w, (uint16_t)w, 0, 1);
+    dvs_expr_t sh = dvs_builder_expr_binary(fe->builder, DVS_BIN_ASHR, as, k.ref);
+    dvs_expr_t r  = dvs_builder_expr_sv_cast(fe->builder, sh,
+                                      (uint16_t)w, (uint16_t)w, 1, 0);
+    _flag_wide_arith(fe, w);
+    return _tagged(r, w, 0, NULL);
+}
+
+/* One list term: dispatch on its head to the operator's handler. Each handler
+ * is its own (noinline) function, so a level of nesting costs the stack of the
+ * one handler it uses rather than the union of every operator's locals; the
+ * calls here are in tail position. */
+static SMT2_NOINLINE TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
     if (s->list.count == 0) return TAGGED_NULL;
 
     Sexpr *head = s->list.items[0];
 
-    /* (_ bvN W) */
-    if (sexpr_is_symbol(head, "_")) {
-        if (s->list.count < 3) return TAGGED_NULL;
-        Sexpr *op = s->list.items[1];
-        uint64_t bv_val;
-        int bv_ovf = 0;
-        if (_parse_bv_sym(op, &bv_val, &bv_ovf)) {
-            if (s->list.items[2]->kind != SEXPR_NUMERAL) return TAGGED_NULL;
-            uint64_t wn = s->list.items[2]->numval;
-            if (wn > 64 || bv_ovf) {
-                /* A wide sort, or N >= 2^64: re-read N exactly (mod 2^128,
-                 * which is exact mod 2^W for every accepted W). */
-                if (wn > SMT2_MAX_BV_BITS) {
-                    SMT2_TAINT(fe, "bitvector constant wider than the widest supported sort");
-                    return TAGGED_NULL;
-                }
-                uint64_t limbs[SMT2_BV_MAX_LIMBS];
-                _parse_bv_sym_limbs(op, limbs, SMT2_BV_MAX_LIMBS);
-                if (wn > 64) return _wide_const(fe, limbs, (uint32_t)wn);
-                bv_val = limbs[0];
-            }
-            /* The value is N mod 2^W (as z3 reads it). An unreduced N >= 2^W
-             * made the CDCL engine answer a wrong `unsat` on e.g.
-             * `(= x8 (_ bv300 8))`; reduce it here, for every width. */
-            if (wn > 0 && wn < 64) bv_val &= ((uint64_t)1 << wn) - 1;
-            uint16_t w = (uint16_t)wn;
-            dvs_expr_t r = _bv_const(fe, (int64_t)bv_val, w);
-            return (TaggedExpr){ { r, w }, 2, NULL };
-        }
-        _term_error(fe, "unexpected indexed identifier");
-        return TAGGED_NULL;
-    }
-
-    /* ((_ zero_extend N) expr) / ((_ sign_extend N) expr) / ((_ extract hi lo) expr) */
+    if (sexpr_is_symbol(head, "_")) return _tr_bv_lit(fe, s);
     if (head->kind == SEXPR_LIST && head->list.count >= 3 &&
-        sexpr_is_symbol(head->list.items[0], "_")) {
-
-        Sexpr *op_sym = head->list.items[1];
-
-        if (sexpr_is_symbol(op_sym, "zero_extend") ||
-            sexpr_is_symbol(op_sym, "sign_extend")) {
-            if (s->list.count != 2) return TAGGED_NULL;
-            uint8_t sign = sexpr_is_symbol(op_sym, "sign_extend") ? 1 : 0;
-            uint64_t ext_n = head->list.items[2]->numval;
-
-            TaggedExpr inner = _translate_tagged(fe, s->list.items[1]);
-            if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
-            if (_too_wide(fe, (uint64_t)inner.te.width + ext_n)) return TAGGED_NULL;
-            uint16_t new_width = inner.te.width + (uint16_t)ext_n;
-
-            /* The native CDCL compile of `r == sign_extend(a)` bounds a wide
-             * (>=64-bit) unsigned result var with a negative lower bound, which
-             * as an unsigned domain becomes a high sliver -> spurious compile-
-             * time UNSAT (verified: sext(x32)->64 == 5 is wrongly unsat). The
-             * bit-blast engine lowers sign-extend exactly, so force it. */
-            if (sign && new_width >= 64)
-                { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "sext64"; }
-
-            /* Fold zero-extend of a constant: the value is unchanged, but
-             * making it a real EXPR_CONST lets downstream passes (e.g. the
-             * modular bvadd-with-constant routing) recognise it as a
-             * literal. Sign-extend is skipped here -- downstream type
-             * interpretation of signed constants is fragile. */
-            if (!sign && inner.leaf_kind == 2 && new_width < 64) {
-                ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, inner.te.ref);
-                uint64_t v = (uint64_t)ec->value & (((uint64_t)1 << new_width) - 1);
-                dvs_expr_t cr = _bv_const(fe, (int64_t)v, new_width);
-                return (TaggedExpr){ { cr, new_width }, 2, NULL };
-            }
-
-            inner = _flatten_to_var(fe, inner);
-            if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
-            dvs_expr_t r = dvs_builder_expr_extend(fe->builder, inner.te.ref,
-                                            (uint16_t)inner.te.width,
-                                            new_width, sign);
-            return (TaggedExpr){ { r, new_width }, 0, NULL };
-        }
-
-        if (sexpr_is_symbol(op_sym, "extract")) {
-            if (s->list.count != 2 || head->list.count != 4) return TAGGED_NULL;
-            uint64_t hi = head->list.items[2]->numval;
-            uint64_t lo = head->list.items[3]->numval;
-
-            TaggedExpr inner = _translate_tagged(fe, s->list.items[1]);
-            inner = _flatten_to_var(fe, inner);
-            if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
-            if (lo > hi || (inner.te.width && hi >= inner.te.width)) {
-                _term_error(fe, "extract %llu %llu of a %u-bit term",
-                            (unsigned long long)hi, (unsigned long long)lo,
-                            (unsigned)inner.te.width);
-                return TAGGED_NULL;
-            }
-
-            dvs_expr_t r = dvs_builder_expr_extract(fe->builder, inner.te.ref,
-                                                    (uint16_t)hi, (uint16_t)lo);
-            return (TaggedExpr){ { r, (uint16_t)(hi - lo + 1) }, 0, NULL };
-        }
-
-        /* ((_ repeat N) expr) = expr concatenated with itself N times. */
-        if (sexpr_is_symbol(op_sym, "repeat")) {
-            if (s->list.count != 2) return TAGGED_NULL;
-            uint64_t rep_n = head->list.items[2]->numval;
-            if (rep_n == 0) return TAGGED_NULL;
-            TaggedExpr inner = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
-            if (inner.te.ref == EXPR_NULL) return TAGGED_NULL;
-            uint16_t w = inner.te.width;
-            if (_too_wide(fe, (uint64_t)w * rep_n)) return TAGGED_NULL;
-            dvs_expr_t acc = inner.te.ref;              /* N==1 is the identity */
-            for (uint64_t i = 1; i < rep_n; i++)
-                acc = dvs_builder_expr_concat(fe->builder, acc, inner.te.ref, w);
-            return (TaggedExpr){ { acc, (uint16_t)(w * rep_n) }, 0, NULL };
-        }
-
-        if (op_sym->kind == SEXPR_SYMBOL && head->list.count == 3 &&
-            head->list.items[2]->kind == SEXPR_NUMERAL) {
-            int handled;
-            TaggedExpr r = _try_rewrite(fe, s, op_sym->sym.str, op_sym->sym.len,
-                                        head->list.items[2]->numval, &handled);
-            if (handled) return r;
-        }
-        if (op_sym->kind == SEXPR_SYMBOL)
-            _unsupported(fe, "indexed operator '%.*s'", (int)op_sym->sym.len, op_sym->sym.str);
-        else
-            _unsupported(fe, "indexed operator");
-        return TAGGED_NULL;
-    }
-
-    /* ((as const (Array M N)) value) */
+        sexpr_is_symbol(head->list.items[0], "_"))
+        return _tr_indexed_app(fe, s);
     if (head->kind == SEXPR_LIST && head->list.count == 3 &&
         sexpr_is_symbol(head->list.items[0], "as") &&
-        sexpr_is_symbol(head->list.items[1], "const")) {
-
-        Smt2ArraySort sort;
-        int r = _parse_array_sort(fe, head->list.items[2], &sort);
-        if (r <= 0) {
-            _term_error(fe, "(as const ...) requires valid Array sort");
-            return TAGGED_NULL;
-        }
-        if (s->list.count != 2) return TAGGED_NULL;
-
-        TaggedExpr val_te = _translate_tagged(fe, s->list.items[1]);
-        if (val_te.te.ref == EXPR_NULL || val_te.array != NULL) {
-            if (val_te.array) _term_error(fe, "(as const ...) value must be a BV");   /* else: already reported */
-            return TAGGED_NULL;
-        }
-
-        if (_abstract_sort(fe, sort)) {
-            val_te = _flatten_to_var(fe, val_te);
-            Smt2ArrayValue *arr = _anode_new(fe, SMT2_ANODE_CONST, sort);
-            if (!arr) { SMT2_TAINT(fe, "abstract const-array node allocation failed"); return TAGGED_NULL; }
-            arr->store_val = val_te.te.ref;   /* every read == default */
-            return (TaggedExpr){ { EXPR_NULL, 0 }, 0, arr };
-        }
-
-        Smt2ArrayValue *arr = _make_array_value(fe, sort);
-        if (!arr) return TAGGED_NULL;
-
-        for (uint32_t i = 0; i < arr->n_elems; i++)
-            arr->elems[i] = val_te.te.ref;
-
-        return (TaggedExpr){ { EXPR_NULL, 0 }, 0, arr };
-    }
+        sexpr_is_symbol(head->list.items[1], "const"))
+        return _tr_as_const(fe, s);
 
     /* (! <term> :attr val ...) — annotated term. The attributes (e.g. :named
      * for unsat cores, :pattern) are metadata; the value is just <term>. */
@@ -2248,85 +3129,8 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         s->list.count >= 2) {
         return _translate_tagged(fe, s->list.items[1]);
     }
-
-    /* (let ((x1 e1) (x2 e2) ...) body) — parallel binding.
-     * SMT-LIB2 parallel semantics: all ei are evaluated in the CURRENT scope
-     * before any xi binding takes effect.  We pre-translate eagerly. */
-    if (head->kind == SEXPR_SYMBOL && sexpr_is_symbol(head, "let")) {
-        if (s->list.count != 3) {
-            _term_error(fe, "malformed let (expected 3 elements)");
-            return TAGGED_NULL;
-        }
-        const Sexpr *binds = s->list.items[1];
-        const Sexpr *body  = s->list.items[2];
-        if (binds->kind != SEXPR_LIST) {
-            _term_error(fe, "let: binding list must be a list");
-            return TAGGED_NULL;
-        }
-        uint32_t n = binds->list.count;
-        uint32_t saved = fe->subst_depth, saved_env = fe->subst_env;
-
-        /* Phase 1: evaluate ALL value expressions in the current (outer) scope
-         * before any binding takes effect — true parallel SMT-LIB2 semantics.
-         * Store translated values in a temporary buffer, then push bindings.
-         * Small lets use an inline buffer; larger ones heap-allocate. Keeping
-         * this off a fixed SMT2_MAX_SUBST-sized stack array is what lets deeply
-         * nested `let` recurse (phase 2) without blowing the C stack. */
-        TaggedExpr    sv[8];
-        const Sexpr  *sn[8];
-        TaggedExpr   *let_vals  = sv;
-        const Sexpr **let_names = sn;
-        int           let_heap  = 0;
-        if (n > 8) {
-            let_vals  = (TaggedExpr *)malloc((size_t)n * sizeof(TaggedExpr));
-            let_names = (const Sexpr **)malloc((size_t)n * sizeof(const Sexpr *));
-            if (!let_vals || !let_names) { free(let_vals); free(let_names); goto let_oom; }
-            let_heap = 1;
-        }
-        for (uint32_t i = 0; i < n; i++) {
-            const Sexpr *b = binds->list.items[i];
-            if (b->kind != SEXPR_LIST || b->list.count != 2) goto let_bad;
-            let_names[i] = b->list.items[0];
-            if (let_names[i]->kind != SEXPR_SYMBOL) goto let_bad;
-            let_vals[i] = _translate_tagged(fe, b->list.items[1]);
-        }
-        /* Reserve after phase 1 (nested translations may have grown the stack),
-         * then push all bindings now that every value is evaluated. */
-        if (!_subst_reserve(fe, n)) goto let_oom;
-        uint32_t env = saved_env;
-        for (uint32_t i = 0; i < n; i++) {
-            env = _subst_push(fe, let_names[i]->sym.str, let_names[i]->sym.len, env);
-            Smt2Subst *e        = &fe->subst_stack[env - 1];
-            e->cached_ref       = let_vals[i].te.ref;
-            e->cached_width     = let_vals[i].te.width;
-            e->cached_leaf_kind = let_vals[i].leaf_kind;
-            e->cached_array     = let_vals[i].array;
-            e->has_cache        = 1;
-        }
-        fe->subst_env = env;
-        /* Values are copied into the subst stack; release the temp buffers
-         * BEFORE the (possibly very deep) phase-2 recursion. */
-        if (let_heap) { free(let_vals); free(let_names); }
-
-        /* Phase 2: translate body with all bindings now in scope. */
-        {
-            TaggedExpr res = _translate_tagged(fe, body);
-            fe->subst_depth = saved;
-            fe->subst_env   = saved_env;
-            return res;
-        }
-    let_bad:
-        if (let_heap) { free(let_vals); free(let_names); }
-        _term_error(fe, "malformed let binding");
-        fe->subst_depth = saved;
-        fe->subst_env   = saved_env;
-        return TAGGED_NULL;
-    let_oom:
-        fprintf(fe->err, "error: out of memory in let (%u bindings)\n", n);
-        fe->subst_depth = saved;
-        fe->subst_env   = saved_env;
-        return TAGGED_NULL;
-    }
+    if (head->kind == SEXPR_SYMBOL && sexpr_is_symbol(head, "let"))
+        return _tr_let(fe, s);
 
     if (head->kind != SEXPR_SYMBOL) {
         _term_error(fe, "expected symbol at head of expression");
@@ -2348,766 +3152,47 @@ static TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const Sexpr *s) {
         return _apply_sort_fun(fe, sf, s);
     }
 
-    /* ---- select / store ---- */
-    if (oplen == 6 && memcmp(op, "select", 6) == 0) {
-        if (s->list.count != 3) return TAGGED_NULL;
-
-        TaggedExpr arr_te = _translate_tagged(fe, s->list.items[1]);
-        if (arr_te.array == NULL) {
-            if (arr_te.te.ref != EXPR_NULL) _term_error(fe, "select: first argument is not an array");   /* else: already reported */
-            return TAGGED_NULL;
-        }
-        Smt2ArrayValue *arr = arr_te.array;
-
-        TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
-        if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
-            if (idx_te.array) _term_error(fe, "select: index must be a BV");   /* else: already reported */
-            return TAGGED_NULL;
-        }
-
-        /* A nested array, or a slice of one: constant indices only. (select A
-         * k) is a slice view; (select slice j) is A's flat element k ++ j. */
-        if (arr->slice_of || arr->sort.inner_addr) {
-            uint64_t lo, hi;
-            uint32_t w = arr->slice_of ? arr->sort.addr_width
-                       : (uint32_t)(arr->sort.addr_width - arr->sort.inner_addr);
-            if (!_const_index(fe, s->list.items[2], w, &lo, &hi)) {
-                SMT2_TAINT(fe, "symbolic index into a nested array");
-                return TAGGED_NULL;
-            }
-            if (arr->slice_of) {
-                uint64_t klo, khi;
-                _key_concat(arr->slice_lo, arr->slice_hi, lo, hi, arr->sort.addr_width,
-                            &klo, &khi);
-                dvs_expr_t e = _sparse_elem(fe, arr->slice_of, klo, khi, /*create=*/1);
-                if (e == EXPR_NULL) { SMT2_TAINT(fe, "sparse-array element could not be materialized"); return TAGGED_NULL; }
-                return (TaggedExpr){ { e, arr->sort.data_width }, 1, NULL };
-            }
-            Smt2ArrayValue *sl = (Smt2ArrayValue *)_cmd_alloc(fe, sizeof(Smt2ArrayValue));
-            if (!sl) { SMT2_TAINT(fe, "nested-array slice allocation failed"); return TAGGED_NULL; }
-            memset(sl, 0, sizeof(*sl));
-            sl->sort.addr_width = arr->sort.inner_addr;
-            sl->sort.data_width = arr->sort.data_width;
-            sl->store_idx_varid = UINT32_MAX;
-            sl->store_val       = EXPR_NULL;
-            sl->slice_of = arr;
-            sl->slice_lo = lo;
-            sl->slice_hi = hi;
-            return (TaggedExpr){ { EXPR_NULL, 0 }, 0, sl };
-        }
-
-        /* Word-level abstract path (DV_ARRAY): const or symbolic index alike
-         * become a fresh read var; read-over-write / congruence deferred. */
-        if (arr->is_abstract) {
-            idx_te = _flatten_to_var(fe, idx_te);
-            if (idx_te.te.ref == EXPR_NULL) { SMT2_TAINT(fe, "abstract-array select index not flattenable to a var"); return TAGGED_NULL; }
-            return _abs_select(fe, arr, idx_te.te.ref);
-        }
-
-        /* Constant index path (rewrite R2 included): check if the sexpr is
-         * a bitvec literal after substitution resolution. */
-        uint64_t k = 0, k_hi = 0;
-        if (_const_index(fe, s->list.items[2], arr->sort.addr_width, &k, &k_hi)) {
-            /* The array element is a VARIABLE (dvs_builder_expr_var), so tag it
-             * leaf_kind == 1 (var), NOT 2 (const). Tagging it const made the
-             * const-fold sites (e.g. zero_extend, boolean connectives) read
-             * the var's dvs_expr_t as an ExprConst and fold it to a garbage
-             * literal (0) -> wrong `unsat` for e.g.
-             * `(= ((_ zero_extend N) (select a i)) k)`. */
-            if (arr->is_sparse) {
-                dvs_expr_t e = _sparse_elem(fe, arr, k, k_hi, /*create=*/1);
-                if (e == EXPR_NULL) { SMT2_TAINT(fe, "sparse-array element could not be materialized"); return TAGGED_NULL; }
-                return (TaggedExpr){ { e, arr->sort.data_width }, 1, NULL };
-            }
-            if (k_hi == 0 && k < arr->n_elems)
-                return (TaggedExpr){ { arr->elems[k], arr->sort.data_width }, 1, NULL };
-        }
-
-        /* Symbolic index. A sparse (large-address) array cannot resolve one
-         * without enumerating 2^M entries: promote it to the word-level engine,
-         * or, where that is not possible, an honest unknown rather than a wrong
-         * answer. Dense arrays lower to an ITE tree over their elements. */
-        if (arr->is_sparse && _promote_sparse(fe, arr) == 0) {
-            idx_te = _flatten_to_var(fe, idx_te);
-            if (idx_te.te.ref == EXPR_NULL) { SMT2_TAINT(fe, "abstract-array select index not flattenable to a var"); return TAGGED_NULL; }
-            return _abs_select(fe, arr, idx_te.te.ref);
-        }
-        if (arr->is_sparse) {
-            fprintf(fe->err, "error: symbolic index into a large (sparse) array "
-                             "is unsupported -> result will be unknown\n");
-            SMT2_TAINT(fe, "symbolic index into a large (sparse) array");
-            return TAGGED_NULL;
-        }
-        idx_te = _flatten_to_var(fe, idx_te);
-        return _array_select(fe, arr, idx_te.te.ref);
-    }
-
-    if (oplen == 5 && memcmp(op, "store", 5) == 0) {
-        if (s->list.count != 4) return TAGGED_NULL;
-
-        TaggedExpr arr_te = _translate_tagged(fe, s->list.items[1]);
-        if (arr_te.array == NULL) {
-            if (arr_te.te.ref != EXPR_NULL) _term_error(fe, "store: first argument is not an array");   /* else: already reported */
-            return TAGGED_NULL;
-        }
-        Smt2ArrayValue *arr = arr_te.array;
-        if (arr->slice_of || arr->sort.inner_addr) {
-            SMT2_TAINT(fe, "store on a nested array");
-            return TAGGED_NULL;
-        }
-        if (arr->is_sparse) _promote_sparse(fe, arr);
-
-        /* Word-level abstract path (DV_ARRAY): build a STORE DAG node instead of
-         * an elementwise ITE array; select resolves it via read-over-write. This
-         * also handles large (sparse) address spaces the dense path bails on. */
-        if (arr->is_abstract) {
-            TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
-            if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
-                if (idx_te.array) _term_error(fe, "store: index must be a BV");   /* else: already reported */
-                return TAGGED_NULL;
-            }
-            TaggedExpr val_te = _translate_tagged(fe, s->list.items[3]);
-            if (val_te.te.ref == EXPR_NULL || val_te.array != NULL) {
-                if (val_te.array) _term_error(fe, "store: value must be a BV");   /* else: already reported */
-                return TAGGED_NULL;
-            }
-            idx_te = _flatten_to_var(fe, idx_te);
-            val_te = _flatten_to_var(fe, val_te);
-            Smt2ArrayValue *node = _anode_store(fe, arr, idx_te.te.ref,
-                                                val_te.te.ref);
-            if (!node) { SMT2_TAINT(fe, "abstract-array store node allocation failed"); return TAGGED_NULL; }
-            return (TaggedExpr){ { EXPR_NULL, 0 }, 0, node };
-        }
-
-        /* store on a sparse (large-address) array needs a lazy read-over-write
-         * copy; not yet implemented, so report unknown rather than guess. */
-        if (arr->is_sparse) {
-            fprintf(fe->err, "error: store on a large (sparse) array is "
-                             "unsupported -> result will be unknown\n");
-            SMT2_TAINT(fe, "store on a large (sparse) array");
-            return TAGGED_NULL;
-        }
-
-        TaggedExpr idx_te = _translate_tagged(fe, s->list.items[2]);
-        if (idx_te.te.ref == EXPR_NULL || idx_te.array != NULL) {
-            if (idx_te.array) _term_error(fe, "store: index must be a BV");   /* else: already reported */
-            return TAGGED_NULL;
-        }
-
-        TaggedExpr val_te = _translate_tagged(fe, s->list.items[3]);
-        if (val_te.te.ref == EXPR_NULL || val_te.array != NULL) {
-            if (val_te.array) _term_error(fe, "store: value must be a BV");   /* else: already reported */
-            return TAGGED_NULL;
-        }
-
-        Smt2ArrayValue *new_arr = _make_array_value(fe, arr->sort);
-        if (!new_arr) return TAGGED_NULL;
-
-        /* Constant index path */
-        const Sexpr *idx_s = _resolve_sym(fe, s->list.items[2]);
-        if (idx_s) {
-            uint64_t k = 0;
-            int is_const = 0;
-            if (idx_s->kind == SEXPR_BITVEC && idx_s->bv.width <= 64) {  /* wide: general path */
-                k = idx_s->bv.value; is_const = 1;
-            } else if (idx_s->kind == SEXPR_LIST && idx_s->list.count == 3 &&
-                       sexpr_is_symbol(idx_s->list.items[0], "_")) {
-                uint64_t bv_val;
-                if (_parse_bv_sym(idx_s->list.items[1], &bv_val, NULL)) {
-                    k = bv_val; is_const = 1;
-                }
-            }
-            if (is_const) {
-                memcpy(new_arr->elems, arr->elems, arr->n_elems * sizeof(dvs_expr_t));
-                if (k < arr->n_elems)
-                    new_arr->elems[k] = val_te.te.ref;
-                return (TaggedExpr){ { EXPR_NULL, 0 }, 0, new_arr };
-            }
-        }
-
-        /* Symbolic index: elementwise ITE.  Record R1 metadata (store index
-         * var_id) so a later select at the same index can short-circuit. */
-        idx_te = _flatten_to_var(fe, idx_te);
-        val_te = _flatten_to_var(fe, val_te);
-        {
-            ExprVar *ev = (ExprVar *)dvs_builder_ref_ptr(fe->builder, idx_te.te.ref);
-            if (ev && ev->kind == EXPR_VAR) {
-                new_arr->store_idx_varid = ev->var_id;
-                new_arr->store_val       = val_te.te.ref;
-            }
-        }
-        for (uint32_t j = 0; j < arr->n_elems; j++) {
-            dvs_expr_t j_const = _bv_const(fe, (int64_t)j, arr->sort.addr_width);
-            dvs_expr_t cond = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ,
-                                               idx_te.te.ref, j_const);
-            new_arr->elems[j] = dvs_builder_expr_ite(fe->builder, cond,
-                                                  val_te.te.ref, arr->elems[j]);
-        }
-        return (TaggedExpr){ { EXPR_NULL, 0 }, 0, new_arr };
-    }
-
-    /* ---- Binary BV arithmetic (result has same width as operands) ---- */
-    /* These ops are :left-assoc in SMT-LIB, and Verilator emits them variadically
-     * (e.g. (bvor a b c)). Left-fold over all operands so both the binary and
-     * n-ary forms translate: (op a b c) == (op (op a b) c). */
-    /* bvand / bvor with literal operands: drop identities, short-circuit on the
-     * absorbing value, then fold the rest as BINOP_CASE does. */
-    {
-        int is_band = (oplen == 5 && memcmp(op, "bvand", 5) == 0);
-        int is_bor  = (oplen == 4 && memcmp(op, "bvor", 4) == 0);
-        if ((is_band || is_bor) && s->list.count >= 3) {
-            TaggedExpr acc = TAGGED_NULL;
-            uint16_t w = 0;
-            for (uint32_t i = 1; i < s->list.count; i++) {
-                TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
-                if (b.te.ref == EXPR_NULL || b.array != NULL) return TAGGED_NULL;
-                if (w && b.te.width && b.te.width != w
-                        && s->list.items[i]->kind != SEXPR_NUMERAL) {
-                    _term_error(fe, "%s: sorts (_ BitVec %u) and (_ BitVec %u) are incompatible",
-                                is_band ? "bvand" : "bvor", (unsigned)w, (unsigned)b.te.width);
-                    return TAGGED_NULL;
-                }
-                if (!w) w = b.te.width;
-                uint64_t v, ones = w >= 64 ? ~0ull : ((1ull << w) - 1);
-                if (b.te.width == w && _lit_value(fe, b, &v)) {
-                    if (v == (is_band ? 0 : ones))
-                        return (TaggedExpr){ { _bv_const(fe, (int64_t)v, w), w }, 2, NULL };
-                    if (v == (is_band ? ones : 0)) continue;
-                }
-                b = _flatten_to_var(fe, b);
-                if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
-                if (acc.te.ref == EXPR_NULL) { acc = b; continue; }
-                acc = _flatten_to_var(fe, acc);
-                if (acc.te.ref == EXPR_NULL) return TAGGED_NULL;
-                acc.te.ref = dvs_builder_expr_binary(fe->builder,
-                                                     is_band ? DVS_BIN_BAND : DVS_BIN_BOR,
-                                                     acc.te.ref, b.te.ref);
-                acc.leaf_kind = 0;
-            }
-            if (acc.te.ref == EXPR_NULL) {     /* every operand was the identity */
-                uint64_t id = is_band ? (w >= 64 ? ~0ull : ((1ull << w) - 1)) : 0;
-                return (TaggedExpr){ { _bv_const(fe, (int64_t)id, w), w }, 2, NULL };
-            }
-            _flag_wide_arith(fe, w);
-            return (TaggedExpr){ { acc.te.ref, w }, acc.leaf_kind, NULL };
-        }
-    }
-
-#define BINOP_CASE(name, binop) \
-    if (oplen == sizeof(name)-1 && memcmp(op, name, oplen) == 0) { \
-        if (s->list.count < 3) return TAGGED_NULL; \
-        TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1])); \
-        if (a.te.ref == EXPR_NULL) return TAGGED_NULL; \
-        for (uint32_t _i = 2; _i < s->list.count; _i++) { \
-            TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[_i])); \
-            if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
-            if (!_same_width(fe, name, s->list.items[1], a, s->list.items[_i], b)) \
-                return TAGGED_NULL; \
-            /* Re-flatten the accumulator each round. Without this, from the 2nd \
-             * operand on the left side is a raw composed node, and the CDCL \
-             * compile only links var-var / const-var operands -- so an n-ary op \
-             * with arity >= 3 was left UNCOMPILED, the model then violated it, \
-             * and validation downgraded a perfectly good `sat` to `unknown`. \
-             * That silently disabled `x inside {a,b,c}` (a 3-way bvor) on CDCL. \
-             * Same lesson as B4: never reuse a raw composed sub-expr. */ \
-            a = _flatten_to_var(fe, a); \
-            if (a.te.ref == EXPR_NULL) return TAGGED_NULL; \
-            a.te.ref = dvs_builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
-            a.leaf_kind = 0;   /* composed: must be re-flattened next round */ \
-        } \
-        _flag_wide_arith(fe, a.te.width); \
-        return (TaggedExpr){ { a.te.ref, a.te.width }, 0, NULL }; \
-    }
-
-#define CMPOP_CASE(name, binop) \
-    if (oplen == sizeof(name)-1 && memcmp(op, name, oplen) == 0) { \
-        if (s->list.count != 3) return TAGGED_NULL; \
-        TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1])); \
-        if (a.te.ref == EXPR_NULL) return TAGGED_NULL; \
-        TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2])); \
-        if (b.te.ref == EXPR_NULL) return TAGGED_NULL; \
-        if (!_same_width(fe, name, s->list.items[1], a, s->list.items[2], b)) \
-            return TAGGED_NULL; \
-        if (_same_var(fe, a.te.ref, b.te.ref)) \
-            return _bool_lit(fe, binop == DVS_BIN_LTE || binop == DVS_BIN_GTE); \
-        dvs_expr_t r = dvs_builder_expr_binary(fe->builder, binop, a.te.ref, b.te.ref); \
-        return (TaggedExpr){ { r, 1 }, 0, NULL }; \
-    }
-
-    /* Unsigned division and remainder. SMT-LIB defines a zero divisor:
-     * (bvudiv a 0) = all ones, (bvurem a 0) = a. The engines' own DIV/MOD
-     * leave the result unconstrained at a zero divisor (SystemVerilog's x),
-     * so unless the divisor is a nonzero constant, guard it here; without the
-     * guard a model could pick any value and `unsat` problems came back `sat`
-     * (B52). */
-    {
-        int is_udiv = (oplen == 6 && memcmp(op, "bvudiv", 6) == 0);
-        int is_urem = (oplen == 6 && memcmp(op, "bvurem", 6) == 0);
-        if (is_udiv || is_urem) {
-            if (s->list.count != 3) return TAGGED_NULL;
-            TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
-            if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-            TaggedExpr b = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
-            if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
-            if (!_same_width(fe, is_urem ? "bvurem" : "bvudiv", s->list.items[1], a,
-                             s->list.items[2], b))
-                return TAGGED_NULL;
-            uint16_t w = a.te.width ? a.te.width : b.te.width;
-            _flag_wide_arith(fe, w);
-            dvs_expr_t q = _udivrem_expr(fe, a.te.ref, b.te.ref, w, is_urem);
-            return (TaggedExpr){ { q, w }, 0, NULL };
-        }
-    }
-
-    BINOP_CASE("bvadd", DVS_BIN_ADD)
-    BINOP_CASE("bvsub", DVS_BIN_SUB)
-    BINOP_CASE("bvmul", DVS_BIN_MUL)
-    BINOP_CASE("bvand", DVS_BIN_BAND)
-    BINOP_CASE("bvor", DVS_BIN_BOR)
-    BINOP_CASE("bvxor", DVS_BIN_BXOR)
-    BINOP_CASE("bvshl", DVS_BIN_LSHIFT)
-    BINOP_CASE("bvlshr", DVS_BIN_RSHIFT)
-
-    CMPOP_CASE("bvult", DVS_BIN_LT)
-    CMPOP_CASE("bvule", DVS_BIN_LTE)
-    CMPOP_CASE("bvugt", DVS_BIN_GT)
-    CMPOP_CASE("bvuge", DVS_BIN_GTE)
-
-    /* Signed comparisons — see _translate_signed_cmp (MSB-flip lowering that
+#define OP_IS(name) (oplen == sizeof(name) - 1 && memcmp(op, name, oplen) == 0)
+    if (OP_IS("select")) return _tr_select(fe, s);
+    if (OP_IS("store"))  return _tr_store(fe, s);
+    if ((OP_IS("bvand") || OP_IS("bvor")) && s->list.count >= 3)
+        return _tr_band_bor(fe, s, OP_IS("bvand"));
+    if (OP_IS("bvudiv")) return _tr_udivrem(fe, s, 0);
+    if (OP_IS("bvurem")) return _tr_udivrem(fe, s, 1);
+    if (OP_IS("bvadd"))  return _tr_binop(fe, s, "bvadd", DVS_BIN_ADD);
+    if (OP_IS("bvsub"))  return _tr_binop(fe, s, "bvsub", DVS_BIN_SUB);
+    if (OP_IS("bvmul"))  return _tr_binop(fe, s, "bvmul", DVS_BIN_MUL);
+    if (OP_IS("bvand"))  return _tr_binop(fe, s, "bvand", DVS_BIN_BAND);
+    if (OP_IS("bvor"))   return _tr_binop(fe, s, "bvor", DVS_BIN_BOR);
+    if (OP_IS("bvxor"))  return _tr_binop(fe, s, "bvxor", DVS_BIN_BXOR);
+    if (OP_IS("bvshl"))  return _tr_binop(fe, s, "bvshl", DVS_BIN_LSHIFT);
+    if (OP_IS("bvlshr")) return _tr_binop(fe, s, "bvlshr", DVS_BIN_RSHIFT);
+    if (OP_IS("bvult"))  return _tr_cmpop(fe, s, "bvult", DVS_BIN_LT);
+    if (OP_IS("bvule"))  return _tr_cmpop(fe, s, "bvule", DVS_BIN_LTE);
+    if (OP_IS("bvugt"))  return _tr_cmpop(fe, s, "bvugt", DVS_BIN_GT);
+    if (OP_IS("bvuge"))  return _tr_cmpop(fe, s, "bvuge", DVS_BIN_GTE);
+    /* Signed comparisons -- see _translate_signed_cmp (MSB-flip lowering that
      * materialises the variable side's xor and folds a constant operand). */
-#define SCMPOP_CASE(name, binop) \
-    if (oplen == sizeof(name)-1 && memcmp(op, name, oplen) == 0) \
-        return _translate_signed_cmp(fe, s, binop);
-
-    SCMPOP_CASE("bvslt", DVS_BIN_LT)
-    SCMPOP_CASE("bvsle", DVS_BIN_LTE)
-    SCMPOP_CASE("bvsgt", DVS_BIN_GT)
-    SCMPOP_CASE("bvsge", DVS_BIN_GTE)
-
-#undef BINOP_CASE
-#undef CMPOP_CASE
-#undef SCMPOP_CASE
-
-    /* Signed division / remainder (SMT-LIB `bvsdiv` / `bvsrem`, round toward
-     * zero), lowered to the already-supported unsigned bvudiv/bvurem plus sign
-     * muxing. No engine changes: on bitblast the ite/neg/udiv are primitives;
-     * on CDCL each flattened sub-op has a propagator. Verilator emits these for
-     * signed `/` and `%`.
-     *
-     *   sdiv(s,t): quadrant by (sign s, sign t) —
-     *     (+,+) udiv(s,t)      (-,+) -udiv(-s,t)
-     *     (+,-) -udiv(s,-t)    (-,-) udiv(-s,-t)
-     *   srem(s,t): sign follows the dividend s —
-     *     (+,+) urem(s,t)      (-,+) -urem(-s,t)
-     *     (+,-) urem(s,-t)     (-,-) -urem(-s,-t)
-     */
-    {
-        int is_sdiv = (oplen == 6 && memcmp(op, "bvsdiv", 6) == 0);
-        int is_srem = (oplen == 6 && memcmp(op, "bvsrem", 6) == 0);
-        if (is_sdiv || is_srem) {
-            /* The ITE-of-unsigned-divisions this lowers to is solved exactly by
-             * bitblast but left unpinned (wrong model) by the CDCL bounds
-             * engine, so force bitblast for this problem. */
-            { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "sdiv-srem"; }
-            if (s->list.count != 3) return TAGGED_NULL;
-            TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
-            if (sa.te.ref == EXPR_NULL) return TAGGED_NULL;
-            TaggedExpr tb = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
-            if (tb.te.ref == EXPR_NULL) return TAGGED_NULL;
-            uint16_t w = sa.te.width ? sa.te.width : tb.te.width;
-            if (w == 0) return TAGGED_NULL;
-            dvs_expr_t r = _signed_divrem_expr(fe, sa.te.ref, tb.te.ref,
-                                            w, is_srem);
-            return (TaggedExpr){ { r, w }, 0, NULL };
-        }
-    }
-
-    /* Signed modulo (SMT-LIB `bvsmod`): result sign follows the DIVISOR t.
-     * Built on the (validated) signed remainder: let r = bvsrem(s,t);
-     *   r == 0                 -> 0
-     *   sign(r) == sign(t)     -> r
-     *   else                   -> r + t   (flip the sign toward the divisor)
-     */
-    {
-        if (oplen == 6 && memcmp(op, "bvsmod", 6) == 0) {
-            { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "smod"; }
-            if (s->list.count != 3) return TAGGED_NULL;
-            TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
-            if (sa.te.ref == EXPR_NULL) return TAGGED_NULL;
-            TaggedExpr tb = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
-            if (tb.te.ref == EXPR_NULL) return TAGGED_NULL;
-            uint16_t w = sa.te.width ? sa.te.width : tb.te.width;
-            if (w == 0) return TAGGED_NULL;
-            dvs_expr_t T_ = tb.te.ref;
-            dvs_expr_t r_expr = _signed_divrem_expr(fe, sa.te.ref, T_, w, /*is_rem=*/1);
-            /* Materialise the remainder into its own var: bvsmod references it
-             * three times (sign bit, +t, ==0), and re-embedding the raw ITE tree
-             * at each use makes the bitblaster produce inconsistent values for
-             * the shared sub-DAG. One aux var = one bit-blasted value, shared. */
-            TaggedExpr rt = _flatten_to_var(fe, (TaggedExpr){ { r_expr, w }, 0, NULL });
-            if (rt.te.ref == EXPR_NULL) return TAGGED_NULL;
-            dvs_expr_t r = rt.te.ref;
-            dvs_expr_t msb_r = dvs_builder_expr_extract(fe->builder, r, w - 1, w - 1);
-            dvs_expr_t msb_t = dvs_builder_expr_extract(fe->builder, T_, w - 1, w - 1);
-            dvs_expr_t same_sign = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, msb_r, msb_t);
-            dvs_expr_t r_plus_t = dvs_builder_expr_binary(fe->builder, DVS_BIN_ADD, r, T_);
-            dvs_expr_t adjusted = dvs_builder_expr_ite(fe->builder, same_sign, r, r_plus_t);
-            dvs_expr_t zero = _bv_const(fe, 0, w);
-            dvs_expr_t r_is_zero = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, r, zero);
-            dvs_expr_t result = dvs_builder_expr_ite(fe->builder, r_is_zero, r, adjusted);
-            return (TaggedExpr){ { result, w }, 0, NULL };
-        }
-    }
-
-    /* = (equality) -- handles both BV and array operands */
-    if (oplen == 1 && op[0] == '=') {
-        if (s->list.count != 3) return TAGGED_NULL;
-        for (int i = 1; i <= 2; i++) {
-            const Sexpr *other = s->list.items[3 - i];
-            if (!_is_app(s->list.items[i], "bvsmod") || (other->kind == SEXPR_LIST && !_is_app(other, "_")))
-                continue;
-            uint64_t zv;
-            if (_lit_value(fe, _translate_tagged(fe, other), &zv) && zv == 0)
-                return _smod_is_zero(fe, s->list.items[i]);
-        }
-
-        TaggedExpr a = _translate_tagged(fe, s->list.items[1]);
-        TaggedExpr b = _translate_tagged(fe, s->list.items[2]);
-
-        if (a.array != NULL && b.array != NULL) {
-            if (a.array->slice_of || a.array->sort.inner_addr ||
-                b.array->slice_of || b.array->sort.inner_addr) {
-                SMT2_TAINT(fe, "equality of nested arrays");
-                return TAGGED_NULL;
-            }
-            /* Word-level abstract path: reify onto a boolean var; consistency +
-             * extensionality axioms are emitted at solve time. */
-            if ((a.array->is_abstract || b.array->is_abstract || a.array->is_sparse)
-                && _promote_pair(fe, a.array, b.array)) {
-                dvs_expr_t p = _abs_array_eq(fe, a.array, b.array);
-                if (p == EXPR_NULL) { SMT2_TAINT(fe, "abstract-array equality could not be reified"); return TAGGED_NULL; }
-                return (TaggedExpr){ { p, 1 }, 1, NULL };
-            }
-            /* Array equality: AND of element-wise equalities */
-            if (a.array->n_elems != b.array->n_elems) {
-                _term_error(fe, "array equality on arrays with different sizes");
-                return TAGGED_NULL;
-            }
-            dvs_expr_t result = EXPR_NULL;
-            for (uint32_t i = 0; i < a.array->n_elems; i++) {
-                dvs_expr_t eq_i = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ,
-                                                   a.array->elems[i],
-                                                   b.array->elems[i]);
-                result = (result == EXPR_NULL) ? eq_i
-                       : dvs_builder_expr_binary(fe->builder, DVS_BIN_AND, result, eq_i);
-            }
-            return (TaggedExpr){ { result, 1 }, 0, NULL };
-        }
-        if (a.array != NULL || b.array != NULL) {
-            /* a side that failed to translate has already been reported */
-            if (a.te.ref != EXPR_NULL || b.te.ref != EXPR_NULL)
-                _term_error(fe, "type mismatch in equality (array vs scalar)");
-            return TAGGED_NULL;
-        }
-
-        /* BV/Bool equality */
-        if (!_same_width(fe, "=", s->list.items[1], a, s->list.items[2], b)) return TAGGED_NULL;
-        uint64_t av, bv;
-        if (_lit_value(fe, a, &av) && _lit_value(fe, b, &bv) && a.te.width == b.te.width)
-            return _bool_lit(fe, av == bv);
-        a = _flatten_to_var(fe, a);
-        if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-        b = _flatten_to_var(fe, b);
-        if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
-        dvs_expr_t r = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, a.te.ref, b.te.ref);
-        return (TaggedExpr){ { r, 1 }, 0, NULL };
-    }
-
-    /* distinct */
-    if (oplen == 8 && memcmp(op, "distinct", 8) == 0) {
-        if (s->list.count < 3) return TAGGED_NULL;
-        uint32_t n = s->list.count - 1;
-        TaggedExpr *args = (TaggedExpr *)malloc(n * sizeof(TaggedExpr));
-        if (!args) return TAGGED_NULL;
-        for (uint32_t i = 0; i < n; i++) {
-            args[i] = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[i + 1]));
-            if (args[i].te.ref == EXPR_NULL) { free(args); return TAGGED_NULL; }
-            if (i && !_same_width(fe, "distinct", s->list.items[1], args[0],
-                                  s->list.items[i + 1], args[i])) {
-                free(args);
-                return TAGGED_NULL;
-            }
-        }
-        dvs_expr_t result = EXPR_NULL;
-        for (uint32_t i = 0; i < n; i++) {
-            for (uint32_t j = i + 1; j < n; j++) {
-                dvs_expr_t neq = dvs_builder_expr_binary(fe->builder, DVS_BIN_NEQ,
-                                                  args[i].te.ref, args[j].te.ref);
-                if (result == EXPR_NULL) result = neq;
-                else result = dvs_builder_expr_binary(fe->builder, DVS_BIN_AND, result, neq);
-            }
-        }
-        free(args);
-        return (TaggedExpr){ { result, 1 }, 0, NULL };
-    }
-
-    /* ---- Unary BV ops ---- */
-    if (oplen == 5 && memcmp(op, "bvnot", 5) == 0) {
-        if (s->list.count != 2) return TAGGED_NULL;
-        TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
-        if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-        dvs_expr_t r = dvs_builder_expr_unary(fe->builder, DVS_UN_INVERT, a.te.ref);
-        _flag_wide_arith(fe, a.te.width);
-        return (TaggedExpr){ { r, a.te.width }, 0, NULL };
-    }
-    if (oplen == 5 && memcmp(op, "bvneg", 5) == 0) {
-        if (s->list.count != 2) return TAGGED_NULL;
-        TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
-        if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-        /* bvneg x is (bvsub 0 x), modulo 2^w. It must NOT lower to DVS_UN_NEG:
-         * the CDCL engine (and the model validator) treat DVS_UN_NEG as integer
-         * negation with no wrap, so for an unsigned x in [0, 2^w) the result
-         * lands in (-2^w, 0] and `(= (bvneg x) K)` was a spurious `unsat` for
-         * every constant K. Built exactly as BINOP_CASE builds bvsub. */
-        TaggedExpr z = _flatten_to_var(fe, (TaggedExpr){
-            { _bv_const(fe, 0, a.te.width), a.te.width }, 2, NULL });
-        if (z.te.ref == EXPR_NULL) return TAGGED_NULL;
-        dvs_expr_t r = dvs_builder_expr_binary(fe->builder, DVS_BIN_SUB, z.te.ref, a.te.ref);
-        _flag_wide_arith(fe, a.te.width);
-        return (TaggedExpr){ { r, a.te.width }, 0, NULL };
-    }
-
-    /* ---- Boolean connectives (with compile-time const folding) ---- */
-    if (oplen == 3 && memcmp(op, "not", 3) == 0) {
-        if (s->list.count != 2) return TAGGED_NULL;
-        TaggedExpr a = _translate_tagged(fe, s->list.items[1]);
-        if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-        if (a.leaf_kind == 2) {
-            ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, a.te.ref);
-            int64_t neg = (ec->value != 0) ? 0 : 1;
-            dvs_expr_t cr = _bv_const(fe, neg, 1);
-            return (TaggedExpr){ { cr, 1 }, 2, NULL };
-        }
-        dvs_expr_t r = dvs_builder_expr_unary(fe->builder, DVS_UN_NOT, a.te.ref);
-        return (TaggedExpr){ { r, 1 }, 0, NULL };
-    }
-
-    if (oplen == 3 && memcmp(op, "and", 3) == 0) {
-        /* SMT-LIB permits arity >= 1 here; `(and x)` / `(or x)` / `(xor x)` are
-         * the identity and z3 accepts them (nullary `(and)` it rejects, so we do
-         * too). Rejecting the unary form used to taint the assert -> `unknown`,
-         * which silently killed any single-variable model-enumeration loop --
-         * a blocking clause over one variable is exactly `(not (and (= x V)))`.
-         * See docs/solver_bug_backlog.md B16. */
-        if (s->list.count < 2) return TAGGED_NULL;
-        /* Collect non-trivial operands; short-circuit on any literal false. */
-        TaggedExpr acc = { { EXPR_NULL, 1 }, 0, NULL };
-        for (uint32_t i = 1; i < s->list.count; i++) {
-            TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
-            if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
-            if (b.leaf_kind == 2) {
-                ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, b.te.ref);
-                if (ec->value == 0) {
-                    /* (and ... false ...) -> false */
-                    dvs_expr_t cr = _bv_const(fe, 0, 1);
-                    return (TaggedExpr){ { cr, 1 }, 2, NULL };
-                }
-                /* (and ... true ...) -> drop this operand */
-                continue;
-            }
-            if (acc.te.ref == EXPR_NULL) { acc = b; acc.te.width = 1; }
-            else {
-                acc.te.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_AND,
-                                                 acc.te.ref, b.te.ref);
-                acc.leaf_kind = 0;
-            }
-        }
-        if (acc.te.ref == EXPR_NULL) {
-            /* All operands were literal true */
-            dvs_expr_t cr = _bv_const(fe, 1, 1);
-            return (TaggedExpr){ { cr, 1 }, 2, NULL };
-        }
-        acc.te.width = 1;
-        return acc;
-    }
-
-    if (oplen == 2 && memcmp(op, "or", 2) == 0) {
-        if (s->list.count < 2) return TAGGED_NULL;   /* arity >= 1; see `and` */
-        /* Collect non-trivial operands; short-circuit on any literal true. */
-        TaggedExpr acc = { { EXPR_NULL, 1 }, 0, NULL };
-        for (uint32_t i = 1; i < s->list.count; i++) {
-            TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
-            if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
-            if (b.leaf_kind == 2) {
-                ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, b.te.ref);
-                if (ec->value != 0) {
-                    /* (or ... true ...) -> true */
-                    dvs_expr_t cr = _bv_const(fe, 1, 1);
-                    return (TaggedExpr){ { cr, 1 }, 2, NULL };
-                }
-                /* (or ... false ...) -> drop this operand */
-                continue;
-            }
-            if (acc.te.ref == EXPR_NULL) { acc = b; acc.te.width = 1; }
-            else {
-                acc.te.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_OR,
-                                                 acc.te.ref, b.te.ref);
-                acc.leaf_kind = 0;
-            }
-        }
-        if (acc.te.ref == EXPR_NULL) {
-            /* All operands were literal false */
-            dvs_expr_t cr = _bv_const(fe, 0, 1);
-            return (TaggedExpr){ { cr, 1 }, 2, NULL };
-        }
-        acc.te.width = 1;
-        return acc;
-    }
-
-    /* xor */
-    if (oplen == 3 && memcmp(op, "xor", 3) == 0) {
-        if (s->list.count < 2) return TAGGED_NULL;   /* arity >= 1; see `and` */
-        TaggedExpr acc = _translate_tagged(fe, s->list.items[1]);
-        if (acc.te.ref == EXPR_NULL) return TAGGED_NULL;
-        for (uint32_t i = 2; i < s->list.count; i++) {
-            TaggedExpr b = _translate_tagged(fe, s->list.items[i]);
-            if (b.te.ref == EXPR_NULL) return TAGGED_NULL;
-            acc.te.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_BXOR,
-                                             acc.te.ref, b.te.ref);
-            acc.leaf_kind = 0;
-        }
-        acc.te.width = 1;
-        return acc;
-    }
-
-    /* => */
-    if (oplen == 2 && memcmp(op, "=>", 2) == 0) {
-        if (s->list.count < 3) return TAGGED_NULL;
-        /* SMT-LIB =>: right-associative. (=> a b c) == (=> a (=> b c)) */
-        TaggedExpr last = _translate_tagged(fe, s->list.items[s->list.count - 1]);
-        if (last.te.ref == EXPR_NULL) return TAGGED_NULL;
-        for (int i = (int)s->list.count - 2; i >= 1; i--) {
-            TaggedExpr a = _translate_tagged(fe, s->list.items[i]);
-            if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-            uint64_t av, lv;
-            if (_lit_value(fe, a, &av) || (_lit_value(fe, last, &lv) && lv)) {
-                if (_lit_value(fe, a, &av) && !av) last = _bool_lit(fe, 1);  /* false => _ */
-                continue;                       /* true => b is b; a => true is true */
-            }
-            dvs_expr_t not_a = dvs_builder_expr_unary(fe->builder, DVS_UN_NOT, a.te.ref);
-            last.te.ref = dvs_builder_expr_binary(fe->builder, DVS_BIN_OR, not_a, last.te.ref);
-            last.leaf_kind = 0;
-        }
-        last.te.width = 1;
-        return last;
-    }
-
-    /* ite -- handles both BV and array branches */
-    if (oplen == 3 && memcmp(op, "ite", 3) == 0) {
-        if (s->list.count != 4) return TAGGED_NULL;
-        TaggedExpr c = _translate_tagged(fe, s->list.items[1]);
-        if (c.te.ref == EXPR_NULL) return TAGGED_NULL;
-        TaggedExpr t = _translate_tagged(fe, s->list.items[2]);
-        TaggedExpr e = _translate_tagged(fe, s->list.items[3]);
-        uint64_t cv;
-        if (_lit_value(fe, c, &cv)) return cv ? t : e;
-
-        if (t.array != NULL && e.array != NULL) {
-            if (t.array->slice_of || t.array->sort.inner_addr ||
-                e.array->slice_of || e.array->sort.inner_addr) {
-                SMT2_TAINT(fe, "ite over nested arrays");
-                return TAGGED_NULL;
-            }
-            /* Word-level abstract path: an ITE DAG node; select resolves it to
-             * ite(cond, read(then,i), read(else,i)). */
-            if ((t.array->is_abstract || e.array->is_abstract || t.array->is_sparse)
-                && _promote_pair(fe, t.array, e.array)) {
-                Smt2ArrayValue *node = _anode_ite(fe, c.te.ref, t.array, e.array);
-                if (!node) { SMT2_TAINT(fe, "abstract-array ite node allocation failed"); return TAGGED_NULL; }
-                return (TaggedExpr){ { EXPR_NULL, 0 }, 0, node };
-            }
-            if (t.array->n_elems != e.array->n_elems) {
-                _term_error(fe, "ite branches are arrays of different sizes");
-                return TAGGED_NULL;
-            }
-            Smt2ArrayValue *arr = _make_array_value(fe, t.array->sort);
-            if (!arr) return TAGGED_NULL;
-            for (uint32_t i = 0; i < t.array->n_elems; i++) {
-                arr->elems[i] = dvs_builder_expr_ite(fe->builder, c.te.ref,
-                                                  t.array->elems[i],
-                                                  e.array->elems[i]);
-            }
-            return (TaggedExpr){ { EXPR_NULL, 0 }, 0, arr };
-        }
-
-        /* BV ite */
-        if (!_same_width(fe, "ite", s->list.items[2], t, s->list.items[3], e)) return TAGGED_NULL;
-        t = _flatten_to_var(fe, t);
-        if (t.te.ref == EXPR_NULL) return TAGGED_NULL;
-        e = _flatten_to_var(fe, e);
-        if (e.te.ref == EXPR_NULL) return TAGGED_NULL;
-        dvs_expr_t r = dvs_builder_expr_ite(fe->builder, c.te.ref, t.te.ref, e.te.ref);
-        _flag_wide_arith(fe, t.te.width);
-        return (TaggedExpr){ { r, t.te.width }, 0, NULL };
-    }
-
-    /* concat. SMT-LIB's is binary; Verilator's solver interface (and z3)
-     * also write it n-ary, (concat a b c) == (concat (concat a b) c). Refusing
-     * that left the whole assertion uncompiled, and the check-sat `unknown`. */
-    if (oplen == 6 && memcmp(op, "concat", 6) == 0) {
-        if (s->list.count < 3) return TAGGED_NULL;
-        TaggedExpr acc = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
-        if (acc.te.ref == EXPR_NULL) return TAGGED_NULL;
-        for (uint32_t i = 2; i < s->list.count; i++) {
-            TaggedExpr lo = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[i]));
-            if (lo.te.ref == EXPR_NULL) return TAGGED_NULL;
-            if (_too_wide(fe, (uint64_t)acc.te.width + lo.te.width)) return TAGGED_NULL;
-            dvs_expr_t r = dvs_builder_expr_concat(fe->builder, acc.te.ref, lo.te.ref,
-                                            lo.te.width);
-            acc = (TaggedExpr){ { r, (uint16_t)(acc.te.width + lo.te.width) }, 0, NULL };
-            if (i + 1 < s->list.count) {
-                acc = _flatten_to_var(fe, acc);
-                if (acc.te.ref == EXPR_NULL) return TAGGED_NULL;
-            }
-        }
-        return acc;
-    }
-
-    /* ---- bvashr: arithmetic shift right ----
-     * SMT-LIB values are unsigned bit patterns, while DVS_BIN_ASHR is arithmetic
-     * only for a SIGNED left operand (SystemVerilog `>>>`). So read the
-     * pattern as signed at its own width (an explicit cast -- the problem is
-     * flagged explicit and never SV-elaborated), shift, and read the result
-     * back as an unsigned pattern. The amount stays an unsigned w-bit value;
-     * any amount >= w leaves only sign bits, exactly as SMT-LIB defines. */
-    if (oplen == 6 && memcmp(op, "bvashr", 6) == 0) {
-        if (s->list.count != 3) return TAGGED_NULL;
-        TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
-        if (a.te.ref == EXPR_NULL) return TAGGED_NULL;
-        TaggedExpr k = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[2]));
-        if (k.te.ref == EXPR_NULL) return TAGGED_NULL;
-        uint16_t w = a.te.width;
-        if (w == 0 || k.te.width != w) {
-            _term_error(fe, "bvashr operands must share a width");
-            return TAGGED_NULL;
-        }
-        dvs_expr_t as = dvs_builder_expr_sv_cast(fe->builder, a.te.ref,
-                                          (uint16_t)w, (uint16_t)w, 0, 1);
-        dvs_expr_t sh = dvs_builder_expr_binary(fe->builder, DVS_BIN_ASHR, as, k.te.ref);
-        dvs_expr_t r  = dvs_builder_expr_sv_cast(fe->builder, sh,
-                                          (uint16_t)w, (uint16_t)w, 1, 0);
-        _flag_wide_arith(fe, w);
-        return (TaggedExpr){ { r, w }, 0, NULL };
-    }
-
-    /* ---- Signed arithmetic ops: still deferred (comparisons handled above) ---- */
-    if ((oplen == 6 && memcmp(op, "bvsdiv", 6) == 0) ||
-        (oplen == 6 && memcmp(op, "bvsrem", 6) == 0) ||
-        (oplen == 6 && memcmp(op, "bvsmod", 6) == 0)) {
-        _unsupported(fe, "signed operation '%.*s'",
-                (int)oplen, op);
-        return TAGGED_NULL;
-    }
+    if (OP_IS("bvslt"))  return _translate_signed_cmp(fe, s, DVS_BIN_LT);
+    if (OP_IS("bvsle"))  return _translate_signed_cmp(fe, s, DVS_BIN_LTE);
+    if (OP_IS("bvsgt"))  return _translate_signed_cmp(fe, s, DVS_BIN_GT);
+    if (OP_IS("bvsge"))  return _translate_signed_cmp(fe, s, DVS_BIN_GTE);
+    if (OP_IS("bvsdiv")) return _tr_sdivrem(fe, s, 0);
+    if (OP_IS("bvsrem")) return _tr_sdivrem(fe, s, 1);
+    if (OP_IS("bvsmod")) return _tr_smod(fe, s);
+    if (OP_IS("="))      return _tr_eq(fe, s);
+    if (OP_IS("distinct")) return _tr_distinct(fe, s);
+    if (OP_IS("bvnot"))  return _tr_bvnot(fe, s);
+    if (OP_IS("bvneg"))  return _tr_bvneg(fe, s);
+    if (OP_IS("not"))    return _tr_not(fe, s);
+    if (OP_IS("and"))    return _tr_and(fe, s);
+    if (OP_IS("or"))     return _tr_or(fe, s);
+    if (OP_IS("xor"))    return _tr_xor(fe, s);
+    if (OP_IS("=>"))     return _tr_implies(fe, s);
+    if (OP_IS("ite"))    return _tr_ite(fe, s);
+    if (OP_IS("concat")) return _tr_concat(fe, s);
+    if (OP_IS("bvashr")) return _tr_bvashr(fe, s);
+#undef OP_IS
 
     {
         int handled;
@@ -3127,7 +3212,7 @@ static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s) {
         return _translate_symbol_tagged(fe, s);
     case SEXPR_NUMERAL: {
         dvs_expr_t r = dvs_builder_expr_const(fe->builder, (int64_t)s->numval, 0);
-        return (TaggedExpr){ { r, 64 }, 2, NULL };
+        return _tagged(r, 64, 2, NULL);
     }
     case SEXPR_BITVEC: {
         /* A `#x…`/`#b…` literal wider than 64 bits carries its full value in
@@ -3135,7 +3220,7 @@ static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s) {
         if (s->bv.width > 64)
             return _wide_const(fe, s->bv.limbs, s->bv.width);
         dvs_expr_t r = _bv_const(fe, (int64_t)s->bv.value, (uint16_t)s->bv.width);
-        return (TaggedExpr){ { r, (uint16_t)s->bv.width }, 2, NULL };
+        return _tagged(r, (uint16_t)s->bv.width, 2, NULL);
     }
     case SEXPR_LIST:
         return _translate_list_tagged(fe, s);
@@ -3146,14 +3231,15 @@ static TaggedExpr _translate_tagged_impl(Smt2Frontend *fe, const Sexpr *s) {
 }
 
 static TypedExpr _translate_expr(Smt2Frontend *fe, const Sexpr *s) {
-    return _translate_tagged(fe, s).te;
+    return _typed(_translate_tagged(fe, s));
 }
 
 /* ------------------------------------------------------------------ */
 /* Deep-copy Sexpr into persistent arena                              */
 /* ------------------------------------------------------------------ */
 
-static const Sexpr *_sexpr_deep_copy(SexprArena *arena, const Sexpr *src) {
+/* Copy one node; a list gets a fresh item array, its items still to fill. */
+static Sexpr *_sexpr_copy_node(SexprArena *arena, const Sexpr *src) {
     Sexpr *dst = (Sexpr *)sexpr_arena_alloc(arena, sizeof(Sexpr), _Alignof(Sexpr));
     if (!dst) return NULL;
     dst->kind = src->kind;
@@ -3165,6 +3251,7 @@ static const Sexpr *_sexpr_deep_copy(SexprArena *arena, const Sexpr *src) {
         char *s = (char *)sexpr_arena_alloc(arena, src->sym.len, 1);
         if (!s) return NULL;
         memcpy(s, src->sym.str, src->sym.len);
+        dst->quoted  = src->quoted;
         dst->sym.str = s;
         dst->sym.len = src->sym.len;
         break;
@@ -3184,24 +3271,46 @@ static const Sexpr *_sexpr_deep_copy(SexprArena *arena, const Sexpr *src) {
             dst->bv.limbs = l;
         }
         break;
-    case SEXPR_LIST: {
+    case SEXPR_LIST:
         dst->list.count = src->list.count;
-        if (src->list.count == 0) {
-            dst->list.items = NULL;
-        } else {
-            Sexpr **arr = (Sexpr **)sexpr_arena_alloc(
+        dst->list.items = NULL;
+        if (src->list.count) {
+            dst->list.items = (Sexpr **)sexpr_arena_alloc(
                 arena, src->list.count * sizeof(Sexpr *), _Alignof(Sexpr *));
-            if (!arr) return NULL;
-            for (uint32_t i = 0; i < src->list.count; i++) {
-                arr[i] = (Sexpr *)_sexpr_deep_copy(arena, src->list.items[i]);
-                if (!arr[i]) return NULL;
-            }
-            dst->list.items = arr;
+            if (!dst->list.items) return NULL;
         }
         break;
     }
-    }
     return dst;
+}
+
+/* Iterative, with a heap work list of (slot to fill, node to copy), so a deep
+ * term costs memory rather than C stack. NULL when out of memory. */
+static const Sexpr *_sexpr_deep_copy(SexprArena *arena, const Sexpr *src) {
+    typedef struct { Sexpr **slot; const Sexpr *src; } Work;
+    Sexpr *root = NULL;
+    uint32_t n = 0, cap = 64;
+    Work *w = (Work *)malloc(cap * sizeof *w);
+    if (!w) return NULL;
+    w[n++] = (Work){ &root, src };
+    while (n) {
+        Work it = w[--n];
+        Sexpr *dst = _sexpr_copy_node(arena, it.src);
+        if (!dst) { free(w); return NULL; }
+        *it.slot = dst;
+        if (it.src->kind != SEXPR_LIST) continue;
+        for (uint32_t i = 0; i < it.src->list.count; i++) {
+            if (n == cap) {
+                Work *t = (Work *)realloc(w, (size_t)cap * 2 * sizeof *w);
+                if (!t) { free(w); return NULL; }
+                w = t;
+                cap *= 2;
+            }
+            w[n++] = (Work){ &dst->list.items[i], it.src->list.items[i] };
+        }
+    }
+    free(w);
+    return root;
 }
 
 /* ------------------------------------------------------------------ */
@@ -3815,8 +3924,8 @@ static int _is_bit1_literal(Smt2Frontend *fe, const Sexpr *s) {
     if (s->kind == SEXPR_LIST && !(s->list.count > 0 && sexpr_is_symbol(s->list.items[0], "_")))
         return 0;
     TaggedExpr t = _translate_tagged(fe, s);
-    if (t.te.ref == EXPR_NULL || t.leaf_kind != 2 || t.te.width != 1) return 0;
-    ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, t.te.ref);
+    if (t.ref == EXPR_NULL || t.leaf_kind != 2 || t.width != 1) return 0;
+    ExprConst *ec = (ExprConst *)dvs_builder_ref_ptr(fe->builder, t.ref);
     return ec && ec->value == 1;
 }
 
@@ -3869,8 +3978,8 @@ static dvs_expr_t _reified_bool(Smt2Frontend *fe, const Sexpr *s, int depth) {
     /* Leaf: any 1-bit term (typically the reified `(ite P #b1 #b0)`). Anything
      * wider means this was genuine bitwise arithmetic, not a Boolean tree. */
     TaggedExpr t = _translate_tagged(fe, s);
-    if (t.te.ref == EXPR_NULL || t.te.width != 1) return EXPR_NULL;
-    return t.te.ref;
+    if (t.ref == EXPR_NULL || t.width != 1) return EXPR_NULL;
+    return t.ref;
 }
 
 static int _is_bv_literal(const Sexpr *s, int value, uint16_t width);
@@ -3975,15 +4084,15 @@ static int _inset_leaf(Smt2Frontend *fe, const Sexpr *s, Smt2InSetAcc *a) {
     if (p->kind != SEXPR_SYMBOL) { const Sexpr *t = p; p = q; q = t; }
     if (p->kind != SEXPR_SYMBOL || q->kind == SEXPR_SYMBOL) return 0;
     TaggedExpr v = _translate_tagged(fe, p);
-    if (v.te.ref == EXPR_NULL || v.leaf_kind != 1 || v.array
-            || v.te.width == 0 || v.te.width > 32)
+    if (v.ref == EXPR_NULL || v.leaf_kind != 1 || v.array
+            || v.width == 0 || v.width > 32)
         return 0;
     TaggedExpr c = _translate_tagged(fe, q);
-    if (c.te.ref == EXPR_NULL || c.leaf_kind != 2 || c.te.width != v.te.width) return 0;
-    if (a->x == EXPR_NULL) { a->x = v.te.ref; a->width = v.te.width; }
-    else if (!_same_operand(fe, a->x, v.te.ref)) return 0;
+    if (c.ref == EXPR_NULL || c.leaf_kind != 2 || c.width != v.width) return 0;
+    if (a->x == EXPR_NULL) { a->x = v.ref; a->width = v.width; }
+    else if (!_same_operand(fe, a->x, v.ref)) return 0;
     if (a->n >= SMT2_INSET_MAX) return 0;
-    a->elems[a->n++] = c.te.ref;
+    a->elems[a->n++] = c.ref;
     return 1;
 }
 
@@ -4267,6 +4376,13 @@ static int _is_vlt_xor(Smt2Frontend *fe, const Sexpr *x) {
     return 1;
 }
 
+/* Whether a Verilator hash XOR carries UniGen2's `#b0` chain seed. */
+static int _vlt_xor_seeded(const Sexpr *x) {
+    for (uint32_t i = 1; i < x->list.count; i++)
+        if (x->list.items[i]->kind == SEXPR_BITVEC) return 1;
+    return 0;
+}
+
 static int _is_vlt_enum(Smt2Frontend *fe, const Sexpr *e) {
     if (e->kind != SEXPR_LIST) return 0;
     if (e->list.count == 2 && sexpr_is_symbol(e->list.items[0], "not")) {
@@ -4285,7 +4401,12 @@ static int _is_vlt_enum(Smt2Frontend *fe, const Sexpr *e) {
     if (e->list.count == 3 && sexpr_is_symbol(e->list.items[0], "=")
         && e->list.items[1]->kind == SEXPR_BITVEC) {
         const Sexpr *x = e->list.items[2];
-        if (_is_vlt_xor(fe, x)) return 1;
+        /* A lone XOR counts only with UniGen2's `#b0` chain seed. Without it
+         * the assert is solveDiversityXor's parity round (Verilator 5.046 and
+         * later, `(= #b0|#b1 (bvxor <bits>))`), after which Verilator keeps
+         * the solver's own model: treating it as enumeration turned the
+         * diversify pass off and skewed every randomize() (B95). */
+        if (_is_vlt_xor(fe, x) && _vlt_xor_seeded(x)) return 1;
         if (x->kind == SEXPR_LIST && x->list.count >= 3 && sexpr_is_symbol(x->list.items[0], "concat")) {
             for (uint32_t i = 1; i < x->list.count; i++)
                 if (!_is_vlt_xor(fe, x->list.items[i])) return 0;
@@ -5420,8 +5541,9 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
         return -1;
     }
     /* Simulation first (plan pieces 3.3, 3.4), except in Verilator mode, where
-     * the model it finds -- the first in sweep order -- would cost diversity.
-     * DV_SIM=0 turns it off. */
+     * it was off because the model it found was the first in sweep order. A
+     * seeded sweep now samples uniformly (piece 6.4); turning it on here waits
+     * on a per-randomize cost measurement. DV_SIM=0 turns it off. */
     if (!fe->verilator_mode) {
         const char *sim = getenv("DV_SIM");
         dvs_bbsolver_set_presim(fe->bb_solver, !(sim && *sim == '0'));
@@ -5868,6 +5990,11 @@ static void _route_qfbv(Smt2Frontend *fe) {
     dvs_shape_t sh;
     if (dvs_shape_compute(fe->problem, &sh) != 0) return;
     fe->qfbv_why = _qfbv_route(&sh);
+    /* An explicit seed asks for a sample. The bit-blast engine's simulation
+     * draws one uniformly (dvs_aigsim.h) and its flip-check keeps it uniform;
+     * CDCL's decisions skew orderings and disjunctions (a < b: a == 0 at half
+     * its share; plan piece 6.4, perf-out/p64/route_ab.log). */
+    if (!fe->qfbv_why && fe->seed_given && fe->seed) fe->qfbv_why = "seeded sample";
     fe->qfbv_bb  = fe->qfbv_why != NULL;
     if (getenv("DV_LOG"))
         fprintf(fe->err, "qfbv-route: %s (%s) cons=%u nodes=%u vars=%u bit=%u arith=%u "
@@ -6118,6 +6245,20 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
 
     _route_qfbv(fe);
 
+    /* Routing trace for the other paths: the engine this check-sat starts on
+     * and every rule that pointed it there. nb = first needs_bitblast trigger,
+     * qfbv = one-shot QF_BV operator-mix route, logic = the QF_UFBV/ABV/AUFBV
+     * route. (A CDCL `unknown` may still escalate to bitblast further down.) */
+    if (!fe->verilator_mode && getenv("DV_LOG")) {
+        int logic_bb = fe->logic == SMT2_LOGIC_QF_UFBV || fe->logic == SMT2_LOGIC_QF_ABV
+                    || fe->logic == SMT2_LOGIC_QF_AUFBV;
+        const char *eng = _engine_is_cube(fe) ? "cube"
+                        : _engine_is_bitblast(fe) ? "bitblast" : "cdcl";
+        fprintf(fe->err, "route: %s nb=%s qfbv=%s logic=%d\n", eng,
+                fe->needs_bitblast ? (fe->nb_why ? fe->nb_why : "?") : "-",
+                fe->qfbv_why ? fe->qfbv_why : "-", logic_bb);
+    }
+
     if (_engine_is_cube(fe)) {
         int prc = _ensure_problem(fe);
         if (prc < 0) {
@@ -6346,6 +6487,18 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
                 (unsigned long long)lcg_dbg_bail[4], (unsigned long long)lcg_dbg_bail[5],
                 (unsigned long long)lcg_dbg_bail[6], (unsigned long long)lcg_dbg_bail[7],
                 (unsigned long long)lcg_dbg_bail[8]);
+        /* Every bail counter by index (dvs_lcg.c), then the propagator kinds
+         * behind bail [5] (a propagator conflict with no current-level bound). */
+        extern const char *lcg_dbg_bail_kind[];
+        extern uint64_t    lcg_dbg_bail_kind_n[];
+        fprintf(stderr, "[lcg] bail[]:");
+        for (int i = 0; i < 16; i++)
+            if (lcg_dbg_bail[i]) fprintf(stderr, " %d=%llu", i, (unsigned long long)lcg_dbg_bail[i]);
+        fprintf(stderr, "\n[lcg] bail[5] by propagator:");
+        for (int i = 0; i < 48 && lcg_dbg_bail_kind[i]; i++)
+            fprintf(stderr, " %s=%llu", lcg_dbg_bail_kind[i],
+                    (unsigned long long)lcg_dbg_bail_kind_n[i]);
+        fprintf(stderr, "\n");
     }
 
     /* Sanity check: if we got DVS_SOLVE_OK, re-evaluate every top-level
@@ -6792,9 +6945,10 @@ static Smt2EvalHost _eval_host(Smt2Frontend *fe) {
     h.uf_arity = _evh_uf_arity;
     h.opaque_const = _evh_opaque_const;
     h.sort_alias = _evh_sort_alias;
-    /* The translator budgets 16 KB of stack a level; an evaluation level
-     * takes well under a quarter of that. */
-    uint64_t d = (uint64_t)_translate_depth_limit() * 4u;
+    /* Where the thread's stack is known, evaluation stops at it, as the
+     * translator does. Elsewhere: the translator budgets 16 KB of stack a
+     * level, and an evaluation level takes well under a quarter of that. */
+    uint64_t d = dvs_stack_size() ? 4000000u : (uint64_t)_translate_depth_limit() * 4u;
     h.max_depth = d > 4000000u ? 4000000u : (uint32_t)d;
     return h;
 }
@@ -6832,8 +6986,9 @@ static void _emit_hex_key(FILE *out, uint64_t lo, uint64_t hi, uint32_t width) {
     }
 }
 
-/* Print a term back as SMT-LIB, for echoing a get-value key. */
-static void _fprint_sexpr(FILE *out, const Sexpr *s) {
+/* Print a non-list term. `hex`: a bit-vector literal whose width is a
+ * multiple of 4 prints as #x, the way z3 echoes a get-value key. */
+static void _fprint_atom(FILE *out, const Sexpr *s, int hex) {
     switch (s->kind) {
     case SEXPR_SYMBOL: case SEXPR_KEYWORD: case SEXPR_DECIMAL:
         if (s->kind == SEXPR_SYMBOL && s->quoted)
@@ -6845,51 +7000,65 @@ static void _fprint_sexpr(FILE *out, const Sexpr *s) {
         fprintf(out, "\"%.*s\"", (int)s->sym.len, s->sym.str); break;
     case SEXPR_NUMERAL:
         fprintf(out, "%llu", (unsigned long long)s->numval); break;
-    case SEXPR_BITVEC:
-        if (s->bv.width > 64 && s->bv.limbs)
+    case SEXPR_BITVEC: {
+        uint32_t w = s->bv.width ? s->bv.width : 1;
+        if (hex && w % 4 == 0) {
+            fputs("#x", out);
+            for (uint32_t d = w / 4; d-- > 0;) {
+                uint32_t bit = d * 4;
+                uint64_t limb = s->bv.limbs ? s->bv.limbs[bit / 64]
+                              : (bit < 64 ? s->bv.value : 0);
+                fputc("0123456789abcdef"[(limb >> (bit % 64)) & 0xF], out);
+            }
+        } else if (s->bv.width > 64 && s->bv.limbs)
             _emit_bv_bin_literal_wide(out, s->bv.limbs, (s->bv.width + 63u) / 64u,
                                       (unsigned)s->bv.width);
         else
             _emit_bv_bin_literal(out, s->bv.value, (unsigned)s->bv.width);
         break;
-    case SEXPR_LIST:
-        fprintf(out, "(");
-        for (uint32_t i = 0; i < s->list.count; i++) {
-            if (i) fprintf(out, " ");
-            _fprint_sexpr(out, s->list.items[i]);
-        }
-        fprintf(out, ")");
-        break;
+    }
     default: break;
     }
 }
 
+/* Print a term back as SMT-LIB. Iterative: a term nests as deep as the
+ * input, and this also prints the terms the evaluator refused as too deep. */
+static void _fprint_any(FILE *out, const Sexpr *s, int hex) {
+    typedef struct { const Sexpr *l; uint32_t i; } Fr;
+    Fr inl[32], *st = inl;
+    size_t n = 0, cap = 32;
+    for (;;) {
+        if (s && s->kind != SEXPR_LIST) {
+            _fprint_atom(out, s, hex);
+        } else if (s) {
+            if (n == cap) {
+                Fr *ns = (Fr *)malloc(2 * cap * sizeof *ns);
+                if (!ns) { fputs("...", out); s = NULL; goto next; }
+                memcpy(ns, st, n * sizeof *ns);
+                if (st != inl) free(st);
+                st = ns;
+                cap *= 2;
+            }
+            st[n].l = s;
+            st[n++].i = 0;
+            fputc('(', out);
+        }
+        s = NULL;
+    next:
+        if (!n) break;
+        Fr *f = &st[n - 1];
+        if (f->i == f->l->list.count) { fputc(')', out); n--; continue; }
+        if (f->i) fputc(' ', out);
+        s = f->l->list.items[f->i++];
+    }
+    if (st != inl) free(st);
+}
+
+static void _fprint_sexpr(FILE *out, const Sexpr *s) { _fprint_any(out, s, 0); }
+
 /* Print a term the way z3 echoes a get-value key: as written, except that a
  * bit-vector literal is `#x` when its width is a multiple of 4, else `#b`. */
-static void _fprint_term(FILE *out, const Sexpr *s) {
-    if (s->kind == SEXPR_BITVEC) {
-        uint32_t w = s->bv.width ? s->bv.width : 1;
-        if (w % 4) { _fprint_sexpr(out, s); return; }
-        fputs("#x", out);
-        for (uint32_t d = w / 4; d-- > 0;) {
-            uint32_t bit = d * 4;
-            uint64_t limb = s->bv.limbs ? s->bv.limbs[bit / 64]
-                          : (bit < 64 ? s->bv.value : 0);
-            fputc("0123456789abcdef"[(limb >> (bit % 64)) & 0xF], out);
-        }
-        return;
-    }
-    if (s->kind == SEXPR_LIST) {
-        fputc('(', out);
-        for (uint32_t i = 0; i < s->list.count; i++) {
-            if (i) fputc(' ', out);
-            _fprint_term(out, s->list.items[i]);
-        }
-        fputc(')', out);
-        return;
-    }
-    _fprint_sexpr(out, s);
-}
+static void _fprint_term(FILE *out, const Sexpr *s) { _fprint_any(out, s, 1); }
 
 static int _get_value_body(Smt2Frontend *fe, const Sexpr *vars_list);
 

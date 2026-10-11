@@ -152,6 +152,12 @@ void dvs_builder_destroy(dvs_builder_t *b) {
 dvs_expr_t dvs_builder_alloc(dvs_builder_t *b, uint32_t bytes, uint32_t align) {
     if (align < 1) align = 1;
 
+    /* A reference is a 32-bit pool offset (EXPR_NULL is its top value). Refuse
+     * an allocation past that rather than let the offset wrap: blocks would
+     * then overlap, and finalize copies past the problem it sized. */
+    uint64_t end = ((uint64_t)b->virtual_used + align - 1) / align * align + bytes;
+    if (end + POOL_HEADER_SZ >= (uint64_t)EXPR_NULL) return EXPR_NULL;
+
     uint32_t aligned = _align_up(b->virtual_used, align);
     uint32_t padding = aligned - b->virtual_used;
 
