@@ -945,7 +945,9 @@ static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
     uint32_t n = ctx->n_vars;
     if (n == 0) return 0;
     if (ctx->box_cap < n) {
-        int64_t *bv = (int64_t *)realloc(ctx->box_val, n * sizeof(int64_t));
+        int64_t *bv = (int64_t *)dvs_ctx_resize(ctx, ctx->box_val,
+                                                ctx->box_cap * sizeof(int64_t),
+                                                n * sizeof(int64_t));
         if (!bv) return 0;
         ctx->box_val = bv;
         ctx->box_cap = n;
@@ -1030,14 +1032,14 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
 
     /* Lazy LCG initialization on first solve when use_lcg is requested. */
     if (opts && opts->use_lcg && !ctx->lcg && ctx->n_vars > 0) {
-        LCGCtx *lcg = (LCGCtx *)calloc(1, sizeof(LCGCtx));
+        LCGCtx *lcg = (LCGCtx *)DVS_ALLOC(ctx->alloc, sizeof(LCGCtx));
         if (lcg) {
             uint32_t nv = ctx->n_vars_capacity > 0
                           ? ctx->n_vars_capacity : ctx->n_vars;
             if (lcg_init_alloc(lcg, nv, ctx->alloc) == 0) {
                 ctx->lcg = lcg;
             } else {
-                free(lcg);
+                dvs_ctx_free(ctx, lcg, sizeof(LCGCtx));
             }
         }
     }
@@ -1080,12 +1082,16 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
     ctx->keep_on = 0;
     if (opts && opts->seed != 0 && _keep_draws_enabled() && ctx->n_vars > 0) {
         if (ctx->keep_cap < ctx->n_vars) {
-            int64_t *kv = (int64_t *)realloc(ctx->keep_val,
-                                             ctx->n_vars * sizeof(int64_t));
-            if (kv) ctx->keep_val = kv;
-            uint8_t *ks = (uint8_t *)realloc(ctx->keep_state, ctx->n_vars);
-            if (ks) ctx->keep_state = ks;
-            if (kv && ks) ctx->keep_cap = ctx->n_vars;
+            /* One block, keep_val[n] then keep_state[n]; per solve, so the
+             * old contents need not move. */
+            size_t row = sizeof(int64_t) + 1u;
+            int64_t *kv = (int64_t *)DVS_ALLOC(ctx->alloc, ctx->n_vars * row);
+            if (kv) {
+                dvs_ctx_free(ctx, ctx->keep_val, ctx->keep_cap * row);
+                ctx->keep_val   = kv;
+                ctx->keep_state = (uint8_t *)(kv + ctx->n_vars);
+                ctx->keep_cap   = ctx->n_vars;
+            }
         }
         if (ctx->keep_cap >= ctx->n_vars) {
             memset(ctx->keep_state, KEEP_NONE, ctx->n_vars);
@@ -1097,7 +1103,8 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
     ctx->value_fails_on = 0;
     if (opts && opts->seed != 0 && ctx->n_vars > 0) {
         if (ctx->value_fails_cap < ctx->n_vars) {
-            uint8_t *vf = (uint8_t *)realloc(ctx->value_fails, ctx->n_vars);
+            uint8_t *vf = (uint8_t *)dvs_ctx_resize(ctx, ctx->value_fails,
+                                                    ctx->value_fails_cap, ctx->n_vars);
             if (vf) { ctx->value_fails = vf; ctx->value_fails_cap = ctx->n_vars; }
         }
         if (ctx->value_fails_cap >= ctx->n_vars) {

@@ -694,7 +694,9 @@ static void _note_mod_link(dvs_ctx_t *ctx, uint32_t ref, uint32_t r_id,
     if (blo != bhi || blo <= 1) return;
     if (ctx->n_mod_links == ctx->mod_links_cap) {
         uint32_t cap = ctx->mod_links_cap ? 2 * ctx->mod_links_cap : 8;
-        DvsModLink *m = (DvsModLink *)realloc(ctx->mod_links, cap * sizeof(DvsModLink));
+        DvsModLink *m = (DvsModLink *)dvs_ctx_resize(ctx, ctx->mod_links,
+                                                     ctx->mod_links_cap * sizeof(DvsModLink),
+                                                     cap * sizeof(DvsModLink));
         if (!m) return;
         ctx->mod_links = m;
         ctx->mod_links_cap = cap;

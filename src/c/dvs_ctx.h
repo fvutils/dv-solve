@@ -131,6 +131,9 @@ typedef struct dvs_ctx_s {
                                        * the constraint at all. Read it via
                                        * DV_LOG=1 / --stats. */
     dvs_block_alloc_t *block_alloc;   /* source of dynamic blocks      */
+    dvs_block_alloc_t *own_block_alloc; /* made by dvs_solver_create when
+                                       * given none (fixed pool): the
+                                       * trail stack still needs blocks */
     dvs_alloc_t       *alloc;         /* source of the context's heap
                                        * tables: block_alloc's backing
                                        * allocator, else dvs_malloc_alloc */
@@ -164,10 +167,12 @@ typedef struct dvs_ctx_s {
     uint8_t            box_state;
     uint8_t           *box_skip;      /* [n_decl_vars] 1: defined by an
                                        * equality, not drawn by the tier */
+    uint32_t           box_skip_n;    /* its length                    */
     uint32_t           n_decl_vars;   /* vars the problem declared; compile
                                        * adds its own after them         */
     uint8_t           *var_order;     /* [n_decl_vars] solve-order stage
                                        * (VarSpec.order), NULL: none     */
+    uint32_t           var_order_n;   /* its length                    */
     DvsModLink        *mod_links;
     uint32_t           n_mod_links;
     uint32_t           mod_links_cap;
@@ -237,6 +242,7 @@ typedef struct dvs_ctx_s {
     uint8_t           *scope_log_is_lb;
     uint32_t           n_scope_log;
     uint32_t           scope_log_cap;
+    void              *scope_log_block; /* the four arrays, one block    */
     /* Custom value selector hook (for cost-guided search) */
     int64_t          (*value_selector_fn)(struct dvs_ctx_s *, uint32_t, void *);
     void              *value_selector_data;
@@ -279,6 +285,15 @@ typedef struct dvs_ctx_s {
 void dvs_solver_set_value_selector(dvs_ctx_t *ctx,
                                int64_t (*fn)(dvs_ctx_t *, uint32_t, void *),
                                void *data);
+
+/* The context's heap memory comes from ctx->alloc (dvs_alloc.h). */
+static inline void *dvs_ctx_resize(dvs_ctx_t *ctx, void *p, size_t old_sz,
+                                   size_t new_sz) {
+    return DVS_RESIZE(ctx->alloc, p, old_sz, new_sz);
+}
+static inline void dvs_ctx_free(dvs_ctx_t *ctx, void *p, size_t sz) {
+    if (p) DVS_RELEASE(ctx->alloc, p, sz ? sz : 1);
+}
 
 /** Allocate ctx->phase_save (uninitialised) from ctx->alloc; 0 or -1. */
 int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx);

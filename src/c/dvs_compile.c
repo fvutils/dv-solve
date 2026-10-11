@@ -3963,8 +3963,9 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 
     ctx->n_vars         = n;
     ctx->n_decl_vars    = n;
-    free(ctx->var_order);
+    dvs_ctx_free(ctx, ctx->var_order, ctx->var_order_n);
     ctx->var_order      = NULL;
+    ctx->var_order_n    = 0;
     /* Initialise unassigned_mask -- set after variable init below */
     ctx->unassigned_mask = 0;
 
@@ -3986,8 +3987,12 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         if (vs->is_signed) flags |= VAR_SIGNED;
         if (vs->is_aux)    flags |= VAR_AUX;
         if (vs->order) {
-            if (!ctx->var_order) ctx->var_order = (uint8_t *)calloc(n, 1);
-            if (!ctx->var_order) return -1;
+            if (!ctx->var_order) {
+                ctx->var_order = (uint8_t *)DVS_ALLOC(ctx->alloc, n);
+                if (!ctx->var_order) return -1;
+                memset(ctx->var_order, 0, n);
+                ctx->var_order_n = n;
+            }
             ctx->var_order[id] = vs->order;
         }
 
@@ -4104,9 +4109,11 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
      * such a variable; drawing it independently would almost never agree. */
     {
         uint32_t nd = ctx->n_decl_vars;
-        uint8_t *bs = nd ? (uint8_t *)realloc(ctx->box_skip, nd) : NULL;
+        dvs_ctx_free(ctx, ctx->box_skip, ctx->box_skip_n);
+        uint8_t *bs = nd ? (uint8_t *)DVS_ALLOC(ctx->alloc, nd) : NULL;
         if (bs) memset(bs, 0, nd);
         ctx->box_skip = bs;
+        ctx->box_skip_n = bs ? nd : 0;
         for (dvs_expr_t c = sp->constraints_head; bs && c != EXPR_NULL; ) {
             ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
             ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, cs->root);

@@ -99,11 +99,18 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     }
 
     /* The pool's fixed region is the rest of the buffer; with a block
-     * allocator it grows past it through ctx->alloc. */
+     * allocator it grows past it through ctx->alloc. Without one the pool
+     * is fixed (a problem that does not fit is DVS_COMPILE_NOMEM), and the
+     * context makes a small block allocator of its own for the trail. */
     if (dvs_spool_init(&ctx->pool, (uint8_t *)static_buf + _pool_offset(),
                        static_size - _pool_offset(),
                        block_alloc ? ctx->alloc : NULL) != 0)
         return NULL;
+    if (!block_alloc) {
+        block_alloc = ctx->own_block_alloc = dvs_block_alloc_create(NULL, 64u << 10);
+        if (!block_alloc) goto fail;
+        ctx->block_alloc = block_alloc;
+    }
 
     /* Pre-allocate LevelMark[MAX_DECISION_DEPTH] in the static pool */
     uint32_t marks_ref = dvs_spool_alloc(&ctx->pool,
@@ -129,6 +136,8 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
 
     return ctx;
 fail:
+    if (ctx->dynamic) dvs_stack_destroy(ctx->dynamic);
+    if (ctx->own_block_alloc) dvs_block_alloc_destroy(ctx->own_block_alloc);
     dvs_spool_destroy(&ctx->pool);
     return NULL;
 }
@@ -277,19 +286,29 @@ int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx) {
     return 0;
 }
 
+#define SCOPE_LOG_ROW (sizeof(int64_t) + sizeof(uint32_t) + 2u)
+
 int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t bound) {
     if (ctx->n_scope_log == ctx->scope_log_cap) {
-        uint32_t cap = ctx->scope_log_cap ? 2u * ctx->scope_log_cap : 64u;
-        uint32_t *nv = (uint32_t *)realloc(ctx->scope_log_var, cap * sizeof *nv);
-        if (nv) ctx->scope_log_var = nv;
-        int64_t *nb = (int64_t *)realloc(ctx->scope_log_bound, cap * sizeof *nb);
-        if (nb) ctx->scope_log_bound = nb;
-        uint8_t *nd = (uint8_t *)realloc(ctx->scope_log_depth, cap * sizeof *nd);
-        if (nd) ctx->scope_log_depth = nd;
-        uint8_t *nl = (uint8_t *)realloc(ctx->scope_log_is_lb, cap * sizeof *nl);
-        if (nl) ctx->scope_log_is_lb = nl;
-        if (!nv || !nb || !nd || !nl) return -1;
-        ctx->scope_log_cap = cap;
+        /* One block: bound[cap], var[cap], depth[cap], is_lb[cap]. */
+        uint32_t old = ctx->scope_log_cap, cap = old ? 2u * old : 64u;
+        int64_t *nb = (int64_t *)DVS_ALLOC(ctx->alloc, (size_t)cap * SCOPE_LOG_ROW);
+        if (!nb) return -1;
+        uint32_t *nv = (uint32_t *)(nb + cap);
+        uint8_t *nd = (uint8_t *)(nv + cap), *nl = nd + cap;
+        if (old) {
+            memcpy(nb, ctx->scope_log_bound, old * sizeof *nb);
+            memcpy(nv, ctx->scope_log_var, old * sizeof *nv);
+            memcpy(nd, ctx->scope_log_depth, old);
+            memcpy(nl, ctx->scope_log_is_lb, old);
+        }
+        dvs_ctx_free(ctx, ctx->scope_log_block, (size_t)old * SCOPE_LOG_ROW);
+        ctx->scope_log_block = nb;
+        ctx->scope_log_bound = nb;
+        ctx->scope_log_var   = nv;
+        ctx->scope_log_depth = nd;
+        ctx->scope_log_is_lb = nl;
+        ctx->scope_log_cap   = cap;
     }
     uint32_t i = ctx->n_scope_log++;
     ctx->scope_log_var[i]   = var_id;
@@ -304,25 +323,24 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     dvs_oracle_on_destroy(ctx);
     if (ctx->lcg) {
         lcg_destroy((LCGCtx *)ctx->lcg);
-        free(ctx->lcg);
+        dvs_ctx_free(ctx, ctx->lcg, sizeof(LCGCtx));
         ctx->lcg = NULL;
     }
     if (ctx->dynamic) {
         dvs_stack_destroy(ctx->dynamic);
         ctx->dynamic = NULL;
     }
-    free(ctx->keep_val);
-    free(ctx->keep_state);
-    free(ctx->box_val);
-    free(ctx->box_skip);
-    ctx->box_skip = NULL;
-    free(ctx->var_order);
-    ctx->var_order = NULL;
-    ctx->box_val = NULL; ctx->box_cap = 0;
+    dvs_ctx_free(ctx, ctx->keep_val, (size_t)ctx->keep_cap * (sizeof(int64_t) + 1u));
     ctx->keep_val = NULL; ctx->keep_state = NULL; ctx->keep_cap = 0;
-    free(ctx->value_fails);
+    dvs_ctx_free(ctx, ctx->box_val, (size_t)ctx->box_cap * sizeof(int64_t));
+    ctx->box_val = NULL; ctx->box_cap = 0;
+    dvs_ctx_free(ctx, ctx->box_skip, ctx->box_skip_n);
+    ctx->box_skip = NULL; ctx->box_skip_n = 0;
+    dvs_ctx_free(ctx, ctx->var_order, ctx->var_order_n);
+    ctx->var_order = NULL; ctx->var_order_n = 0;
+    dvs_ctx_free(ctx, ctx->value_fails, ctx->value_fails_cap);
     ctx->value_fails = NULL; ctx->value_fails_cap = 0;
-    free(ctx->mod_links);
+    dvs_ctx_free(ctx, ctx->mod_links, (size_t)ctx->mod_links_cap * sizeof(DvsModLink));
     ctx->mod_links = NULL; ctx->n_mod_links = ctx->mod_links_cap = 0;
     if (ctx->phase_save)
         DVS_RELEASE(ctx->alloc, ctx->phase_save,
@@ -331,10 +349,8 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     if (ctx->costguided)
         DVS_RELEASE(ctx->alloc, ctx->costguided, sizeof(CostGuidedCtx));
     ctx->costguided = NULL;
-    free(ctx->scope_log_var);
-    free(ctx->scope_log_bound);
-    free(ctx->scope_log_depth);
-    free(ctx->scope_log_is_lb);
+    dvs_ctx_free(ctx, ctx->scope_log_block, (size_t)ctx->scope_log_cap * SCOPE_LOG_ROW);
+    ctx->scope_log_block = NULL;
     ctx->scope_log_var = NULL; ctx->scope_log_bound = NULL;
     ctx->scope_log_depth = NULL; ctx->scope_log_is_lb = NULL;
     ctx->n_scope_log = ctx->scope_log_cap = 0;
@@ -342,6 +358,10 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     _tbl_free(ctx, ctx->prop_block, (size_t)ctx->n_prop_refs_capacity * PROP_ROW);
     ctx->var_block = ctx->prop_block = NULL;
     dvs_spool_destroy(&ctx->pool);
+    if (ctx->own_block_alloc) {
+        dvs_block_alloc_destroy(ctx->own_block_alloc);
+        ctx->own_block_alloc = ctx->block_alloc = NULL;
+    }
 }
 
 /* ------------------------------------------------------------------ */
