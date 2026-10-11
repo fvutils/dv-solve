@@ -22,7 +22,7 @@ from dv_solve.ctx import _SolveOpts
 _SRC_C = os.path.join(os.path.dirname(__file__), "..", "..", "src", "c")
 
 _FIELDS = ["seed", "max_conflicts", "max_restarts", "use_phase_save", "use_lcg",
-           "fair_pick", "max_shave_iters", "time_limit_ms"]
+           "fair_pick", "seq_pick", "max_shave_iters", "time_limit_ms"]
 
 _PROBE = r"""
 #include <stdio.h>

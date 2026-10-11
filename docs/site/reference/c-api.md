@@ -364,6 +364,13 @@ Selects which solution is returned: the same seed gives the same solution.
 solution space; use it for constrained-random stimulus. 0 is fastest.
 ```
 
+```{c:member} uint8_t seq_pick
+With `fair_pick`: 1 draws the variables one at a time, in search order. 0
+(the default) draws them uniformly over solutions where it can. Set it for
+a solve order (`solve x before y`), whose distribution is defined by the
+order the values are drawn in.
+```
+
 ```{c:member} uint32_t time_limit_ms
 Wall-clock budget for this solve, or 0 for the default.
 ```

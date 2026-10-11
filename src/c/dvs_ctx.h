@@ -123,6 +123,15 @@ typedef struct dvs_ctx_s {
     uint8_t           *keep_state;
     uint32_t           keep_cap;
     uint8_t            keep_on;       /* keeping applies to this solve now */
+    /* Box-rejection tier (see _box_sample): drawn values, and whether the
+     * tier suits this problem (0 not yet probed, 1 yes, 2 no). */
+    int64_t           *box_val;
+    uint32_t           box_cap;
+    uint8_t            box_state;
+    uint8_t           *box_skip;      /* [n_decl_vars] 1: defined by an
+                                       * equality, not drawn by the tier */
+    uint32_t           n_decl_vars;   /* vars the problem declared; compile
+                                       * adds its own after them         */
     DvsModLink        *mod_links;
     uint32_t           n_mod_links;
     uint32_t           mod_links_cap;
