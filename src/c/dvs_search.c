@@ -1055,20 +1055,10 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         contra_register_explanations(ctx);
     }
 
-    /* Allocate phase_save array on first call (lazily from static pool). */
+    /* Allocate phase_save array on first call (lazily). */
     int ps_fresh = 0;
-    if (opts && opts->use_phase_save && !ctx->phase_save && ctx->n_vars > 0) {
-        /* Size to n_vars_capacity for incremental variable support */
-        uint32_t ps_size = ctx->n_vars_capacity > 0
-                           ? ctx->n_vars_capacity : ctx->n_vars;
-        uint32_t ps_ref = dvs_pool_alloc(&ctx->pool,
-                                          ps_size * (uint32_t)sizeof(int64_t),
-                                          (uint32_t)_Alignof(int64_t));
-        if (ps_ref != EXPR_NULL) {
-            ctx->phase_save = (int64_t *)dvs_pool_ptr(&ctx->pool, ps_ref);
-            ps_fresh = 1;
-        }
-    }
+    if (opts && opts->use_phase_save && !ctx->phase_save && ctx->n_vars > 0)
+        ps_fresh = dvs_ctx_alloc_phase_save(ctx) == 0;
 
     /* Initialize the saved phases to each var's lower bound, once, on the solve
      * that allocated the array. Only the seed-0 (BMC/decision) path consults
@@ -2018,6 +2008,10 @@ static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     he->next = cur_off;
     *prev_next_ptr = he_ref;
     return 0;
+}
+
+int dvs_search_insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
+    return _insert_hole(ctx, var_id, value);
 }
 
 static int _solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);

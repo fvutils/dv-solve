@@ -53,7 +53,8 @@ typedef struct dvs_problem_s dvs_problem_t;
 typedef struct dvs_ctx_s dvs_ctx_t;
 
 /** A memory allocator. Every function that takes one accepts NULL, meaning
- *  malloc and free. */
+ *  malloc and free. Its members are in dvs_alloc.h: alloc, release, and an
+ *  optional resize (leave it NULL and the solver copies to grow a block). */
 typedef struct dvs_alloc_s dvs_alloc_t;
 
 /** Supplies the solver context's working memory; see dvs_block_alloc_create(). */

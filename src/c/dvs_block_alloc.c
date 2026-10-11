@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stddef.h>
+#include <string.h>
 #include "dvs_block_alloc.h"
 
 /* ------------------------------------------------------------------ */
@@ -17,10 +18,44 @@ static void _malloc_release(dvs_alloc_t *self, void *ptr, size_t size) {
     free(ptr);
 }
 
+static void *_malloc_resize(dvs_alloc_t *self, void *ptr,
+                            size_t old_size, size_t new_size) {
+    (void)self;
+    (void)old_size;
+    return realloc(ptr, new_size);
+}
+
 dvs_alloc_t dvs_malloc_alloc = {
     .alloc   = _malloc_alloc,
     .release = _malloc_release,
+    .resize  = _malloc_resize,
 };
+
+/* ------------------------------------------------------------------ */
+/* dvs_alloc_resize — the one growth path                             */
+/* ------------------------------------------------------------------ */
+
+void *dvs_alloc_resize(dvs_alloc_t *a, void *ptr,
+                       size_t old_size, size_t new_size) {
+    if (!a) a = &dvs_malloc_alloc;
+    if (!ptr) return new_size ? DVS_ALLOC(a, new_size) : NULL;
+    if (new_size == 0) {
+        DVS_RELEASE(a, ptr, old_size);
+        return NULL;
+    }
+#ifndef DVS_DEBUG_ALWAYS_MOVE
+    if (new_size == old_size) return ptr;
+    if (a->resize) return a->resize(a, ptr, old_size, new_size);
+#endif
+    void *q = DVS_ALLOC(a, new_size);
+    if (!q) return NULL;
+    memcpy(q, ptr, old_size < new_size ? old_size : new_size);
+#ifdef DVS_DEBUG_ALWAYS_MOVE
+    memset(ptr, 0xA5, old_size);
+#endif
+    DVS_RELEASE(a, ptr, old_size);
+    return q;
+}
 
 /* ------------------------------------------------------------------ */
 /* Free-list node (stored inside the block while it is cached)         */
@@ -165,4 +200,8 @@ void dvs_block_alloc_destroy(dvs_block_alloc_t *ba) {
 
 size_t dvs_block_alloc_block_size(const dvs_block_alloc_t *ba) {
     return ba->block_size;
+}
+
+dvs_alloc_t *dvs_block_alloc_backing(const dvs_block_alloc_t *ba) {
+    return ba->alloc;
 }

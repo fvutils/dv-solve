@@ -31,7 +31,11 @@ class _Alloc(ctypes.Structure):
 
 _ALLOC_FN = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.POINTER(_Alloc), ctypes.c_size_t)
 _RELEASE_FN = ctypes.CFUNCTYPE(None, ctypes.POINTER(_Alloc), ctypes.c_void_p, ctypes.c_size_t)
-_Alloc._fields_ = [("alloc", _ALLOC_FN), ("release", _RELEASE_FN)]
+# resize is left NULL: dvs_alloc_resize falls back to alloc + copy + release.
+_RESIZE_FN = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.POINTER(_Alloc), ctypes.c_void_p,
+                              ctypes.c_size_t, ctypes.c_size_t)
+_Alloc._fields_ = [("alloc", _ALLOC_FN), ("release", _RELEASE_FN),
+                   ("resize", _RESIZE_FN)]
 
 # The C runtime's malloc/free (ucrtbase on Windows, where CDLL(None) is
 # not the process's own symbols).

@@ -1,6 +1,24 @@
 #include <string.h>
 #include "dvs_pool.h"
 
+/* AddressSanitizer: bytes a release frees stay poisoned until allocated
+ * again, so a reference kept across dvs_pool_release() faults. */
+#if defined(__SANITIZE_ADDRESS__)
+#  define DVS_POOL_ASAN 1
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define DVS_POOL_ASAN 1
+#  endif
+#endif
+#ifdef DVS_POOL_ASAN
+#  include <sanitizer/asan_interface.h>
+#  define POOL_POISON(p, n)    ASAN_POISON_MEMORY_REGION((p), (n))
+#  define POOL_UNPOISON(p, n)  ASAN_UNPOISON_MEMORY_REGION((p), (n))
+#else
+#  define POOL_POISON(p, n)    ((void)(p), (void)(n))
+#  define POOL_UNPOISON(p, n)  ((void)(p), (void)(n))
+#endif
+
 /* Offset of the first usable byte (i.e. right after the header). */
 #define POOL_HEADER_SZ  ((uint32_t)sizeof(dvs_pool_t))
 
@@ -46,13 +64,24 @@ uint32_t dvs_pool_alloc(dvs_pool_t *pool, uint32_t bytes, uint32_t align) {
     }
 
     pool->used = base + bytes;
+    POOL_UNPOISON((char *)pool + POOL_HEADER_SZ + base, bytes);
     return POOL_HEADER_SZ + base;
 }
 
-void *dvs_pool_ptr(const dvs_pool_t *pool, uint32_t offset) {
-    if (offset == EXPR_NULL)
-        return NULL;
-    return (void *)((char *)pool + offset);
+void dvs_pool_release(dvs_pool_t *pool, dvs_pool_mark_t mark) {
+    if (mark.used >= pool->used) return;
+    char *freed = (char *)pool + POOL_HEADER_SZ + mark.used;
+    uint32_t n  = pool->used - mark.used;
+#ifdef DVS_DEBUG_ALWAYS_MOVE
+    memset(freed, 0xA5, n);
+#endif
+    POOL_POISON(freed, n);
+    pool->used     = mark.used;
+    pool->overflow = mark.overflow;
+}
+
+void *(dvs_pool_ptr)(const dvs_pool_t *pool, uint32_t offset) {
+    return dvs_pool_ptr_inline(pool, offset);
 }
 
 void dvs_pool_reset(dvs_pool_t *pool) {

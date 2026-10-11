@@ -36,6 +36,12 @@ void *dvs_block_alloc_get(dvs_block_alloc_t *ba);
 void dvs_block_alloc_put(dvs_block_alloc_t *ba, void *block);
 
 /**
+ * Return the allocator backing `ba` (the one passed to
+ * dvs_block_alloc_create, or dvs_malloc_alloc).
+ */
+dvs_alloc_t *dvs_block_alloc_backing(const dvs_block_alloc_t *ba);
+
+/**
  * Return the block size this allocator was created with.
  */
 size_t dvs_block_alloc_block_size(const dvs_block_alloc_t *ba);

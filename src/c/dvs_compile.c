@@ -3918,6 +3918,8 @@ static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     if (err) return _elab_error_code(err);
     dvs_problem_t *msp = dvs_sv_rewrite_masks(esp, NULL, NULL);
     int rc = _solver_compile_body(ctx, msp);
+    /* What compile allocated is permanent: a restore never frees it. */
+    ctx->pool_floor = dvs_pool_used(&ctx->pool);
     dvs_sv_release(esp, msp);
     dvs_sv_release(sp, esp);
 #ifdef DVS_STEP_CHECK

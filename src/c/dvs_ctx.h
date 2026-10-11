@@ -67,6 +67,15 @@ typedef struct {
      * it to its initial state (lcg_reset), so a context reused across
      * checkpoint/solve/restore searches exactly as a freshly compiled one. */
     uint8_t          lcg_pristine;
+    /* The pool position: dvs_solver_restore frees everything the scope
+     * allocated (its propagators, its variables' wide bounds, a regrown
+     * reset snapshot), so push/pop sessions hold pool use flat. */
+    dvs_pool_mark_t  pool_mark;
+    /* The reset snapshot as it stood: an add in the scope extends it, and
+     * may regrow it into memory the restore frees. */
+    Variable        *initial_vars;
+    uint32_t         initial_n_vars;
+    uint32_t         initial_vars_cap;
 } CheckpointMark;
 
 /* `r == a % b` with b a positive constant, all unsigned: the value picker
@@ -119,6 +128,11 @@ typedef struct dvs_ctx_s {
                                        * the constraint at all. Read it via
                                        * DV_LOG=1 / --stats. */
     dvs_block_alloc_t *block_alloc;   /* source of dynamic blocks      */
+    dvs_alloc_t       *alloc;         /* source of the context's heap
+                                       * tables: block_alloc's backing
+                                       * allocator, else dvs_malloc_alloc */
+    uint32_t           pool_floor;    /* pool position after compile: a
+                                       * restore never frees below it   */
     dvs_stack_t       *dynamic;       /* dynamic stack (trail etc.)    */
     TrailEntry        *trail_top;     /* newest trail entry, or NULL   */
     LevelMark         *level_marks;   /* array[MAX_DECISION_DEPTH]     */
@@ -126,7 +140,9 @@ typedef struct dvs_ctx_s {
     uint32_t           n_props;       /* total propagators created     */
     uint32_t          *watcher_heads; /* array[n_vars] in static pool  */
     DecisionRecord    *decisions;     /* array[MAX_DECISION_DEPTH]     */
-    int64_t           *phase_save;    /* last tried value per var      */
+    int64_t           *phase_save;    /* last tried value per var;
+                                       * from ctx->alloc, created lazily */
+    uint32_t           phase_save_cap;
     /* A seeded solve's first draw per var, kept for the rest of the solve
      * (see _pick_value). keep_state: KEEP_NONE / KEEP_SET / KEEP_DEAD. */
     int64_t           *keep_val;
@@ -216,6 +232,8 @@ typedef struct dvs_ctx_s {
     /* Custom value selector hook (for cost-guided search) */
     int64_t          (*value_selector_fn)(struct dvs_ctx_s *, uint32_t, void *);
     void              *value_selector_data;
+    /* dvs_solver_set_cost_guided's selector state (from ctx->alloc). */
+    void              *costguided;
     /* The oracle check attached by dvs_solver_set_oracle(), or NULL
      * (dvs_oracle.c). */
     struct dvs_octx_s *oracle;
@@ -254,6 +272,9 @@ typedef struct dvs_ctx_s {
 void dvs_solver_set_value_selector(dvs_ctx_t *ctx,
                                int64_t (*fn)(dvs_ctx_t *, uint32_t, void *),
                                void *data);
+
+/** Allocate ctx->phase_save (uninitialised) from ctx->alloc; 0 or -1. */
+int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx);
 
 /* ------------------------------------------------------------------ */
 /* Accessor wrappers (thin C functions for ctypes compatibility)       */

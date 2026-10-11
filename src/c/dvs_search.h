@@ -85,6 +85,10 @@ typedef struct {
     uint32_t _hpad;
 } HoleEntry;
 
+/* Add `value` to var_id's hole list (allocated in the pool). 0 on success,
+ * 1 if already present, -1 on allocation failure. */
+int dvs_search_insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
+
 /* ------------------------------------------------------------------ */
 /* API                                                                 */
 /* ------------------------------------------------------------------ */

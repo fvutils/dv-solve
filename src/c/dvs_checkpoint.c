@@ -38,6 +38,10 @@ static int _solver_checkpoint(dvs_ctx_t *ctx) {
      * matching rewind on dvs_solver_restore is deferred to the deep kissat
      * refactor (see dvs_trail.h:LevelMark for the full note). */
     m->sat_arena_top  = 0;
+    m->pool_mark        = dvs_pool_mark(&ctx->pool);
+    m->initial_vars     = ctx->initial_vars;
+    m->initial_n_vars   = ctx->initial_n_vars;
+    m->initial_vars_cap = ctx->initial_vars_cap;
 
     if (ctx->dynamic)
         m->stack_mark = dvs_stack_push(ctx->dynamic);
@@ -46,6 +50,113 @@ static int _solver_checkpoint(dvs_ctx_t *ctx) {
     trail_push_level(ctx);
 
     return (int)cp;
+}
+
+/* ------------------------------------------------------------------ */
+/* Pool rewind on restore                                              */
+/* ------------------------------------------------------------------ */
+
+/* The next propagator after `p` on var_id's watcher chain. Watches are
+ * pushed at the head of the chain, so the first slot naming var_id holds
+ * the link (as in _wake_var). */
+static uint32_t _watch_next(const Propagator *p, uint32_t var_id) {
+    if (p->flags & PROP_FLAG_WIDE_WATCH) {
+        const uint32_t *nv_ptr = (const uint32_t *)((const char *)p + sizeof(Propagator));
+        uint32_t nv = nv_ptr[0], cap = nv_ptr[1];
+        const uint32_t *vids = nv_ptr + 2, *wnexts = vids + cap;
+        for (uint32_t i = 0; i < nv; i++)
+            if (vids[i] == var_id) return wnexts[i];
+    } else {
+        const PropWatchSect *ws =
+            (const PropWatchSect *)((const char *)p + sizeof(Propagator));
+        for (uint32_t i = 0; i < ws->n_watches; i++)
+            if (ws->var_ids[i] == var_id) return ws->next_watchers[i];
+    }
+    return EXPR_NULL;
+}
+
+typedef struct { uint32_t var; int64_t value; } _HoleCarry;
+
+/* Free the pool memory the scope of checkpoint `m` allocated. Called at the
+ * end of the restore, when the scope's propagators are already out of
+ * prop_refs and its variables are gone (n_vars rolled back from n_vars_was).
+ *
+ * Everything at or above offset `first` dies, so every reference into it
+ * from what survives is dropped first:
+ *   - watcher chains: the scope's propagators were pushed at the head of
+ *     each chain after the checkpoint, so they form a prefix of it;
+ *   - hole lists: an exclusion made in the scope outlives the restore
+ *     (dvs_solver_exclude_value lasts across resets), so its value is
+ *     carried over and re-inserted after the rewind;
+ *   - the reset snapshot returns to what it was at the checkpoint;
+ *   - the scope's variables' chains and hole lists are cleared.
+ * Never frees below pool_floor, the end of compile. */
+static void _rewind_pool(dvs_ctx_t *ctx, const CheckpointMark *m,
+                         uint32_t n_vars_was) {
+    dvs_pool_mark_t mark = m->pool_mark;
+    if (mark.used < ctx->pool_floor) {
+        mark.used     = ctx->pool_floor;
+        mark.overflow = ctx->pool.overflow;
+    }
+    uint32_t first = dvs_pool_mark_offset(mark);
+    uint32_t n_keep = m->n_vars_at_cp;
+    if (n_vars_was > ctx->n_vars_capacity) n_vars_was = ctx->n_vars_capacity;
+
+    if (ctx->watcher_heads) {
+        for (uint32_t v = 0; v < n_keep; v++) {
+            uint32_t ref = ctx->watcher_heads[v];
+            while (ref != EXPR_NULL && ref >= first)
+                ref = _watch_next((const Propagator *)dvs_pool_ptr(&ctx->pool, ref), v);
+            ctx->watcher_heads[v] = ref;
+        }
+        for (uint32_t v = n_keep; v < n_vars_was; v++)
+            ctx->watcher_heads[v] = EXPR_NULL;
+    }
+
+    _HoleCarry *carry = NULL;
+    uint32_t n_carry = 0, carry_cap = 0;
+    if (ctx->var_holes_head) {
+        for (uint32_t v = 0; v < n_keep; v++) {
+            uint32_t *link = &ctx->var_holes_head[v];
+            while (*link != 0) {
+                HoleEntry *he = (HoleEntry *)dvs_pool_ptr(&ctx->pool, *link);
+                if (*link < first) { link = &he->next; continue; }
+                if (n_carry == carry_cap) {
+                    uint32_t cap = carry_cap ? 2 * carry_cap : 16;
+                    _HoleCarry *nc = (_HoleCarry *)DVS_RESIZE(
+                        ctx->alloc, carry, carry_cap * sizeof *carry, cap * sizeof *carry);
+                    if (!nc) {
+                        /* Out of memory: keep the scope's pool memory
+                         * rather than lose an exclusion. */
+                        if (carry) DVS_RELEASE(ctx->alloc, carry, carry_cap * sizeof *carry);
+                        return;
+                    }
+                    carry = nc; carry_cap = cap;
+                }
+                carry[n_carry].var   = v;
+                carry[n_carry].value = he->value;
+                n_carry++;
+                *link = he->next;
+            }
+        }
+        for (uint32_t v = n_keep; v < n_vars_was; v++)
+            ctx->var_holes_head[v] = 0;
+    }
+
+    ctx->initial_vars     = m->initial_vars;
+    ctx->initial_n_vars   = m->initial_n_vars;
+    ctx->initial_vars_cap = m->initial_vars_cap;
+    if (ctx->current_prop_ref != EXPR_NULL && ctx->current_prop_ref >= first)
+        ctx->current_prop_ref = EXPR_NULL;
+    if (ctx->conflict_prop_ref != EXPR_NULL && ctx->conflict_prop_ref >= first)
+        ctx->conflict_prop_ref = EXPR_NULL;
+
+    dvs_pool_release(&ctx->pool, mark);
+
+    /* The rewind freed at least as much as the carried holes held. */
+    for (uint32_t i = 0; i < n_carry; i++)
+        dvs_search_insert_hole(ctx, carry[i].var, carry[i].value);
+    if (carry) DVS_RELEASE(ctx->alloc, carry, carry_cap * sizeof *carry);
 }
 
 /* ------------------------------------------------------------------ */
@@ -65,6 +176,7 @@ static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
     ctx->search_sealed = 0;            /* the backtrack below undoes it */
 
     CheckpointMark *m = &ctx->checkpoints[cp];
+    uint32_t n_vars_was = ctx->n_vars;
 
     /* Bounds the scope established after this checkpoint go with it. */
     {
@@ -139,6 +251,18 @@ static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
     /* Restore variable count */
     ctx->n_vars = m->n_vars_at_cp;
 
+    /* The backtrack above rebuilt unassigned_mask over the scope's
+     * variables too; the search would decide on one of them, gone now. */
+    if (ctx->n_vars <= 64) {
+        uint64_t mask = 0;
+        for (uint32_t i = 0; i < ctx->n_vars; i++) {
+            if (ctx->vars[i].flags & VAR_AUX) continue;
+            if (var_lo64(ctx, &ctx->vars[i]) != var_hi64(ctx, &ctx->vars[i]))
+                mask |= (1ULL << i);
+        }
+        ctx->unassigned_mask = mask;
+    }
+
     /* Drop learnt clauses added between checkpoint and now. Their
      * literals reference var IDs that may be reused for fresh aux
      * vars in the post-pop scope — keeping the clauses around would
@@ -187,4 +311,6 @@ static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
             }
         }
     }
+
+    _rewind_pool(ctx, m, n_vars_was);
 }

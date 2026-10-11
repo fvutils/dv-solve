@@ -143,6 +143,14 @@ if(DVS_STEP_CHECK)
     add_compile_definitions(DVS_STEP_CHECK=1)
 endif()
 
+# Stale-pointer check (tests only). Every DVS_RESIZE moves the block and
+# poisons the old one, so a pointer held across a table growth fails under
+# ASan. See docs/dynamic_pool_plan.md.
+option(DVS_DEBUG_ALWAYS_MOVE "Make every allocator resize move and poison the old block (tests only)" OFF)
+if(DVS_DEBUG_ALWAYS_MOVE)
+    add_compile_definitions(DVS_DEBUG_ALWAYS_MOVE=1)
+endif()
+
 set(DVS_CONTRA_SOURCES
     src/c/dvs_contradiction.c
 )
@@ -400,6 +408,16 @@ add_executable(test_dvs_block_alloc_cache tests/c/test_dvs_block_alloc_cache.c)
 target_link_libraries(test_dvs_block_alloc_cache PRIVATE dv_solve)
 target_include_directories(test_dvs_block_alloc_cache PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_dvs_block_alloc_cache COMMAND test_dvs_block_alloc_cache)
+
+add_executable(test_dvs_alloc_resize tests/c/test_dvs_alloc_resize.c)
+target_link_libraries(test_dvs_alloc_resize PRIVATE dv_solve)
+target_include_directories(test_dvs_alloc_resize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_dvs_alloc_resize COMMAND test_dvs_alloc_resize)
+
+add_executable(test_checkpoint_pool tests/c/test_checkpoint_pool.c)
+target_link_libraries(test_checkpoint_pool PRIVATE dv_solve)
+target_include_directories(test_checkpoint_pool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_checkpoint_pool COMMAND test_checkpoint_pool)
 
 # The public API through dv_solve.h alone; the test includes no other header.
 add_executable(test_public_api tests/c/test_public_api.c)

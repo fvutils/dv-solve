@@ -100,13 +100,14 @@ void dvs_solver_set_cost_guided(dvs_ctx_t *ctx, CostFunc cost_fn,
                              void *cost_data, int32_t max_scan) {
     if (!ctx) return;
 
-    /* Allocate the CostGuidedCtx in the solver's pool so it lives
-     * as long as the context. */
-    uint32_t ref = dvs_pool_alloc(&ctx->pool, (uint32_t)sizeof(CostGuidedCtx),
-                                   (uint32_t)_Alignof(CostGuidedCtx));
-    if (ref == EXPR_NULL) return;
-
-    CostGuidedCtx *cg = (CostGuidedCtx *)dvs_pool_ptr(&ctx->pool, ref);
+    /* One CostGuidedCtx per context, from its allocator: it lives as
+     * long as the context, and a later call reuses it. */
+    CostGuidedCtx *cg = (CostGuidedCtx *)ctx->costguided;
+    if (!cg) {
+        cg = (CostGuidedCtx *)DVS_ALLOC(ctx->alloc, sizeof(CostGuidedCtx));
+        if (!cg) return;
+        ctx->costguided = cg;
+    }
     cg->cost_fn = cost_fn;
     cg->cost_data = cost_data;
     cg->max_domain_scan = max_scan;
@@ -499,13 +500,7 @@ int dvs_solver_set_phase_hints(dvs_ctx_t *ctx, const uint32_t *var_ids,
 
     /* Ensure phase_save array exists */
     if (!ctx->phase_save && ctx->n_vars > 0) {
-        uint32_t ps_size = ctx->n_vars_capacity > 0
-                           ? ctx->n_vars_capacity : ctx->n_vars;
-        uint32_t ps_ref = dvs_pool_alloc(&ctx->pool,
-                                          ps_size * (uint32_t)sizeof(int64_t),
-                                          (uint32_t)_Alignof(int64_t));
-        if (ps_ref == EXPR_NULL) return -1;
-        ctx->phase_save = (int64_t *)dvs_pool_ptr(&ctx->pool, ps_ref);
+        if (dvs_ctx_alloc_phase_save(ctx) != 0) return -1;
         for (uint32_t i = 0; i < ctx->n_vars; i++)
             ctx->phase_save[i] = var_lo64(ctx, &ctx->vars[i]);
     }

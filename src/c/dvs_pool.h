@@ -63,11 +63,50 @@ uint32_t dvs_pool_alloc(dvs_pool_t *pool, uint32_t bytes, uint32_t align);
 /**
  * Convert an offset returned by dvs_pool_alloc() to a real pointer.
  *
+ * Inline: it sits on every hot path (each Variable and propagator lookup).
+ * The out-of-line `(dvs_pool_ptr)` stays exported for FFI callers.
+ *
  * @param pool    The pool.
  * @param offset  Offset returned by dvs_pool_alloc().
  * @return  Pointer to the allocated region, or NULL if offset == EXPR_NULL.
  */
-void *dvs_pool_ptr(const dvs_pool_t *pool, uint32_t offset);
+static inline void *dvs_pool_ptr_inline(const dvs_pool_t *pool, uint32_t offset) {
+    if (offset == EXPR_NULL)
+        return NULL;
+    return (void *)((char *)pool + offset);
+}
+void *(dvs_pool_ptr)(const dvs_pool_t *pool, uint32_t offset);
+#define dvs_pool_ptr(pool, offset)  dvs_pool_ptr_inline((pool), (offset))
+
+/**
+ * A point in the pool's allocation order, for dvs_pool_release(). Offsets
+ * allocated after the mark compare >= dvs_pool_mark_offset(mark).
+ */
+typedef struct {
+    uint32_t used;
+    uint32_t overflow;
+} dvs_pool_mark_t;
+
+static inline dvs_pool_mark_t dvs_pool_mark(const dvs_pool_t *pool) {
+    dvs_pool_mark_t m = { pool->used, pool->overflow };
+    return m;
+}
+
+/** The first offset dvs_pool_alloc() can return after `mark` was taken. */
+static inline uint32_t dvs_pool_mark_offset(dvs_pool_mark_t mark) {
+    return (uint32_t)sizeof(dvs_pool_t) + mark.used;
+}
+
+/**
+ * Free everything allocated since `mark` and restore the overflow flag to
+ * its value then. Offsets at or above dvs_pool_mark_offset(mark) become
+ * invalid; the caller must drop every reference to them first. A mark
+ * at or above the current position is a no-op.
+ *
+ * Built with DVS_DEBUG_ALWAYS_MOVE the freed bytes are filled with 0xA5;
+ * under AddressSanitizer they are poisoned until allocated again.
+ */
+void dvs_pool_release(dvs_pool_t *pool, dvs_pool_mark_t mark);
 
 /**
  * Reset the pool: clear all allocations and the overflow flag.

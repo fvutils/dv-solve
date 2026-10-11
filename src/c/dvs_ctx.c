@@ -3,6 +3,7 @@
 #include "dvs_ctx.h"
 #include "dvs_oracle_hooks.h"
 #include "dvs_lcg.h"
+#include "dvs_costguided.h"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -38,6 +39,8 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     ctx->conflict_count  = 0;
     ctx->rng_state       = 0;
     ctx->block_alloc     = block_alloc;
+    ctx->alloc           = block_alloc ? dvs_block_alloc_backing(block_alloc)
+                                       : &dvs_malloc_alloc;
     ctx->dynamic         = NULL;
     ctx->trail_top       = NULL;
     ctx->level_marks     = NULL;
@@ -125,6 +128,16 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     return ctx;
 }
 
+int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx) {
+    /* Sized to n_vars_capacity for incremental variable support. */
+    uint32_t n = ctx->n_vars_capacity > 0 ? ctx->n_vars_capacity : ctx->n_vars;
+    int64_t *ps = (int64_t *)DVS_ALLOC(ctx->alloc, n * sizeof(int64_t));
+    if (!ps) return -1;
+    ctx->phase_save     = ps;
+    ctx->phase_save_cap = n;
+    return 0;
+}
+
 int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t bound) {
     if (ctx->n_scope_log == ctx->scope_log_cap) {
         uint32_t cap = ctx->scope_log_cap ? 2u * ctx->scope_log_cap : 64u;
@@ -172,6 +185,13 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     ctx->value_fails = NULL; ctx->value_fails_cap = 0;
     free(ctx->mod_links);
     ctx->mod_links = NULL; ctx->n_mod_links = ctx->mod_links_cap = 0;
+    if (ctx->phase_save)
+        DVS_RELEASE(ctx->alloc, ctx->phase_save,
+                    ctx->phase_save_cap * sizeof(int64_t));
+    ctx->phase_save = NULL; ctx->phase_save_cap = 0;
+    if (ctx->costguided)
+        DVS_RELEASE(ctx->alloc, ctx->costguided, sizeof(CostGuidedCtx));
+    ctx->costguided = NULL;
     free(ctx->scope_log_var);
     free(ctx->scope_log_bound);
     free(ctx->scope_log_depth);

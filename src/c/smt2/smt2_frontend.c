@@ -4614,9 +4614,9 @@ static int _ensure_compiled(Smt2Frontend *fe) {
     fe->builder_retained = 1;
     fe->problem_dirty    = 0;
 
-    /* The static ctx pool is a fixed-capacity, relocatable bump allocator by
-     * design (32-bit offsets, snapshot wholesale for push/pop checkpoints), so
-     * it cannot grow in place. Rather than always allocate the 64 MB maximum --
+    /* The static ctx pool is a fixed-capacity bump allocator (32-bit offsets
+     * into one buffer; a pop rewinds it to its push), so it cannot grow in
+     * place. Rather than always allocate the 64 MB maximum --
      * a large per-solve cost the frontend pays on every Verilator randomize() --
      * start from a problem-sized estimate and, if dvs_solver_compile overflows the
      * pool, reallocate a larger contiguous buffer and recompile. This gives
