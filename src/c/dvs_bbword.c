@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef unsigned __int128 u128;
+#include "dvs_i128.h"
 
 /* A vector as a key: AIG literals, MSB first, in bit-blaster-owned memory. */
 typedef struct {
@@ -262,13 +262,18 @@ static void _form(const dvs_bbword_t *W, bbw_key_t k, bbw_form_t *F) {
 
 /* a + b, reduced modulo m (no reduction when m = 0); 0 on overflow. */
 static int _cadd(uint64_t a, uint64_t b, uint64_t m, uint64_t *out) {
-    if (m) { *out = (uint64_t)(((u128)a + b) % m); return 1; }
-    return !__builtin_add_overflow(a, b, out);
+    if (m) {
+        a %= m;
+        b %= m;
+        *out = a >= m - b ? a - (m - b) : a + b;
+        return 1;
+    }
+    return !dvs_add_u64_ovf(a, b, out);
 }
 
 static int _cmul(uint64_t a, uint64_t b, uint64_t m, uint64_t *out) {
-    if (m) { *out = (uint64_t)(((u128)(a % m) * (b % m)) % m); return 1; }
-    return !__builtin_mul_overflow(a, b, out);
+    if (m) { *out = dvs_mulmod_u64(a % m, b % m, m); return 1; }
+    return !dvs_mul_u64_ovf(a, b, out);
 }
 
 /* Reduce F modulo m (a divisor of F->mod, or any m when F->mod = 0). */
@@ -379,9 +384,9 @@ void dvs_bbword_note_add(dvs_bbword_t *W, dvs_bv_t a, dvs_bv_t b, dvs_bv_t r) {
     bbw_key_t ka = _strip(_key(a)), kb = _strip(_key(b));
     uint64_t ba, bb_;
     if (!_bound(W, ka, &ba) || !_bound(W, kb, &bb_)) return;
-    u128 s = (u128)ba + bb_;
-    if (r.size < 128 && s > (((u128)1 << r.size) - 1)) return;   /* may wrap */
-    if (s > ~(uint64_t)0) return;
+    uint64_t s;
+    if (dvs_add_u64_ovf(ba, bb_, &s)) return;
+    if (s > _mask(r.size)) return;                     /* may wrap */
     bbw_form_t F, G, H;
     _form(W, ka, &F);
     _form(W, kb, &G);
@@ -493,7 +498,8 @@ dvs_bv_t dvs_bbword_mul(dvs_bbword_t *W, dvs_bitblast_t *bb, dvs_bv_t a, dvs_bv_
     /* A multiply that cannot wrap scales the value's form. */
     bbw_key_t kx = _strip(_key(x));
     uint64_t bx;
-    if (c && _bound(W, kx, &bx) && (u128)bx * c <= _mask(w)) {
+    uint64_t p;
+    if (c && _bound(W, kx, &bx) && !dvs_mul_u64_ovf(bx, c, &p) && p <= _mask(w)) {
         bbw_form_t F;
         _form(W, kx, &F);
         _remember_val(W, _strip(_key(r)), bx * c, _form_scale(&F, c) ? &F : NULL);

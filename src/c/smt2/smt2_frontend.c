@@ -8135,7 +8135,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     int8_t   check_models = fe->check_models;
     /* operator rewrites: parsed into persistent_arena, which is kept */
     uint32_t n_rewrites = fe->n_rewrites;
-    __typeof__(fe->rewrites[0]) rewrites[SMT2_MAX_REWRITES];
+    struct Smt2Rewrite rewrites[SMT2_MAX_REWRITES];
     memcpy(rewrites, fe->rewrites, n_rewrites * sizeof rewrites[0]);
     /* Reused allocations (reset in place below rather than freed). */
     dvs_builder_t *builder = fe->builder;

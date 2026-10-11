@@ -24,8 +24,10 @@ typedef struct {
 
 #define BBSUM_MAX_TERMS 64
 
-typedef unsigned __int128 u128;
-#define BBSUM_SAT ((u128)1 << 126)    /* saturated bound: "too big to know" */
+/* An unsigned bound below 2^126, as 64-bit halves (MSVC has no __int128).
+ * hi >= 2^62 means saturated: "too big to know". */
+typedef struct { uint64_t hi, lo; } bbsum_bound_t;
+#define BBSUM_SAT_HI ((uint64_t)1 << 62)
 
 struct dvs_bbsum_s {
     dvs_alloc_t   *alloc;
@@ -87,30 +89,54 @@ static uint64_t _const_val(bbsum_term_t t) {
     return v;
 }
 
-static u128 _sat_add(u128 a, u128 b) {
-    return (a >= BBSUM_SAT || b >= BBSUM_SAT || a + b >= BBSUM_SAT)
-        ? BBSUM_SAT : a + b;
+static const bbsum_bound_t BBSUM_SAT = { BBSUM_SAT_HI, 0 };
+
+static int _is_sat(bbsum_bound_t b) { return b.hi >= BBSUM_SAT_HI; }
+
+static bbsum_bound_t _from_u64(uint64_t v) {
+    bbsum_bound_t b = { 0, v };
+    return b;
+}
+
+static bbsum_bound_t _sat_add(bbsum_bound_t a, bbsum_bound_t b) {
+    if (_is_sat(a) || _is_sat(b)) return BBSUM_SAT;
+    bbsum_bound_t r;
+    r.lo = a.lo + b.lo;
+    r.hi = a.hi + b.hi + (r.lo < a.lo);   /* each hi < 2^62: no wrap */
+    return _is_sat(r) ? BBSUM_SAT : r;
 }
 
 /* Largest value t can take. */
-static u128 _max_val(bbsum_term_t t) {
-    if (t.size <= 64 && _is_const(t)) return (u128)_const_val(t);
+static bbsum_bound_t _max_val(bbsum_term_t t) {
+    if (t.size <= 64 && _is_const(t)) return _from_u64(_const_val(t));
     if (t.size >= 126) return BBSUM_SAT;
-    return ((u128)1 << t.size) - 1;
+    if (t.size <= 64)
+        return _from_u64(t.size == 64 ? ~(uint64_t)0
+                                       : (((uint64_t)1 << t.size) - 1));
+    bbsum_bound_t b = { ((uint64_t)1 << (t.size - 64)) - 1, ~(uint64_t)0 };
+    return b;
+}
+
+/* Bits in b's binary form (0 for 0). */
+static uint32_t _bitlen(bbsum_bound_t b) {
+    uint64_t v = b.hi ? b.hi : b.lo;
+    uint32_t n = b.hi ? 64 : 0;
+    while (v) { n++; v >>= 1; }
+    return n;
 }
 
 /* Bits needed to hold every value up to `b`, at most `w`. */
-static uint32_t _bits_for(u128 b, uint32_t w) {
-    if (b >= BBSUM_SAT) return w;
-    uint32_t n = 0;
-    while (b) { n++; b >>= 1; }
+static uint32_t _bits_for(bbsum_bound_t b, uint32_t w) {
+    if (_is_sat(b)) return w;
+    uint32_t n = _bitlen(b);
     if (n == 0) n = 1;
     return n < w ? n : w;
 }
 
-static int _fits(u128 b, uint32_t w) {
-    if (b >= BBSUM_SAT) return 0;
-    return w >= 126 || b < ((u128)1 << w);
+/* b < 2^w. */
+static int _fits(bbsum_bound_t b, uint32_t w) {
+    if (_is_sat(b)) return 0;
+    return _bitlen(b) <= w;
 }
 
 static int _term_eq(bbsum_term_t a, bbsum_term_t b) {
@@ -253,7 +279,7 @@ dvs_bv_t dvs_bbsum_add(dvs_bbsum_t *T, dvs_bitblast_t *bb, dvs_bv_t a, dvs_bv_t 
 
     if (!splice) {
         dvs_bv_t r = dvs_bb_add(bb, a, b);
-        u128 bound = _sat_add(_max_val(ops[0]), _max_val(ops[1]));
+        bbsum_bound_t bound = _sat_add(_max_val(ops[0]), _max_val(ops[1]));
         _remember(T, _strip(r.bits, r.size), w, _fits(bound, w), single, ops, 2);
         return r;
     }
@@ -261,14 +287,14 @@ dvs_bv_t dvs_bbsum_add(dvs_bbsum_t *T, dvs_bitblast_t *bb, dvs_bv_t a, dvs_bv_t 
     if (fold) {
         if (w < 64) cval &= (((uint64_t)1 << w) - 1);
         if (cval) {
-            dvs_bv_t c = dvs_bb_value_u64(bb, _bits_for((u128)cval, 64), cval);
+            dvs_bv_t c = dvs_bb_value_u64(bb, _bits_for(_from_u64(cval), 64), cval);
             ts[n++] = _strip(c.bits, c.size);   /* constants sort last anyway */
         }
     }
 
     /* Add in that order, each partial sum as wide as its bound needs. */
     dvs_bv_t acc = { NULL, 0 };
-    u128 bound = 0;
+    bbsum_bound_t bound = _from_u64(0);
     for (uint32_t i = 0; i < n; i++) {
         bound = _sat_add(bound, _max_val(ts[i]));
         uint32_t wp = _bits_for(bound, w);

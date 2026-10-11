@@ -56,11 +56,21 @@ static __forceinline int dvs__ctz64(unsigned long long x) {
     return _BitScanForward64(&i, x) ? (int)i : 64;
 }
 
+/* Bit-twiddled rather than __popcnt64, which faults on CPUs without POPCNT. */
+static __forceinline int dvs__popcount64(unsigned long long x) {
+    x = x - ((x >> 1) & 0x5555555555555555ULL);
+    x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
+    x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
+    return (int)((x * 0x0101010101010101ULL) >> 56);
+}
+
 #define __builtin_clz(x)   dvs__clz32((unsigned)(x))
 #define __builtin_clzl(x)  dvs__clz32((unsigned)(x))   /* LLP64: long is 32-bit */
 #define __builtin_clzll(x) dvs__clz64((unsigned long long)(x))
 #define __builtin_ctz(x)   dvs__ctz32((unsigned)(x))
 #define __builtin_ctzll(x) dvs__ctz64((unsigned long long)(x))
+#define __builtin_popcount(x)   dvs__popcount64((unsigned)(x))
+#define __builtin_popcountll(x) dvs__popcount64((unsigned long long)(x))
 #define __builtin_prefetch(addr, ...) ((void)(addr))
 #define __builtin_alloca(n) _alloca(n)
 #define __builtin_unreachable() __assume(0)

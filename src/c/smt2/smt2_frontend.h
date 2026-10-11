@@ -552,7 +552,7 @@ typedef struct {
     /* Operators lowered by rewriting into supported ones (_translate_rewrite):
      * each template, keyed by its text and parsed once into persistent_arena.
      * Kept across a soft reset, like the arena. */
-    struct { const char *text; const struct Sexpr *body; }
+    struct Smt2Rewrite { const char *text; const struct Sexpr *body; }
                          rewrites[SMT2_MAX_REWRITES];
     uint32_t             n_rewrites;
 
