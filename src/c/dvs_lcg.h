@@ -274,6 +274,24 @@ PropResult clause_notify_ub(ClauseDB *db, dvs_ctx_t *ctx,
                               uint32_t var_id, int64_t new_ub);
 
 /**
+ * Hold notifications: until clause_notify_release, a bound change only queues
+ * its clause checks. A propagator's fire runs under a hold, so the bounds it
+ * reads do not move under it between its own tightenings (see
+ * dvs_solver_propagate).
+ * @return 1 if this call took the hold, 0 if one was already held (the
+ *         holder releases it; do not call clause_notify_release).
+ */
+int clause_notify_hold(ClauseDB *db);
+
+/**
+ * End a hold taken by clause_notify_hold. With `check`, run the queued clause
+ * checks (to completion, or the first conflict); without, discard them (the
+ * caller is about to backtrack).
+ * @return PROP_OK or PROP_CONFLICT (conflict_clause_idx set).
+ */
+PropResult clause_notify_release(ClauseDB *db, dvs_ctx_t *ctx, int check);
+
+/**
  * Propagate unit clauses from the clause database.
  * Scans all learned clauses; enforces any that are unit.
  * @return PROP_OK or PROP_CONFLICT.

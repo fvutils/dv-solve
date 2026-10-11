@@ -101,20 +101,9 @@ static PropResult _check_watch(ClauseDB *db, dvs_ctx_t *ctx, WatchEntry *we) {
     return PROP_OK;
 }
 
-static PropResult _notify(ClauseDB *db, dvs_ctx_t *ctx, uint32_t var_id, int ub_event) {
-    if (var_id >= db->n_watch_vars) return PROP_OK;
-    if (db->in_notify) {
-        if (db->n_pend < db->pend_cap)
-            db->pend[db->n_pend++] = var_id * 2u + (ub_event ? 1u : 0u);
-        else
-            db->pend_over = 1;
-        return PROP_OK;
-    }
-    db->in_notify = 1;
-    /* An LB rise falsifies `var <= v` literals (the UB watch list); a UB
-     * fall falsifies `var >= v` literals (the LB watch list). */
-    PropResult res = _check_watch(db, ctx, ub_event ? db->watch_lb[var_id]
-                                                    : db->watch_ub[var_id]);
+/* Check the queued events until none is left or one conflicts, then
+ * release the queue. */
+static PropResult _drain(ClauseDB *db, dvs_ctx_t *ctx, PropResult res) {
     while (res != PROP_CONFLICT && (db->n_pend || db->pend_over)) {
         if (db->n_pend) {
             uint32_t e = db->pend[--db->n_pend];
@@ -129,6 +118,36 @@ static PropResult _notify(ClauseDB *db, dvs_ctx_t *ctx, uint32_t var_id, int ub_
     db->pend_over = 0;
     db->in_notify = 0;
     return res;
+}
+
+static PropResult _notify(ClauseDB *db, dvs_ctx_t *ctx, uint32_t var_id, int ub_event) {
+    if (var_id >= db->n_watch_vars) return PROP_OK;
+    if (db->in_notify) {
+        if (db->n_pend < db->pend_cap)
+            db->pend[db->n_pend++] = var_id * 2u + (ub_event ? 1u : 0u);
+        else
+            db->pend_over = 1;
+        return PROP_OK;
+    }
+    db->in_notify = 1;
+    /* An LB rise falsifies `var <= v` literals (the UB watch list); a UB
+     * fall falsifies `var >= v` literals (the LB watch list). */
+    return _drain(db, ctx, _check_watch(db, ctx, ub_event ? db->watch_lb[var_id]
+                                                          : db->watch_ub[var_id]));
+}
+
+int clause_notify_hold(ClauseDB *db) {
+    if (db->in_notify) return 0;
+    db->in_notify = 1;
+    return 1;
+}
+
+PropResult clause_notify_release(ClauseDB *db, dvs_ctx_t *ctx, int check) {
+    if (check) return _drain(db, ctx, PROP_OK);
+    db->n_pend = 0;
+    db->pend_over = 0;
+    db->in_notify = 0;
+    return PROP_OK;
 }
 
 PropResult clause_notify_lb(ClauseDB *db, dvs_ctx_t *ctx,

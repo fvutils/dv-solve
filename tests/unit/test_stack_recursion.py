@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -184,8 +185,11 @@ def _gcc_has_callgraph_info() -> bool:
     return r.returncode == 0
 
 
-pytestmark = pytest.mark.skipif(not _gcc_has_callgraph_info(),
-                                reason="needs gcc >= 10 (-fcallgraph-info)")
+# Windows: the sources are compiled as the POSIX build sees them, and a
+# MinGW gcc has neither getc_unlocked nor setenv. The call graph is the same
+# on every platform, so the Linux runs cover it.
+pytestmark = pytest.mark.skipif(sys.platform == "win32" or not _gcc_has_callgraph_info(),
+                                reason="needs gcc >= 10 (-fcallgraph-info) on a POSIX host")
 
 
 def test_every_recursion_is_bounded():

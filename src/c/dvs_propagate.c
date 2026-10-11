@@ -301,6 +301,17 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
             }
         }
 
+        /* Learnt clauses wait until the fire returns. A propagator reads
+         * bounds, tightens, and judges entailment from what it read; a
+         * clause propagating inside one of its tightenings moved those
+         * bounds under it. `x == y` with both in [4,5] tightened x, a clause
+         * fixed x = 4 and then y = 5, and the propagator saw two singletons
+         * and called itself entailed: a model with x != y (array selects
+         * under learning, once clause chains were followed). */
+        ClauseDB *cdb = (ctx->lcg && ((LCGCtx *)ctx->lcg)->enabled)
+                        ? &((LCGCtx *)ctx->lcg)->clause_db : NULL;
+        int held = cdb && clause_notify_hold(cdb);
+
         /* Tag the firing propagator so trail_record_* attributes the
          * resulting bound tightenings to it. Cleared after fire so
          * non-propagation tightenings (e.g. decision pushes, level-0
@@ -308,6 +319,11 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
         ctx->current_prop_ref = prop_ref;
         PropResult r = p->fire(p, ctx);
         ctx->current_prop_ref = EXPR_NULL;
+        /* A clause conflict leaves conflict_clause_idx set for analysis. An
+         * entailment holds through the clauses' tightenings: they only
+         * narrow the domains it held over. */
+        if (held && clause_notify_release(cdb, ctx, r != PROP_CONFLICT) == PROP_CONFLICT)
+            r = PROP_CONFLICT;
         if (r == PROP_CONFLICT) {
             /* Stash the conflicting propagator for downstream conflict
              * analysis (dvs_analyze_conflict). */
