@@ -331,7 +331,31 @@ static inline uint64_t _dom_size(const dvs_ctx_t *ctx, uint32_t i,
     return dom;
 }
 
+/* Solve order (dvs_builder_set_var_order): a variable's stage key, with the
+ * unordered variables, stage 0, last. */
+#define DVS_ORDER_LAST 256u
+static inline uint32_t _order_key(const dvs_ctx_t *ctx, uint32_t i) {
+    if (!ctx->var_order || i >= ctx->n_decl_vars) return DVS_ORDER_LAST;
+    return ctx->var_order[i] ? ctx->var_order[i] : DVS_ORDER_LAST;
+}
+
+/* The earliest stage that still has an undecided variable: the search
+ * decides only that stage's variables until it is done. */
+static uint32_t _open_stage(const dvs_ctx_t *ctx) {
+    uint32_t m = DVS_ORDER_LAST;
+    uint32_t n = ctx->n_decl_vars < ctx->n_vars ? ctx->n_decl_vars : ctx->n_vars;
+    for (uint32_t i = 0; i < n; i++) {
+        const Variable *v = &ctx->vars[i];
+        if ((v->flags & VAR_AUX) || ctx->var_order[i] == 0
+                || ctx->var_order[i] >= m) continue;
+        if (var_lo64(ctx, v) != var_hi64(ctx, v)) m = ctx->var_order[i];
+    }
+    return m;
+}
+
 static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
+    /* With a solve order, only the open stage's variables are candidates. */
+    const uint32_t stage = ctx->var_order ? _open_stage(ctx) : 0;
     /* VSIDS path: when LCG is active and we have non-zero activity
      * (i.e. at least one conflict has fired the bumper), pick the
      * highest-activity unassigned, non-aux variable. Falls through to
@@ -348,6 +372,7 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
             for (uint32_t i = 0; i < lim; i++) {
                 Variable *v = &ctx->vars[i];
                 if (v->flags & VAR_AUX) continue;
+                if (stage && _order_key(ctx, i) != stage) continue;
                 int64_t lo = var_lo64(ctx, v);
                 int64_t hi = var_hi64(ctx, v);
                 if (lo == hi) continue;
@@ -395,6 +420,7 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
                 if (best_aux == EXPR_NULL || dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
             }
+            if (stage && _order_key(ctx, i) != stage) continue;
             if (best == EXPR_NULL || dom < best_dom) {
                 best_dom = dom; best = i; n_best = 1;
             } else if (ctx->fair_pick && dom == best_dom) {
@@ -415,6 +441,7 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
                 if (best_aux == EXPR_NULL || dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
             }
+            if (stage && _order_key(ctx, i) != stage) continue;
             if (best == EXPR_NULL || dom < best_dom) {
                 best_dom = dom; best = i; n_best = 1;
             } else if (ctx->fair_pick && dom == best_dom) {
@@ -818,6 +845,7 @@ static int _box_mode(void) {
  * 0: rejected (trail back at `base`). -1: stop trying (propagation was
  * aborted, or the pins left an aux variable open). */
 static int _box_try(dvs_ctx_t *ctx, uint32_t base) {
+    if (ctx->decision_level + 1 >= ctx->max_depth) return -1;
     uint32_t n = ctx->n_decl_vars < ctx->n_vars ? ctx->n_decl_vars : ctx->n_vars;
     /* Draw every value before pinning any: a pin followed by propagation
      * would narrow the next draw's domain, which is the sequential sampling
@@ -871,8 +899,8 @@ static void _bx_report(void) {
             (unsigned long long)_bx_probe_on, (unsigned long long)_bx_probe_off,
             (unsigned long long)_bx_acc, (unsigned long long)_bx_fall);
 }
-static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base);
-static int _box_sample(dvs_ctx_t *ctx, uint32_t base) {
+static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage);
+static int _box_sample(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
     static int stats = -1;
     if (stats < 0) {
         const char *e = getenv("DVS_BOX_STATS");
@@ -880,7 +908,7 @@ static int _box_sample(dvs_ctx_t *ctx, uint32_t base) {
         if (stats) atexit(_bx_report);
     }
     uint8_t st0 = ctx->box_state;
-    int r = _box_sample_inner(ctx, base);
+    int r = _box_sample_inner(ctx, base, last_stage);
     if (stats) {
         _bx_calls++;
         if (st0 == BOX_UNPROBED && ctx->box_state == BOX_ON) _bx_probe_on++;
@@ -892,7 +920,10 @@ static int _box_sample(dvs_ctx_t *ctx, uint32_t base) {
     return r;
 }
 
-static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base) {
+/* `last_stage`: called mid-search, once a solve order's stages are decided,
+ * for the unordered variables (see _solver_solve_core). It never probes:
+ * the probe runs at the root, where it depends on the problem only. */
+static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
     int mode = _box_mode();
     if (mode == 0) return 0;
     if (mode == 1 && ctx->box_state == BOX_OFF) return 0;
@@ -920,6 +951,7 @@ static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base) {
     if (n_draw < 2) return 0;   /* one variable: the search is already uniform */
 
     if (mode == 1 && ctx->box_state == BOX_UNPROBED) {
+        if (last_stage) return 0;
         uint64_t saved = ctx->rng_state;
         ctx->rng_state = _seed_mix64(0x626f78ULL);
         uint32_t acc = 0, t;
@@ -938,6 +970,9 @@ static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base) {
                          ? BOX_ON : BOX_OFF;
         if (ctx->box_state == BOX_OFF) return 0;
     }
+    /* At the root of an ordered problem, only probe: the earlier stages
+     * are chosen first, by the search. */
+    if (ctx->var_order && !last_stage) return 0;
 
     for (uint32_t t = 0; t < DVS_BOX_TRIES; t++) {
         int r = _box_try(ctx, base);
@@ -1106,9 +1141,15 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (sr == PROP_CONFLICT) return DVS_SOLVE_UNSAT;
     }
 
-    /* Box-rejection tier: uniform over solutions when it succeeds. */
-    if (opts && opts->seed != 0 && ctx->fair_pick && !opts->seq_pick) {
-        if (_box_sample(ctx, base)) return DVS_SOLVE_OK;
+    /* Box-rejection tier: uniform over solutions when it succeeds. With a
+     * solve order, the search decides the ordered stages first, and the
+     * tier then draws the unordered variables given them (box_stage_left
+     * bounds how often a solve tries that, as backtracking re-enters it). */
+    const int box_ok = opts && opts->seed != 0 && ctx->fair_pick
+                       && !opts->seq_pick;
+    uint32_t box_stage_left = (box_ok && ctx->var_order) ? 4u : 0u;
+    if (box_ok) {
+        if (_box_sample(ctx, base, 0)) return DVS_SOLVE_OK;
     }
 
     for (;;) {
@@ -1149,6 +1190,12 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
             }
 #endif
             return DVS_SOLVE_OK;   /* all assigned */
+        }
+        if (box_stage_left && _order_key(ctx, x_id) == DVS_ORDER_LAST
+                && !(ctx->vars[x_id].flags & VAR_AUX)) {
+            box_stage_left--;
+            if (_box_sample(ctx, ctx->decision_level, 1)) return DVS_SOLVE_OK;
+            if (ABORTED()) return DVS_SOLVE_TIMEOUT;
         }
         int64_t v = _pick_value(ctx, x_id, opts);
 

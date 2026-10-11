@@ -136,6 +136,15 @@ soft constraints conflict, those with the highest priority number are dropped
 first. See {doc}`../concepts/soft-constraints`.
 ```
 
+```{c:function} int dvs_builder_set_var_order(dvs_builder_t *b, uint32_t var_id, uint8_t stage)
+Put a variable in a solve-order stage (SystemVerilog `solve ... before`). The
+variables of stage 1 are chosen first, then those of stage 2, and so on;
+variables in stage 0 (the default) come last. Each stage is chosen among the
+values that leave the constraints satisfiable, and in a seeded `fair_pick`
+solve the last stage is uniform over the solutions that remain. Declare the
+variable first. Returns 0, or -1 if no variable `var_id` has been declared.
+```
+
 ```{c:function} dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id, uint32_t n_entries, const dvs_dist_entry_t *entries)
 Give a variable a weighted distribution (SystemVerilog `dist`). See
 {doc}`../concepts/randomization-seeds`.
