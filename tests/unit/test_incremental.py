@@ -235,8 +235,9 @@ class TestIncremental:
         assert len(set(vals)) == 3, f"Not all distinct: {vals}"
         lib.dvs_block_alloc_destroy(ba)
 
-    def test_var_capacity_overflow(self, libdvs):
-        """Try to add var_id >= capacity; returns -1."""
+    def test_var_capacity_grows(self, libdvs):
+        """A var_id far past the compiled size is room the context makes,
+        not an overflow (the tables grow; docs/dynamic_pool_plan.md P2)."""
         lib = libdvs
         _setup_lib(lib)
 
@@ -245,10 +246,11 @@ class TestIncremental:
 
         ctx, _, ba = _compile(lib, sp)
 
-        # Add var with id way beyond capacity (1 + 64 slack = 65 max)
         aux_buf, aux_sp = _make_problem(lib)
-        lib.problem_add_var(aux_sp, 200, 8, 0, 0, 10)
+        lib.problem_add_var(aux_sp, 200, 8, 0, 3, 7)
 
         rc = lib.dvs_solver_add_constraint(ctx, aux_sp)
-        assert rc == -1, f"Expected -1 (capacity overflow), got {rc}"
+        assert rc == 0, f"Expected 0, got {rc}"
+        assert lib.dvs_var_lo32(ctx, 200) == 3
+        assert lib.dvs_var_hi32(ctx, 200) == 7
         lib.dvs_block_alloc_destroy(ba)
