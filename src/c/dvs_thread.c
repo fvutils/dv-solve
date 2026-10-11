@@ -145,15 +145,36 @@ static int dvs__stack_bounds(uintptr_t *lo_out, size_t *size_out) {
 
 /* ------------------------------ Both backends ---------------------------- */
 
+#if defined(_MSC_VER)
+#  define DVS__TLS __declspec(thread)
+#else
+#  define DVS__TLS _Thread_local
+#endif
+
+/* A thread's stack bounds don't change, so look them up once per thread.
+ * On Linux the main thread's lookup (pthread_getattr_np) opens and parses
+ * /proc/self/maps: ~200 us in a Python process with a few hundred mappings,
+ * which dvs_sv_elaborate paid on every compile. */
+static int dvs__stack_bounds_cached(uintptr_t *lo, size_t *size) {
+    static DVS__TLS int known;          /* 0 not looked up, 1 found, -1 unknown */
+    static DVS__TLS uintptr_t c_lo;
+    static DVS__TLS size_t c_size;
+    if (!known)
+        known = dvs__stack_bounds(&c_lo, &c_size) ? 1 : -1;
+    *lo = c_lo;
+    *size = c_size;
+    return known == 1;
+}
+
 uintptr_t dvs_stack_floor(size_t margin) {
     uintptr_t lo;
     size_t size;
-    if (!dvs__stack_bounds(&lo, &size) || size <= margin) return 0;
+    if (!dvs__stack_bounds_cached(&lo, &size) || size <= margin) return 0;
     return lo + margin;
 }
 
 size_t dvs_stack_size(void) {
     uintptr_t lo;
     size_t size;
-    return dvs__stack_bounds(&lo, &size) ? size : 0;
+    return dvs__stack_bounds_cached(&lo, &size) ? size : 0;
 }
