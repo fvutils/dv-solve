@@ -425,6 +425,11 @@ target_link_libraries(test_growable_tables PRIVATE dv_solve)
 target_include_directories(test_growable_tables PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_growable_tables COMMAND test_growable_tables)
 
+add_executable(test_clause_arena tests/c/test_clause_arena.c)
+target_link_libraries(test_clause_arena PRIVATE dv_solve)
+target_include_directories(test_clause_arena PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_clause_arena COMMAND test_clause_arena)
+
 # The segmented pool at the default slot size, and at 256-byte slots so the
 # test's allocations cross slots and take the large-object path constantly.
 add_executable(test_dvs_spool tests/c/test_dvs_spool.c src/c/dvs_spool.c src/c/dvs_block_alloc.c)

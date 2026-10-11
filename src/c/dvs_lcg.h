@@ -24,6 +24,7 @@
 
 #include <stdint.h>
 #include "dvs_alloc.h"
+#include "dvs_spool.h"
 #include "dvs_propagator.h"  /* PropResult */
 
 #ifdef __cplusplus
@@ -111,10 +112,11 @@ typedef struct {
      * here, so they grow with the context (lcg_reserve_vars). */
     dvs_alloc_t *alloc;
 
-    /* Allocation arena for clauses and watch entries */
-    uint8_t  *arena;
-    uint32_t  arena_used;
-    uint32_t  arena_cap;
+    /* Allocation arena for clauses and watch entries. Clauses and watch
+     * entries are held by pointer, so it grows in segments that never move
+     * (dvs_spool_t); lcg_reset empties it back to arena_empty. */
+    dvs_spool_t      arena;
+    dvs_spool_mark_t arena_empty;
 
     /* Statistics */
     uint64_t  n_propagations;

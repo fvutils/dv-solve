@@ -50,8 +50,20 @@ EXPR_COUNTONES = 11
 EXPR_CLOG2 = 12
 EXPR_ARRAY_SELECT = 13
 
-# Default buffer size for a SolveProblem (64 KiB)
-_SP_BUF_SIZE = 65536
+# Initial buffer size for a SolveProblem; it grows as needed.
+_SP_BUF_SIZE = 4096
+_HELD = 1          # pool flags: a context compiled it (DVS_PROBLEM_HELD)
+
+
+class _ProblemHeader(ctypes.Structure):
+    """The head of a dvs_problem_t (dvs_problem.h): its fields, then its
+    pool's header. Offsets in the pool are relative to the pool, so the whole
+    buffer can be copied into a bigger one."""
+    _fields_ = [(n, ctypes.c_uint32) for n in (
+        "n_vars", "n_constraints", "n_sources", "vars_head", "constraints_head",
+        "sources_head", "n_alldiffs", "allDiff_head", "n_softs", "softs_head",
+        "n_dists", "dists_head", "next_constraint_id", "flags",
+        "pool_capacity", "pool_used", "pool_overflow", "pool_flags")]
 
 
 class DistEntry(ctypes.Structure):
@@ -69,8 +81,10 @@ class SolveProblem:
     """Thin ctypes wrapper around the C ``SolveProblem`` API.
 
     The buffer backing the problem is kept alive for the lifetime of
-    this object.  Call ``reset()`` to reuse the buffer for a fresh
-    problem.
+    this object, and grows (moves to a bigger buffer) when an addition does
+    not fit. Once a :class:`~dv_solve.ctx.SolveCtx` has compiled the problem
+    it can no longer move: an addition that needs more room raises.
+    Call ``reset()`` to reuse the buffer for a fresh problem.
     """
 
     def __init__(self, buf_size: int = _SP_BUF_SIZE) -> None:
@@ -88,6 +102,29 @@ class SolveProblem:
         """Reset the problem in place (clears all vars/constraints)."""
         self._lib.solve_problem_reset(self._sp)
 
+    def _call(self, fn, *args):
+        """Call a builder function on the problem; when it fails because the
+        buffer is full, grow the buffer and call it again."""
+        while True:
+            r = fn(self._sp, *args)
+            hdr = _ProblemHeader.from_buffer(self._buf)
+            if r != EXPR_NULL or not hdr.pool_overflow:
+                return r
+            self._grow(hdr)
+
+    def _grow(self, hdr: "_ProblemHeader") -> None:
+        if hdr.pool_flags & _HELD:
+            raise RuntimeError("SolveProblem is full and a SolveCtx holds it: "
+                               "build the whole problem before compiling it")
+        size = 2 * len(self._buf)
+        buf = (ctypes.c_uint8 * size)()
+        ctypes.memmove(buf, self._buf, ctypes.sizeof(_ProblemHeader) + hdr.pool_used)
+        nh = _ProblemHeader.from_buffer(buf)
+        nh.pool_capacity = size - ctypes.sizeof(_ProblemHeader)
+        nh.pool_overflow = 0
+        self._buf = buf
+        self._sp = ctypes.addressof(buf)
+
     # ------------------------------------------------------------------ #
     # Variable / constraint builders                                       #
     # ------------------------------------------------------------------ #
@@ -101,9 +138,7 @@ class SolveProblem:
         hi: int,
     ) -> int:
         """Declare a variable; returns its ExprRef (EXPR_NULL on overflow)."""
-        return self._lib.problem_add_var(
-            self._sp,
-            ctypes.c_uint32(var_id),
+        return self._call(self._lib.problem_add_var, ctypes.c_uint32(var_id),
             ctypes.c_uint16(width),
             ctypes.c_uint8(1 if is_signed else 0),
             ctypes.c_int64(lo),
@@ -112,21 +147,19 @@ class SolveProblem:
 
     def add_constraint(self, root: int) -> int:
         """Add a constraint expression; returns ConstraintSpec ExprRef."""
-        return self._lib.problem_add_constraint(self._sp, ctypes.c_uint32(root))
+        return self._call(self._lib.problem_add_constraint, ctypes.c_uint32(root))
 
     def add_source(self, var_ids: Sequence[int]) -> int:
         """Add a source group."""
         arr = (ctypes.c_uint32 * len(var_ids))(*var_ids)
-        return self._lib.problem_add_source(
-            self._sp, ctypes.c_uint32(len(var_ids)), arr
+        return self._call(self._lib.problem_add_source, ctypes.c_uint32(len(var_ids)), arr
         )
 
 
     def add_all_different(self, var_ids: Sequence[int]) -> int:
         """Add an AllDifferent constraint over the given variable IDs."""
         arr = (ctypes.c_uint32 * len(var_ids))(*var_ids)
-        return self._lib.problem_add_all_different(
-            self._sp, ctypes.c_uint32(len(var_ids)), arr
+        return self._call(self._lib.problem_add_all_different, ctypes.c_uint32(len(var_ids)), arr
         )
 
     def add_at_least_one(self, var_ids: Sequence[int]) -> int:
@@ -163,47 +196,37 @@ class SolveProblem:
             root = self.expr_binary(BIN_OR, root, t)
         return self.add_constraint(root)
     def expr_const(self, value: int, is_signed: bool = False) -> int:
-        return self._lib.expr_const(
-            self._sp, ctypes.c_int64(value), ctypes.c_uint8(1 if is_signed else 0)
+        return self._call(self._lib.expr_const, ctypes.c_int64(value), ctypes.c_uint8(1 if is_signed else 0)
         )
 
     def expr_var(self, var_id: int) -> int:
-        return self._lib.expr_var(self._sp, ctypes.c_uint32(var_id))
+        return self._call(self._lib.expr_var, ctypes.c_uint32(var_id))
 
     def expr_binary(self, op: int, lhs: int, rhs: int) -> int:
-        return self._lib.expr_binary(
-            self._sp,
-            ctypes.c_int32(op),
+        return self._call(self._lib.expr_binary, ctypes.c_int32(op),
             ctypes.c_uint32(lhs),
             ctypes.c_uint32(rhs),
         )
 
     def expr_unary(self, op: int, operand: int) -> int:
-        return self._lib.expr_unary(
-            self._sp, ctypes.c_int32(op), ctypes.c_uint32(operand)
+        return self._call(self._lib.expr_unary, ctypes.c_int32(op), ctypes.c_uint32(operand)
         )
 
     def expr_ite(self, cond: int, then_e: int, else_e: int) -> int:
-        return self._lib.expr_ite(
-            self._sp,
-            ctypes.c_uint32(cond),
+        return self._call(self._lib.expr_ite, ctypes.c_uint32(cond),
             ctypes.c_uint32(then_e),
             ctypes.c_uint32(else_e),
         )
 
     def expr_in_range(self, value: int, lo: int, hi: int) -> int:
-        return self._lib.expr_in_range(
-            self._sp,
-            ctypes.c_uint32(value),
+        return self._call(self._lib.expr_in_range, ctypes.c_uint32(value),
             ctypes.c_uint32(lo),
             ctypes.c_uint32(hi),
         )
 
     def expr_in_set(self, value: int, elems: Sequence[int]) -> int:
         arr = (ctypes.c_uint32 * len(elems))(*elems)
-        return self._lib.expr_in_set(
-            self._sp,
-            ctypes.c_uint32(value),
+        return self._call(self._lib.expr_in_set, ctypes.c_uint32(value),
             ctypes.c_uint32(len(elems)),
             arr,
         )
@@ -215,9 +238,7 @@ class SolveProblem:
         to_bits: int,
         sign_extend: bool = False,
     ) -> int:
-        return self._lib.expr_extend(
-            self._sp,
-            ctypes.c_uint32(operand),
+        return self._call(self._lib.expr_extend, ctypes.c_uint32(operand),
             ctypes.c_uint16(from_bits),
             ctypes.c_uint16(to_bits),
             ctypes.c_uint8(1 if sign_extend else 0),
@@ -233,23 +254,18 @@ class SolveProblem:
         value is then truncated to ``to_bits``, or extended by the operand's
         own signedness, and read as signed or unsigned.
         """
-        return self._lib.expr_cast(
-            self._sp, ctypes.c_uint32(operand), ctypes.c_uint16(to_bits),
+        return self._call(self._lib.expr_cast, ctypes.c_uint32(operand), ctypes.c_uint16(to_bits),
             ctypes.c_uint8(1 if to_signed else 0),
         )
 
     def expr_extract(self, operand: int, hi_bit: int, lo_bit: int) -> int:
-        return self._lib.expr_extract(
-            self._sp,
-            ctypes.c_uint32(operand),
+        return self._call(self._lib.expr_extract, ctypes.c_uint32(operand),
             ctypes.c_uint16(hi_bit),
             ctypes.c_uint16(lo_bit),
         )
 
     def expr_concat(self, hi: int, lo: int, lo_width: int) -> int:
-        return self._lib.expr_concat(
-            self._sp,
-            ctypes.c_uint32(hi),
+        return self._call(self._lib.expr_concat, ctypes.c_uint32(hi),
             ctypes.c_uint32(lo),
             ctypes.c_uint16(lo_width),
         )
@@ -257,8 +273,7 @@ class SolveProblem:
     def add_soft_constraint(self, root: int, priority: int = 0) -> int:
         """Add a soft (relaxable) constraint with a priority.
         Higher priority value = lower priority (relaxed first on conflict)."""
-        return self._lib.problem_add_soft_constraint(
-            self._sp, ctypes.c_uint32(root), ctypes.c_uint32(priority)
+        return self._call(self._lib.problem_add_soft_constraint, ctypes.c_uint32(root), ctypes.c_uint32(priority)
         )
 
     def add_dist(self, var_id: int, entries: Sequence[dict]) -> int:
@@ -274,9 +289,7 @@ class SolveProblem:
             arr[i].hi = e["hi"]
             arr[i].weight = e["weight"]
             arr[i].is_per_value = 1 if e.get("is_per_value", True) else 0
-        return self._lib.problem_add_dist(
-            self._sp,
-            ctypes.c_uint32(var_id),
+        return self._call(self._lib.problem_add_dist, ctypes.c_uint32(var_id),
             ctypes.c_uint32(len(entries)),
             arr,
         )

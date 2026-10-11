@@ -98,13 +98,13 @@ int clause_db_init_alloc(ClauseDB *db, uint32_t n_vars, dvs_alloc_t *alloc) {
         return -1;
     }
 
-    db->arena_cap = 1u << 22;  /* 4 MiB arena (no realloc) */
-    db->arena = (uint8_t *)malloc(db->arena_cap);
-    if (!db->arena) {
+    /* Grows as learning needs; it used to be a fixed 4 MiB, and learning
+     * silently stopped once that filled. */
+    if (dvs_spool_init(&db->arena, NULL, 0, alloc) != 0) {
         clause_db_destroy(db);
         return -1;
     }
-    db->arena_used = 0;
+    db->arena_empty = dvs_spool_mark(&db->arena);
 
     return 0;
 }
@@ -116,21 +116,14 @@ void clause_db_destroy(ClauseDB *db) {
         _afree(db->alloc, db->watch_ub, db->n_watch_vars * sizeof(WatchEntry *));
         _afree(db->alloc, db->pend, db->pend_cap * sizeof(uint32_t));
     }
-    free(db->arena);
+    if (db->arena.seg) dvs_spool_destroy(&db->arena);
     memset(db, 0, sizeof(*db));
 }
 
 /* Arena allocator for clauses and watch entries */
 static void *_arena_alloc(ClauseDB *db, uint32_t size, uint32_t align) {
-    uint32_t off = (db->arena_used + align - 1) & ~(align - 1);
-    if (off + size > db->arena_cap) {
-        /* Arena full: cannot grow without invalidating pointers.
-         * Return NULL; caller should GC or give up. */
-        return NULL;
-    }
-    void *ptr = db->arena + off;
-    db->arena_used = off + size;
-    return ptr;
+    uint32_t ref = dvs_spool_alloc(&db->arena, size, align);
+    return ref == EXPR_NULL ? NULL : dvs_spool_ptr(&db->arena, ref);
 }
 
 /* Add a watch entry for a literal in a clause */
@@ -331,7 +324,7 @@ void lcg_reset(LCGCtx *lcg) {
     db->n_clauses = 0;
     if (db->watch_lb) memset(db->watch_lb, 0, db->n_watch_vars * sizeof(WatchEntry *));
     if (db->watch_ub) memset(db->watch_ub, 0, db->n_watch_vars * sizeof(WatchEntry *));
-    db->arena_used     = 0;
+    dvs_spool_release(&db->arena, db->arena_empty);
     db->n_pend         = 0;
     db->pend_over      = 0;
     db->n_propagations = 0;
@@ -350,7 +343,7 @@ void lcg_reset(LCGCtx *lcg) {
 
 int lcg_is_pristine(const LCGCtx *lcg) {
     return lcg->n_analyses == 0 && lcg->clause_db.n_clauses == 0 &&
-           lcg->clause_db.arena_used == 0;
+           dvs_spool_used(&lcg->clause_db.arena) == lcg->clause_db.arena_empty.top;
 }
 
 void lcg_destroy(LCGCtx *lcg) {
