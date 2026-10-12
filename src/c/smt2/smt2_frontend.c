@@ -3672,11 +3672,14 @@ static int _add_sort_const(Smt2Frontend *fe, const Sexpr *name_s,
 
 static uint64_t _fp_mix(uint64_t h, const uint8_t *d, size_t n);
 
-/* A name visible as a constant, array or function (scoped by push/pop). */
+/* A name visible as a constant, array or function (scoped by push/pop),
+ * including sort-typed constants and functions (B116). */
 static int _declared(Smt2Frontend *fe, const Sexpr *name) {
     return _find_var(fe, name->sym.str, name->sym.len) != NULL
         || _find_array_var(fe, name->sym.str, name->sym.len) != NULL
-        || _find_fun(fe, name->sym.str, name->sym.len) != NULL;
+        || _find_fun(fe, name->sym.str, name->sym.len) != NULL
+        || _find_sort_fun(fe, name->sym.str, name->sym.len) != NULL
+        || _find_sort_const(fe, name->sym.str, name->sym.len) != NULL;
 }
 
 static int _cmd_declare_const(Smt2Frontend *fe, const Sexpr *cmd) {
@@ -7399,6 +7402,9 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->push_n_checked[fe->push_depth] = fe->n_checked;
             fe->push_n_funs[fe->push_depth] = fe->n_funs;
             fe->push_n_sort_aliases[fe->push_depth] = fe->n_sort_aliases;
+            fe->push_n_sort_names[fe->push_depth] = fe->n_sort_names;
+            fe->push_n_sort_funs[fe->push_depth] = fe->n_sort_funs;
+            fe->push_n_sort_consts[fe->push_depth] = fe->n_sort_consts;
             fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
             _abs_push_frame(fe, fe->push_depth);
             fe->push_bmark[fe->push_depth] = dvs_builder_mark(fe->builder);
@@ -7428,6 +7434,9 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
         fe->push_n_checked[fe->push_depth - 1] = fe->n_checked;
         fe->push_n_funs[fe->push_depth - 1] = fe->n_funs;
         fe->push_n_sort_aliases[fe->push_depth - 1] = fe->n_sort_aliases;
+        fe->push_n_sort_names[fe->push_depth - 1] = fe->n_sort_names;
+        fe->push_n_sort_funs[fe->push_depth - 1] = fe->n_sort_funs;
+        fe->push_n_sort_consts[fe->push_depth - 1] = fe->n_sort_consts;
         fe->push_incomplete[fe->push_depth - 1] = (uint8_t)fe->incomplete;
         _abs_push_frame(fe, fe->push_depth - 1);
         fe->push_bmark[fe->push_depth - 1] = dvs_builder_mark(fe->builder);
@@ -7585,6 +7594,12 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
         }
         if (fe->n_sort_aliases > fe->push_n_sort_aliases[fe->push_depth])
             fe->n_sort_aliases = fe->push_n_sort_aliases[fe->push_depth];
+        if (fe->n_sort_names > fe->push_n_sort_names[fe->push_depth])
+            fe->n_sort_names = fe->push_n_sort_names[fe->push_depth];
+        if (fe->n_sort_funs > fe->push_n_sort_funs[fe->push_depth])
+            fe->n_sort_funs = fe->push_n_sort_funs[fe->push_depth];
+        if (fe->n_sort_consts > fe->push_n_sort_consts[fe->push_depth])
+            fe->n_sort_consts = fe->push_n_sort_consts[fe->push_depth];
     }
     return 0;
 }

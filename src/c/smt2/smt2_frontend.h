@@ -573,6 +573,9 @@ typedef struct {
     uint32_t             push_n_checked[32];
     uint32_t             push_n_funs[32];          /* define-fun is scoped too (B82) */
     uint32_t             push_n_sort_aliases[32];  /* and define-sort */
+    uint32_t             push_n_sort_names[32];    /* and declare-sort, and */
+    uint32_t             push_n_sort_funs[32];     /* sort-typed declarations */
+    uint32_t             push_n_sort_consts[32];   /* (B116) */
     dvs_builder_mark_t   push_bmark[32];     /* builder position at each push */
     uint8_t              push_incomplete[32];  /* `incomplete` at each push */
     uint32_t             push_n_anodes[32];    /* abstract-array state at each push */
