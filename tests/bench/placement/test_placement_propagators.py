@@ -322,6 +322,50 @@ class TestNoOverlap2D:
         _cleanup(lib, ba)
 
 
+    def test_many_rects(self):
+        """100 rects: past the old fixed limit of 64 (the propagator is now
+        sized to its rectangle count)."""
+        lib = _get_lib()
+        n = 100
+        # vars 0..n-1 = x, n..2n-1 = y, on a 40x40 canvas of 3x3 rects
+        ctx, ba, ctx_buf, sp_buf = _make_ctx(
+            lib, 2 * n, [(i, 32, 0, 0, 37) for i in range(2 * n)])
+        rects = (CRectSpec * n)()
+        for i in range(n):
+            rects[i] = CRectSpec(x_id=i, y_id=n + i, width=3, height=3,
+                                 halo_l=0, halo_r=0, halo_t=0, halo_b=0)
+        ref = lib.prop_add_no_overlap_2d(ctx, ctypes.c_uint32(n),
+                                          rects, ctypes.c_uint8(2))
+        assert ref != 0xFFFFFFFF
+        sopts = _SolveOpts(seed=42, max_conflicts=1000, max_restarts=1000)
+        assert lib.dvs_solver_solve(ctx, ctypes.byref(sopts)) == 0
+        pos = [(lib.dvs_solver_get_value(ctx, ctypes.c_uint32(i)),
+                lib.dvs_solver_get_value(ctx, ctypes.c_uint32(n + i)))
+               for i in range(n)]
+        for i in range(n):
+            for j in range(i + 1, n):
+                (xi, yi), (xj, yj) = pos[i], pos[j]
+                assert (xi + 3 <= xj or xj + 3 <= xi or
+                        yi + 3 <= yj or yj + 3 <= yi), (i, j, pos[i], pos[j])
+        _cleanup(lib, ba)
+
+    def test_many_rects_overfull(self):
+        """101 unit rects cannot fit a 10x10 canvas (area check, n > 64)."""
+        lib = _get_lib()
+        n = 101
+        ctx, ba, ctx_buf, sp_buf = _make_ctx(
+            lib, 2 * n, [(i, 32, 0, 0, 9) for i in range(2 * n)])
+        rects = (CRectSpec * n)()
+        for i in range(n):
+            rects[i] = CRectSpec(x_id=i, y_id=n + i, width=1, height=1,
+                                 halo_l=0, halo_r=0, halo_t=0, halo_b=0)
+        lib.prop_add_no_overlap_2d(ctx, ctypes.c_uint32(n),
+                                    rects, ctypes.c_uint8(2))
+        sopts = _SolveOpts(seed=42, max_conflicts=100, max_restarts=100)
+        assert lib.dvs_solver_solve(ctx, ctypes.byref(sopts)) != 0
+        _cleanup(lib, ba)
+
+
 # ------------------------------------------------------------------ #
 # Optimization tests                                                  #
 # ------------------------------------------------------------------ #

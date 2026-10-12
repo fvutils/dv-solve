@@ -70,7 +70,8 @@ uint32_t prop_add_max_of_n_32(dvs_ctx_t *ctx, uint32_t result_id,
 /*   y_j + h_j <= y_i   (j above i)                                  */
 /* ================================================================== */
 
-#define MAX_NOOVERLAP2D_RECTS 64u
+/* Rectangle indices are recorded in 16 bits (pair tracking). */
+#define MAX_NOOVERLAP2D_RECTS 65535u
 
 typedef struct {
     uint32_t x_id;    /* variable for x position */
@@ -83,19 +84,16 @@ typedef struct {
     int32_t  halo_b;  /* halo: extra spacing bottom */
 } RectSpec;
 
+/* Sized to its rectangle count. Wide-watch layout (dvs_propagate.c):
+ * hdr, n_vars, _capacity, var_ids[2n], watcher_nexts[2n]; then
+ * RectSpec rects[n] and uint32_t last_pair[4n], the LCG pair tracking:
+ * which pair (i,j) last tightened each bound, index rect * 4 + (2 if y) +
+ * (1 if upper), entry (i << 16) | j, or 0xFFFFFFFF if unknown. */
 typedef struct {
     Propagator    hdr;
-    uint32_t      n_vars;       /* 2 * n_rects (for wide-watch compat) */
-    uint32_t      _capacity;
-    uint32_t      var_ids[MAX_NOOVERLAP2D_RECTS * 2];
-    uint32_t      watcher_nexts[MAX_NOOVERLAP2D_RECTS * 2];
-    uint32_t      n_rects;      /* actual rectangle count */
-    uint32_t      _rpad;
-    RectSpec      rects[MAX_NOOVERLAP2D_RECTS];
-    /* LCG pair tracking: records which pair (i,j) last tightened
-     * each variable's bound. Index = rect_idx * 2 + (0=LB, 1=UB).
-     * Each entry: (pair_i << 8) | pair_j, or 0xFFFF if unknown. */
-    uint16_t      last_pair[MAX_NOOVERLAP2D_RECTS * 2 * 2];
+    uint32_t      n_vars;       /* 2 * n_rects */
+    uint32_t      _capacity;    /* == n_vars */
+    uint32_t      var_ids[];    /* then the arrays above */
 } NoOverlap2D_t;
 
 /**

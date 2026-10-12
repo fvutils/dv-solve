@@ -246,17 +246,29 @@ static int32_t _eff_h(const RectSpec *r) { return r->height + r->halo_t + r->hal
 static int32_t _eff_x_off(const RectSpec *r) { return -r->halo_l; }
 static int32_t _eff_y_off(const RectSpec *r) { return -r->halo_t; }
 
+static uint32_t _no_n(const NoOverlap2D_t *no) { return no->n_vars / 2u; }
+static RectSpec *_no_rects(const NoOverlap2D_t *no) {
+    return (RectSpec *)(no->var_ids + 2u * no->_capacity);
+}
+static uint32_t *_no_last_pair(const NoOverlap2D_t *no) {
+    return (uint32_t *)(_no_rects(no) + _no_n(no));
+}
+static size_t _no_size(uint32_t n) {
+    return sizeof(NoOverlap2D_t) + (size_t)n * (4u * sizeof(uint32_t)
+           + sizeof(RectSpec) + 4u * sizeof(uint32_t));
+}
+
 /* Record which pair (i,j) caused a tightening for LCG explain */
 static void _record_pair(NoOverlap2D_t *no, uint32_t var_id,
                           uint8_t is_lb, uint32_t pi, uint32_t pj) {
     /* Find the rect index for this variable */
-    for (uint32_t r = 0; r < no->n_rects; r++) {
-        if (no->rects[r].x_id == var_id || no->rects[r].y_id == var_id) {
+    const RectSpec *rects = _no_rects(no);
+    for (uint32_t r = 0, n = _no_n(no); r < n; r++) {
+        if (rects[r].x_id == var_id || rects[r].y_id == var_id) {
             uint32_t slot = r * 4;
-            if (no->rects[r].y_id == var_id) slot += 2;
+            if (rects[r].y_id == var_id) slot += 2;
             if (!is_lb) slot += 1;
-            if (slot < MAX_NOOVERLAP2D_RECTS * 4)
-                no->last_pair[slot] = (uint16_t)((pi << 8) | pj);
+            _no_last_pair(no)[slot] = (pi << 16) | pj;
             return;
         }
     }
@@ -265,15 +277,16 @@ static void _record_pair(NoOverlap2D_t *no, uint32_t var_id,
 /* Look up the pair that caused a tightening */
 static int _lookup_pair(const NoOverlap2D_t *no, uint32_t var_id,
                          uint8_t is_lb, uint32_t *out_i, uint32_t *out_j) {
-    for (uint32_t r = 0; r < no->n_rects; r++) {
-        if (no->rects[r].x_id == var_id || no->rects[r].y_id == var_id) {
+    const RectSpec *rects = _no_rects(no);
+    const uint32_t *last_pair = _no_last_pair(no);
+    for (uint32_t r = 0, n = _no_n(no); r < n; r++) {
+        if (rects[r].x_id == var_id || rects[r].y_id == var_id) {
             uint32_t slot = r * 4;
-            if (no->rects[r].y_id == var_id) slot += 2;
+            if (rects[r].y_id == var_id) slot += 2;
             if (!is_lb) slot += 1;
-            if (slot < MAX_NOOVERLAP2D_RECTS * 4 &&
-                no->last_pair[slot] != 0xFFFF) {
-                *out_i = no->last_pair[slot] >> 8;
-                *out_j = no->last_pair[slot] & 0xFF;
+            if (last_pair[slot] != 0xFFFFFFFFu) {
+                *out_i = last_pair[slot] >> 16;
+                *out_j = last_pair[slot] & 0xFFFFu;
                 return 0;
             }
             return -1;
@@ -286,7 +299,8 @@ static int _explain_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx,
                                    uint32_t var_id, uint8_t is_lb,
                                    int64_t new_bound, Explanation *out) {
     NoOverlap2D_t *no = (NoOverlap2D_t *)self;
-    uint32_t nr = no->n_rects;
+    uint32_t nr = _no_n(no);
+    const RectSpec *rects = _no_rects(no);
     out->n_lits = 0;
 
     /* Conflict explanation (var_id == UINT32_MAX):  find the conflicting
@@ -310,7 +324,7 @@ static int _explain_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx,
          * These are all TRUE right now and their conjunction causes
          * the conflict.  The resolution process will negate them. */
         for (uint32_t i = 0; i < nr; i++) {
-            const RectSpec *ri = &no->rects[i];
+            const RectSpec *ri = &rects[i];
             int32_t xi_lo = (int32_t)var_lo64(ctx, &ctx->vars[ri->x_id]);
             int32_t xi_hi = (int32_t)var_hi64(ctx, &ctx->vars[ri->x_id]);
             int32_t yi_lo = (int32_t)var_lo64(ctx, &ctx->vars[ri->y_id]);
@@ -319,7 +333,7 @@ static int _explain_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx,
             int32_t exi = _eff_x_off(ri), eyi = _eff_y_off(ri);
 
             for (uint32_t j = i + 1; j < nr; j++) {
-                const RectSpec *rj = &no->rects[j];
+                const RectSpec *rj = &rects[j];
                 int32_t xj_lo = (int32_t)var_lo64(ctx, &ctx->vars[rj->x_id]);
                 int32_t xj_hi = (int32_t)var_hi64(ctx, &ctx->vars[rj->x_id]);
                 int32_t yj_lo = (int32_t)var_lo64(ctx, &ctx->vars[rj->y_id]);
@@ -375,8 +389,8 @@ static int _explain_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx,
 
         /* Use the recorded pair for explanation */
         uint32_t i = pi, j = pj;
-        const RectSpec *ri = &no->rects[i];
-        const RectSpec *rj = &no->rects[j];
+        const RectSpec *ri = &rects[i];
+        const RectSpec *rj = &rects[j];
         {
 
             int32_t xi_lo = (int32_t)var_lo64(ctx, &ctx->vars[ri->x_id]);
@@ -490,19 +504,28 @@ static int _explain_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx,
     return (out->n_lits > 0) ? 0 : -1;
 }
 
+/* Rectangles whose fire scratch fits on the stack. */
+#define NO_STACK_RECTS 64u
+
+static PropResult _no_energetic(dvs_ctx_t *ctx, const RectSpec *rects, uint32_t nr,
+                                int32_t *my_lo, int32_t *my_hi,
+                                int32_t *mx_lo, int32_t *mx_hi,
+                                int32_t *y_endpoints, int32_t *x_endpoints);
+
 static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
     NoOverlap2D_t *no = (NoOverlap2D_t *)self;
-    uint32_t nr = no->n_rects;  /* actual rect count (not n_vars) */
+    uint32_t nr = _no_n(no);
+    const RectSpec *rects = _no_rects(no);
     PropResult res;
 
     /* Clear pair tracking: only record pairs from THIS propagation round.
      * Stale entries from before backtracking would produce wrong explains. */
-    memset(no->last_pair, 0xFF, sizeof(no->last_pair));
+    memset(_no_last_pair(no), 0xFF, (size_t)nr * 4u * sizeof(uint32_t));
 
     /* For each pair, check which separation directions remain feasible.
      * If only one remains, enforce it. */
     for (uint32_t i = 0; i < nr; i++) {
-        const RectSpec *ri = &no->rects[i];
+        const RectSpec *ri = &rects[i];
         int32_t xi_lo = (int32_t)var_lo64(ctx, &ctx->vars[ri->x_id]);
         int32_t xi_hi = (int32_t)var_hi64(ctx, &ctx->vars[ri->x_id]);
         int32_t yi_lo = (int32_t)var_lo64(ctx, &ctx->vars[ri->y_id]);
@@ -513,7 +536,7 @@ static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
         int32_t eyi_off = _eff_y_off(ri);
 
         for (uint32_t j = i + 1; j < nr; j++) {
-            const RectSpec *rj = &no->rects[j];
+            const RectSpec *rj = &rects[j];
             int32_t xj_lo = (int32_t)var_lo64(ctx, &ctx->vars[rj->x_id]);
             int32_t xj_hi = (int32_t)var_hi64(ctx, &ctx->vars[rj->x_id]);
             int32_t yj_lo = (int32_t)var_lo64(ctx, &ctx->vars[rj->y_id]);
@@ -576,7 +599,7 @@ static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
      * the canvas, conflict. We approximate with the global bounding box. */
     int32_t global_x_lo = INT32_MAX, global_x_hi = INT32_MIN;
     for (uint32_t i = 0; i < nr; i++) {
-        const RectSpec *ri = &no->rects[i];
+        const RectSpec *ri = &rects[i];
         int32_t lo = (int32_t)var_lo64(ctx, &ctx->vars[ri->x_id]) + _eff_x_off(ri);
         int32_t hi = (int32_t)var_hi64(ctx, &ctx->vars[ri->x_id]) + _eff_x_off(ri) + _eff_w(ri);
         if (lo < global_x_lo) global_x_lo = lo;
@@ -584,7 +607,7 @@ static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
     }
     int32_t global_y_lo = INT32_MAX, global_y_hi = INT32_MIN;
     for (uint32_t i = 0; i < nr; i++) {
-        const RectSpec *ri = &no->rects[i];
+        const RectSpec *ri = &rects[i];
         int32_t lo = (int32_t)var_lo64(ctx, &ctx->vars[ri->y_id]) + _eff_y_off(ri);
         int32_t hi = (int32_t)var_hi64(ctx, &ctx->vars[ri->y_id]) + _eff_y_off(ri) + _eff_h(ri);
         if (lo < global_y_lo) global_y_lo = lo;
@@ -594,7 +617,7 @@ static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
     /* Check: total mandatory area cannot exceed bounding box area */
     int64_t total_area = 0;
     for (uint32_t i = 0; i < nr; i++) {
-        total_area += (int64_t)_eff_w(&no->rects[i]) * (int64_t)_eff_h(&no->rects[i]);
+        total_area += (int64_t)_eff_w(&rects[i]) * (int64_t)_eff_h(&rects[i]);
     }
     int64_t bbox_area = (int64_t)(global_x_hi - global_x_lo) *
                         (int64_t)(global_y_hi - global_y_lo);
@@ -617,15 +640,31 @@ static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
      * this is O(n^2) which is dominated by the pairwise check above.
      */
 
-    /* Precompute mandatory intervals for each rect */
-    int32_t my_lo[MAX_NOOVERLAP2D_RECTS], my_hi[MAX_NOOVERLAP2D_RECTS];
-    int32_t mx_lo[MAX_NOOVERLAP2D_RECTS], mx_hi[MAX_NOOVERLAP2D_RECTS];
-    int32_t y_endpoints[MAX_NOOVERLAP2D_RECTS * 2];
-    int32_t x_endpoints[MAX_NOOVERLAP2D_RECTS * 2];
+    /* Precompute mandatory intervals for each rect: 8n int32 of scratch,
+     * on the stack up to NO_STACK_RECTS rectangles. */
+    int32_t stack_buf[8u * NO_STACK_RECTS];
+    int32_t *buf = stack_buf;
+    if (nr > NO_STACK_RECTS) {
+        buf = (int32_t *)DVS_ALLOC(ctx->alloc, (size_t)nr * 8u * sizeof(int32_t));
+        if (!buf) return PROP_OK;   /* skip the (optional) overload check */
+    }
+    int32_t *my_lo = buf, *my_hi = buf + nr, *mx_lo = buf + 2u * nr, *mx_hi = buf + 3u * nr;
+    int32_t *y_endpoints = buf + 4u * nr, *x_endpoints = buf + 6u * nr;
+    PropResult er = _no_energetic(ctx, rects, nr, my_lo, my_hi, mx_lo, mx_hi,
+                                  y_endpoints, x_endpoints);
+    if (buf != stack_buf) DVS_RELEASE(ctx->alloc, buf, (size_t)nr * 8u * sizeof(int32_t));
+    return er;
+}
+
+/* The energetic overload check and entailment test of _fire_no_overlap_2d. */
+static PropResult _no_energetic(dvs_ctx_t *ctx, const RectSpec *rects, uint32_t nr,
+                                int32_t *my_lo, int32_t *my_hi,
+                                int32_t *mx_lo, int32_t *mx_hi,
+                                int32_t *y_endpoints, int32_t *x_endpoints) {
     uint32_t n_y_ep = 0, n_x_ep = 0;
 
     for (uint32_t i = 0; i < nr; i++) {
-        const RectSpec *ri = &no->rects[i];
+        const RectSpec *ri = &rects[i];
         int32_t yi_lo_pos = (int32_t)var_lo64(ctx, &ctx->vars[ri->y_id]);
         int32_t yi_hi_pos = (int32_t)var_hi64(ctx, &ctx->vars[ri->y_id]);
         my_lo[i] = yi_hi_pos + _eff_y_off(ri);
@@ -685,8 +724,8 @@ static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
         for (uint32_t i = 0; i < nr; i++) {
             /* Does rect i's mandatory Y interval contain this strip? */
             if (my_lo[i] <= strip_lo && my_hi[i] >= strip_hi) {
-                x_demand += (int64_t)_eff_w(&no->rects[i]);
-                const RectSpec *ri = &no->rects[i];
+                x_demand += (int64_t)_eff_w(&rects[i]);
+                const RectSpec *ri = &rects[i];
                 int32_t xlo = (int32_t)var_lo64(ctx, &ctx->vars[ri->x_id]) + _eff_x_off(ri);
                 int32_t xhi = (int32_t)var_hi64(ctx, &ctx->vars[ri->x_id]) + _eff_x_off(ri) + _eff_w(ri);
                 if (xlo < x_lo_min) x_lo_min = xlo;
@@ -711,8 +750,8 @@ static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
 
         for (uint32_t i = 0; i < nr; i++) {
             if (mx_lo[i] <= strip_lo && mx_hi[i] >= strip_hi) {
-                y_demand += (int64_t)_eff_h(&no->rects[i]);
-                const RectSpec *ri = &no->rects[i];
+                y_demand += (int64_t)_eff_h(&rects[i]);
+                const RectSpec *ri = &rects[i];
                 int32_t ylo = (int32_t)var_lo64(ctx, &ctx->vars[ri->y_id]) + _eff_y_off(ri);
                 int32_t yhi = (int32_t)var_hi64(ctx, &ctx->vars[ri->y_id]) + _eff_y_off(ri) + _eff_h(ri);
                 if (ylo < y_lo_min) y_lo_min = ylo;
@@ -729,10 +768,10 @@ static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
     /* Entailment: all position vars are singletons */
     int all_fixed = 1;
     for (uint32_t i = 0; i < nr; i++) {
-        int64_t xlo = var_lo64(ctx, &ctx->vars[no->rects[i].x_id]);
-        int64_t xhi = var_hi64(ctx, &ctx->vars[no->rects[i].x_id]);
-        int64_t ylo = var_lo64(ctx, &ctx->vars[no->rects[i].y_id]);
-        int64_t yhi = var_hi64(ctx, &ctx->vars[no->rects[i].y_id]);
+        int64_t xlo = var_lo64(ctx, &ctx->vars[rects[i].x_id]);
+        int64_t xhi = var_hi64(ctx, &ctx->vars[rects[i].x_id]);
+        int64_t ylo = var_lo64(ctx, &ctx->vars[rects[i].y_id]);
+        int64_t yhi = var_hi64(ctx, &ctx->vars[rects[i].y_id]);
         if (xlo != xhi || ylo != yhi) {
             all_fixed = 0;
             break;
@@ -748,12 +787,12 @@ uint32_t prop_add_no_overlap_2d(dvs_ctx_t *ctx, uint32_t n_rects,
     if (n_rects < 2 || n_rects > MAX_NOOVERLAP2D_RECTS) return EXPR_NULL;
 
     if (dvs_ctx_room_prop(ctx) != 0) return EXPR_NULL;  /* prop_refs slot */
-    uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(NoOverlap2D_t), 8u);
+    size_t sz = _no_size(n_rects);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sz, 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     NoOverlap2D_t *no = (NoOverlap2D_t *)dvs_spool_ptr(&ctx->pool, ref);
-    memset(no, 0, sizeof(NoOverlap2D_t));
-    memset(no->last_pair, 0xFF, sizeof(no->last_pair));
+    memset(no, 0, sz);
 
     no->hdr.fire       = _fire_no_overlap_2d;
     no->hdr.explain    = NULL;  /* TODO: per-pair trail tracking needed for sound explains */
@@ -761,13 +800,13 @@ uint32_t prop_add_no_overlap_2d(dvs_ctx_t *ctx, uint32_t n_rects,
     no->hdr.prop_id    = (uint16_t)ctx->n_props++;
     no->hdr.priority   = priority;
     no->hdr.flags      = PROP_FLAG_WIDE_WATCH;
-    no->n_vars         = 2 * n_rects;  /* wide-watch: n_vars for var_ids count */
-    no->_capacity      = MAX_NOOVERLAP2D_RECTS * 2;
-    no->n_rects        = n_rects;      /* actual rectangle count */
-    no->_rpad          = 0;
+    no->n_vars         = 2 * n_rects;
+    no->_capacity      = 2 * n_rects;
+    memset(_no_last_pair(no), 0xFF, (size_t)n_rects * 4u * sizeof(uint32_t));
 
+    RectSpec *nrects = _no_rects(no);
     for (uint32_t i = 0; i < n_rects; i++) {
-        no->rects[i] = rects[i];
+        nrects[i] = rects[i];
         no->var_ids[2 * i]     = rects[i].x_id;
         no->var_ids[2 * i + 1] = rects[i].y_id;
     }
@@ -775,7 +814,7 @@ uint32_t prop_add_no_overlap_2d(dvs_ctx_t *ctx, uint32_t n_rects,
     uint32_t n_watches = 2 * n_rects;
     for (uint32_t i = 0; i < n_watches; i++) {
         uint32_t vid = no->var_ids[i];
-        no->watcher_nexts[i]    = ctx->watcher_heads[vid];
+        no->var_ids[no->_capacity + i] = ctx->watcher_heads[vid];  /* watcher_nexts */
         ctx->watcher_heads[vid] = ref;
     }
 
