@@ -3,7 +3,8 @@
 Tracking document. Design and rationale: `docs/dynamic_pool_design.md`.
 
 - **Started:** 2026-10-11
-- **Status:** P0–P4 implemented and gated, 2026-10-11 (see Log). Not merged to `main`.
+- **Status:** P0–P4 implemented and gated, 2026-10-11 (see Log). Follow-ups
+  2026-10-12: six of nine done (see Follow-ups). Not merged to `main`.
 - **Owner:** —
 
 ## Goal
@@ -310,30 +311,95 @@ no new ones. ASan covered by the P3 run below. Perf recorded in the Log.
       3.7 → 6.7 ms; `x inside {...}` holes on the randomize path). The
       links are now pointers (pool memory never moves): 3.1 ms.
 
-## Follow-up (out of scope, tracked here so it isn't lost)
+## Follow-ups (started 2026-10-12)
 
-- Raw `malloc`/`realloc`/`free` outside the context: about 490 call sites
-  in `src/c/dvs_*.c`. The largest are `dvs_bbsolver.c` (88),
-  `dvs_cube.c` (63), `dvs_contradiction.c` (48), `dvs_affine.c` (43),
-  `dvs_sv.c` (33) and `dvs_lcg.c` (33). Move them to `dvs_alloc_t` file by
-  file once P3 lands. SAT backends (kissat/CaDiCaL) are excluded because
-  they own their own memory.
-- The LCG's `clauses` pointer array and its analysis scratch (`mk_ent`,
-  `undo_*`, `learnt_buf`) are still malloc'd.
-- Propagator watcher chains are walked by offset, so each hop pays the
-  slot decode. That is the likely source of the ~1.5% left on the
-  Verilator-protocol bench versus P0. Linking by pointer, as was done for
-  holes, would need the chain unlink in restore to keep each
-  propagator's offset.
-- `Propagator.prop_id` is 16 bits; contexts are capped at 65,535
-  propagators. Widening it costs 8 bytes per propagator.
-- B116 (logged in the bug backlog): a duplicate `declare-fun` of a
-  sort-typed constant is accepted. Pre-existing. It shows as
-  `test_parser_fuzz[21]` failing because the B83 corpus change shifted
-  that seed's mutation.
-- Other fixed capacities: `MAX_CHECKPOINTS 32` (`dvs_ctx.h:51`),
-  `MAX_NOOVERLAP2D_RECTS 64`, and the `Smt2Frontend` inline `funs[8192]`
-  (frontend memset hotspot).
+Worked in this order: correctness first, then fixed limits a hosted user
+can hit, then memory, then performance.
+
+- [x] **B116** (logged in the bug backlog): a duplicate `declare-fun` of a
+      sort-typed constant was accepted. Pre-existing; it showed as
+      `test_parser_fuzz[21]` failing because the B83 corpus change shifted
+      that seed's mutation. Fixed: sort-typed declarations are checked for
+      redeclaration and scoped by push/pop.
+- [x] **Checkpoint depth.** `MAX_CHECKPOINTS 32` was a fixed array in the
+      context header, and the SMT2 front end kept 17 parallel `[32]` push
+      arrays, so a 33rd nested `(push)` was an error. Now:
+  - [x] `ctx->checkpoints` is an array from `ctx->alloc`, doubled on
+        demand, up to `DVS_MAX_CHECKPOINTS` (trail entries record their
+        level in 16 bits). A fixed-pool context carves 32 at create and
+        keeps that limit (`DVS_FIXED_CHECKPOINTS`).
+  - [x] `level_marks` and `decisions` are one block of `level_cap`
+        entries. A checkpoint reserves its own level plus a full search
+        above it (`dvs_ctx_reserve_levels`).
+  - [x] `MAX_DECISION_DEPTH` is now counted from the search's root
+        (`max_depth = search_base + MAX_DECISION_DEPTH`), not from level 0.
+        Before, each open checkpoint took a level from the search. A solve
+        with no checkpoints is unchanged.
+  - [x] `scope_log_depth` widened from 8 to 32 bits.
+  - [x] SMT2: one growable `Smt2PushFrame` array replaces the parallel
+        arrays. A `(push N)` count can no longer wrap the depth check.
+  - [x] Tests: `tests/c/test_deep_checkpoints.c` (1,000 nested checkpoints
+        with pins; 240 decisions under 32 fixed-pool checkpoints, which the
+        old absolute limit refused), conformance `ok_push_deep.smt2`, and
+        `test_dpi_shim.py::test_deep_checkpoints_then_solve`.
+- [x] **B117:** incremental SMT2 sessions held O(hand-offs × problem
+      size) memory. `_flush_aux` copied the whole retained builder for each
+      hand-off and kept every copy for model validation. Now:
+  - [x] A context reads a problem only during `dvs_solver_compile` /
+        `dvs_solver_add_constraint`. Verified before relying on it: a full
+        suite run with every problem copied, compiled from the copy, and
+        the copy poisoned on return showed no failure;
+        `tests/c/test_problem_lifetime.c` frees each problem right after the
+        call and runs under ASan. `DVS_PROBLEM_HELD` is gone, the API docs
+        say "read only during the call", and a Python `SolveProblem` may
+        grow after it was compiled.
+  - [x] While retained, the front end keeps one finalized copy of the
+        builder (`vproblem`), brought up to date with
+        `dvs_builder_finalize_append` (new bytes only). A hand-off gives the
+        context the items since `aux_mark` by cutting its lists in place
+        (`dvs_problem_cut_since` / `dvs_problem_uncut`), so it costs
+        O(new items), not a full copy. The `aux_problems` entry is NULL;
+        `n_aux_problems` keeps its meaning for the routing checks.
+  - [x] Validation checks `vproblem`'s items since the compile. When
+        retention ends (the 16 MB cap), `vproblem` is frozen as `vbase`, and
+        each push frame records its constraint count so a pop trims it.
+  - [x] 4,000 rounds of `assert; check-sat`: 447 MB → 6.6 MB, 1.02 s →
+        0.74 s. 10,000 nested pushes with an assert each: 2.76 GB → 13 MB,
+        1.14 s → 0.09 s. Same answers.
+- [x] **B118** (found writing the lifetime test): an incremental add read
+      a "new" variable whose id the compile had taken for an internal one
+      as that variable — a wrong `unsat`, also on f04af10. Variables a
+      problem declares are now marked (`VAR_DECLARED`); an add re-declaring
+      any other id is `DVS_COMPILE_BAD_VAR`. New `dvs_solver_n_vars()` /
+      `SolveCtx.n_vars`: number new variables from here.
+- [x] **B119** (found by fuzzing the end of retention with the new
+      `DV_RETAIN_MAX_BYTES` override): a refused hand-off (a variable wider
+      than 64 bits) still ended retention and reset the builder, and the
+      refused add had half set up its variables; later adds over them read
+      zeroed slots. Wrong `unsat`s, also on the old code. A refused hand-off
+      now keeps the builder; an add checks widths and that every name
+      exists before changing anything.
+- [x] `MAX_NOOVERLAP2D_RECTS 64`: the propagator is now sized to its
+      rectangle count (`_no_size`), up to 65,535 rectangles (16-bit pair
+      tracking). Up to 64 rectangles the fire's scratch stays on the stack.
+- [x] The LCG's `clauses` pointer array and its analysis scratch
+      (`mk_ent`, `undo_*`, `learnt_buf`) come from its `dvs_alloc_t`; the
+      undo log is one block.
+- [ ] Propagator watcher chains are walked by offset, so each hop pays the
+      slot decode. That is the likely source of the ~1.5% left on the
+      Verilator-protocol bench versus P0. Linking by pointer, as was done
+      for holes, would need the chain unlink in restore to keep each
+      propagator's offset.
+- [ ] `Propagator.prop_id` is 16 bits; contexts are capped at 65,535
+      propagators. Widening it costs 8 bytes per propagator.
+- [ ] Raw `malloc`/`realloc`/`free` outside the context: about 490 call
+      sites in `src/c/dvs_*.c`. The largest are `dvs_bbsolver.c` (88),
+      `dvs_cube.c` (63), `dvs_contradiction.c` (48), `dvs_affine.c` (43),
+      `dvs_sv.c` (33) and `dvs_lcg.c` (33). Move them to `dvs_alloc_t` file
+      by file. SAT backends (kissat/CaDiCaL) are excluded because they own
+      their own memory.
+- Not a limit any more: the `Smt2Frontend` `funs[]` table is already
+  heap-grown (`SMT2_MAX_FUNS` only caps it).
 
 ---
 
@@ -348,3 +414,8 @@ no new ones. ASan covered by the P3 run below. Perf recorded in the Log.
 | 2026-10-11 | P2b | f830dda | Context-owned memory through ctx->alloc; NULL-ba fixed mode works. Memory, 1,000-var sum problem via Python: f04af10 cannot compile it in the default 1 MiB context (NOMEM) and needs ≥2 MiB (+3.8 MB peak RSS); P2 compiles from a 64 KiB buffer (+2.0 MB). dv-solve-smt2 peak RSS 93.4 → 84.2 MB. |
 | 2026-10-11 | P3 | a84ee8f, 9eb8649 | `dvs_solver_new`; front ends switched. ASan + always-move full suite: zero memory-error reports. |
 | 2026-10-11 | P4 | 6d1caa1, c6fb271 | Clause arena on a spool; SolveProblem grows; hole lists by pointer. Final perf vs f04af10: Verilator-protocol 0.935, API 0.876, fixtures 0.946, field 0.766. vs P0: 1.015 / 0.997 / 0.988 / 1.024 (noise). Final suite, SHIFT=16 and SHIFT=8 identical: 9,934 passed, 31 failed = the 30 baseline failures + `test_parser_fuzz[21]` (B116, pre-existing). |
+| 2026-10-12 | F | de3a3f8 | B116: sort-typed redeclaration rejected; sort tables scoped by push/pop. `test_parser_fuzz[21]` passes again. |
+| 2026-10-12 | F | f977c28 | Checkpoints and SMT2 pushes nest past 32 (growable stack and level arrays; search depth counted from its root). |
+| 2026-10-12 | F | 4e89bc6 | NoOverlap2D sized to its rectangle count (was fixed at 64). |
+| 2026-10-12 | F | de07a9c | B117 (incremental SMT2 memory: 447 MB → 6.6 MB on 4,000 rounds; 2.76 GB → 13 MB on 10,000 nested pushes), B118 and B119 (wrong `unsat`s in incremental adds, pre-existing). Problems are read only during compile/add (poisoned-problem suite run: no failures). Perf vs de3a3f8: Verilator-protocol 0.992, API 1.000, fixtures 0.96–1.02 (A/A 0.967), field 1.004. Full suite: 26 failures, all in the P4 baseline list; 5 baseline failures now pass. 2,000 session-fuzz seeds clean at retention caps 1 KB, 4 KB and default. |
+| 2026-10-12 | F | ee92fb4 | LCG scratch from its allocator; ASan + leak check clean. |
