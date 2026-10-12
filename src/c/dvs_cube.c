@@ -160,6 +160,11 @@ static int q_push(cube_q *q, cube_t c) {
 }
 static int q_empty(const cube_q *q) { return q->head >= q->size; }
 static cube_t q_pop(cube_q *q) { return q->v[q->head++]; }
+/* Free every queued cube and empty the queue (the array is kept). */
+static void q_clear(cube_q *q) {
+    while (!q_empty(q)) free(q_pop(q).lits);
+    q->head = q->size = 0;
+}
 
 /* Build a child cube = parent.lits ∪ {extra}, one deeper, with a grown budget. */
 static int make_child(cube_t parent, int32_t extra, uint32_t growth,
@@ -331,7 +336,9 @@ static int lookahead_children(const cube_t *c, const or_set *ors,
 /* Build the initial partition into `q`. Prefers the widest top-level `or`
  * (k-way, exhaustive and SAT-directed); else a single high-fanout bit (2-way).
  * Returns the number of seed cubes pushed (>=1), or 0 if none could be formed
- * (caller falls back to a single unbounded solve). */
+ * (caller falls back to a single unbounded solve). All or nothing: the seeds
+ * must cover the whole space, so a push that fails empties `q` and returns 0
+ * rather than leave a partial cover whose refutation would read as UNSAT. */
 static uint32_t build_frontier(cube_q *q, const int32_t *orlits, uint32_t n_or,
                                const int32_t *bits, uint32_t n_bits,
                                uint32_t B0, int verbose) {
@@ -339,13 +346,13 @@ static uint32_t build_frontier(cube_q *q, const int32_t *orlits, uint32_t n_or,
     if (n_or >= 2) {
         if (verbose) fprintf(stderr, "[cube] structural split: %u disjuncts\n", n_or);
         for (uint32_t i = 0; i < n_or; i++) {
-            if (push_seed_cube(q, orlits[i], B0) != 0) break;
+            if (push_seed_cube(q, orlits[i], B0) != 0) { q_clear(q); return 0; }
             pushed++;
         }
     } else if (n_bits >= 1) {
         if (verbose) fprintf(stderr, "[cube] bit split on var %d\n", bits[0]);
         for (int s = 0; s < 2; s++) {
-            if (push_seed_cube(q, s ? -bits[0] : bits[0], B0) != 0) break;
+            if (push_seed_cube(q, s ? -bits[0] : bits[0], B0) != 0) { q_clear(q); return 0; }
             pushed++;
         }
     }
@@ -447,7 +454,7 @@ static uint32_t build_cartesian_frontier(dvs_bbsolver_t *bb, cube_q *q,
     uint32_t pushed = 0;
     for (uint64_t j = 0; j < product; j++) {
         int32_t *cl = (int32_t *)malloc((size_t)nfold * sizeof(int32_t));
-        if (!cl) break;
+        if (!cl) break;                 /* partial product: dropped below */
         uint64_t rem = j;
         for (uint32_t g = 0; g < nfold; g++) {
             uint32_t s = ors->size[g];
@@ -459,7 +466,10 @@ static uint32_t build_cartesian_frontier(dvs_bbsolver_t *bb, cube_q *q,
         pushed++;
     }
 
-    if (pushed < 2) {          /* degenerate (single narrow or, or OOM): fall back */
+    if (pushed < 2 || pushed < product) {
+        /* Degenerate (single narrow or), or a push failed (OOM): the seeds
+         * must cover the whole product, so drop them and fall back. */
+        q_clear(q);
         or_set_free(ors);
         if (total_out) *total_out = 0;
         return 0;
@@ -862,6 +872,12 @@ static int run_parallel(dvs_bbsolver_t *bb, cube_q *q0, uint32_t total_cubes,
 
     for (uint32_t i = 0; i < spawned; i++)
         dvs_thread_join(&th[i], NULL);
+
+    /* Every cube worker can fail to start (no SAT instance, no child buffer)
+     * and exit without popping: the queue is then not drained, and the
+     * provisional UNSAT stands for nothing. */
+    if (!q_empty(&C.q))
+        C.unresolved = 1;
 
     int result = C.result;
     /* Downgrade a provisional (cube-drain) UNSAT to UNKNOWN only if a region was

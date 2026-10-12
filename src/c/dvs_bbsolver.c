@@ -181,6 +181,10 @@ struct dvs_bbsolver_s {
     int             no_diversify;
     /* Simulate before SAT (dvs_bbsolver_set_presim). */
     int             presim;
+    /* The last SAT verdict's model is the assignment of S->sat. Clear when it
+     * came from simulation, the affine check or a portfolio/cube worker: then
+     * node_val is the model and S->sat's assignment is stale or absent. */
+    int             model_in_sat;
     /* An assertion could not be recorded in assert_nodes (out of memory), so
      * the list is not the whole problem: no simulation verdicts. */
     int             asserts_lost;
@@ -699,14 +703,19 @@ static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
      * try_record_subst — is byte-for-byte unchanged. Returns 1 iff EVERY
      * sub-assert under root was consumed as a substitution (root can be
      * skipped); every leaf is still visited even after one fails to consume, so
-     * all recordable substitutions are recorded (matching the old `l && r`). */
-    dvs_expr_t *stk = NULL;
-    size_t n = 0, cap = 0;
+     * all recordable substitutions are recorded (matching the old `l && r`).
+     * The stack starts on the C stack: most roots are not conjunctions, and
+     * this runs once per constraint per solve. */
+    dvs_expr_t local[32];
+    dvs_expr_t *stk = local;
+    size_t n = 0, cap = sizeof local / sizeof local[0];
     int all_consumed = 1;
     #define CS_PUSH(R) do {                                                 \
-        if (n == cap) { size_t nc = cap ? cap * 2 : 32;                     \
-            dvs_expr_t *t = (dvs_expr_t *)realloc(stk, nc * sizeof(dvs_expr_t));     \
-            if (!t) { free(stk); return 0; }                               \
+        if (n == cap) { size_t nc = cap * 2;                                \
+            dvs_expr_t *t = (dvs_expr_t *)malloc(nc * sizeof(dvs_expr_t));  \
+            if (!t) { if (stk != local) free(stk); return 0; }              \
+            memcpy(t, stk, n * sizeof(dvs_expr_t));                         \
+            if (stk != local) free(stk);                                    \
             stk = t; cap = nc; }                                            \
         stk[n++] = (R);                                                     \
     } while (0)
@@ -733,7 +742,7 @@ static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
         all_consumed = 0;   /* this leaf was not consumable as a substitution */
     }
     #undef CS_PUSH
-    free(stk);
+    if (stk != local) free(stk);
     return all_consumed;
 }
 
@@ -2494,6 +2503,7 @@ static int _sim_result(dvs_bbsolver_t *S, dvs_aigsim_t *sim, int r) {
     if (!nv) return DVS_BB_UNKNOWN;
     free(S->node_val);
     S->node_val = nv;
+    S->model_in_sat = 0;
     return DVS_BB_SAT;
 }
 
@@ -2501,7 +2511,9 @@ static int _sim_result(dvs_bbsolver_t *S, dvs_aigsim_t *sim, int r) {
 static int bb_sat_solve(dvs_bbsolver_t *S) {
     for (uint32_t i = 0; i < S->n_frames; i++)
         dvs_sat_assume(S->sat, (dvs_sat_lit_t)S->frames[i].sel);
-    return dvs_sat_solve(S->sat);
+    int rc = dvs_sat_solve(S->sat);
+    S->model_in_sat = rc == DVS_BB_SAT;
+    return rc;
 }
 
 static void _sim_check(dvs_bbsolver_t *S, int verdict) {
@@ -2534,7 +2546,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
                     ast.why, _ms_since(&t0));
         if (ar != DVS_AFFINE_UNDECIDED) {
             int rc = ar == DVS_AFFINE_UNSAT ? DVS_BB_UNSAT : DVS_BB_SAT;
-            if (nv) { free(S->node_val); S->node_val = nv; }
+            if (nv) { free(S->node_val); S->node_val = nv; S->model_in_sat = 0; }
             _sim_check(S, rc);
             return rc;
         }
@@ -2883,6 +2895,7 @@ int dvs_bbsolver_solve_assuming(dvs_bbsolver_t *S, const int32_t *lits,
     for (uint32_t i = 0; i < n; i++)
         dvs_sat_assume(S->sat, (dvs_sat_lit_t)lits[i]);
     int rc = dvs_sat_solve(S->sat);
+    S->model_in_sat = rc == DVS_BB_SAT;
     S->last_result = rc;
     if (rc == DVS_BB_SAT) {
         /* Fresh model for this cube: drop any stale flip-check valuation and
@@ -2927,6 +2940,7 @@ int dvs_bbsolver_install_worker_model(dvs_bbsolver_t *S, dvs_sat_t *wsat) {
         nv[id] = (int8_t)(dvs_sat_value(wsat, (dvs_sat_var_t)id) > 0 ? 1 : 0);
     free(S->node_val);
     S->node_val = nv;
+    S->model_in_sat = 0;
     S->last_result = DVS_BB_SAT;
     return 0;
 }
@@ -2937,9 +2951,16 @@ int dvs_bbsolver_rediversify(dvs_bbsolver_t *S, uint64_t seed) {
      * still-valid SAT model with the new seed. _diversify re-reads the base
      * model via dvs_aig_cnf_value() (kissat's assignment persists until
      * dvs_bbsolver_free) and only depends on S->seed for the flip targets, so a
-     * new seed yields a different sound model with no re-solve. */
-    free(S->node_val);
-    S->node_val = NULL;
+     * new seed yields a different sound model with no re-solve. When the model
+     * did not come from S->sat (simulation, the affine check, a cube or
+     * portfolio worker), S->sat's assignment is stale or absent: diversify from
+     * node_val, the current model, instead. */
+    if (S->model_in_sat) {
+        free(S->node_val);
+        S->node_val = NULL;
+    } else if (!S->node_val) {
+        return -1;
+    }
     S->seed = seed;
     _diversify(S);
     return 0;
@@ -3148,6 +3169,7 @@ int dvs_bbsolver_resolve(dvs_bbsolver_t *S, uint64_t seed) {
     free(S->node_val);
     S->node_val = NULL;
     int rc = dvs_sat_solve(S->sat);
+    S->model_in_sat = rc == DVS_BB_SAT;
     S->last_result = rc;
     if (rc == DVS_BB_SAT) _diversify(S);
     return rc;
@@ -3166,6 +3188,7 @@ int dvs_bbsolver_resolve_raw(dvs_bbsolver_t *S) {
     free(S->node_val);
     S->node_val = NULL;   /* value readback -> raw cnf model (seed 0) */
     int rc = dvs_sat_solve(S->sat);
+    S->model_in_sat = rc == DVS_BB_SAT;
     S->last_result = rc;
     return rc;
 }

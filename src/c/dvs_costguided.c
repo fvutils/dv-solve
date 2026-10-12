@@ -586,9 +586,23 @@ int dvs_solver_lns_optimize(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
     if (!cur) return -1;
     memcpy(cur, out_positions, nm * 2 * sizeof(int32_t));
 
-    /* Neighborhood selection buffer */
+    /* With fewer than two macros no neighborhood can move anything: the
+     * greedy placement is the answer. */
+    if (nm < 2) {
+        free(cur);
+        return 0;
+    }
+    if (neigh_sz < 2) neigh_sz = 2;     /* the fallback picks a pair */
+
+    /* Neighborhood selection buffer, the neighborhood's new positions, and
+     * a trial copy of every position. */
     uint32_t *unfrozen = (uint32_t *)malloc(neigh_sz * sizeof(uint32_t));
-    if (!unfrozen) { free(cur); return -1; }
+    int32_t *new_pos = (int32_t *)malloc((size_t)neigh_sz * 2 * sizeof(int32_t));
+    int32_t *trial = (int32_t *)malloc((size_t)nm * 2 * sizeof(int32_t));
+    if (!unfrozen || !new_pos || !trial) {
+        free(unfrozen); free(new_pos); free(trial); free(cur);
+        return -1;
+    }
 
     double t0 = _lns_now();
 
@@ -693,7 +707,6 @@ int dvs_solver_lns_optimize(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
 
         if (sr == DVS_SOLVE_OK) {
             /* Read new positions for unfrozen macros */
-            int32_t new_pos[2 * 256];  /* enough for neigh_sz <= 128 */
             for (uint32_t k = 0; k < actual_neigh; k++) {
                 uint32_t m = unfrozen[k];
                 new_pos[k * 2]     = (int32_t)dvs_solver_get_value(ctx, hctx->macros[m].x_var_id);
@@ -701,8 +714,7 @@ int dvs_solver_lns_optimize(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
             }
 
             /* Compute new HPWL with the updated positions */
-            int32_t trial[512];
-            if (nm * 2 <= 512) {
+            {
                 memcpy(trial, cur, nm * 2 * sizeof(int32_t));
                 for (uint32_t k = 0; k < actual_neigh; k++) {
                     uint32_t m = unfrozen[k];
@@ -746,6 +758,8 @@ int dvs_solver_lns_optimize(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
     memcpy(out_positions, cur, nm * 2 * sizeof(int32_t));
 
     free(unfrozen);
+    free(new_pos);
+    free(trial);
     free(cur);
     return 0;
 }

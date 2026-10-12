@@ -105,6 +105,15 @@ void *dvs_dpi_compile_b64(const char *b64_data) {
     size_t buf_len = 0;
     uint8_t *buf = _b64_decode(b64_data, &buf_len);
     if (!buf) return NULL;
+    /* The buffer must hold the header and the pool it describes (a
+     * truncated or corrupt blob would be read past its end). The offsets
+     * inside the pool are trusted, as for any dvs_problem_t. */
+    const dvs_problem_t *hp = (const dvs_problem_t *)buf;
+    if (buf_len < sizeof(dvs_problem_t) || hp->pool.used > hp->pool.capacity ||
+        (size_t)hp->pool.capacity > buf_len - sizeof(dvs_problem_t)) {
+        free(buf);
+        return NULL;
+    }
 
     /* 2. Allocate the persistent dvs_ctx_t */
     dvs_ctx_t *ctx = dvs_solver_new(NULL);

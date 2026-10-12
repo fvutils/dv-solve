@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include "dvs_contradiction.h"
 #include "dvs_search.h"
@@ -432,6 +433,8 @@ int contra_analyze_unsat(dvs_ctx_t *ctx, dvs_problem_t *sp,
             if (result->mus_constraint_ids) {
                 for (uint32_t i = 0; i < mus_n; i++)
                     result->mus_constraint_ids[i] = gated.cid_map[mus_indices[i]];
+            } else {
+                result->mus_size = 0;   /* no ids to report */
             }
         }
         _solver_destroy(&si); _gated_free(&gated);
@@ -472,6 +475,8 @@ int contra_analyze_unsat(dvs_ctx_t *ctx, dvs_problem_t *sp,
             if (result->mus_constraint_ids) {
                 for (uint32_t i = 0; i < core_n; i++)
                     result->mus_constraint_ids[i] = gated.cid_map[core_indices[i]];
+            } else {
+                result->mus_size = 0;   /* no ids to report */
             }
         } else {
             uint32_t mus_indices[MAX_CORE_SIZE];
@@ -500,6 +505,8 @@ int contra_analyze_unsat(dvs_ctx_t *ctx, dvs_problem_t *sp,
                     for (uint32_t i = 0; i < mus_n; i++)
                         result->mus_constraint_ids[i] =
                             gated.cid_map[mus_indices[i]];
+                } else {
+                    result->mus_size = 0;   /* no ids to report */
                 }
             }
         }
@@ -553,6 +560,29 @@ done:
 
 /* ---- Text output formatter (T-24) ---- */
 
+/* printf onto buf at *pos, growing it (a long constraint name or source path
+ * outruns the size estimate). -1 when out of memory. */
+static int _appendf(char **buf, size_t *cap, size_t *pos, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(*buf + *pos, *cap - *pos, fmt, ap);
+    va_end(ap);
+    if (n < 0) return -1;
+    if ((size_t)n >= *cap - *pos) {
+        size_t nc = *cap * 2;
+        while (nc - *pos <= (size_t)n) nc *= 2;
+        char *nb = (char *)realloc(*buf, nc);
+        if (!nb) return -1;
+        *buf = nb;
+        *cap = nc;
+        va_start(ap, fmt);
+        vsnprintf(*buf + *pos, *cap - *pos, fmt, ap);
+        va_end(ap);
+    }
+    *pos += (size_t)n;
+    return 0;
+}
+
 /**
  * Format MUS + relaxation data as human-readable text.
  * Returns a malloc'd string or NULL.
@@ -567,8 +597,7 @@ static char *_format_text(const ContraResult *result,
     size_t pos = 0;
 
 #define APPEND(...) do { \
-    int _n = snprintf(buf + pos, cap - pos, __VA_ARGS__); \
-    if (_n > 0) pos += (size_t)_n; \
+    if (_appendf(&buf, &cap, &pos, __VA_ARGS__) != 0) { free(buf); return NULL; } \
 } while(0)
 
     APPEND("UNSATISFIABLE: %u constraint%s form a minimal contradiction.\n\n",
@@ -641,8 +670,7 @@ static char *_format_json(const ContraResult *result,
     size_t pos = 0;
 
 #define APPEND(...) do { \
-    int _n = snprintf(buf + pos, cap - pos, __VA_ARGS__); \
-    if (_n > 0) pos += (size_t)_n; \
+    if (_appendf(&buf, &cap, &pos, __VA_ARGS__) != 0) { free(buf); return NULL; } \
 } while(0)
 
     APPEND("{");
