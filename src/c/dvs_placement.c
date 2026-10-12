@@ -253,9 +253,12 @@ static RectSpec *_no_rects(const NoOverlap2D_t *no) {
 static uint32_t *_no_last_pair(const NoOverlap2D_t *no) {
     return (uint32_t *)(_no_rects(no) + _no_n(no));
 }
+static int32_t *_no_scratch(const NoOverlap2D_t *no) {
+    return (int32_t *)(_no_last_pair(no) + 4u * _no_n(no));
+}
 static size_t _no_size(uint32_t n) {
     return sizeof(NoOverlap2D_t) + (size_t)n * (4u * sizeof(uint32_t)
-           + sizeof(RectSpec) + 4u * sizeof(uint32_t));
+           + sizeof(RectSpec) + 4u * sizeof(uint32_t) + 8u * sizeof(int32_t));
 }
 
 /* Record which pair (i,j) caused a tightening for LCG explain */
@@ -504,9 +507,6 @@ static int _explain_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx,
     return (out->n_lits > 0) ? 0 : -1;
 }
 
-/* Rectangles whose fire scratch fits on the stack. */
-#define NO_STACK_RECTS 64u
-
 static PropResult _no_energetic(dvs_ctx_t *ctx, const RectSpec *rects, uint32_t nr,
                                 int32_t *my_lo, int32_t *my_hi,
                                 int32_t *mx_lo, int32_t *mx_hi,
@@ -640,20 +640,13 @@ static PropResult _fire_no_overlap_2d(Propagator *self, dvs_ctx_t *ctx) {
      * this is O(n^2) which is dominated by the pairwise check above.
      */
 
-    /* Precompute mandatory intervals for each rect: 8n int32 of scratch,
-     * on the stack up to NO_STACK_RECTS rectangles. */
-    int32_t stack_buf[8u * NO_STACK_RECTS];
-    int32_t *buf = stack_buf;
-    if (nr > NO_STACK_RECTS) {
-        buf = (int32_t *)DVS_ALLOC(ctx->alloc, (size_t)nr * 8u * sizeof(int32_t));
-        if (!buf) return PROP_OK;   /* skip the (optional) overload check */
-    }
+    /* Precompute mandatory intervals for each rect into the propagator's
+     * 8n int32 of scratch. */
+    int32_t *buf = _no_scratch(no);
     int32_t *my_lo = buf, *my_hi = buf + nr, *mx_lo = buf + 2u * nr, *mx_hi = buf + 3u * nr;
     int32_t *y_endpoints = buf + 4u * nr, *x_endpoints = buf + 6u * nr;
-    PropResult er = _no_energetic(ctx, rects, nr, my_lo, my_hi, mx_lo, mx_hi,
-                                  y_endpoints, x_endpoints);
-    if (buf != stack_buf) DVS_RELEASE(ctx->alloc, buf, (size_t)nr * 8u * sizeof(int32_t));
-    return er;
+    return _no_energetic(ctx, rects, nr, my_lo, my_hi, mx_lo, mx_hi,
+                         y_endpoints, x_endpoints);
 }
 
 /* The energetic overload check and entailment test of _fire_no_overlap_2d. */

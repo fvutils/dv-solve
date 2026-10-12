@@ -88,7 +88,8 @@ typedef struct {
  * hdr, n_vars, _capacity, var_ids[2n], watcher_nexts[2n]; then
  * RectSpec rects[n] and uint32_t last_pair[4n], the LCG pair tracking:
  * which pair (i,j) last tightened each bound, index rect * 4 + (2 if y) +
- * (1 if upper), entry (i << 16) | j, or 0xFFFFFFFF if unknown. */
+ * (1 if upper), entry (i << 16) | j, or 0xFFFFFFFF if unknown; then
+ * int32_t scratch[8n] for the energetic check (contents dead between fires). */
 typedef struct {
     Propagator    hdr;
     uint32_t      n_vars;       /* 2 * n_rects */
