@@ -29,26 +29,31 @@ static SexprArenaBlock *_arena_new_block(size_t capacity) {
 void *sexpr_arena_alloc(SexprArena *arena, size_t bytes, size_t align) {
     if (align < 1) align = 1;
 
-    /* Try current block first */
-    if (arena->current) {
-        size_t off  = arena->current->used;
+    /* The current block, then the blocks after it: after a reset those are
+     * kept, empty, for reuse. A block too small for this request is skipped
+     * until the next reset. */
+    SexprArenaBlock *tail = NULL;
+    for (SexprArenaBlock *blk = arena->current; blk; blk = blk->next) {
+        size_t off  = blk->used;
         size_t pad  = (align - (off % align)) % align;
         size_t need = pad + bytes;
-        if (off + need <= arena->current->capacity) {
-            void *ptr = ARENA_BLOCK_DATA(arena->current) + off + pad;
-            arena->current->used = off + need;
+        if (off + need <= blk->capacity) {
+            void *ptr = ARENA_BLOCK_DATA(blk) + off + pad;
+            blk->used = off + need;
+            arena->current = blk;
             return ptr;
         }
+        tail = blk;
     }
 
-    /* Need a new block */
+    /* Need a new block, linked at the tail */
     size_t cap = arena->block_size;
     if (bytes + align > cap) cap = bytes + align;
     SexprArenaBlock *nb = _arena_new_block(cap);
     if (!nb) return NULL;
 
-    if (arena->current)
-        arena->current->next = nb;
+    if (tail)
+        tail->next = nb;
     else
         arena->head = nb;
     arena->current = nb;

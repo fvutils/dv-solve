@@ -585,11 +585,13 @@ typedef struct {
     uint32_t             fun_memo_gen;
 
     /* Operators lowered by rewriting into supported ones (_translate_rewrite):
-     * each template, keyed by its text and parsed once into persistent_arena.
-     * Kept across a soft reset, like the arena. */
+     * each template, keyed by its text and parsed once into rewrite_arena.
+     * Both are kept across a soft reset (persistent_arena is reset there, so
+     * the cache must not point into it). */
     struct Smt2Rewrite { const char *text; const struct Sexpr *body; }
                          rewrites[SMT2_MAX_REWRITES];
     uint32_t             n_rewrites;
+    SexprArena           rewrite_arena;
 
     /* Assumption literals from the most recent check-sat-assuming, recorded so
      * (get-unsat-assumptions) can answer. When the last check-sat-assuming was

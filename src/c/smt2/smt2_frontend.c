@@ -2074,13 +2074,18 @@ static SMT2_NOINLINE const Sexpr *_rewrite_body(Smt2Frontend *fe, const char *op
     for (uint32_t i = 0; i < fe->n_rewrites && !body; i++)
         if (strcmp(fe->rewrites[i].text, text) == 0) body = fe->rewrites[i].body;
     if (!body) {
+        /* A cached template outlives a soft reset, so it lives in
+         * rewrite_arena; once the cache is full, a template is parsed per use
+         * into persistent_arena. */
+        SexprArena *a = fe->n_rewrites < SMT2_MAX_REWRITES ? &fe->rewrite_arena
+                                                           : &fe->persistent_arena;
         size_t len = strlen(text);
-        char *t = (char *)sexpr_arena_alloc(&fe->persistent_arena, len + 1, 1);
+        char *t = (char *)sexpr_arena_alloc(a, len + 1, 1);
         if (!t) return NULL;
         memcpy(t, text, len + 1);
         Smt2Lexer lex;
         smt2_lexer_init(&lex, t, len);
-        body = sexpr_parse(&lex, &fe->persistent_arena);
+        body = sexpr_parse(&lex, a);
         if (!body) {
             fprintf(fe->err, "internal error: rewrite '%s' does not parse\n", t);
             SMT2_TAINT(fe, "internal error in an operator rewrite");
@@ -8060,6 +8065,7 @@ void smt2_frontend_init(Smt2Frontend *fe, FILE *out, FILE *err) {
     fe->err = err;
     fe->builder = dvs_builder_create(0, NULL);
     sexpr_arena_init(&fe->persistent_arena, 16384);
+    sexpr_arena_init(&fe->rewrite_arena, 4096);
     /* Verilator-mode cache reseed cadence: force a full re-solve every Nth
      * randomize so coupled fields periodically get a fresh base model.
      * DV_VERILATOR_RESEED=0 (default) = pure cache (max throughput). */
@@ -8108,6 +8114,7 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     free(fe->checked);
     free(fe->decl_hist);
     sexpr_arena_destroy(&fe->persistent_arena);
+    sexpr_arena_destroy(&fe->rewrite_arena);
     /* Free persistent array var allocations (dense elems[] or sparse map).
      * Abstract (DV_ARRAY) values are owned by anodes[] -- freed below -- so skip
      * them here to avoid a double free. */
@@ -8168,8 +8175,9 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     void    *shape_tab = fe->shape_tab;
     uint32_t n_input_errors = fe->n_input_errors;   /* drives the exit status */
     int8_t   check_models = fe->check_models;
-    /* operator rewrites: parsed into persistent_arena, which is kept */
+    /* operator rewrites: parsed into rewrite_arena, which is kept */
     uint32_t n_rewrites = fe->n_rewrites;
+    SexprArena rarena = fe->rewrite_arena;
     struct Smt2Rewrite rewrites[SMT2_MAX_REWRITES];
     memcpy(rewrites, fe->rewrites, n_rewrites * sizeof rewrites[0]);
     /* Reused allocations (reset in place below rather than freed). */
@@ -8242,6 +8250,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->check_models = check_models;
     fe->n_rewrites = n_rewrites;
     memcpy(fe->rewrites, rewrites, n_rewrites * sizeof rewrites[0]);
+    fe->rewrite_arena = rarena;
     fe->builder = builder;
     fe->persistent_arena = parena;
 }
