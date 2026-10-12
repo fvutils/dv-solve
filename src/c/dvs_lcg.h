@@ -216,7 +216,8 @@ typedef struct {
     uint32_t *mk_start;      /* 2 * n_vars + 1 bucket offsets */
     uint32_t *mk_cur;        /* 2 * n_vars fill cursors */
     /* Bounds temporarily rewound during analysis (see _rewind_before), to
-     * be restored before it returns. */
+     * be restored before it returns. One block: val[cap], var[cap],
+     * kind[cap]. */
     uint32_t *undo_var;
     uint8_t  *undo_kind;
     int64_t  *undo_val;

@@ -57,6 +57,9 @@ static void _trace_lit(const char *prefix, Literal lit) {
 /* Clause Database                                                     */
 /* ================================================================== */
 
+/* The undo log's block: val (int64), var (uint32), kind (uint8) per entry. */
+#define UNDO_ROW (sizeof(int64_t) + sizeof(uint32_t) + sizeof(uint8_t))
+
 /* A zeroed array of n elements of `sz` bytes from `a`, or NULL. */
 static void *_zalloc(dvs_alloc_t *a, size_t n, size_t sz) {
     void *p = DVS_ALLOC(a, n * sz ? n * sz : 1);
@@ -85,7 +88,7 @@ int clause_db_init_alloc(ClauseDB *db, uint32_t n_vars, dvs_alloc_t *alloc) {
     db->alloc = alloc;
 
     db->clauses_cap = CLAUSE_DB_INIT_CAP;
-    db->clauses = (Clause **)calloc(db->clauses_cap, sizeof(Clause *));
+    db->clauses = (Clause **)_zalloc(alloc, db->clauses_cap, sizeof(Clause *));
     if (!db->clauses) return -1;
 
     db->n_watch_vars = n_vars;
@@ -110,8 +113,8 @@ int clause_db_init_alloc(ClauseDB *db, uint32_t n_vars, dvs_alloc_t *alloc) {
 }
 
 void clause_db_destroy(ClauseDB *db) {
-    free(db->clauses);
     if (db->alloc) {
+        _afree(db->alloc, db->clauses, db->clauses_cap * sizeof(Clause *));
         _afree(db->alloc, db->watch_lb, db->n_watch_vars * sizeof(WatchEntry *));
         _afree(db->alloc, db->watch_ub, db->n_watch_vars * sizeof(WatchEntry *));
         _afree(db->alloc, db->pend, db->pend_cap * sizeof(uint32_t));
@@ -151,7 +154,8 @@ uint32_t clause_db_add(ClauseDB *db, uint32_t n_lits, const Literal *lits,
     /* Grow clause pointer array if needed */
     if (db->n_clauses >= db->clauses_cap) {
         uint32_t new_cap = db->clauses_cap * 2;
-        Clause **new_arr = (Clause **)realloc(db->clauses, new_cap * sizeof(Clause *));
+        Clause **new_arr = (Clause **)DVS_RESIZE(db->alloc, db->clauses,
+            db->clauses_cap * sizeof(Clause *), new_cap * sizeof(Clause *));
         if (!new_arr) return UINT32_MAX;
         db->clauses = new_arr;
         db->clauses_cap = new_cap;
@@ -276,7 +280,7 @@ int lcg_init_alloc(LCGCtx *lcg, uint32_t n_vars, dvs_alloc_t *alloc) {
     lcg->mk_start = (uint32_t *)_zalloc(alloc, 2u * n_vars + 1u, sizeof(uint32_t));
     lcg->mk_cur = (uint32_t *)_zalloc(alloc, 2u * n_vars, sizeof(uint32_t));
     lcg->learnt_cap = MAX_CLAUSE_LITS;
-    lcg->learnt_buf = (Literal *)calloc(lcg->learnt_cap, sizeof(Literal));
+    lcg->learnt_buf = (Literal *)_zalloc(alloc, lcg->learnt_cap, sizeof(Literal));
     if (!lcg->seen || !lcg->seen_lit || !lcg->body_pos || !lcg->learnt_buf ||
         !lcg->mk_start || !lcg->mk_cur) {
         lcg_destroy(lcg);
@@ -355,14 +359,12 @@ void lcg_destroy(LCGCtx *lcg) {
         _afree(a, lcg->body_pos, n2 * sizeof(uint32_t));
         _afree(a, lcg->mk_start, (n2 + 1u) * sizeof(uint32_t));
         _afree(a, lcg->mk_cur, n2 * sizeof(uint32_t));
+        _afree(a, lcg->mk_ent, lcg->mk_cap * sizeof(TrailEntry *));
+        _afree(a, lcg->undo_val, (size_t)lcg->undo_cap * UNDO_ROW);
+        _afree(a, lcg->learnt_buf, lcg->learnt_cap * sizeof(Literal));
     }
     clause_db_destroy(&lcg->clause_db);
     vsids_destroy(&lcg->vsids);
-    free(lcg->mk_ent);
-    free(lcg->undo_var);
-    free(lcg->undo_kind);
-    free(lcg->undo_val);
-    free(lcg->learnt_buf);
     memset(lcg, 0, sizeof(*lcg));
 }
 
@@ -438,7 +440,8 @@ static int _mk_index(LCGCtx *lcg, dvs_ctx_t *ctx) {
     for (uint32_t i = 1; i <= ns; i++) lcg->mk_start[i] += lcg->mk_start[i - 1];
     if (n > lcg->mk_cap) {
         uint32_t cap = n + n / 2u + 64u;
-        TrailEntry **ne = (TrailEntry **)realloc(lcg->mk_ent, cap * sizeof(TrailEntry *));
+        TrailEntry **ne = (TrailEntry **)DVS_RESIZE(lcg->vsids.alloc, lcg->mk_ent,
+            lcg->mk_cap * sizeof(TrailEntry *), cap * sizeof(TrailEntry *));
         if (!ne) return -1;
         lcg->mk_ent = ne;
         lcg->mk_cap = cap;
@@ -525,14 +528,19 @@ static int _rewind_before(LCGCtx *lcg, dvs_ctx_t *ctx, TrailEntry **applied,
         TrailEntry *t = *applied;
         if (t->kind == TRAIL_LB || t->kind == TRAIL_UB) {
             if (lcg->n_undo == lcg->undo_cap) {
-                uint32_t cap = lcg->undo_cap ? 2u * lcg->undo_cap : 256u;
-                uint32_t *nv = (uint32_t *)realloc(lcg->undo_var, cap * sizeof *nv);
-                if (nv) lcg->undo_var = nv;
-                uint8_t *nk = (uint8_t *)realloc(lcg->undo_kind, cap * sizeof *nk);
-                if (nk) lcg->undo_kind = nk;
-                int64_t *nb = (int64_t *)realloc(lcg->undo_val, cap * sizeof *nb);
-                if (nb) lcg->undo_val = nb;
-                if (!nv || !nk || !nb) return -1;
+                uint32_t old = lcg->undo_cap, cap = old ? 2u * old : 256u;
+                dvs_alloc_t *a = lcg->vsids.alloc;
+                int64_t *nb = (int64_t *)DVS_ALLOC(a, (size_t)cap * UNDO_ROW);
+                if (!nb) return -1;
+                uint32_t *nv = (uint32_t *)(nb + cap);
+                uint8_t *nk = (uint8_t *)(nv + cap);
+                if (old) {
+                    memcpy(nb, lcg->undo_val, old * sizeof *nb);
+                    memcpy(nv, lcg->undo_var, old * sizeof *nv);
+                    memcpy(nk, lcg->undo_kind, old * sizeof *nk);
+                    DVS_RELEASE(a, lcg->undo_val, (size_t)old * UNDO_ROW);
+                }
+                lcg->undo_val = nb; lcg->undo_var = nv; lcg->undo_kind = nk;
                 lcg->undo_cap = cap;
             }
             const Variable *v = &ctx->vars[t->var_id];
