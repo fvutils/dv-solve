@@ -275,7 +275,7 @@ no new ones. ASan covered by the P3 run below. Perf recorded in the Log.
       Backgrounder §4.1 updated in the working tree (it is untracked).
 
 **Gate P3:**
-- [x] Full suite on Linux. **Windows/MSVC CI not run** (needs a push).
+- [x] Full suite on Linux. Windows/MSVC CI passed on the merge to main (65acd8d, run 38193284009).
       The new code uses no GCC builtins; the parenthesised
       `(dvs_pool_ptr)` definition and the `<sanitizer/asan_interface.h>`
       include (guarded by `__SANITIZE_ADDRESS__`) are the parts to watch.
@@ -395,9 +395,11 @@ can hit, then memory, then performance.
 - [ ] Raw `malloc`/`realloc`/`free` outside the context: about 490 call
       sites in `src/c/dvs_*.c`. The largest are `dvs_bbsolver.c` (88),
       `dvs_cube.c` (63), `dvs_contradiction.c` (48), `dvs_affine.c` (43),
-      `dvs_sv.c` (33) and `dvs_lcg.c` (33). Move them to `dvs_alloc_t` file
-      by file. SAT backends (kissat/CaDiCaL) are excluded because they own
-      their own memory.
+      `dvs_sv.c` (33) and `dvs_lcg.c` (33). SAT backends (kissat/CaDiCaL)
+      are excluded because they own their own memory. Surveyed and measured
+      in `docs/malloc_lifecycle_analysis.md`: allocator calls cost about 1%
+      of solver CPU, so the plan there is lifecycle-matched pooling (P1–P9)
+      where the counts and bytes are, not a file-by-file migration.
 - Not a limit any more: the `Smt2Frontend` `funs[]` table is already
   heap-grown (`SMT2_MAX_FUNS` only caps it).
 
@@ -419,3 +421,4 @@ can hit, then memory, then performance.
 | 2026-10-12 | F | 4e89bc6 | NoOverlap2D sized to its rectangle count (was fixed at 64). |
 | 2026-10-12 | F | de07a9c | B117 (incremental SMT2 memory: 447 MB → 6.6 MB on 4,000 rounds; 2.76 GB → 13 MB on 10,000 nested pushes), B118 and B119 (wrong `unsat`s in incremental adds, pre-existing). Problems are read only during compile/add (poisoned-problem suite run: no failures). Perf vs de3a3f8: Verilator-protocol 0.992, API 1.000, fixtures 0.96–1.02 (A/A 0.967), field 1.004. Full suite: 26 failures, all in the P4 baseline list; 5 baseline failures now pass. 2,000 session-fuzz seeds clean at retention caps 1 KB, 4 KB and default. |
 | 2026-10-12 | F | ee92fb4 | LCG scratch from its allocator; ASan + leak check clean. |
+| 2026-10-12 | F | — | Malloc lifecycle survey (`docs/malloc_lifecycle_analysis.md`). Fixed B120–B126 and the NoOverlap2D per-fire allocation from 4e89bc6; `collect_substs_from` stack on the C stack. Verilator randomize: 957 → 269 allocations, swizzle 0.984 vs 65acd8d. |
