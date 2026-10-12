@@ -310,6 +310,8 @@ typedef struct {
     uint32_t             n_areads;
     uint32_t             n_aeqs;
     uint8_t              incomplete;      /* `incomplete` at the push */
+    uint32_t             vbase_ncons;     /* builder constraints at the push
+                                           * if retained then, else UINT32_MAX */
     dvs_builder_mark_t   bmark;           /* builder position at the push */
 } Smt2PushFrame;
 
@@ -319,13 +321,26 @@ typedef struct {
     dvs_problem_t        *problem;      /* finalized; NULL until check-sat */
     size_t               problem_size;
 
-    /* Retained aux SolveProblems from _flush_aux. The model-validation
-     * pass walks these in addition to fe->problem so that user-asserts
-     * added incrementally (after the first check-sat) can also be
-     * checked. Each entry is freed in smt2_frontend_destroy. */
+    /* One entry per hand-off of incremental asserts to the ctx (_flush_aux),
+     * scoped by push/pop: n_aux_problems == 0 means fe->problem is the whole
+     * assertion set. While cdcl_retained the entry is NULL, as the
+     * assertions live in the retained builder (validated through vproblem);
+     * otherwise it is the hand-off's problem, kept for the model-validation
+     * pass. Freed in smt2_frontend_destroy. (Keeping a full builder copy per
+     * hand-off cost O(hand-offs x problem size) memory, B117.) */
     dvs_problem_t       **aux_problems;
     uint32_t             n_aux_problems;
     uint32_t             aux_problems_cap;
+    /* While cdcl_retained: the retained builder, finalized and kept up to
+     * date by dvs_builder_finalize_append (only new bytes are copied). A
+     * hand-off gives the ctx its items since aux_mark, cut in place; the
+     * validation pass checks its items since retain_mark (the compile). */
+    dvs_problem_t       *vproblem;
+    size_t               vproblem_size;
+    dvs_builder_mark_t   retain_mark;
+    /* vproblem frozen when retention ended (the builder was reset): its
+     * items since retain_mark are still asserted, less those popped since. */
+    dvs_problem_t       *vbase;
     /* Names from `(assert (! t :named N))`, in assertion order, for
      * get-unsat-core. Scoped by push/pop (push_n_named); freed on reset. */
     /* 1 iff fe->bb_solver holds the model for the CURRENT check-sat result.

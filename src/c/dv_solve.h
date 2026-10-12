@@ -354,8 +354,8 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
 void dvs_solver_destroy(dvs_ctx_t *ctx);
 
 /**
- * Compile problem `p` into the context. `p` must stay valid until the
- * context is destroyed.
+ * Compile problem `p` into the context. The context reads `p` only during
+ * the call: afterwards `p` may be freed, reused or moved.
  *
  * @return  DVS_COMPILE_OK; DVS_COMPILE_UNSAT if no solution exists;
  *          DVS_COMPILE_NOMEM, DVS_COMPILE_UNSUPPORTED_WIDTH or
@@ -402,13 +402,24 @@ int dvs_solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
 int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
 
 /**
- * Add the constraints of problem `p` to an already compiled context. `p`
- * must stay valid until the context is destroyed.
+ * Add the constraints of problem `p` to an already compiled context. As with
+ * dvs_solver_compile(), `p` is read only during the call.
+ *
+ * Variables `p` declares are new, numbered from dvs_solver_n_vars(): the
+ * compile may have made variables of its own after the ones its problem
+ * declared. `p` may also name, or re-declare at the same width, variables
+ * the problem declared before; re-declaring any other id is
+ * DVS_COMPILE_BAD_VAR.
  *
  * @return  The same codes as dvs_solver_compile(). `p` may name variables
  *          the context already has without declaring them.
  */
 int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *p);
+
+/** The number of variables in the context: those its problems declared and
+ *  those the compile made for itself. A problem passed to
+ *  dvs_solver_add_constraint() numbers its new variables from here. */
+uint32_t dvs_solver_n_vars(const dvs_ctx_t *ctx);
 
 /**
  * Save the context's state.

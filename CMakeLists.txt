@@ -425,6 +425,16 @@ target_link_libraries(test_deep_checkpoints PRIVATE dv_solve)
 target_include_directories(test_deep_checkpoints PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_deep_checkpoints COMMAND test_deep_checkpoints)
 
+add_executable(test_problem_lifetime tests/c/test_problem_lifetime.c)
+target_link_libraries(test_problem_lifetime PRIVATE dv_solve)
+target_include_directories(test_problem_lifetime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_problem_lifetime COMMAND test_problem_lifetime)
+
+add_executable(test_add_var_ids tests/c/test_add_var_ids.c)
+target_link_libraries(test_add_var_ids PRIVATE dv_solve)
+target_include_directories(test_add_var_ids PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_add_var_ids COMMAND test_add_var_ids)
+
 add_executable(test_growable_tables tests/c/test_growable_tables.c)
 target_link_libraries(test_growable_tables PRIVATE dv_solve)
 target_include_directories(test_growable_tables PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)

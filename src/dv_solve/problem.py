@@ -52,7 +52,6 @@ EXPR_ARRAY_SELECT = 13
 
 # Initial buffer size for a SolveProblem; it grows as needed.
 _SP_BUF_SIZE = 4096
-_HELD = 1          # pool flags: a context compiled it (DVS_PROBLEM_HELD)
 
 
 class _ProblemHeader(ctypes.Structure):
@@ -113,9 +112,8 @@ class SolveProblem:
             self._grow(hdr)
 
     def _grow(self, hdr: "_ProblemHeader") -> None:
-        if hdr.pool_flags & _HELD:
-            raise RuntimeError("SolveProblem is full and a SolveCtx holds it: "
-                               "build the whole problem before compiling it")
+        # A context reads the problem only while compiling it, and SolveCtx
+        # looks up its address afresh at each call, so it may move any time.
         size = 2 * len(self._buf)
         buf = (ctypes.c_uint8 * size)()
         ctypes.memmove(buf, self._buf, ctypes.sizeof(_ProblemHeader) + hdr.pool_used)

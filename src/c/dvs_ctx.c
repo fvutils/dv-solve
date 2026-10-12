@@ -458,6 +458,10 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
 /* Accessor wrappers                                                   */
 /* ------------------------------------------------------------------ */
 
+uint32_t dvs_solver_n_vars(const dvs_ctx_t *ctx) {
+    return ctx ? ctx->n_vars : 0;
+}
+
 int32_t dvs_var_lo32(const dvs_ctx_t *ctx, uint32_t var_id) {
     return var_lo32(_ctx_var(ctx, var_id));
 }

@@ -322,8 +322,11 @@ class SolveCtx:
     def add_constraint(self, aux_problem) -> int:
         """Add constraints from an auxiliary SolveProblem to this context.
 
+        New variables it declares are numbered from :attr:`n_vars`.
+
         Returns 0 on success, -1 if capacity exceeded, -2 if UNSAT, -3 for
-        an unsupported width, -4 for an undeclared variable, or a positive
+        an unsupported width, -4 for an undeclared variable or one numbered
+        below :attr:`n_vars` that the problem did not declare, or a positive
         count of constraints that could not be compiled.
         """
         sp_ptr = getattr(aux_problem, "_sp", None)
@@ -457,6 +460,13 @@ class SolveCtx:
                         self.restore(cp2)
                         hi_cur = mid - 1
             return best
+
+    @property
+    def n_vars(self) -> int:
+        """The number of variables in the context, including those the
+        compile made for itself. A problem passed to :meth:`add_constraint`
+        numbers its new variables from here."""
+        return self._lib.dvs_solver_n_vars(self._ctx)
 
     def get_value(self, var_id: int) -> int:
         """The value of variable ``var_id`` in the last solution.

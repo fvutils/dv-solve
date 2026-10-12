@@ -17,6 +17,8 @@ extern "C" {
 #define VAR_TIER1   0x08u   /* bounds stored in WideBounds64 (33-64b) */
 #define VAR_TIER2   0x10u   /* bounds stored in WideBoundsN  (>64b)   */
 #define VAR_AUX     0x20u   /* auxiliary (guard/ITE result): never a search decision */
+#define VAR_DECLARED 0x40u  /* declared by a problem's VarSpec (else made by
+                             * the compile, or an unfilled id gap)     */
 
 /* Convenience: tier-0 when neither TIER1 nor TIER2 is set (width ≤ 32) */
 #define VAR_IS_TIER0(f)  (((f) & (VAR_TIER1|VAR_TIER2)) == 0)

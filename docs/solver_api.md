@@ -78,8 +78,12 @@ void dvs_solver_restore(SolveCtx *ctx, uint32_t cp);
 
 ```c
 // Add constraints from an auxiliary SolveProblem to a compiled context.
+// The context reads aux_sp only during the call. New variables are numbered
+// from dvs_solver_n_vars(ctx) (the compile may have made variables of its
+// own); an id the compile took is -4 (DVS_COMPILE_BAD_VAR).
 // Returns 0 on success, -1 on capacity error, -2 on UNSAT.
 int dvs_solver_add_constraint(SolveCtx *ctx, SolveProblem *aux_sp);
+uint32_t dvs_solver_n_vars(const SolveCtx *ctx);
 ```
 
 ## Value Exclusion (randc)

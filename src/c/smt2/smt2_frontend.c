@@ -4635,10 +4635,37 @@ static int _ensure_compiled(Smt2Frontend *fe) {
  * a later CDCL `unknown` can escalate to bitblast even after incremental
  * asserts -- unless it is already too big to keep copying on every hand-off. */
 #define SMT2_RETAIN_MAX_BYTES (16u << 20)
+
+/* The retention cap; DV_RETAIN_MAX_BYTES overrides it (tests use a small
+ * one to reach the end of retention without a 16 MB problem). */
+static uint32_t _retain_max(void) {
+    static uint32_t v;
+    if (!v) {
+        const char *e = getenv("DV_RETAIN_MAX_BYTES");
+        v = (e && *e) ? (uint32_t)strtoul(e, NULL, 0) : SMT2_RETAIN_MAX_BYTES;
+        if (!v) v = 1;
+    }
+    return v;
+}
+/* Retention ends (the builder is about to be reset): keep the retained
+ * assertions for the validation pass in vbase, which pops trim. */
+static void _retention_end(Smt2Frontend *fe) {
+    if (!fe->vproblem) return;
+    dvs_problem_t *vp = _explicit(dvs_builder_finalize_append(
+                            fe->builder, fe->vproblem, &fe->vproblem_size));
+    if (vp) fe->vproblem = vp;
+    free(fe->vbase);           /* one retention per compile; never both */
+    fe->vbase = fe->vproblem;
+    fe->vproblem = NULL;
+}
+
 static void _start_cdcl_retention(Smt2Frontend *fe) {
-    if (dvs_builder_virtual_used(fe->builder) <= SMT2_RETAIN_MAX_BYTES) {
+    free(fe->vproblem);
+    fe->vproblem = NULL;
+    if (dvs_builder_virtual_used(fe->builder) <= _retain_max()) {
         fe->cdcl_retained = 1;
         fe->aux_mark = dvs_builder_mark(fe->builder);
+        fe->retain_mark = fe->aux_mark;
     } else {
         dvs_builder_reset(fe->builder);
         _fun_memo_clear(fe);
@@ -4649,12 +4676,17 @@ static void _start_cdcl_retention(Smt2Frontend *fe) {
     }
 }
 
-/* The builder's items since aux_mark have been handed to CDCL. */
-static void _aux_handed_off(Smt2Frontend *fe) {
+/* The builder's items since aux_mark have been handed to CDCL. `failed`: the
+ * ctx refused them (it no longer stands for the assertion set, and later
+ * checks bit-blast from the builder): keep the builder whole even past the
+ * retention cap. Resetting it there lost those assertions, and a later check
+ * answered without them (B119). */
+static void _aux_handed_off(Smt2Frontend *fe, int failed) {
     if (fe->cdcl_retained &&
-        dvs_builder_virtual_used(fe->builder) <= SMT2_RETAIN_MAX_BYTES) {
+        (failed || dvs_builder_virtual_used(fe->builder) <= _retain_max())) {
         fe->aux_mark = dvs_builder_mark(fe->builder);
     } else {
+        _retention_end(fe);
         dvs_builder_reset(fe->builder);
         _fun_memo_clear(fe);
         fe->cdcl_retained = 0;
@@ -4669,20 +4701,39 @@ static void _aux_handed_off(Smt2Frontend *fe) {
 static int _flush_aux(Smt2Frontend *fe) {
     if (!fe->compiled || !fe->has_aux) return 0;
     size_t aux_sz = 0;
-    /* Only the items added since the last hand-off: the builder may also hold
-     * everything before it (cdcl_retained), which the ctx already has. */
-    dvs_problem_t *aux = _explicit(dvs_builder_finalize_since(fe->builder, &fe->aux_mark, &aux_sz));
-    if (!aux) return -1;
-    int rc = dvs_solver_add_constraint(fe->ctx, aux);
+    dvs_problem_t *aux = NULL;
+    int rc;
+    if (fe->cdcl_retained) {
+        /* The builder holds every assertion (the ctx has those before
+         * aux_mark). Bring its finalized copy up to date, copying only the new
+         * bytes, and hand the ctx just the items since aux_mark, cut in
+         * place. The ctx reads a problem only during the call. A full copy
+         * per hand-off, each kept for validation, cost O(hand-offs x size)
+         * memory and time (B117). */
+        dvs_problem_t *vp = _explicit(dvs_builder_finalize_append(
+                                fe->builder, fe->vproblem, &fe->vproblem_size));
+        if (!vp) return -1;
+        fe->vproblem = vp;
+        dvs_problem_cut_t cut;
+        if (dvs_problem_cut_since(vp, &fe->aux_mark, &cut) != 0) return -1;
+        rc = dvs_solver_add_constraint(fe->ctx, vp);
+        dvs_problem_uncut(vp, &cut);
+    } else {
+        /* Only the items added since the last hand-off: the builder was reset
+         * after it, so this copy is small. */
+        aux = _explicit(dvs_builder_finalize_since(fe->builder, &fe->aux_mark, &aux_sz));
+        if (!aux) return -1;
+        rc = dvs_solver_add_constraint(fe->ctx, aux);
+    }
     /* An add that overflows the context pool compiles only part of `aux`, and
      * can read the failed allocation as a conflict: neither its `unsat` nor
      * the context can be trusted. Report it incomplete -- check-sat then
      * answers from bitblast -- and give later instances a bigger pool. */
     if (fe->ctx->pool.overflow) rc = 1;
     if (rc > 0) fe->ctx_uncompiled += (uint32_t)rc;
-    /* Retain the aux dvs_problem_t (instead of freeing) so the post-solve
-     * model-validation pass can re-evaluate the constraints it contributed.
-     * Storage is reclaimed in smt2_frontend_destroy. */
+    /* Record the hand-off (scoped by push/pop; see aux_problems). A copy is
+     * kept so the post-solve model-validation pass can re-evaluate the
+     * constraints it contributed; retained ones are in vproblem. */
     if (fe->n_aux_problems == fe->aux_problems_cap) {
         uint32_t new_cap = fe->aux_problems_cap ? fe->aux_problems_cap * 2 : 8;
         dvs_problem_t **grow = (dvs_problem_t **)realloc(fe->aux_problems,
@@ -4692,7 +4743,7 @@ static int _flush_aux(Smt2Frontend *fe) {
              * aux). Validation will be incomplete for this run but the
              * solver result is unaffected. */
             free(aux);
-            _aux_handed_off(fe);
+            _aux_handed_off(fe, rc < 0 && rc != -2);
             if (rc == -2 && !fe->flush_unsat) fe->flush_unsat = fe->push_depth + 1;
             return rc;
         }
@@ -4700,9 +4751,40 @@ static int _flush_aux(Smt2Frontend *fe) {
         fe->aux_problems_cap = new_cap;
     }
     fe->aux_problems[fe->n_aux_problems++] = aux;
-    _aux_handed_off(fe);
+    _aux_handed_off(fe, rc < 0 && rc != -2);
     if (rc == -2 && !fe->flush_unsat) fe->flush_unsat = fe->push_depth + 1;
     return rc;
+}
+
+/* Validate the ctx's model against `sp`'s items since retain_mark: the
+ * assertions made after the compile (fe->problem has those before). */
+static int _validate_since(Smt2Frontend *fe, dvs_problem_t *sp) {
+    if (!sp) return 0;
+    dvs_problem_cut_t cut;
+    if (dvs_problem_cut_since(sp, &fe->retain_mark, &cut) != 0) return 0;
+    int viol = dvs_solver_validate_model(fe->ctx, sp, fe->err);
+    dvs_problem_uncut(sp, &cut);
+    return viol;
+}
+
+/* Check the ctx's model against every assertion in scope: the compiled
+ * problem, then the incremental ones (hand-off copies, and the retained or
+ * once-retained builder). Returns the number of violated constraints. */
+static int _validate_all(Smt2Frontend *fe) {
+    int viol = dvs_solver_validate_model(fe->ctx, fe->problem, fe->err);
+    for (uint32_t i = 0; i < fe->n_aux_problems; i++)
+        if (fe->aux_problems[i])
+            viol += dvs_solver_validate_model(fe->ctx, fe->aux_problems[i], fe->err);
+    viol += _validate_since(fe, fe->vbase);
+    if (fe->cdcl_retained && fe->vproblem) {
+        /* Up to date with the builder: a pop since the last hand-off dropped
+         * items from its lists. */
+        dvs_problem_t *vp = _explicit(dvs_builder_finalize_append(
+                                fe->builder, fe->vproblem, &fe->vproblem_size));
+        if (vp) fe->vproblem = vp;
+        viol += _validate_since(fe, fe->vproblem);
+    }
+    return viol;
 }
 
 /* Fingerprint of a finalized dvs_problem_t. dvs_builder_finalize() zeroes the
@@ -6450,10 +6532,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
         const char *mode_env = getenv("DV_VALIDATE_MODEL");
         int mode = mode_env ? atoi(mode_env) : 2;
         if (mode > 0) {
-            int viol = dvs_solver_validate_model(fe->ctx, fe->problem, fe->err);
-            for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
-                viol += dvs_solver_validate_model(fe->ctx, fe->aux_problems[i], fe->err);
-            }
+            int viol = _validate_all(fe);
             fe->last_validate_viol = viol;
             if (viol > 0) {
                 fprintf(fe->err,
@@ -7351,6 +7430,7 @@ static void _push_frame(Smt2Frontend *fe, uint32_t cp) {
     f->n_sort_funs    = fe->n_sort_funs;
     f->n_sort_consts  = fe->n_sort_consts;
     f->incomplete     = (uint8_t)fe->incomplete;
+    f->vbase_ncons    = fe->cdcl_retained ? fe->builder->n_constraints : UINT32_MAX;
     _abs_push_frame(fe, d);
     f->bmark          = dvs_builder_mark(fe->builder);
 }
@@ -7495,6 +7575,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
              * the pop solving a stale problem -- a wrong unsat (B63). */
             fe->aux_mark = fe->push[fe->push_depth - n].bmark;
         } else {
+            if (fe->cdcl_retained) _retention_end(fe);  /* the loop trims it */
             dvs_builder_reset(fe->builder);
             _fun_memo_clear(fe);
             fe->cdcl_retained = 0;
@@ -7584,6 +7665,15 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->aux_problems[i] = NULL;
         }
         fe->n_aux_problems = target_n_aux;
+        /* The once-retained assertions made since this push go too. */
+        uint32_t vkeep = fe->push[fe->push_depth].vbase_ncons;
+        if (fe->vbase && vkeep != UINT32_MAX) {
+            dvs_problem_t *vb = fe->vbase;
+            while (vb->n_constraints > vkeep) {
+                vb->constraints_head = ((ConstraintSpec *)POOL_PTR(vb, vb->constraints_head))->next;
+                vb->n_constraints--;
+            }
+        }
         _truncate_named(fe, fe->push[fe->push_depth].n_named);
         if (fe->n_core_hist > fe->push[fe->push_depth].n_core_hist)
             fe->n_core_hist = fe->push[fe->push_depth].n_core_hist;
@@ -7908,9 +7998,7 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
         const char *mode_env = getenv("DV_VALIDATE_MODEL");
         int mode = mode_env ? atoi(mode_env) : 2;
         if (fe->last_result == DVS_SOLVE_OK && fe->problem && mode > 0) {
-            int viol = dvs_solver_validate_model(fe->ctx, fe->problem, fe->err);
-            for (uint32_t i = 0; i < fe->n_aux_problems; i++)
-                viol += dvs_solver_validate_model(fe->ctx, fe->aux_problems[i], fe->err);
+            int viol = _validate_all(fe);
             if (viol > 0) {
                 fprintf(fe->err, "model-validation: %d constraint(s) violated%s\n", viol,
                         mode >= 2 ? "; downgrading sat -> unknown" : "");
@@ -8039,6 +8127,8 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     free(fe->aread_hash);
     free(fe->aeqs);
     free(fe->push);
+    free(fe->vproblem);
+    free(fe->vbase);
     /* Free any remaining per-command transient allocations */
     _cmd_alloc_reset(fe);
     memset(fe, 0, sizeof(*fe));
@@ -8113,6 +8203,8 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     free(fe->aread_hash);
     free(fe->aeqs);
     free(fe->push);
+    free(fe->vproblem);
+    free(fe->vbase);
     _cmd_alloc_reset(fe);
 
     _truncate_named(fe, 0);

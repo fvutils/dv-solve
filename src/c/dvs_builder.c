@@ -318,10 +318,8 @@ dvs_problem_t *dvs_builder_finalize_append(dvs_builder_t *b, dvs_problem_t *prev
     }
     dvs_problem_t *sp = prev;
     if (used > prev->pool.capacity) {
-        /* Growing moves the problem; a context that compiled it still points
-         * at the old one. */
-        assert(!(prev->pool._pad & DVS_PROBLEM_HELD) && "problem held by a context");
-        if (prev->pool._pad & DVS_PROBLEM_HELD) return NULL;
+        /* Growing moves the problem (a context reads one only during
+         * compile and add). */
         uint32_t cap = used + (used / 2 > 4096 ? used / 2 : 4096);
         sp = (dvs_problem_t *)realloc(prev, sizeof(dvs_problem_t) + cap);
         if (!sp) return NULL;                 /* prev is still valid */
@@ -416,6 +414,58 @@ static int _cut_list(dvs_problem_t *sp, dvs_expr_t *head, uint32_t *count,
     if (cur == EXPR_NULL) return -1;
     *(dvs_expr_t *)POOL_PTR(sp, cur) = EXPR_NULL;
     return 0;
+}
+
+/* The six item lists of a problem, as (head, count) pairs. */
+static void _lists(dvs_problem_t *sp, dvs_expr_t *head[6], uint32_t *count[6]) {
+    head[0] = &sp->vars_head;        count[0] = &sp->n_vars;
+    head[1] = &sp->constraints_head; count[1] = &sp->n_constraints;
+    head[2] = &sp->sources_head;     count[2] = &sp->n_sources;
+    head[3] = &sp->allDiff_head;     count[3] = &sp->n_alldiffs;
+    head[4] = &sp->softs_head;       count[4] = &sp->n_softs;
+    head[5] = &sp->dists_head;       count[5] = &sp->n_dists;
+}
+
+int dvs_problem_cut_since(dvs_problem_t *sp, const dvs_builder_mark_t *m,
+                          dvs_problem_cut_t *save) {
+    dvs_expr_t *head[6];
+    uint32_t *count[6];
+    _lists(sp, head, count);
+    const uint32_t at[6] = { m->n_vars, m->n_constraints, m->n_sources,
+                             m->n_alldiffs, m->n_softs, m->n_dists };
+    for (int i = 0; i < 6; i++)
+        if (at[i] > *count[i]) return -1;
+    for (int i = 0; i < 6; i++) {
+        save->head[i] = *head[i];
+        save->count[i] = *count[i];
+        save->link_at[i] = EXPR_NULL;
+        save->link_was[i] = EXPR_NULL;
+        uint32_t keep = *count[i] - at[i];
+        *count[i] = keep;
+        if (keep == 0) { *head[i] = EXPR_NULL; continue; }
+        /* Lists are newest-first: the kept items are the first `keep`. Every
+         * spec type starts with its `next` link. */
+        dvs_expr_t cur = *head[i];
+        for (uint32_t k = 1; k < keep; k++)
+            cur = *(dvs_expr_t *)POOL_PTR(sp, cur);
+        dvs_expr_t *link = (dvs_expr_t *)POOL_PTR(sp, cur);
+        save->link_at[i] = cur;
+        save->link_was[i] = *link;
+        *link = EXPR_NULL;
+    }
+    return 0;
+}
+
+void dvs_problem_uncut(dvs_problem_t *sp, const dvs_problem_cut_t *save) {
+    dvs_expr_t *head[6];
+    uint32_t *count[6];
+    _lists(sp, head, count);
+    for (int i = 0; i < 6; i++) {
+        if (save->link_at[i] != EXPR_NULL)
+            *(dvs_expr_t *)POOL_PTR(sp, save->link_at[i]) = save->link_was[i];
+        *head[i] = save->head[i];
+        *count[i] = save->count[i];
+    }
 }
 
 /* Advance a newest-first list head past its items beyond `keep`. */

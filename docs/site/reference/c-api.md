@@ -51,7 +51,7 @@ Ownership is explicit:
 | Object | Created by | Freed by | Must outlive |
 |---|---|---|---|
 | builder | {c:func}`dvs_builder_create` | {c:func}`dvs_builder_destroy` | the problems it finalized, until they are freed |
-| problem | {c:func}`dvs_builder_finalize` | {c:func}`dvs_builder_free_problem` | every context compiled from it |
+| problem | {c:func}`dvs_builder_finalize` | {c:func}`dvs_builder_free_problem` | the compile or add that reads it (only that call) |
 | context | {c:func}`dvs_solver_new` | {c:func}`dvs_solver_free` | |
 | context in your own buffer (embedded) | {c:func}`dvs_solver_create` | {c:func}`dvs_solver_destroy`, then free the buffer | |
 | block allocator (embedded only) | {c:func}`dvs_block_alloc_create` | {c:func}`dvs_block_alloc_destroy` | every context using it |
@@ -341,8 +341,8 @@ Release the memory of a context made by {c:func}`dvs_solver_create`.
 ```
 
 ```{c:function} int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *p)
-Compile problem `p` into the context. `p` must stay valid until the context
-is destroyed.
+Compile problem `p` into the context. The context reads `p` only during the
+call: afterwards `p` may be freed, reused or moved.
 
 :returns: {c:macro}`DVS_COMPILE_OK`, a negative error code (see
   [Compile results](#compile-results)), or a positive count of constraints
@@ -461,7 +461,9 @@ or an all-different constraint has more than 16 variables or one wider than
 
 ```{c:macro} DVS_COMPILE_BAD_VAR
 −4: the variable ids are not 0 to *n*−1 each declared once, or an expression
-names a variable that was never declared.
+names a variable that was never declared. For
+{c:func}`dvs_solver_add_constraint`: the problem declares an id the context
+already uses for a variable of its own, or re-declares one at another width.
 ```
 
 ## Incremental solving
@@ -487,11 +489,23 @@ SystemVerilog `randc` behaviour.
 ```
 
 ```{c:function} int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *p)
-Add the constraints of problem `p` to an already compiled context. `p` may
-name the context's variables without declaring them, and must stay valid
-until the context is destroyed.
+Add the constraints of problem `p` to an already compiled context. As with
+{c:func}`dvs_solver_compile`, `p` is read only during the call.
 
-:returns: The same codes as {c:func}`dvs_solver_compile`.
+Variables `p` declares are new, numbered from {c:func}`dvs_solver_n_vars`:
+the compile may have made variables of its own after the ones its problem
+declared. `p` may also name, or re-declare at the same width, variables a
+problem declared before.
+
+:returns: The same codes as {c:func}`dvs_solver_compile`;
+  {c:macro}`DVS_COMPILE_BAD_VAR` if `p` declares an id the compile took for
+  a variable of its own, or re-declares a variable at another width.
+```
+
+```{c:function} uint32_t dvs_solver_n_vars(const dvs_ctx_t *ctx)
+The number of variables in the context: those its problems declared and
+those the compile made for itself. A problem for
+{c:func}`dvs_solver_add_constraint` numbers its new variables from here.
 ```
 
 ```{c:function} int dvs_solver_checkpoint(dvs_ctx_t *ctx)

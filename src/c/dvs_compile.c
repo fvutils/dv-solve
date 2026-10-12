@@ -3923,7 +3923,15 @@ static int _nomem_check(const dvs_ctx_t *ctx, int rc) {
 
 static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 #ifdef DVS_STEP_CHECK
-    dvs_sc_problem = sp;
+    /* The checker validates models against the problem after the call, and
+     * a caller may free it then: keep a copy. */
+    free(dvs_sc_problem);
+    dvs_sc_problem = NULL;
+    if (sp) {
+        size_t n = sizeof(dvs_problem_t) + sp->pool.capacity;
+        dvs_sc_problem = (dvs_problem_t *)malloc(n);
+        if (dvs_sc_problem) memcpy(dvs_sc_problem, sp, n);
+    }
 #endif
     int err = 0;
     dvs_problem_t *esp = dvs_sv_elaborate(sp, NULL, NULL, &err);
@@ -3941,7 +3949,6 @@ static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 }
 
 int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
-    if (sp) sp->pool._pad |= DVS_PROBLEM_HELD;   /* the context keeps it */
     if (!ctx || !ctx->oracle) return _solver_compile(ctx, sp);
     double t0 = dvs_oracle_clock_ms();
     int rc = _solver_compile(ctx, sp);
@@ -3984,7 +3991,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 
         Variable *v = &ctx->vars[id];
         if (v->width != 0) return DVS_COMPILE_BAD_VAR;   /* declared twice */
-        uint8_t  flags = 0;
+        uint8_t  flags = VAR_DECLARED;
         if (vs->is_signed) flags |= VAR_SIGNED;
         if (vs->is_aux)    flags |= VAR_AUX;
         if (vs->order) {
@@ -4455,7 +4462,6 @@ static int _solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
 }
 
 int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
-    if (aux_sp) aux_sp->pool._pad |= DVS_PROBLEM_HELD;
     dvs_search_discard(ctx);
     int rc = _solver_add_constraint(ctx, aux_sp);
     if (ctx && ctx->oracle) dvs_oracle_on_add(ctx, aux_sp, rc);
@@ -4513,6 +4519,185 @@ static int _snapshot_added_vars(dvs_ctx_t *ctx, uint32_t base) {
     return 0;
 }
 
+/* ---- An add names only variables that exist ----
+ * A variable an add's items name must be declared by an earlier problem (or
+ * made by the compile), or by the add itself. Anything else -- an id gap, an
+ * id past the end -- read an all-zero slot, a variable with domain {0}: after
+ * a refused add, the next one's constraints over the refused add's variables
+ * answered unsat (B119). SMT-LIB problems skip SV elaboration, which checks
+ * this for the others. Walked before the add changes anything. */
+typedef struct {
+    const dvs_ctx_t *ctx;
+    dvs_problem_t   *sp;
+    uint32_t         base, hi;     /* the add's new ids lie in [base, hi) */
+    const uint8_t   *mine;         /* mine[id - base]: the add declares id */
+    uint32_t        *seen;         /* open-addressed set of visited refs + 1 */
+    uint32_t         seen_cap, n_seen;
+    dvs_expr_t      *st;
+    uint32_t         n_st, st_cap;
+    int              bad, oom;
+} KnownWalk;
+
+static void _kw_id(KnownWalk *w, uint32_t id) {
+    int ok = id < w->base ? w->ctx->vars[id].width != 0
+                          : id < w->hi && w->mine[id - w->base];
+    if (!ok) w->bad = 1;
+}
+
+static void _kw_push(KnownWalk *w, dvs_expr_t r) {
+    if (r == EXPR_NULL || w->bad || w->oom) return;
+    if (2 * (w->n_seen + 1) > w->seen_cap) {
+        uint32_t cap = w->seen_cap ? 2 * w->seen_cap : 256;
+        uint32_t *t = (uint32_t *)DVS_ALLOC(w->ctx->alloc, (size_t)cap * sizeof *t);
+        if (!t) { w->oom = 1; return; }
+        memset(t, 0, (size_t)cap * sizeof *t);
+        for (uint32_t i = 0; i < w->seen_cap; i++) {
+            uint32_t e = w->seen[i];
+            if (!e) continue;
+            uint32_t j = (e * 2654435761u) & (cap - 1);
+            while (t[j]) j = (j + 1) & (cap - 1);
+            t[j] = e;
+        }
+        if (w->seen) DVS_RELEASE(w->ctx->alloc, w->seen, (size_t)w->seen_cap * sizeof *w->seen);
+        w->seen = t;
+        w->seen_cap = cap;
+    }
+    uint32_t key = r + 1, j = (key * 2654435761u) & (w->seen_cap - 1);
+    while (w->seen[j]) {
+        if (w->seen[j] == key) return;
+        j = (j + 1) & (w->seen_cap - 1);
+    }
+    w->seen[j] = key;
+    w->n_seen++;
+    if (w->n_st == w->st_cap) {
+        uint32_t cap = w->st_cap ? 2 * w->st_cap : 256;
+        dvs_expr_t *t = (dvs_expr_t *)DVS_RESIZE(w->ctx->alloc, w->st,
+                            (size_t)w->st_cap * sizeof *t, (size_t)cap * sizeof *t);
+        if (!t) { w->oom = 1; return; }
+        w->st = t;
+        w->st_cap = cap;
+    }
+    w->st[w->n_st++] = r;
+}
+
+static void _kw_visit(KnownWalk *w, dvs_expr_t r) {
+    dvs_problem_t *sp = w->sp;
+    void *n = dvs_pool_ptr(&sp->pool, r);
+    switch (*(const ExprKind *)n) {
+    case EXPR_VAR:    _kw_id(w, ((const ExprVar *)n)->var_id); break;
+    case EXPR_BINARY: _kw_push(w, ((const ExprBinary *)n)->lhs);
+                      _kw_push(w, ((const ExprBinary *)n)->rhs); break;
+    case EXPR_UNARY:  _kw_push(w, ((const ExprUnary *)n)->operand); break;
+    case EXPR_ITE:    _kw_push(w, ((const ExprITE *)n)->cond);
+                      _kw_push(w, ((const ExprITE *)n)->then_e);
+                      _kw_push(w, ((const ExprITE *)n)->else_e); break;
+    case EXPR_IN_RANGE: _kw_push(w, ((const ExprInRange *)n)->value);
+                      _kw_push(w, ((const ExprInRange *)n)->lo);
+                      _kw_push(w, ((const ExprInRange *)n)->hi); break;
+    case EXPR_IN_SET: {
+        const ExprInSet *e = (const ExprInSet *)n;
+        _kw_push(w, e->value);
+        dvs_expr_t *el = expr_in_set_elems(sp, r);
+        for (uint32_t i = 0; i < e->n_elems; i++) _kw_push(w, el[i]);
+        break;
+    }
+    case EXPR_IN_RANGES: {
+        const ExprInRanges *e = (const ExprInRanges *)n;
+        _kw_push(w, e->value);
+        dvs_expr_t *lo = expr_in_ranges_los(sp, r), *hi = expr_in_ranges_his(sp, r);
+        for (uint32_t i = 0; i < e->n_ranges; i++) { _kw_push(w, lo[i]); _kw_push(w, hi[i]); }
+        break;
+    }
+    case EXPR_EXTEND:  _kw_push(w, ((const ExprExtend *)n)->operand); break;
+    case EXPR_EXTRACT: _kw_push(w, ((const ExprExtract *)n)->operand); break;
+    case EXPR_SV_CAST: _kw_push(w, ((const ExprSvCast *)n)->operand); break;
+    case EXPR_CAST:    _kw_push(w, ((const ExprCast *)n)->operand); break;
+    case EXPR_CONCAT:  _kw_push(w, ((const ExprConcat *)n)->hi);
+                       _kw_push(w, ((const ExprConcat *)n)->lo); break;
+    case EXPR_SUM: {
+        const ExprSum *e = (const ExprSum *)n;
+        _kw_push(w, e->result);
+        const dvs_expr_t *refs = (const dvs_expr_t *)(e + 1);   /* summand exprs */
+        for (uint32_t i = 0; i < e->n_vars; i++) _kw_push(w, refs[i]);
+        break;
+    }
+    case EXPR_COUNTONES: _kw_push(w, ((const ExprCountones *)n)->result);
+                         _kw_push(w, ((const ExprCountones *)n)->operand); break;
+    case EXPR_CLOG2:   _kw_push(w, ((const ExprClog2 *)n)->result);
+                       _kw_push(w, ((const ExprClog2 *)n)->operand); break;
+    case EXPR_ARRAY_SELECT: {
+        const ExprArraySelect *e = (const ExprArraySelect *)n;
+        for (uint32_t i = 0; i < e->n_elems; i++) _kw_id(w, e->base_var_id + i);
+        _kw_push(w, e->result);
+        _kw_push(w, e->index);
+        break;
+    }
+    default: break;
+    }
+}
+
+static void _kw_root(KnownWalk *w, dvs_expr_t root) {
+    _kw_push(w, root);
+    while (w->n_st && !w->bad && !w->oom) _kw_visit(w, w->st[--w->n_st]);
+}
+
+/* 0 if every name in `sp` exists, DVS_COMPILE_BAD_VAR if one does not, -1 if
+ * memory ran out. `base` is the context's n_vars before the add. */
+static int _add_names_known(const dvs_ctx_t *ctx, dvs_problem_t *sp, uint32_t base) {
+    KnownWalk w;
+    memset(&w, 0, sizeof w);
+    w.ctx = ctx; w.sp = sp; w.base = base; w.hi = base;
+    for (dvs_expr_t r = sp->vars_head; r != EXPR_NULL; ) {
+        const VarSpec *vs = (const VarSpec *)dvs_pool_ptr(&sp->pool, r);
+        if (vs->var_id >= w.hi) w.hi = vs->var_id + 1;
+        r = vs->next;
+    }
+    uint8_t *mine = NULL;
+    size_t nm = w.hi - base;
+    if (nm) {
+        mine = (uint8_t *)DVS_ALLOC(ctx->alloc, nm);
+        if (!mine) return -1;
+        memset(mine, 0, nm);
+        for (dvs_expr_t r = sp->vars_head; r != EXPR_NULL; ) {
+            const VarSpec *vs = (const VarSpec *)dvs_pool_ptr(&sp->pool, r);
+            if (vs->var_id >= base) mine[vs->var_id - base] = 1;
+            r = vs->next;
+        }
+    }
+    w.mine = mine;
+    for (dvs_expr_t c = sp->constraints_head; c != EXPR_NULL && !w.bad && !w.oom; ) {
+        const ConstraintSpec *cs = (const ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+        _kw_root(&w, cs->root);
+        c = cs->next;
+    }
+    for (dvs_expr_t c = sp->softs_head; c != EXPR_NULL && !w.bad && !w.oom; ) {
+        const SoftSpec *ss = (const SoftSpec *)dvs_pool_ptr(&sp->pool, c);
+        _kw_root(&w, ss->root);
+        c = ss->next;
+    }
+    for (dvs_expr_t c = sp->allDiff_head; c != EXPR_NULL && !w.bad; ) {
+        const AllDiffSpec *ad = (const AllDiffSpec *)dvs_pool_ptr(&sp->pool, c);
+        const uint32_t *ids = (const uint32_t *)(ad + 1);
+        for (uint32_t i = 0; i < ad->n_vars; i++) _kw_id(&w, ids[i]);
+        c = ad->next;
+    }
+    for (dvs_expr_t c = sp->sources_head; c != EXPR_NULL && !w.bad; ) {
+        const SourceSpec *ss = (const SourceSpec *)dvs_pool_ptr(&sp->pool, c);
+        const uint32_t *ids = source_spec_vars(sp, c);
+        for (uint32_t i = 0; i < ss->n_vars; i++) _kw_id(&w, ids[i]);
+        c = ss->next;
+    }
+    for (dvs_expr_t c = sp->dists_head; c != EXPR_NULL && !w.bad; ) {
+        const DistSpec *ds = (const DistSpec *)dvs_pool_ptr(&sp->pool, c);
+        _kw_id(&w, ds->var_id);
+        c = ds->next;
+    }
+    if (mine) DVS_RELEASE(ctx->alloc, mine, nm);
+    if (w.seen) DVS_RELEASE(ctx->alloc, w.seen, (size_t)w.seen_cap * sizeof *w.seen);
+    if (w.st) DVS_RELEASE(ctx->alloc, w.st, (size_t)w.st_cap * sizeof *w.st);
+    return w.oom ? -1 : w.bad ? DVS_COMPILE_BAD_VAR : 0;
+}
+
 static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
     TrailEntry *add_trail_top = ctx->trail_top;
     int n_uncompiled = 0;
@@ -4529,10 +4714,31 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
         dvs_expr_t vref = aux_sp->vars_head;
         while (vref != EXPR_NULL) {
             VarSpec *vs = (VarSpec *)dvs_pool_ptr(&aux_sp->pool, vref);
+            /* A var the context has may be re-declared (a no-op) only if a
+             * problem declared it, at the same width. An id the compile took
+             * for an internal variable is an error: it used to be read as
+             * that variable, and a new `x3 == x0 + 3` over the aux of a
+             * compiled `x2 == x1 + 1000` answered unsat (B118). Checked
+             * before anything changes. */
+            if (vs->var_id < init_base_n_vars) {
+                const Variable *v = &ctx->vars[vs->var_id];
+                if (!(v->flags & VAR_DECLARED) || v->width != vs->width)
+                    return DVS_COMPILE_BAD_VAR;
+            } else if (vs->width == 0) {
+                return DVS_COMPILE_BAD_VAR;
+            } else if (vs->width > 64) {
+                /* Not searchable (see dvs_solver_compile's variable loop).
+                 * Refused here, not part-way through initialising the new
+                 * variables: that left the context half-changed, and a solve
+                 * on it answered unsat (B119). */
+                return DVS_COMPILE_UNSUPPORTED_WIDTH;
+            }
             if (vs->var_id + 1 > want)
                 want = vs->var_id + 1;
             vref = vs->next;
         }
+        int nk = _add_names_known(ctx, aux_sp, init_base_n_vars);
+        if (nk != 0) return nk;
         if (dvs_ctx_reserve_vars(ctx, want) != 0) return -1;
         ctx->n_vars = want;
     }
@@ -4547,11 +4753,11 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
         /* "New" means added to the dvs_problem_t this call. Use the
          * pre-call n_vars as the discriminator. Vars at ids below
          * that boundary already exist in the solver context and
-         * mustn't be re-initialised. */
+         * mustn't be re-initialised (the walk above checked them). */
         if (id >= init_base_n_vars) {
             /* New variable: initialise it */
             Variable *v = &ctx->vars[id];
-            uint8_t flags = 0;
+            uint8_t flags = VAR_DECLARED;
             if (vs->is_signed) flags |= VAR_SIGNED;
             if (vs->is_aux)    flags |= VAR_AUX;
 
@@ -4664,9 +4870,12 @@ int dvs_solver_add_array_vars(dvs_ctx_t *ctx,
                           int64_t  lo,
                           int64_t  hi) {
     uint32_t end = elem_var_base + n_elems;
+    /* New variables only: initialising an id the context has would reset a
+     * variable propagators already watch, the compile's own included (B118). */
+    if (elem_var_base < ctx->n_vars) return DVS_COMPILE_BAD_VAR;
     if (end < elem_var_base || dvs_ctx_reserve_vars(ctx, end) != 0) return -1;
 
-    uint8_t flags = is_signed ? VAR_SIGNED : 0;
+    uint8_t flags = VAR_DECLARED | (is_signed ? VAR_SIGNED : 0);
     for (uint32_t i = elem_var_base; i < end; i++) {
         Variable *v = &ctx->vars[i];
         int rc;

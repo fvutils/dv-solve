@@ -145,6 +145,8 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.dvs_solver_solve.argtypes = [c.c_void_p, c.c_void_p]  # ctx, SolveOpts*
     lib.dvs_solver_get_value.restype  = c.c_int64
     lib.dvs_solver_get_value.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_solver_n_vars.restype  = c.c_uint32
+    lib.dvs_solver_n_vars.argtypes = [c.c_void_p]
 
     # Post-solve safety net: re-evaluates every constraint in the ORIGINAL
     # problem against the current assignment. Previously reachable only from

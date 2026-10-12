@@ -136,9 +136,11 @@ int dvs_solver_solve_n(dvs_ctx_t *ctx, uint32_t n_solves,
  * Creates n_elems variables with IDs [elem_var_base .. elem_var_base+n_elems-1],
  * all with the same width, signedness, and initial bounds. This is more
  * efficient than building an auxiliary dvs_problem_t for the common
- * "add N identical element variables" pattern.
+ * "add N identical element variables" pattern. The ids must be new:
+ * elem_var_base >= dvs_solver_n_vars(ctx).
  *
- * @return 0 on success, -1 on capacity overflow.
+ * @return 0 on success, -1 on capacity overflow, DVS_COMPILE_BAD_VAR if an
+ *         id is taken.
  */
 int dvs_solver_add_array_vars(dvs_ctx_t *ctx,
                           uint32_t elem_var_base,

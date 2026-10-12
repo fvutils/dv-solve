@@ -113,6 +113,31 @@ dvs_problem_t *dvs_builder_finalize_since(dvs_builder_t *b,
                                      const dvs_builder_mark_t *mark, size_t *size);
 
 /**
+ * A problem's item lists cut down to the items added since a mark, and what
+ * dvs_problem_uncut() needs to put them back.
+ */
+typedef struct {
+    dvs_expr_t head[6];
+    uint32_t   count[6];
+    dvs_expr_t link_at[6];   /* the last kept item, EXPR_NULL if none */
+    dvs_expr_t link_was[6];  /* its `next` before the cut */
+} dvs_problem_cut_t;
+
+/**
+ * Make `sp` (a finalized problem of the builder `mark` was taken from) list
+ * only the items added since `mark`, in place, without copying: the cheap
+ * form of dvs_builder_finalize_since for a problem kept up to date with
+ * dvs_builder_finalize_append. Costs O(items since the mark). Returns -1 if
+ * `mark` is ahead of `sp`. Undo with dvs_problem_uncut() before anything else
+ * uses `sp` (finalize_append included).
+ */
+int dvs_problem_cut_since(dvs_problem_t *sp, const dvs_builder_mark_t *mark,
+                          dvs_problem_cut_t *save);
+
+/** Undo dvs_problem_cut_since(). */
+void dvs_problem_uncut(dvs_problem_t *sp, const dvs_problem_cut_t *save);
+
+/**
  * Drop every item added since `mark` (the builder then finalizes as it would
  * have at the mark). Pool storage is not reclaimed. Returns -1 if `mark` is
  * ahead of `b`. Used by the SMT-LIB2 frontend's (pop) when no CDCL context
