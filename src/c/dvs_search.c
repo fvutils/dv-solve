@@ -1150,6 +1150,10 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
      * to [1,1], out of reach of a restart. */
     const uint32_t base = ctx->decision_level;
     ctx->search_base = base;
+    /* The search may decide MAX_DECISION_DEPTH levels above its root, within
+     * the level arrays (a checkpoint reserves that room as it opens). */
+    ctx->max_depth = base + MAX_DECISION_DEPTH < ctx->level_cap
+                   ? base + MAX_DECISION_DEPTH : ctx->level_cap;
     ctx->level_marks[base].trail_top   = ctx->trail_top;
     ctx->level_marks[base].trail_count = ctx->trail_count;
     ctx->level_marks[base].stack_mark  = dvs_stack_push(ctx->dynamic);
@@ -1222,11 +1226,10 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         }
         int64_t v = _pick_value(ctx, x_id, opts);
 
-        /* Decision-depth guard. decisions/level_marks are fixed-size
-         * (MAX_DECISION_DEPTH); the search pushes one level per decided
-         * variable, so a problem with more decision variables than that depth
-         * would overflow both arrays (out-of-bounds heap write -> crash).
-         * Bail with TIMEOUT so the caller defers/escalates cleanly instead. */
+        /* Decision-depth guard: MAX_DECISION_DEPTH above the root (and
+         * within the level arrays). The search pushes one level per decided
+         * variable, so a problem with more decision variables than that bails
+         * with TIMEOUT and the caller defers/escalates cleanly. */
         if (ctx->decision_level >= ctx->max_depth) {
             ctx->bail_reason = DVS_BAIL_MAX_DEPTH;
             return DVS_SOLVE_TIMEOUT;

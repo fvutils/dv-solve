@@ -413,8 +413,10 @@ int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *p);
 /**
  * Save the context's state.
  *
- * @return  A checkpoint index for dvs_solver_restore(), or -1 if too many
- *          checkpoints are open.
+ * @return  A checkpoint index for dvs_solver_restore(), or -1 if no more
+ *          can be opened: a context from dvs_solver_create() holds at most
+ *          32 open checkpoints; one from dvs_solver_new() grows its stack
+ *          (to about 65,000), and fails only when out of memory.
  */
 int dvs_solver_checkpoint(dvs_ctx_t *ctx);
 

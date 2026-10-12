@@ -203,7 +203,7 @@ int dvs_dpi_checkpoint_h(void *ctx) {
     DpiHandle *h = (DpiHandle *)ctx;
     _undo_search(h);
     /* Keep one slot free for the checkpoint dvs_dpi_solve_h takes. */
-    if (h->ctx->n_checkpoints + 1 >= MAX_CHECKPOINTS) return -1;
+    if (h->ctx->n_checkpoints + 1 >= DVS_MAX_CHECKPOINTS) return -1;
     return dvs_solver_checkpoint(h->ctx);
 }
 

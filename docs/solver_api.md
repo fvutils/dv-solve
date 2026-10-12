@@ -65,7 +65,8 @@ Use cases:
 
 ```c
 // Save a checkpoint of the current state.
-// Returns checkpoint index (0-based), or -1 if MAX_CHECKPOINTS exceeded.
+// Returns checkpoint index (0-based), or -1 if no more can be opened
+// (a dvs_solver_new context grows its stack; a fixed buffer holds 32).
 int dvs_solver_checkpoint(SolveCtx *ctx);
 
 // Restore to a previously saved checkpoint.

@@ -520,7 +520,7 @@ static void test_array_push_pop_basic(void) {
     ASSERT_EQ_INT(fe.n_array_vars, 2);
     ASSERT_EQ_INT(fe.push_depth, 1);
     /* Saved count = 1 (only `a` existed before push) */
-    ASSERT_EQ_INT(fe.push_n_array_vars[0], 1);
+    ASSERT_EQ_INT(fe.push[0].n_array_vars, 1);
 
     /* Pop: `b` should be cleaned up, `a` remains */
     rc = _run(&fe, "(pop 1)");

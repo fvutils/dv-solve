@@ -16,13 +16,13 @@
 #include "dvs_search.h"      /* DecisionRecord */
 #include "dvs_stackinfo.h"   /* dvs_stack_guard_t */
 
-/** Maximum decision depth for the embedded solver profile. The search pushes
- *  one level per decided variable, so this also caps the number of decision
- *  variables a single solve can carry natively — e.g. a symbolic array select
- *  frees every array element as a decision var, so a very large indexed array
- *  can exceed this. `_solver_solve_core` bails with DVS_SOLVE_TIMEOUT (clean defer)
- *  rather than overflowing the fixed decisions/level_marks arrays beyond this,
- *  so exceeding it degrades gracefully instead of an out-of-bounds write. */
+/** Maximum decision depth of one search, counted from its root (the level
+ *  the open checkpoints hold). The search pushes one level per decided
+ *  variable, so this also caps the number of decision variables a single
+ *  solve can carry natively -- e.g. a symbolic array select frees every array
+ *  element as a decision var, so a very large indexed array can exceed this.
+ *  `_solver_solve_core` then bails with DVS_SOLVE_TIMEOUT (clean defer). It
+ *  is search policy: the level arrays are sized to the root plus this. */
 #define MAX_DECISION_DEPTH  256u
 
 #ifdef __cplusplus
@@ -49,7 +49,12 @@ extern "C" {
 /* ------------------------------------------------------------------ */
 /* CheckpointMark -- saved state for incremental checkpoint/restore   */
 /* ------------------------------------------------------------------ */
-#define MAX_CHECKPOINTS 32u
+/* A context with a fixed pool holds at most DVS_FIXED_CHECKPOINTS open
+ * checkpoints; a growable one grows its checkpoint stack (and its level
+ * arrays) up to DVS_MAX_CHECKPOINTS. Each open checkpoint holds a decision
+ * level, and trail entries record their level in 16 bits. */
+#define DVS_FIXED_CHECKPOINTS 32u
+#define DVS_MAX_CHECKPOINTS   (0xFFFFu - MAX_DECISION_DEPTH - 1u)
 
 typedef struct {
     uint32_t         decision_level;
@@ -143,11 +148,15 @@ typedef struct dvs_ctx_s {
                                        * restore never frees below it   */
     dvs_stack_t       *dynamic;       /* dynamic stack (trail etc.)    */
     TrailEntry        *trail_top;     /* newest trail entry, or NULL   */
-    LevelMark         *level_marks;   /* array[MAX_DECISION_DEPTH]     */
-    uint32_t           max_depth;     /* == MAX_DECISION_DEPTH         */
+    LevelMark         *level_marks;   /* array[level_cap]              */
+    uint32_t           max_depth;     /* the search's level limit: its
+                                       * root + MAX_DECISION_DEPTH     */
+    uint32_t           level_cap;     /* entries in level_marks and
+                                       * decisions; grown by
+                                       * dvs_ctx_reserve_levels       */
     uint32_t           n_props;       /* total propagators created     */
     uint32_t          *watcher_heads; /* per variable: first watcher  */
-    DecisionRecord    *decisions;     /* array[MAX_DECISION_DEPTH]     */
+    DecisionRecord    *decisions;     /* array[level_cap]              */
     int64_t           *phase_save;    /* last tried value per var;
                                        * from ctx->alloc, created lazily */
     uint32_t           phase_save_cap;
@@ -178,8 +187,10 @@ typedef struct dvs_ctx_s {
     DvsModLink        *mod_links;
     uint32_t           n_mod_links;
     uint32_t           mod_links_cap;
-    CheckpointMark     checkpoints[MAX_CHECKPOINTS];
+    CheckpointMark    *checkpoints;   /* array[checkpoints_cap]: from
+                                       * the fixed pool, else ctx->alloc */
     uint32_t           n_checkpoints;
+    uint32_t           checkpoints_cap;
     uint32_t          *prop_refs;     /* pool offsets of propagators   */
     uint32_t           n_prop_refs_capacity;
     uint32_t          *prop_guard_vars; /* guard var per prop, EXPR_NULL=unconditional */
@@ -240,7 +251,7 @@ typedef struct dvs_ctx_s {
      * checkpoint cp. malloc'd; freed by dvs_solver_destroy. */
     uint32_t          *scope_log_var;
     int64_t           *scope_log_bound;
-    uint8_t           *scope_log_depth;
+    uint32_t          *scope_log_depth;
     uint8_t           *scope_log_is_lb;
     uint32_t           n_scope_log;
     uint32_t           scope_log_cap;
@@ -302,6 +313,10 @@ static inline void *dvs_ctx_resize(dvs_ctx_t *ctx, void *p, size_t old_sz,
 static inline void dvs_ctx_free(dvs_ctx_t *ctx, void *p, size_t sz) {
     if (p) DVS_RELEASE(ctx->alloc, p, sz ? sz : 1);
 }
+
+/** Make level_marks and decisions hold at least `n` levels. A fixed-pool
+ *  context cannot grow them. 0, or -1 (unchanged). */
+int dvs_ctx_reserve_levels(dvs_ctx_t *ctx, uint32_t n);
 
 /** Allocate ctx->phase_save (uninitialised) from ctx->alloc; 0 or -1. */
 int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx);

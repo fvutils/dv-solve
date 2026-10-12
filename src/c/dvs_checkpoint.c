@@ -18,9 +18,31 @@ int dvs_solver_checkpoint(dvs_ctx_t *ctx) {
     return cp;
 }
 
+/* Room for one more checkpoint: its mark, the level it holds, and a full
+ * search (MAX_DECISION_DEPTH) above that. A fixed pool cannot grow. */
+static int _checkpoint_room(dvs_ctx_t *ctx) {
+    uint32_t n = ctx->n_checkpoints;
+    if (n >= DVS_MAX_CHECKPOINTS) return -1;
+    if (n == ctx->checkpoints_cap) {
+        if (!ctx->pool.alloc) return -1;
+        uint32_t cap = n ? 2u * n : 8u;
+        if (cap > DVS_MAX_CHECKPOINTS) cap = DVS_MAX_CHECKPOINTS;
+        CheckpointMark *c = (CheckpointMark *)dvs_ctx_resize(ctx, ctx->checkpoints,
+            (size_t)n * sizeof(CheckpointMark), (size_t)cap * sizeof(CheckpointMark));
+        if (!c) return -1;
+        ctx->checkpoints = c;
+        ctx->checkpoints_cap = cap;
+    }
+    uint32_t need = ctx->decision_level + 1u + MAX_DECISION_DEPTH;
+    if (need > ctx->level_cap && dvs_ctx_reserve_levels(ctx, need) != 0
+            && ctx->decision_level + 1u >= ctx->level_cap)
+        return -1;
+    return 0;
+}
+
 static int _solver_checkpoint(dvs_ctx_t *ctx) {
-    if (ctx->n_checkpoints >= MAX_CHECKPOINTS) return -1;
     dvs_search_discard(ctx);
+    if (_checkpoint_room(ctx) != 0) return -1;
 
     uint32_t cp = ctx->n_checkpoints++;
     CheckpointMark *m = &ctx->checkpoints[cp];

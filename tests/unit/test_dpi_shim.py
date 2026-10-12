@@ -235,11 +235,16 @@ class TestDpiShim:
         finally:
             self.lib.dvs_dpi_release_h(fresh)
 
-    def test_checkpoint_limit_leaves_room_to_solve(self):
+    def test_deep_checkpoints_then_solve(self):
+        # The checkpoint stack grows (it was capped at 31 open).
         ctx = self.lib.dvs_dpi_compile_b64(_build_2var_b64(self.lib).encode())
         try:
-            cps = [self.lib.dvs_dpi_checkpoint_h(ctx) for _ in range(40)]
-            assert cps[:31] == list(range(31)) and set(cps[31:]) == {-1}
+            cps = [self.lib.dvs_dpi_checkpoint_h(ctx) for _ in range(300)]
+            assert cps == list(range(300))
+            assert self.lib.dvs_dpi_pin_var_h(ctx, 0, 50) == 0
+            assert self.lib.dvs_dpi_solve_h(ctx, 1) == 0
+            assert self._values(ctx)[0] == 50
+            self.lib.dvs_dpi_restore_h(ctx, 20)
             assert self.lib.dvs_dpi_solve_h(ctx, 1) == 0
         finally:
             self.lib.dvs_dpi_release_h(ctx)

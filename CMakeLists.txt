@@ -420,6 +420,11 @@ target_link_libraries(test_checkpoint_pool PRIVATE dv_solve)
 target_include_directories(test_checkpoint_pool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_checkpoint_pool COMMAND test_checkpoint_pool)
 
+add_executable(test_deep_checkpoints tests/c/test_deep_checkpoints.c)
+target_link_libraries(test_deep_checkpoints PRIVATE dv_solve)
+target_include_directories(test_deep_checkpoints PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_deep_checkpoints COMMAND test_deep_checkpoints)
+
 add_executable(test_growable_tables tests/c/test_growable_tables.c)
 target_link_libraries(test_growable_tables PRIVATE dv_solve)
 target_include_directories(test_growable_tables PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)

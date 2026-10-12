@@ -497,8 +497,10 @@ until the context is destroyed.
 ```{c:function} int dvs_solver_checkpoint(dvs_ctx_t *ctx)
 Save the context's state: its pins and the constraints added so far.
 
-:returns: A checkpoint index for {c:func}`dvs_solver_restore`, or −1 if too
-  many checkpoints are open (the limit is 32).
+:returns: A checkpoint index for {c:func}`dvs_solver_restore`, or −1 if no
+  more can be opened. A context from {c:func}`dvs_solver_new` grows its
+  checkpoint stack (to about 65,000) and fails only when out of memory; one
+  from {c:func}`dvs_solver_create` holds at most 32.
 ```
 
 ```{c:function} void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp)

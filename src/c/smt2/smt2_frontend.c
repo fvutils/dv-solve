@@ -1233,7 +1233,7 @@ static int _promote_sparse(Smt2Frontend *fe, Smt2ArrayValue *arr) {
     for (uint32_t i = 0; i < fe->n_array_vars; i++)
         if (fe->array_vars[i].value == arr) { ai = i; break; }
     if (ai == UINT32_MAX) return -1;
-    if (fe->push_depth > 0 && ai < fe->push_n_array_vars[fe->push_depth - 1]) return -1;
+    if (fe->push_depth > 0 && ai < fe->push[fe->push_depth - 1].n_array_vars) return -1;
     if (fe->n_anodes == fe->anodes_cap) {
         uint32_t nc = fe->anodes_cap ? fe->anodes_cap * 2 : 16;
         Smt2ArrayValue **grow = (Smt2ArrayValue **)realloc(
@@ -5688,13 +5688,13 @@ static int _session_sync(Smt2Frontend *fe) {
     for (uint32_t i = 0; arc == 0; i++) {
         int end = (i == k);
         uint32_t j = j0 + i;
-        if (end || (d < fe->push_depth && fe->push_bmark[d].n_constraints <= j)) {
+        if (end || (d < fe->push_depth && fe->push[d].bmark.n_constraints <= j)) {
             if (i > start)
                 arc = dvs_bbsolver_sess_add(fe->bb_solver, roots + start, i - start);
             start = i;
             while (arc == 0 && d < fe->push_depth
-                   && (end || fe->push_bmark[d].n_constraints <= j)) {
-                if (dvs_bbsolver_sess_push(fe->bb_solver, fe->push_n_vars[d]) != 0)
+                   && (end || fe->push[d].bmark.n_constraints <= j)) {
+                if (dvs_bbsolver_sess_push(fe->bb_solver, fe->push[d].n_vars) != 0)
                     arc = DVS_BB_ERROR;
                 else
                     d++;
@@ -7308,19 +7308,59 @@ static int _cmd_get_info(Smt2Frontend *fe, const Sexpr *cmd) {
     return 0;
 }
 
-typedef struct {
-    uint32_t cp;
-    uint32_t n_vars;
-} PushFrame;
+/* Push depth limit: about what a growable solver context can hold
+ * (DVS_MAX_CHECKPOINTS). */
+#define SMT2_MAX_PUSH 0xFE00u
 
-#define SMT2_MAX_PUSH 32
+/* Room for `n` push frames: 0, or -1 (an input error, or out of memory). */
+static int _push_reserve(Smt2Frontend *fe, uint64_t n) {
+    if (n > SMT2_MAX_PUSH) {
+        _input_error(fe, "push: max push depth exceeded");
+        return -1;
+    }
+    if (n <= fe->push_cap) return 0;
+    uint32_t cap = fe->push_cap ? 2 * fe->push_cap : 16;
+    if (cap < n) cap = (uint32_t)n;
+    Smt2PushFrame *f = (Smt2PushFrame *)realloc(fe->push, (size_t)cap * sizeof(*f));
+    if (!f) {
+        fprintf(fe->err, "error: out of memory growing the push stack\n");
+        return -1;
+    }
+    fe->push = f;
+    fe->push_cap = cap;
+    return 0;
+}
+
+static void _abs_push_frame(Smt2Frontend *fe, uint32_t d);
+
+/* Open a push frame recording what a pop returns to; `cp` is its solver
+ * checkpoint, or (uint32_t)-1. The caller made room (_push_reserve). */
+static void _push_frame(Smt2Frontend *fe, uint32_t cp) {
+    uint32_t d = fe->push_depth++;
+    Smt2PushFrame *f = &fe->push[d];
+    f->cp             = cp;
+    f->n_vars         = fe->n_vars;
+    f->n_array_vars   = fe->n_array_vars;
+    f->n_aux_problems = fe->n_aux_problems;
+    f->n_named        = fe->n_named;
+    f->n_core_hist    = fe->n_core_hist;
+    f->n_checked      = fe->n_checked;
+    f->n_funs         = fe->n_funs;
+    f->n_sort_aliases = fe->n_sort_aliases;
+    f->n_sort_names   = fe->n_sort_names;
+    f->n_sort_funs    = fe->n_sort_funs;
+    f->n_sort_consts  = fe->n_sort_consts;
+    f->incomplete     = (uint8_t)fe->incomplete;
+    _abs_push_frame(fe, d);
+    f->bmark          = dvs_builder_mark(fe->builder);
+}
 
 /* Record the abstract-array state a pop of frame `d` returns to: translation
  * counts only, a solve's own reads are rebuilt by the next solve. */
 static void _abs_push_frame(Smt2Frontend *fe, uint32_t d) {
-    fe->push_n_anodes[d] = fe->n_anodes;
-    fe->push_n_areads[d] = fe->n_areads_user;
-    fe->push_n_aeqs[d]   = fe->n_aeqs;
+    fe->push[d].n_anodes = fe->n_anodes;
+    fe->push[d].n_areads = fe->n_areads_user;
+    fe->push[d].n_aeqs   = fe->n_aeqs;
 }
 
 /* Pop the abstract-array state back to frame `d`: nodes, reads and equalities
@@ -7328,16 +7368,16 @@ static void _abs_push_frame(Smt2Frontend *fe, uint32_t d) {
  * made before it never point at later ones. */
 static void _abs_pop_frame(Smt2Frontend *fe, uint32_t d) {
     _abs_drop_solve_state(fe);
-    if (fe->push_n_areads[d] < fe->n_areads) {
-        fe->n_areads = fe->n_areads_user = fe->push_n_areads[d];
+    if (fe->push[d].n_areads < fe->n_areads) {
+        fe->n_areads = fe->n_areads_user = fe->push[d].n_areads;
         if (fe->aread_hash) {
             memset(fe->aread_hash, 0, fe->aread_hash_cap * sizeof(uint32_t));
             for (uint32_t i = 0; i < fe->n_areads; i++) _aread_hash_put(fe, i);
         }
     }
-    if (fe->push_n_aeqs[d] < fe->n_aeqs) fe->n_aeqs = fe->push_n_aeqs[d];
-    for (uint32_t i = fe->push_n_anodes[d]; i < fe->n_anodes; i++) free(fe->anodes[i]);
-    if (fe->push_n_anodes[d] < fe->n_anodes) fe->n_anodes = fe->push_n_anodes[d];
+    if (fe->push[d].n_aeqs < fe->n_aeqs) fe->n_aeqs = fe->push[d].n_aeqs;
+    for (uint32_t i = fe->push[d].n_anodes; i < fe->n_anodes; i++) free(fe->anodes[i]);
+    if (fe->push[d].n_anodes < fe->n_anodes) fe->n_anodes = fe->push[d].n_anodes;
 }
 
 static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
@@ -7388,58 +7428,21 @@ static int _cmd_push(Smt2Frontend *fe, const Sexpr *cmd) {
             fe->last_result = DVS_SOLVE_UNSAT;
             fe->has_result = 1;
         }
-        if (fe->push_depth + n > SMT2_MAX_PUSH) {
-            _input_error(fe, "push: max push depth exceeded");
-            return -1;
-        }
-        for (uint32_t i = 0; i < n; i++) {
-            fe->push_stack[fe->push_depth] = (uint32_t)-1;
-            fe->push_n_vars[fe->push_depth] = fe->n_vars;
-            fe->push_n_array_vars[fe->push_depth] = fe->n_array_vars;
-            fe->push_n_aux_problems[fe->push_depth] = fe->n_aux_problems;
-            fe->push_n_named[fe->push_depth] = fe->n_named;
-            fe->push_n_core_hist[fe->push_depth] = fe->n_core_hist;
-            fe->push_n_checked[fe->push_depth] = fe->n_checked;
-            fe->push_n_funs[fe->push_depth] = fe->n_funs;
-            fe->push_n_sort_aliases[fe->push_depth] = fe->n_sort_aliases;
-            fe->push_n_sort_names[fe->push_depth] = fe->n_sort_names;
-            fe->push_n_sort_funs[fe->push_depth] = fe->n_sort_funs;
-            fe->push_n_sort_consts[fe->push_depth] = fe->n_sort_consts;
-            fe->push_incomplete[fe->push_depth] = (uint8_t)fe->incomplete;
-            _abs_push_frame(fe, fe->push_depth);
-            fe->push_bmark[fe->push_depth] = dvs_builder_mark(fe->builder);
-            fe->push_depth++;
-        }
+        if (_push_reserve(fe, (uint64_t)fe->push_depth + n) != 0) return -1;
+        for (uint32_t i = 0; i < n; i++) _push_frame(fe, (uint32_t)-1);
         return 0;
     }
     if (fe->has_result) dvs_solver_reset(fe->ctx);
     fe->has_result = 0;
 
+    if (_push_reserve(fe, (uint64_t)fe->push_depth + n) != 0) return -1;
     for (uint32_t i = 0; i < n; i++) {
         int cp = dvs_solver_checkpoint(fe->ctx);
         if (cp < 0) {
             fprintf(fe->err, "error: push: too many checkpoints\n");
             return -1;
         }
-        if (fe->push_depth >= SMT2_MAX_PUSH) {
-            _input_error(fe, "push: max push depth exceeded");
-            return -1;
-        }
-        fe->push_stack[fe->push_depth++] = (uint32_t)cp;
-        fe->push_n_vars[fe->push_depth - 1] = fe->n_vars;
-        fe->push_n_array_vars[fe->push_depth - 1] = fe->n_array_vars;
-        fe->push_n_aux_problems[fe->push_depth - 1] = fe->n_aux_problems;
-        fe->push_n_named[fe->push_depth - 1] = fe->n_named;
-        fe->push_n_core_hist[fe->push_depth - 1] = fe->n_core_hist;
-        fe->push_n_checked[fe->push_depth - 1] = fe->n_checked;
-        fe->push_n_funs[fe->push_depth - 1] = fe->n_funs;
-        fe->push_n_sort_aliases[fe->push_depth - 1] = fe->n_sort_aliases;
-        fe->push_n_sort_names[fe->push_depth - 1] = fe->n_sort_names;
-        fe->push_n_sort_funs[fe->push_depth - 1] = fe->n_sort_funs;
-        fe->push_n_sort_consts[fe->push_depth - 1] = fe->n_sort_consts;
-        fe->push_incomplete[fe->push_depth - 1] = (uint8_t)fe->incomplete;
-        _abs_push_frame(fe, fe->push_depth - 1);
-        fe->push_bmark[fe->push_depth - 1] = dvs_builder_mark(fe->builder);
+        _push_frame(fe, (uint32_t)cp);
     }
     return 0;
 }
@@ -7475,22 +7478,22 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
         int had = dvs_bbsolver_sess_depth(fe->bb_solver) > t;
         while (fe->bb_sess && dvs_bbsolver_sess_depth(fe->bb_solver) > t)
             if (dvs_bbsolver_sess_pop(fe->bb_solver) != 0) _free_bb(fe);
-        if (fe->bb_sess && fe->bb_sess_ncons > fe->push_bmark[t].n_constraints) {
-            if (had) fe->bb_sess_ncons = fe->push_bmark[t].n_constraints;
+        if (fe->bb_sess && fe->bb_sess_ncons > fe->push[t].bmark.n_constraints) {
+            if (had) fe->bb_sess_ncons = fe->push[t].bmark.n_constraints;
             else     _free_bb(fe);       /* constraints past a mark with no scope */
         }
         fe->bb_model_valid = 0;
     }
     if (fe->compiled) {
         if (fe->cdcl_retained && n <= fe->push_depth &&
-            dvs_builder_rewind(fe->builder, &fe->push_bmark[fe->push_depth - n]) == 0) {
+            dvs_builder_rewind(fe->builder, &fe->push[fe->push_depth - n].bmark) == 0) {
             /* Rewind to the outermost popped push instead: the builder then
              * holds exactly the assertions still in scope, so retention (and
              * the bitblast route, which finalizes from it) stays valid. A push
              * flushes first, so everything up to its mark reached the ctx.
              * Resetting the builder here left a bitblast-routed check after
              * the pop solving a stale problem -- a wrong unsat (B63). */
-            fe->aux_mark = fe->push_bmark[fe->push_depth - n];
+            fe->aux_mark = fe->push[fe->push_depth - n].bmark;
         } else {
             dvs_builder_reset(fe->builder);
             _fun_memo_clear(fe);
@@ -7505,7 +7508,7 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
          * the bitblast path finalizes from. Rewind it to the outermost
          * popped push, and make the next check-sat re-finalize (B63). */
         _fun_memo_clear(fe);
-        if (dvs_builder_rewind(fe->builder, &fe->push_bmark[fe->push_depth - n]) != 0) {
+        if (dvs_builder_rewind(fe->builder, &fe->push[fe->push_depth - n].bmark) != 0) {
             SMT2_TAINT(fe, "pop could not rewind the assertion set");
             fe->bb_sess = 0;
         }
@@ -7519,22 +7522,22 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
         }
         fe->push_depth--;
         /* Un-taint if the untranslatable assert lived in the popped scope. */
-        fe->incomplete = fe->push_incomplete[fe->push_depth];
-        if (fe->ctx && fe->push_stack[fe->push_depth] != (uint32_t)-1) {
+        fe->incomplete = fe->push[fe->push_depth].incomplete;
+        if (fe->ctx && fe->push[fe->push_depth].cp != (uint32_t)-1) {
             /* dvs_solver_restore handles trail backtrack itself; calling
              * dvs_solver_reset first would zero ctx->trail_top while leaving
              * checkpoint marks pointing at stale TrailEntry addresses,
              * leading to a NULL-deref inside trail_backtrack. */
             fe->has_result = 0;
-            dvs_solver_restore(fe->ctx, fe->push_stack[fe->push_depth]);
+            dvs_solver_restore(fe->ctx, fe->push[fe->push_depth].cp);
         }
-        fe->n_vars = fe->push_n_vars[fe->push_depth];
+        fe->n_vars = fe->push[fe->push_depth].n_vars;
         fe->var_idx_n = UINT32_MAX;     /* the name index rebuilds */
 
         /* Free arrays declared inside the popped scope. The solver-side BV
          * vars are already unwound by dvs_solver_restore via the n_vars rewind;
          * here we drop the frontend-side tracking and malloc'd element list. */
-        uint32_t target_n_arr = fe->push_n_array_vars[fe->push_depth];
+        uint32_t target_n_arr = fe->push[fe->push_depth].n_array_vars;
         for (uint32_t i = target_n_arr; i < fe->n_array_vars; i++) {
             Smt2ArrayVar *av = &fe->array_vars[i];
             /* Abstract (DV_ARRAY) values are owned by anodes[]; don't free here
@@ -7575,31 +7578,31 @@ static int _cmd_pop(Smt2Frontend *fe, const Sexpr *cmd) {
          * pass would still re-evaluate -- producing spurious violations
          * (and downgrading sat -> unknown) for assertions the user
          * popped off the stack. */
-        uint32_t target_n_aux = fe->push_n_aux_problems[fe->push_depth];
+        uint32_t target_n_aux = fe->push[fe->push_depth].n_aux_problems;
         for (uint32_t i = target_n_aux; i < fe->n_aux_problems; i++) {
             free(fe->aux_problems[i]);
             fe->aux_problems[i] = NULL;
         }
         fe->n_aux_problems = target_n_aux;
-        _truncate_named(fe, fe->push_n_named[fe->push_depth]);
-        if (fe->n_core_hist > fe->push_n_core_hist[fe->push_depth])
-            fe->n_core_hist = fe->push_n_core_hist[fe->push_depth];
-        if (fe->n_checked > fe->push_n_checked[fe->push_depth])
-            fe->n_checked = fe->push_n_checked[fe->push_depth];
+        _truncate_named(fe, fe->push[fe->push_depth].n_named);
+        if (fe->n_core_hist > fe->push[fe->push_depth].n_core_hist)
+            fe->n_core_hist = fe->push[fe->push_depth].n_core_hist;
+        if (fe->n_checked > fe->push[fe->push_depth].n_checked)
+            fe->n_checked = fe->push[fe->push_depth].n_checked;
         /* Definitions made in the popped scope go with it (B82: a stale one
          * shadowed a later redefinition -> wrong unsat). */
-        if (fe->n_funs > fe->push_n_funs[fe->push_depth]) {
-            fe->n_funs = fe->push_n_funs[fe->push_depth];
+        if (fe->n_funs > fe->push[fe->push_depth].n_funs) {
+            fe->n_funs = fe->push[fe->push_depth].n_funs;
             fe->fun_idx_n = UINT32_MAX;     /* the name index rebuilds */
         }
-        if (fe->n_sort_aliases > fe->push_n_sort_aliases[fe->push_depth])
-            fe->n_sort_aliases = fe->push_n_sort_aliases[fe->push_depth];
-        if (fe->n_sort_names > fe->push_n_sort_names[fe->push_depth])
-            fe->n_sort_names = fe->push_n_sort_names[fe->push_depth];
-        if (fe->n_sort_funs > fe->push_n_sort_funs[fe->push_depth])
-            fe->n_sort_funs = fe->push_n_sort_funs[fe->push_depth];
-        if (fe->n_sort_consts > fe->push_n_sort_consts[fe->push_depth])
-            fe->n_sort_consts = fe->push_n_sort_consts[fe->push_depth];
+        if (fe->n_sort_aliases > fe->push[fe->push_depth].n_sort_aliases)
+            fe->n_sort_aliases = fe->push[fe->push_depth].n_sort_aliases;
+        if (fe->n_sort_names > fe->push[fe->push_depth].n_sort_names)
+            fe->n_sort_names = fe->push[fe->push_depth].n_sort_names;
+        if (fe->n_sort_funs > fe->push[fe->push_depth].n_sort_funs)
+            fe->n_sort_funs = fe->push[fe->push_depth].n_sort_funs;
+        if (fe->n_sort_consts > fe->push[fe->push_depth].n_sort_consts)
+            fe->n_sort_consts = fe->push[fe->push_depth].n_sort_consts;
     }
     return 0;
 }
@@ -8035,6 +8038,7 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     free(fe->areads);
     free(fe->aread_hash);
     free(fe->aeqs);
+    free(fe->push);
     /* Free any remaining per-command transient allocations */
     _cmd_alloc_reset(fe);
     memset(fe, 0, sizeof(*fe));
@@ -8108,6 +8112,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     free(fe->areads);
     free(fe->aread_hash);
     free(fe->aeqs);
+    free(fe->push);
     _cmd_alloc_reset(fe);
 
     _truncate_named(fe, 0);

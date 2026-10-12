@@ -290,6 +290,29 @@ typedef struct {
 /* Frontend state                                                      */
 /* ------------------------------------------------------------------ */
 
+/* What a pop returns to: the solver checkpoint and the frontend's table
+ * sizes at the push. */
+typedef struct {
+    uint32_t             cp;              /* dvs_solver_checkpoint index, or
+                                           * (uint32_t)-1: no CDCL context */
+    uint32_t             n_vars;
+    uint32_t             n_array_vars;
+    uint32_t             n_aux_problems;
+    uint32_t             n_named;
+    uint32_t             n_core_hist;
+    uint32_t             n_checked;
+    uint32_t             n_funs;          /* define-fun is scoped too (B82) */
+    uint32_t             n_sort_aliases;  /* and define-sort */
+    uint32_t             n_sort_names;    /* and declare-sort, and */
+    uint32_t             n_sort_funs;     /* sort-typed declarations */
+    uint32_t             n_sort_consts;   /* (B116) */
+    uint32_t             n_anodes;        /* abstract-array state */
+    uint32_t             n_areads;
+    uint32_t             n_aeqs;
+    uint8_t              incomplete;      /* `incomplete` at the push */
+    dvs_builder_mark_t   bmark;           /* builder position at the push */
+} Smt2PushFrame;
+
 typedef struct {
     dvs_builder_t *builder;
     dvs_ctx_t            *ctx;          /* NULL until check-sat */
@@ -563,24 +586,9 @@ typedef struct {
     uint32_t             n_last_assump;
     int                  last_assump_unsat;   /* 1 if last check-sat-assuming was unsat */
 
-    /* Push/pop stack: maps to dvs_solver_checkpoint indices */
-    uint32_t             push_stack[32];
-    uint32_t             push_n_vars[32];
-    uint32_t             push_n_array_vars[32];
-    uint32_t             push_n_aux_problems[32];
-    uint32_t             push_n_named[32];
-    uint32_t             push_n_core_hist[32];
-    uint32_t             push_n_checked[32];
-    uint32_t             push_n_funs[32];          /* define-fun is scoped too (B82) */
-    uint32_t             push_n_sort_aliases[32];  /* and define-sort */
-    uint32_t             push_n_sort_names[32];    /* and declare-sort, and */
-    uint32_t             push_n_sort_funs[32];     /* sort-typed declarations */
-    uint32_t             push_n_sort_consts[32];   /* (B116) */
-    dvs_builder_mark_t   push_bmark[32];     /* builder position at each push */
-    uint8_t              push_incomplete[32];  /* `incomplete` at each push */
-    uint32_t             push_n_anodes[32];    /* abstract-array state at each push */
-    uint32_t             push_n_areads[32];
-    uint32_t             push_n_aeqs[32];
+    /* Push/pop stack, one frame per open push (grown on demand). */
+    Smt2PushFrame       *push;
+    uint32_t             push_cap;
     uint32_t             push_depth;
 
     /* Incremental state: 1 once the initial problem has been compiled. */

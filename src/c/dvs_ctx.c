@@ -63,6 +63,54 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
                      block_alloc ? dvs_block_alloc_backing(block_alloc) : NULL);
 }
 
+/* level_marks and decisions, one block of `cap` entries each: from
+ * ctx->alloc when the pool can grow, else carved from the fixed pool. */
+#define LEVEL_ROW (sizeof(LevelMark) + sizeof(DecisionRecord))
+
+static int _alloc_levels(dvs_ctx_t *ctx, uint32_t cap) {
+    uint8_t *b;
+    if (ctx->pool.alloc) {
+        b = (uint8_t *)DVS_ALLOC(ctx->alloc, (size_t)cap * LEVEL_ROW);
+    } else {
+        uint32_t ref = dvs_spool_alloc(&ctx->pool, cap * (uint32_t)LEVEL_ROW,
+                                       (uint32_t)_Alignof(LevelMark));
+        b = ref == EXPR_NULL ? NULL : (uint8_t *)dvs_spool_ptr(&ctx->pool, ref);
+    }
+    if (!b) return -1;
+    memset(b, 0, (size_t)cap * LEVEL_ROW);
+    ctx->level_marks = (LevelMark *)b;
+    ctx->decisions   = (DecisionRecord *)(ctx->level_marks + cap);
+    ctx->level_cap   = cap;
+    return 0;
+}
+
+static void _free_levels(dvs_ctx_t *ctx) {
+    if (ctx->pool.alloc && ctx->level_marks)
+        DVS_RELEASE(ctx->alloc, ctx->level_marks, (size_t)ctx->level_cap * LEVEL_ROW);
+    ctx->level_marks = NULL; ctx->decisions = NULL; ctx->level_cap = 0;
+}
+
+int dvs_ctx_reserve_levels(dvs_ctx_t *ctx, uint32_t n) {
+    uint32_t old = ctx->level_cap;
+    if (n <= old) return 0;
+    if (!ctx->pool.alloc || n > 0xFFFFu) return -1;
+    uint32_t cap = old * 2u > n ? old * 2u : n;
+    if (cap > 0xFFFFu) cap = 0xFFFFu;
+    uint8_t *b = (uint8_t *)DVS_ALLOC(ctx->alloc, (size_t)cap * LEVEL_ROW);
+    if (!b) return -1;
+    LevelMark *lm = (LevelMark *)b;
+    DecisionRecord *dr = (DecisionRecord *)(lm + cap);
+    memcpy(lm, ctx->level_marks, (size_t)old * sizeof *lm);
+    memset(lm + old, 0, (size_t)(cap - old) * sizeof *lm);
+    memcpy(dr, ctx->decisions, (size_t)old * sizeof *dr);
+    memset(dr + old, 0, (size_t)(cap - old) * sizeof *dr);
+    DVS_RELEASE(ctx->alloc, ctx->level_marks, (size_t)old * LEVEL_ROW);
+    ctx->level_marks = lm;
+    ctx->decisions   = dr;
+    ctx->level_cap   = cap;
+    return 0;
+}
+
 /* Set up the header at `ctx`: a pool over [pool_buf, pool_buf + pool_size)
  * growing through `grow` (NULL: fixed), the trail stack on `block_alloc`
  * (NULL: a block allocator of the context's own). */
@@ -149,22 +197,21 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
         ctx->block_alloc = block_alloc;
     }
 
-    /* Pre-allocate LevelMark[MAX_DECISION_DEPTH] in the static pool */
-    uint32_t marks_ref = dvs_spool_alloc(&ctx->pool,
-        MAX_DECISION_DEPTH * (uint32_t)sizeof(LevelMark),
-        (uint32_t)_Alignof(LevelMark));
-    if (marks_ref == EXPR_NULL) goto fail;
-    ctx->level_marks = (LevelMark *)dvs_spool_ptr(&ctx->pool, marks_ref);
-    ctx->max_depth   = MAX_DECISION_DEPTH;
-    memset(ctx->level_marks, 0, MAX_DECISION_DEPTH * sizeof(LevelMark));
-
-    /* Pre-allocate DecisionRecord[MAX_DECISION_DEPTH] in the static pool */
-    uint32_t dec_ref = dvs_spool_alloc(&ctx->pool,
-        MAX_DECISION_DEPTH * (uint32_t)sizeof(DecisionRecord),
-        (uint32_t)_Alignof(DecisionRecord));
-    if (dec_ref == EXPR_NULL) goto fail;
-    ctx->decisions = (DecisionRecord *)dvs_spool_ptr(&ctx->pool, dec_ref);
-    memset(ctx->decisions, 0, MAX_DECISION_DEPTH * sizeof(DecisionRecord));
+    /* Level arrays for a search's MAX_DECISION_DEPTH plus the levels a
+     * fixed pool's checkpoints hold; a growable context grows them as
+     * checkpoints open (dvs_ctx_reserve_levels). A fixed pool also carves
+     * its checkpoint stack; a growable one allocates it on first use. */
+    if (_alloc_levels(ctx, MAX_DECISION_DEPTH + DVS_FIXED_CHECKPOINTS) != 0)
+        goto fail;
+    if (!grow) {
+        uint32_t cp_ref = dvs_spool_alloc(&ctx->pool,
+            DVS_FIXED_CHECKPOINTS * (uint32_t)sizeof(CheckpointMark),
+            (uint32_t)_Alignof(CheckpointMark));
+        if (cp_ref == EXPR_NULL) goto fail;
+        ctx->checkpoints = (CheckpointMark *)dvs_spool_ptr(&ctx->pool, cp_ref);
+        ctx->checkpoints_cap = DVS_FIXED_CHECKPOINTS;
+    }
+    ctx->max_depth = MAX_DECISION_DEPTH;
 
     if (block_alloc) {
         ctx->dynamic = dvs_stack_create(block_alloc);
@@ -173,6 +220,7 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
 
     return ctx;
 fail:
+    _free_levels(ctx);
     if (ctx->dynamic) dvs_stack_destroy(ctx->dynamic);
     if (ctx->own_block_alloc) dvs_block_alloc_destroy(ctx->own_block_alloc);
     dvs_spool_destroy(&ctx->pool);
@@ -323,7 +371,7 @@ int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx) {
     return 0;
 }
 
-#define SCOPE_LOG_ROW (sizeof(int64_t) + sizeof(uint32_t) + 2u)
+#define SCOPE_LOG_ROW (sizeof(int64_t) + 2u * sizeof(uint32_t) + 1u)
 
 int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t bound) {
     if (ctx->n_scope_log == ctx->scope_log_cap) {
@@ -331,12 +379,12 @@ int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t boun
         uint32_t old = ctx->scope_log_cap, cap = old ? 2u * old : 64u;
         int64_t *nb = (int64_t *)DVS_ALLOC(ctx->alloc, (size_t)cap * SCOPE_LOG_ROW);
         if (!nb) return -1;
-        uint32_t *nv = (uint32_t *)(nb + cap);
-        uint8_t *nd = (uint8_t *)(nv + cap), *nl = nd + cap;
+        uint32_t *nv = (uint32_t *)(nb + cap), *nd = nv + cap;
+        uint8_t *nl = (uint8_t *)(nd + cap);
         if (old) {
             memcpy(nb, ctx->scope_log_bound, old * sizeof *nb);
             memcpy(nv, ctx->scope_log_var, old * sizeof *nv);
-            memcpy(nd, ctx->scope_log_depth, old);
+            memcpy(nd, ctx->scope_log_depth, old * sizeof *nd);
             memcpy(nl, ctx->scope_log_is_lb, old);
         }
         dvs_ctx_free(ctx, ctx->scope_log_block, (size_t)old * SCOPE_LOG_ROW);
@@ -350,7 +398,7 @@ int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t boun
     uint32_t i = ctx->n_scope_log++;
     ctx->scope_log_var[i]   = var_id;
     ctx->scope_log_bound[i] = bound;
-    ctx->scope_log_depth[i] = (uint8_t)ctx->n_checkpoints;
+    ctx->scope_log_depth[i] = ctx->n_checkpoints;
     ctx->scope_log_is_lb[i] = is_lb ? 1 : 0;
     return 0;
 }
@@ -392,6 +440,11 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     ctx->scope_log_depth = NULL; ctx->scope_log_is_lb = NULL;
     ctx->n_scope_log = ctx->scope_log_cap = 0;
     _tbl_free(ctx, ctx->var_block, (size_t)ctx->n_vars_capacity * VAR_ROW);
+    _free_levels(ctx);
+    if (ctx->pool.alloc)
+        dvs_ctx_free(ctx, ctx->checkpoints,
+                     (size_t)ctx->checkpoints_cap * sizeof(CheckpointMark));
+    ctx->checkpoints = NULL; ctx->checkpoints_cap = 0;
     _tbl_free(ctx, ctx->prop_block, (size_t)ctx->n_prop_refs_capacity * PROP_ROW);
     ctx->var_block = ctx->prop_block = NULL;
     dvs_spool_destroy(&ctx->pool);

@@ -101,8 +101,8 @@ int dvs_dpi_pin_var_h(void *ctx, int var_id, long long value);
  * calling dvs_dpi_restore_h with the returned index.
  *
  * @param ctx  Handle from dvs_dpi_compile_b64.
- * @return  Checkpoint index (>= 0), or -1 on error (NULL handle, or too many
- *          checkpoints: at most 31 can be open).
+ * @return  Checkpoint index (>= 0), or -1 on error (NULL handle, or out of
+ *          memory).
  */
 int dvs_dpi_checkpoint_h(void *ctx);
 
