@@ -3187,6 +3187,42 @@ uint32_t prop_add_bounds_band_64(dvs_ctx_t *ctx, uint32_t r_id,
 /* BoundsBOR_64:  r = a | b                                           */
 /* ------------------------------------------------------------------ */
 
+/* The values y with every bit of `must` set and no bit outside `allow`
+ * (must a subset of allow, allow < 2^63) are must | f, f over the subsets of
+ * F = allow & ~must, in the order of f: f's bits are placed by the rank k
+ * of f among F's subsets (a software pdep). The least such y >= lo, and the
+ * greatest <= hi, are then binary searches over k. -1: none. */
+static uint64_t _pdep64(uint64_t k, uint64_t mask) {
+    uint64_t r = 0;
+    for (uint64_t m = mask; m; m &= m - 1) {
+        if (k & 1) r |= m & (~m + 1);
+        k >>= 1;
+    }
+    return r;
+}
+
+static int64_t _masked_ceil(uint64_t lo, uint64_t must, uint64_t allow) {
+    uint64_t F = allow & ~must;
+    if ((must | F) < lo) return -1;
+    uint64_t a = 0, b = (F ? (((uint64_t)1 << __builtin_popcountll(F)) - 1) : 0);
+    while (a < b) {                      /* least k with must|pdep(k) >= lo */
+        uint64_t m = a + (b - a) / 2;
+        if ((must | _pdep64(m, F)) >= lo) b = m; else a = m + 1;
+    }
+    return (int64_t)(must | _pdep64(a, F));
+}
+
+static int64_t _masked_floor(uint64_t hi, uint64_t must, uint64_t allow) {
+    uint64_t F = allow & ~must;
+    if (must > hi) return -1;
+    uint64_t a = 0, b = (F ? (((uint64_t)1 << __builtin_popcountll(F)) - 1) : 0);
+    while (a < b) {                      /* greatest k with must|pdep(k) <= hi */
+        uint64_t m = b - (b - a) / 2;
+        if ((must | _pdep64(m, F)) <= hi) a = m; else b = m - 1;
+    }
+    return (int64_t)(must | _pdep64(a, F));
+}
+
 static PropResult _fire_bounds_bor_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
@@ -3215,6 +3251,43 @@ static PropResult _fire_bounds_bor_64(Propagator *self, dvs_ctx_t *ctx) {
     if (alo >= 0 && blo >= 0) {
         int64_t r_lb = (alo > blo) ? alo : blo;
         if ((res = ctx_tighten_lb64(ctx, rid, r_lb)) != PROP_OK) return res;
+        /* Upper bound: below 2^n when both operands are. Without it a 16-bit
+         * or extended to 32 bits kept r's full 32-bit range, and a product
+         * over it (`a * (a | b) == K`) looked like it could wrap, so the
+         * divisor rule (_bv_mul_divisors) never ran. SOUND. */
+        uint64_t top = (uint64_t)ahi | (uint64_t)bhi;
+        top |= top >> 1;  top |= top >> 2;  top |= top >> 4;
+        top |= top >> 8;  top |= top >> 16; top |= top >> 32;
+        if ((res = ctx_tighten_ub64(ctx, rid, (int64_t)top)) != PROP_OK) return res;
+        /* Backward: each operand's bits are a subset of r's, so neither
+         * exceeds r, and a fixed operand with a bit a fixed r lacks is a
+         * conflict. SOUND. */
+        int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
+        if ((res = ctx_tighten_ub64(ctx, aid, rhi)) != PROP_OK) return res;
+        if ((res = ctx_tighten_ub64(ctx, bid, rhi)) != PROP_OK) return res;
+        int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
+        if (rlo == rhi) {
+            /* r fixed: each operand is a subset of r's bits, and holds the
+             * bits of r a fixed other operand lacks. Its bounds move to the
+             * nearest such values, so a search or a walk over its values
+             * steps from one to the next (`a * (a | b) == K`). */
+            for (int k = 0; k < 2; k++) {
+                uint32_t x = k ? bid : aid, y = k ? aid : bid;
+                int64_t ylo = var_lo64(ctx, &ctx->vars[y]);
+                uint64_t must = 0;
+                if (ylo == var_hi64(ctx, &ctx->vars[y])) {
+                    if (ylo & ~rlo) return PROP_CONFLICT;
+                    must = (uint64_t)rlo & ~(uint64_t)ylo;
+                }
+                int64_t xl = _masked_ceil((uint64_t)var_lo64(ctx, &ctx->vars[x]),
+                                          must, (uint64_t)rlo);
+                int64_t xh = _masked_floor((uint64_t)var_hi64(ctx, &ctx->vars[x]),
+                                           must, (uint64_t)rlo);
+                if (xl < 0 || xh < 0 || xl > xh) return PROP_CONFLICT;
+                if ((res = ctx_tighten_lb64(ctx, x, xl)) != PROP_OK) return res;
+                if ((res = ctx_tighten_ub64(ctx, x, xh)) != PROP_OK) return res;
+            }
+        }
     }
 
     /* Singleton: r >= singleton_val -- only when the OTHER operand cannot

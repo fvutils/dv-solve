@@ -340,3 +340,44 @@ def test_product_over_xor_is_fast():
         for rc, t, _ in _solve(_xor_mul(16, K), range(1, 9)):
             assert rc == want, (K, rc)
             assert t < 0.05, (K, t)
+
+
+def _or_mul(w, K):
+    """a * (a | b) == K, a and b w-bit, at 2w bits."""
+    from dv_solve.problem import BIN_BOR
+    def c(b):
+        x = b.expr_binary(BIN_BOR, _ext(b, 0, w, 2 * w), _ext(b, 1, w, 2 * w))
+        p = b.expr_binary(BIN_MUL, _ext(b, 0, w, 2 * w), x)
+        b.add_constraint(b.expr_binary(BIN_EQ, p, b.expr_const(K, width=2 * w)))
+    return _build(2, [w, w], c)
+
+
+def test_product_over_or_drawn_uniformly():
+    """a * (a | b) == 720720 over 16-bit fields: 98 solutions. The or now
+    bounds its result (so the divisor rule runs), and with r and a fixed
+    moves b's bounds to the nearest values holding r's bits that a lacks and
+    no others, so the solutions are listed in a few hundred pins and drawn
+    uniformly (each a with its 2^popcount(a) choices of b). It searched b
+    one value at a time, or gave up."""
+    K = 720720
+    w_a = {}
+    for a in range(1, 1 << 16):
+        if K % a == 0 and K // a < 1 << 16 and (a & (K // a)) == a:
+            w_a[a] = 1 << bin(a).count("1")
+    n = 20000
+    seen = collections.Counter()
+    for rc, t, v in _solve(_or_mul(16, K), range(1, n + 1)):
+        assert rc == SOLVE_OK
+        a, bb = v[:2]
+        assert a * (a | bb) == K
+        seen[a] += 1
+    tot = sum(w_a.values())
+    chi = sum((seen[a] - n * w / tot) ** 2 / (n * w / tot) for a, w in w_a.items())
+    assert chi / (len(w_a) - 1) < 3.0, chi
+
+
+def test_product_over_or_refuted_fast():
+    # 1234567890 has no divisor pair (a, c) with a's bits within c's.
+    for rc, t, _ in _solve(_or_mul(16, 1234567890), range(1, 9)):
+        assert rc == SOLVE_UNSAT
+        assert t < 0.05, t

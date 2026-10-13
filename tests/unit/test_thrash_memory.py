@@ -13,19 +13,19 @@ from __future__ import annotations
 import time
 
 from dv_solve.builder import SolveProblemBuilder
-from dv_solve.problem import BIN_BOR, BIN_EQ, BIN_MUL
+from dv_solve.problem import BIN_ADD, BIN_BXOR, BIN_EQ, BIN_MUL
 from dv_solve.ctx import SolveCtx, SOLVE_TIMEOUT
 
 LIMIT_S = 0.3     # the default budget, shortened for the test
 
 
-def _or_mul():
-    """a * (a | b) == 1234567890 over 16-bit fields: the search thrashes.
-    (The or does not narrow its operands from its result, so a product over
-    it is searched one value of a at a time. Earlier examples here now solve:
-    `a * b == c * c + 12345` by the square and divisor rules, and
-    `a * (a ^ b) == K` since the xor bounds its result; see _fire_bvbin_64
-    and _fire_bounds_bxor_64.)"""
+def _mix():
+    """(a * b) ^ (a + b) == 1234567890 over 16-bit fields: the search thrashes.
+    (Nothing inverts a product through an xor with a sum. Earlier examples
+    here now solve: `a * b == c * c + 12345` by the square and divisor rules,
+    and `a * (a ^ b) == K` and `a * (a | b) == K` since the xor and the or
+    bound their results; see _fire_bvbin_64, _fire_bounds_bxor_64 and
+    _fire_bounds_bor_64.)"""
     b = SolveProblemBuilder()
     try:
         for i in range(2):
@@ -34,7 +34,8 @@ def _or_mul():
         e = lambda x: b.expr_extend(x, 16, 32, False)
         b.add_constraint(b.expr_binary(
             BIN_EQ,
-            b.expr_binary(BIN_MUL, e(v(0)), b.expr_binary(BIN_BOR, e(v(0)), e(v(1)))),
+            b.expr_binary(BIN_BXOR, b.expr_binary(BIN_MUL, e(v(0)), e(v(1))),
+                          b.expr_binary(BIN_ADD, e(v(0)), e(v(1)))),
             b.expr_const(1234567890, width=32)))
         buf, _sz = b.finalize()
     finally:
@@ -51,7 +52,7 @@ def _timed(ctx, seed, **opts):
 
 def test_thrashing_problem_escalates_at_once(monkeypatch):
     monkeypatch.setenv("DV_CDCL_TIME_LIMIT", str(LIMIT_S))
-    buf = _or_mul()
+    buf = _mix()
     ctx = SolveCtx(buf)
     try:
         rc, t = _timed(ctx, 1)
@@ -62,7 +63,7 @@ def test_thrashing_problem_escalates_at_once(monkeypatch):
     finally:
         ctx.destroy()
     # A context compiled afresh from the same problem remembers too.
-    ctx = SolveCtx(_or_mul())
+    ctx = SolveCtx(_mix())
     try:
         rc, t = _timed(ctx, 5)
         assert rc == SOLVE_TIMEOUT and t < LIMIT_S / 3, t
