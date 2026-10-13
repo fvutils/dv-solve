@@ -353,6 +353,21 @@ static uint32_t _open_stage(const dvs_ctx_t *ctx) {
     return m;
 }
 
+/* A variable the problem defines by an equality, `v == <expression>` (see
+ * box_skip in dvs_compile.c). Front-ends declare one for each lifted
+ * operand, and pinning the variables it is defined from fixes it, so the
+ * search treats it like VAR_AUX: a decision only when nothing else is open.
+ * This changes only the order of decisions, so no solution is lost. Deciding
+ * it early is what is slow: two variables defined from the same input can be
+ * given values that no input yields, and when propagation cannot invert the
+ * definition (`x & mask`) the search finds that out only by enumerating the
+ * input (pyvsc F5: ~1 s and millions of conflicts on two 8-bit fields). A
+ * variable in a solve order keeps its place: the user asked for it. */
+static inline int _is_defined(const dvs_ctx_t *ctx, uint32_t i) {
+    return ctx->box_skip && i < ctx->box_skip_n && ctx->box_skip[i]
+           && _order_key(ctx, i) == DVS_ORDER_LAST;
+}
+
 static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
     /* With a solve order, only the open stage's variables are candidates. */
     const uint32_t stage = ctx->var_order ? _open_stage(ctx) : 0;
@@ -371,7 +386,7 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
                            ? L->vsids.n_vars : ctx->n_vars;
             for (uint32_t i = 0; i < lim; i++) {
                 Variable *v = &ctx->vars[i];
-                if (v->flags & VAR_AUX) continue;
+                if ((v->flags & VAR_AUX) || _is_defined(ctx, i)) continue;
                 if (stage && _order_key(ctx, i) != stage) continue;
                 int64_t lo = var_lo64(ctx, v);
                 int64_t hi = var_hi64(ctx, v);
@@ -415,7 +430,7 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
             int64_t hi = var_hi64(ctx, v);
             if (lo == hi) continue;  /* singleton -- already assigned */
             uint64_t dom = _dom_size(ctx, i, lo, hi);
-            if (v->flags & VAR_AUX) {
+            if ((v->flags & VAR_AUX) || _is_defined(ctx, i)) {
                 /* Aux is a low-priority decision: prefer real vars first. */
                 if (best_aux == EXPR_NULL || dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
@@ -437,7 +452,7 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
             int64_t hi = var_hi64(ctx, v);
             if (lo == hi) continue;
             uint64_t dom = _dom_size(ctx, i, lo, hi);
-            if (v->flags & VAR_AUX) {
+            if ((v->flags & VAR_AUX) || _is_defined(ctx, i)) {
                 if (best_aux == EXPR_NULL || dom < best_aux_dom) { best_aux_dom = dom; best_aux = i; }
                 continue;
             }

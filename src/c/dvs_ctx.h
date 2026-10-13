@@ -177,7 +177,9 @@ typedef struct dvs_ctx_s {
     uint32_t           box_cap;
     uint8_t            box_state;
     uint8_t           *box_skip;      /* [n_decl_vars] 1: defined by an
-                                       * equality, not drawn by the tier */
+                                       * equality (`v == <expr>`): not drawn
+                                       * by the box tier, and decided by the
+                                       * search only after every other var */
     uint32_t           box_skip_n;    /* its length                    */
     uint32_t           n_decl_vars;   /* vars the problem declared; compile
                                        * adds its own after them         */
