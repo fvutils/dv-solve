@@ -7,8 +7,9 @@
                "verilator": ["verilator/bin/verilator", "5.046"]}
  },
  "yosys-bin": {
-  "url": "https://github.com/edapack/yosys-bin/releases/download/v0.69.35518581703/yosys-bin-manylinux_2_28_x86_64-0.69.35518581703.tar.gz",
-  "sha256": "073b928c7c9676699e92a15c7f6cd911bff27d55cf128f9fa0e647e843578742",
+  "_comment": "v0.69.35518581703 (2026-09-20) shipped missing libffi.so.6/libreadline.so.7/libcrypt.so.1 in yosys/lib/ -- a silent bundle_lib() skip in build.sh, fixed 2026-10-12 (edapack/yosys-bin@281222c, @2d4b0dd); re-pinned to the first release built from the fix.",
+  "url": "https://github.com/edapack/yosys-bin/releases/download/v0.69.38282783076/yosys-bin-manylinux_2_28_x86_64-0.69.38282783076.tar.gz",
+  "sha256": "9967c0fffc162fa39489946bc6d8ea0158351966c28b92e47b539b2b93970ae0",
   "provides": {"boolector": ["yosys/bin/boolector", "3.2.4"],
                "yosys": ["yosys/bin/yosys", "0.69"],
                "yosys-abc": ["yosys/bin/yosys-abc", "1.01"]}

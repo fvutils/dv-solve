@@ -121,16 +121,49 @@ def fetch(dest: Path) -> None:
         arc.unlink()
 
 
+# Default reference solvers for a SAT suite with no "references" of its own
+# (run_sat.REFERENCES, duplicated here to avoid importing run_sat, which
+# imports this module).
+_DEFAULT_REFS = ("z3", "bitwuzla", "boolector")
+
+
+def needed_for(suite_names) -> set:
+    """Tool names actually exercised by `--suites suite_names` (design §2.2).
+
+    Only a suite's own declared `references` (or the SAT default) are
+    required; a suite with no SMT2 fixtures (calib, rand, scenario) needs
+    only z3. Tools outside this set, such as yosys/yosys-abc, are used by
+    one-off scripts that call tools.path() directly and fail on their own
+    if the tool is missing -- they should not block every other suite.
+    """
+    names = {"z3"}
+    for name in suite_names:
+        spec_path = _HERE / "suites" / f"{name}.json"
+        if not spec_path.exists():
+            continue
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        if spec.get("kind") in ("rand", "scenario"):
+            continue
+        names.update(spec.get("references", _DEFAULT_REFS))
+    return names
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="pinned perf tools")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("fetch").add_argument("--dest", default=str(DEFAULT_ROOT))
+    fetch_p = sub.add_parser("fetch")
+    fetch_p.add_argument("--dest", default=str(DEFAULT_ROOT))
+    fetch_p.add_argument("--suites", default=None,
+                          help="comma-separated suite names: check only the tools "
+                               "they use, instead of every pinned tool")
     sub.add_parser("check")
     a = ap.parse_args(argv)
     if a.cmd == "fetch":
         fetch(Path(a.dest))
         os.environ["DVS_PERF_TOOLS"] = a.dest
-    print(json.dumps(check([*SOLVERS, "yosys", "yosys-abc"])))
+    want = needed_for(a.suites.split(",")) if getattr(a, "suites", None) else \
+        {*SOLVERS, "yosys", "yosys-abc"}
+    print(json.dumps(check(sorted(want))))
     return 0
 
 

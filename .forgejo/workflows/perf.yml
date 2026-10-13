@@ -58,7 +58,7 @@ jobs:
             python3 -m pip install -q --break-system-packages "$@"
           }
           pip_install cmake ninja scipy -r tests/perf/solvers.lock
-          python3 -m tests.perf.tools fetch --dest perf-tools
+          python3 -m tests.perf.tools fetch --dest perf-tools --suites calib,sat-core,rand-core
 
       - name: Build dv-solve-smt2 and the library
         if: steps.seen.outputs.measured != 'true'
