@@ -3288,6 +3288,18 @@ static PropResult _fire_bounds_bxor_64(Propagator *self, dvs_ctx_t *ctx) {
         }
     }
 
+    /* Non-negative operands below 2^n: so is r. Without this bound, a 16-bit
+     * xor extended to 32 bits kept r's full 32-bit range, and a product over
+     * it (`a * (a ^ b) == K`) looked like it could wrap, so the divisor rule
+     * (_bv_mul_divisors) never ran and the search enumerated a. SOUND. */
+    if (alo >= 0 && blo >= 0) {
+        uint64_t top = (uint64_t)ahi | (uint64_t)bhi;
+        top |= top >> 1;  top |= top >> 2;  top |= top >> 4;
+        top |= top >> 8;  top |= top >> 16; top |= top >> 32;
+        if ((res = ctx_tighten_lb64(ctx, rid, 0)) != PROP_OK) return res;
+        if ((res = ctx_tighten_ub64(ctx, rid, (int64_t)top)) != PROP_OK) return res;
+    }
+
     /* Single-bit constant operand (r = y ^ 2^m): xor flips only bit m, so it is
      * an order-preserving shift on any range whose values all share the same
      * bit m (i.e. lie in one 2^m-aligned block: (lo>>m)==(hi>>m)). This is the

@@ -304,3 +304,39 @@ def test_divisors_come_from_the_context_allocator():
         ctx.destroy()
     assert 240 * 8 in sizes
     assert live == {}
+
+
+def _xor_mul(w, K):
+    """a * (a ^ b) == K, a and b w-bit, at 2w bits."""
+    from dv_solve.problem import BIN_BXOR
+    def c(b):
+        x = b.expr_binary(BIN_BXOR, _ext(b, 0, w, 2 * w), _ext(b, 1, w, 2 * w))
+        p = b.expr_binary(BIN_MUL, _ext(b, 0, w, 2 * w), x)
+        b.add_constraint(b.expr_binary(BIN_EQ, p, b.expr_const(K, width=2 * w)))
+    return _build(2, [w, w], c)
+
+
+def test_product_over_xor_drawn_uniformly():
+    """The xor of two 8-bit values is below 2^8, so the product cannot wrap
+    and its operands are drawn from the divisors of K (b then follows from
+    a ^ b). The xor's result had kept the full 16-bit range."""
+    K = 720
+    sols = {(x, y) for x in range(256) for y in range(256) if x * (x ^ y) == K}
+    n = 100 * len(sols)
+    seen = collections.Counter()
+    for rc, _, v in _solve(_xor_mul(8, K), range(1, n + 1)):
+        assert rc == SOLVE_OK
+        seen[tuple(v[:2])] += 1
+    assert set(seen) == sols
+    e = n / len(sols)
+    chi = sum((seen[s] - e) ** 2 / e for s in sols) / (len(sols) - 1)
+    assert chi < 1.6, chi
+
+
+def test_product_over_xor_is_fast():
+    # 16-bit: SAT (1234567890 has divisor pairs) and UNSAT (1234567891 is
+    # prime). Each took about a second of search, or gave up.
+    for K, want in ((1234567890, SOLVE_OK), (1234567891, SOLVE_UNSAT)):
+        for rc, t, _ in _solve(_xor_mul(16, K), range(1, 9)):
+            assert rc == want, (K, rc)
+            assert t < 0.05, (K, t)
