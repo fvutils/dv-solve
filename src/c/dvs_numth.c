@@ -160,7 +160,9 @@ uint32_t dvs_divisors(DvsDivisors *d, uint64_t n, uint32_t max) {
     }
     if (count > max) return 0;
     if (count > d->cap) {
-        uint64_t *p = (uint64_t *)realloc(d->divs, (size_t)count * sizeof(uint64_t));
+        uint64_t *p = (uint64_t *)DVS_RESIZE(d->alloc, d->divs,
+                                             (size_t)d->cap * sizeof(uint64_t),
+                                             (size_t)count * sizeof(uint64_t));
         if (!p) return 0;
         d->divs = p;
         d->cap = (uint32_t)count;
@@ -186,8 +188,12 @@ uint32_t dvs_divisors(DvsDivisors *d, uint64_t n, uint32_t max) {
 }
 
 void dvs_divisors_free(DvsDivisors *d) {
-    free(d->divs);
+    dvs_alloc_t *a = d->alloc;
+    if (d->divs)
+        DVS_RELEASE(a ? a : &dvs_malloc_alloc, d->divs,
+                    (size_t)d->cap * sizeof(uint64_t));
     memset(d, 0, sizeof *d);
+    d->alloc = a;
 }
 
 uint32_t dvs_divisors_lower(const DvsDivisors *d, uint64_t x) {

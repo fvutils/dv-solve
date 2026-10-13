@@ -245,3 +245,62 @@ def test_square_root_with_more_left_than_the_product():
         a, bb, c = v[:3]
         assert a * bb == c * c + 345 and a <= bb
 
+
+
+def test_divisors_come_from_the_context_allocator():
+    # The divisor cache grows through the context's allocator, like every
+    # other table the context keeps, and goes back to it on destroy.
+    import ctypes
+    import os
+    from dv_solve import ctx as ctx_mod
+
+    class Alloc(ctypes.Structure):
+        pass
+    alloc_fn = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.POINTER(Alloc), ctypes.c_size_t)
+    release_fn = ctypes.CFUNCTYPE(None, ctypes.POINTER(Alloc), ctypes.c_void_p, ctypes.c_size_t)
+    resize_fn = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.POINTER(Alloc), ctypes.c_void_p,
+                                 ctypes.c_size_t, ctypes.c_size_t)
+    Alloc._fields_ = [("alloc", alloc_fn), ("release", release_fn), ("resize", resize_fn)]
+    libc = ctypes.CDLL("ucrtbase") if os.name == "nt" else ctypes.CDLL(None)
+    libc.malloc.restype = ctypes.c_void_p
+    libc.malloc.argtypes = [ctypes.c_size_t]
+    libc.free.restype = None
+    libc.free.argtypes = [ctypes.c_void_p]
+
+    live = {}
+    sizes = []
+
+    def _alloc(_self, size):
+        p = libc.malloc(size)
+        live[p] = size
+        sizes.append(size)
+        return p
+
+    def _release(_self, ptr, size):
+        assert live.pop(ptr) == size
+        libc.free(ptr)
+
+    fns = (alloc_fn(_alloc), release_fn(_release))
+    alloc = Alloc(*fns)
+
+    K = 720720                                  # 240 divisors
+    buf = _build(2, [16, 16], lambda b: b.add_constraint(b.expr_binary(
+        BIN_EQ, b.expr_binary(BIN_MUL, _ext(b, 0, 16, 32), _ext(b, 1, 16, 32)),
+        b.expr_const(K, width=32))))
+    lib = ctx_mod._load_lib()
+    new = lib.dvs_solver_new
+    try:
+        lib.dvs_solver_new = lambda _a: new(
+            ctypes.cast(ctypes.byref(alloc), ctypes.c_void_p))
+        ctx = SolveCtx(buf)
+    finally:
+        lib.dvs_solver_new = new
+    try:
+        for s in range(1, 20):
+            ctx.reset()
+            assert ctx.solve(seed=s, fair_pick=True) == SOLVE_OK
+            assert ctx.get_value(0) * ctx.get_value(1) == K
+    finally:
+        ctx.destroy()
+    assert 240 * 8 in sizes
+    assert live == {}

@@ -3,6 +3,7 @@
 #ifndef INCLUDED_DVS_NUMTH_H
 #define INCLUDED_DVS_NUMTH_H
 #include <stdint.h>
+#include "dvs_alloc.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,12 +28,14 @@ typedef struct {
     uint64_t *divs;
     uint32_t  n_divs;
     uint32_t  cap;
+    dvs_alloc_t *alloc; /* where divs comes from; NULL: dvs_malloc_alloc */
 } DvsDivisors;
 
 /* Divisors of n (n >= 1) into d. Returns the count, or 0 when n has more
  * than `max` divisors or memory runs out (the caller then learns nothing). */
 uint32_t dvs_divisors(DvsDivisors *d, uint64_t n, uint32_t max);
 
+/* Release divs. alloc is kept, so d can be used again. */
 void dvs_divisors_free(DvsDivisors *d);
 
 /* Index of the first divisor >= x, and of the first > x (n_divs if none). */

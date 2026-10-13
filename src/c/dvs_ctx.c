@@ -164,6 +164,7 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->n_ext_memo      = 0;
     ctx->ext_memo_cap    = 0;
     memset(&ctx->divisors, 0, sizeof ctx->divisors);
+    ctx->divisors.alloc = ctx->alloc;
     ctx->dec_tier        = NULL;
     ctx->dec_tier_n      = 0;
     ctx->mul_count_max   = 0;
