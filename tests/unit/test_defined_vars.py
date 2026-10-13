@@ -132,3 +132,43 @@ def test_defined_variable_in_a_solve_order_is_decided_first():
     zero = lambda draws: sum(1 for d in draws if d[2] == 0) / n
     assert abs(zero(_solve_all(build(True), n, check)) - 1 / 7) < 0.03
     assert abs(zero(_solve_all(build(False), n, check)) - 1 / 16) < 0.03
+
+
+def _copies(rel):
+    """t1 == a * b and t2 == a * b (a, b: u8; t1, t2: u16), with `rel` over
+    t1, t2: the shape a front-end writes when it lifts each mention of a*b."""
+    from dv_solve.problem import BIN_MUL
+
+    def build(b):
+        b.add_var(0, 8, False, 0, 255)
+        b.add_var(1, 8, False, 0, 255)
+        b.add_var(2, 16, False, 0, 0xFFFF)
+        b.add_var(3, 16, False, 0, 0xFFFF)
+        prod = lambda: b.expr_binary(BIN_MUL, b.expr_extend(b.expr_var(0), 8, 16, False),
+                                     b.expr_extend(b.expr_var(1), 8, 16, False))
+        b.add_constraint(b.expr_binary(BIN_EQ, b.expr_var(2), prod()))
+        b.add_constraint(b.expr_binary(BIN_EQ, b.expr_var(3), prod()))
+        b.add_constraint(b.expr_binary(rel, b.expr_var(2), b.expr_var(3)))
+    return build
+
+
+def test_duplicate_definitions_are_one_variable():
+    # Merged, t1 != t2 is t1 != t1: unsatisfiable at once. Unmerged, the
+    # search had to try a and b to find that out.
+    from dv_solve.problem import BIN_NEQ, BIN_LT
+    from dv_solve.ctx import CompileUnsatError, SOLVE_UNSAT
+    for rel in (BIN_NEQ, BIN_LT):
+        b = SolveProblemBuilder()
+        try:
+            _copies(rel)(b)
+            buf, _sz = b.finalize()
+        finally:
+            b.destroy()
+        try:
+            ctx = SolveCtx(buf)
+        except CompileUnsatError:
+            continue
+        try:
+            assert ctx.solve(seed=1, fair_pick=True, **BUDGET) == SOLVE_UNSAT
+        finally:
+            ctx.destroy()

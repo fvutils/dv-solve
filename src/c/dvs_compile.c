@@ -3866,6 +3866,238 @@ static void _collect_eq_aliases(const dvs_ctx_t *ctx, uint32_t *alias,
 }
 
 /* ------------------------------------------------------------------ */
+/* Duplicate definitions                                               */
+/* ------------------------------------------------------------------ */
+/*
+ * Two variables defined by the same expression, `v == E` and `w == E`, are
+ * equal. A front-end that lifts every operand into a variable writes one
+ * definition per mention: pyvsc's `abs(x)` names x three times (condition and
+ * both arms), so `b & 127` had three variables, the search could give them
+ * three different values, and only pinning b showed the conflict (pyvsc F5).
+ * Merged into one variable through the alias table, they cannot disagree.
+ * Expressions are compared with their variables resolved through the table,
+ * so merging `zext(s)`'s copies makes `zext(s) - (b & 127)`'s copies equal
+ * too: the pass repeats until nothing merges. Only an unconditional top-level
+ * `var == expr` (or inside a top-level &&) counts, and only between variables
+ * of one width and signedness, so the merge never changes a value.
+ */
+#define CSE_MAX_DEPTH  32
+#define CSE_MAX_PASSES 8
+
+typedef struct { uint64_t h; uint32_t var; dvs_expr_t e; } CseDef;
+
+static uint64_t _cse_mix(uint64_t h, uint64_t x) {
+    h ^= x + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
+    return h;
+}
+
+/* A structural hash of r, its variables resolved; 0 when r holds a node the
+ * pass does not compare. */
+static uint64_t _cse_hash(dvs_problem_t *sp, uint32_t *alias, uint32_t nv,
+                          dvs_expr_t r, int depth) {
+    if (r == EXPR_NULL || depth > CSE_MAX_DEPTH) return 0;
+    ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, r);
+    uint64_t h = _cse_mix(0x5ca1ab1eULL, (uint64_t)k), a, b, c;
+    switch (k) {
+    case EXPR_CONST: {
+        ExprConst *e = (ExprConst *)dvs_pool_ptr(&sp->pool, r);
+        h = _cse_mix(h, (uint64_t)e->value);
+        return _cse_mix(h, ((uint64_t)e->width << 8) | e->is_signed) | 1;
+    }
+    case EXPR_VAR: {
+        uint32_t id = ((ExprVar *)dvs_pool_ptr(&sp->pool, r))->var_id;
+        if (id >= nv) return 0;
+        return _cse_mix(h, _alias_find(alias, id)) | 1;
+    }
+    case EXPR_BINARY: {
+        ExprBinary e = *(ExprBinary *)dvs_pool_ptr(&sp->pool, r);
+        if (!(a = _cse_hash(sp, alias, nv, e.lhs, depth + 1))) return 0;
+        if (!(b = _cse_hash(sp, alias, nv, e.rhs, depth + 1))) return 0;
+        return _cse_mix(_cse_mix(_cse_mix(h, (uint64_t)e.op), a), b) | 1;
+    }
+    case EXPR_UNARY: {
+        ExprUnary e = *(ExprUnary *)dvs_pool_ptr(&sp->pool, r);
+        if (!(a = _cse_hash(sp, alias, nv, e.operand, depth + 1))) return 0;
+        return _cse_mix(_cse_mix(h, (uint64_t)e.op), a) | 1;
+    }
+    case EXPR_ITE: {
+        ExprITE e = *(ExprITE *)dvs_pool_ptr(&sp->pool, r);
+        if (!(a = _cse_hash(sp, alias, nv, e.cond, depth + 1))) return 0;
+        if (!(b = _cse_hash(sp, alias, nv, e.then_e, depth + 1))) return 0;
+        if (!(c = _cse_hash(sp, alias, nv, e.else_e, depth + 1))) return 0;
+        return _cse_mix(_cse_mix(_cse_mix(h, a), b), c) | 1;
+    }
+    case EXPR_EXTEND: {
+        ExprExtend e = *(ExprExtend *)dvs_pool_ptr(&sp->pool, r);
+        if (!(a = _cse_hash(sp, alias, nv, e.operand, depth + 1))) return 0;
+        h = _cse_mix(h, ((uint64_t)e.from_bits << 24) | ((uint64_t)e.to_bits << 8) | e.sign_extend);
+        return _cse_mix(h, a) | 1;
+    }
+    case EXPR_SV_CAST: {
+        ExprSvCast e = *(ExprSvCast *)dvs_pool_ptr(&sp->pool, r);
+        if (!(a = _cse_hash(sp, alias, nv, e.operand, depth + 1))) return 0;
+        h = _cse_mix(h, ((uint64_t)e.from_bits << 24) | ((uint64_t)e.to_bits << 8)
+                        | ((uint64_t)e.dst_signed << 1) | e.sign_extend);
+        return _cse_mix(h, a) | 1;
+    }
+    case EXPR_EXTRACT: {
+        ExprExtract e = *(ExprExtract *)dvs_pool_ptr(&sp->pool, r);
+        if (!(a = _cse_hash(sp, alias, nv, e.operand, depth + 1))) return 0;
+        return _cse_mix(_cse_mix(h, ((uint64_t)e.hi_bit << 16) | e.lo_bit), a) | 1;
+    }
+    case EXPR_CONCAT: {
+        ExprConcat e = *(ExprConcat *)dvs_pool_ptr(&sp->pool, r);
+        if (!(a = _cse_hash(sp, alias, nv, e.hi, depth + 1))) return 0;
+        if (!(b = _cse_hash(sp, alias, nv, e.lo, depth + 1))) return 0;
+        return _cse_mix(_cse_mix(_cse_mix(h, e.lo_width), a), b) | 1;
+    }
+    default:
+        return 0;
+    }
+}
+
+/* Whether a and b are the same expression, their variables resolved. */
+static int _cse_same(dvs_problem_t *sp, uint32_t *alias, uint32_t nv,
+                     dvs_expr_t a, dvs_expr_t b, int depth) {
+    if (a == b) return 1;
+    if (a == EXPR_NULL || b == EXPR_NULL || depth > CSE_MAX_DEPTH) return 0;
+    ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, a);
+    if (k != *(ExprKind *)dvs_pool_ptr(&sp->pool, b)) return 0;
+#define SAME(x, y) _cse_same(sp, alias, nv, (x), (y), depth + 1)
+    switch (k) {
+    case EXPR_CONST: {
+        ExprConst x = *(ExprConst *)dvs_pool_ptr(&sp->pool, a);
+        ExprConst y = *(ExprConst *)dvs_pool_ptr(&sp->pool, b);
+        return x.value == y.value && x.width == y.width && x.is_signed == y.is_signed;
+    }
+    case EXPR_VAR: {
+        uint32_t x = ((ExprVar *)dvs_pool_ptr(&sp->pool, a))->var_id;
+        uint32_t y = ((ExprVar *)dvs_pool_ptr(&sp->pool, b))->var_id;
+        return x < nv && y < nv && _alias_find(alias, x) == _alias_find(alias, y);
+    }
+    case EXPR_BINARY: {
+        ExprBinary x = *(ExprBinary *)dvs_pool_ptr(&sp->pool, a);
+        ExprBinary y = *(ExprBinary *)dvs_pool_ptr(&sp->pool, b);
+        return x.op == y.op && SAME(x.lhs, y.lhs) && SAME(x.rhs, y.rhs);
+    }
+    case EXPR_UNARY: {
+        ExprUnary x = *(ExprUnary *)dvs_pool_ptr(&sp->pool, a);
+        ExprUnary y = *(ExprUnary *)dvs_pool_ptr(&sp->pool, b);
+        return x.op == y.op && SAME(x.operand, y.operand);
+    }
+    case EXPR_ITE: {
+        ExprITE x = *(ExprITE *)dvs_pool_ptr(&sp->pool, a);
+        ExprITE y = *(ExprITE *)dvs_pool_ptr(&sp->pool, b);
+        return SAME(x.cond, y.cond) && SAME(x.then_e, y.then_e) && SAME(x.else_e, y.else_e);
+    }
+    case EXPR_EXTEND: {
+        ExprExtend x = *(ExprExtend *)dvs_pool_ptr(&sp->pool, a);
+        ExprExtend y = *(ExprExtend *)dvs_pool_ptr(&sp->pool, b);
+        return x.sign_extend == y.sign_extend && x.from_bits == y.from_bits
+            && x.to_bits == y.to_bits && SAME(x.operand, y.operand);
+    }
+    case EXPR_SV_CAST: {
+        ExprSvCast x = *(ExprSvCast *)dvs_pool_ptr(&sp->pool, a);
+        ExprSvCast y = *(ExprSvCast *)dvs_pool_ptr(&sp->pool, b);
+        return x.sign_extend == y.sign_extend && x.dst_signed == y.dst_signed
+            && x.from_bits == y.from_bits && x.to_bits == y.to_bits
+            && SAME(x.operand, y.operand);
+    }
+    case EXPR_EXTRACT: {
+        ExprExtract x = *(ExprExtract *)dvs_pool_ptr(&sp->pool, a);
+        ExprExtract y = *(ExprExtract *)dvs_pool_ptr(&sp->pool, b);
+        return x.hi_bit == y.hi_bit && x.lo_bit == y.lo_bit && SAME(x.operand, y.operand);
+    }
+    case EXPR_CONCAT: {
+        ExprConcat x = *(ExprConcat *)dvs_pool_ptr(&sp->pool, a);
+        ExprConcat y = *(ExprConcat *)dvs_pool_ptr(&sp->pool, b);
+        return x.lo_width == y.lo_width && SAME(x.hi, y.hi) && SAME(x.lo, y.lo);
+    }
+    default:
+        return 0;
+    }
+#undef SAME
+}
+
+/* The `var == expr` definitions under r (r, or the conjuncts of a top-level
+ * &&): appended to *defs. Returns -1 when memory runs out. */
+static int _cse_collect(const dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t r,
+                        CseDef **defs, uint32_t *n, uint32_t *cap, int depth) {
+    if (r == EXPR_NULL || depth > CSE_MAX_DEPTH) return 0;
+    ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, r);
+    if (k != EXPR_BINARY) return 0;
+    ExprBinary e = *(ExprBinary *)dvs_pool_ptr(&sp->pool, r);
+    if (e.op == DVS_BIN_AND) {
+        if (_cse_collect(ctx, sp, e.lhs, defs, n, cap, depth + 1) < 0) return -1;
+        return _cse_collect(ctx, sp, e.rhs, defs, n, cap, depth + 1);
+    }
+    if (e.op != DVS_BIN_EQ) return 0;
+    uint32_t id, id2;
+    int64_t cv;
+    dvs_expr_t def;
+    if (_is_var(sp, e.lhs, &id) && !_is_var(sp, e.rhs, &id2) && !_is_const(sp, e.rhs, &cv))
+        def = e.rhs;
+    else if (_is_var(sp, e.rhs, &id) && !_is_var(sp, e.lhs, &id2) && !_is_const(sp, e.lhs, &cv))
+        def = e.lhs;
+    else
+        return 0;
+    if (id >= ctx->n_vars) return 0;
+    if (*n == *cap) {
+        uint32_t nc = *cap ? 2 * *cap : 64;
+        CseDef *d = (CseDef *)realloc(*defs, nc * sizeof(CseDef));
+        if (!d) return -1;
+        *defs = d; *cap = nc;
+    }
+    (*defs)[(*n)++] = (CseDef){ 0, id, def };
+    return 0;
+}
+
+static int _cse_cmp(const void *a, const void *b) {
+    uint64_t x = ((const CseDef *)a)->h, y = ((const CseDef *)b)->h;
+    return x < y ? -1 : x > y;
+}
+
+/* Merge the variables of duplicate definitions (see above). Best effort: out
+ * of memory, it merges what it has. */
+static void _cse_definitions(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    CseDef *defs = NULL;
+    uint32_t n = 0, cap = 0;
+    for (dvs_expr_t c = sp->constraints_head; c != EXPR_NULL; ) {
+        ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+        if (_cse_collect(ctx, sp, cs->root, &defs, &n, &cap, 0) < 0) break;
+        c = cs->next;
+    }
+    uint32_t *alias = ctx->var_alias;
+    for (int pass = 0; pass < CSE_MAX_PASSES && n > 1; pass++) {
+        for (uint32_t i = 0; i < n; i++)
+            defs[i].h = _cse_hash(sp, alias, ctx->n_vars, defs[i].e, 0);
+        qsort(defs, n, sizeof(CseDef), _cse_cmp);
+        int merged = 0;
+        for (uint32_t i = 0; i < n; ) {
+            uint32_t j = i + 1;
+            while (j < n && defs[j].h == defs[i].h) j++;
+            for (uint32_t a = i; a < j && defs[a].h; a++) {
+                for (uint32_t b = a + 1; b < j; b++) {
+                    uint32_t va = _alias_find(alias, defs[a].var);
+                    uint32_t vb = _alias_find(alias, defs[b].var);
+                    const Variable *x = &ctx->vars[va], *y = &ctx->vars[vb];
+                    if (va == vb || x->width != y->width
+                            || (x->flags & VAR_SIGNED) != (y->flags & VAR_SIGNED))
+                        continue;
+                    if (!_cse_same(sp, alias, ctx->n_vars, defs[a].e, defs[b].e, 0))
+                        continue;
+                    _alias_union(alias, va, vb);
+                    merged = 1;
+                }
+            }
+            i = j;
+        }
+        if (!merged) break;
+    }
+    free(defs);
+}
+
+/* ------------------------------------------------------------------ */
 /* dvs_solver_compile                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -4075,6 +4307,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                 _collect_eq_aliases(ctx, ctx->var_alias, sp, cs->root);
                 scan = cs->next;
             }
+            _cse_definitions(ctx, sp);
 
             /* Merge domains: for each non-root, intersect with root */
             for (uint32_t i = 0; i < n; i++) {
