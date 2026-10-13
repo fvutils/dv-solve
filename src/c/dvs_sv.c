@@ -1448,6 +1448,34 @@ static dvs_expr_t _mrw_ite_self(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t
     return E->err ? EXPR_NULL : _mrw_bool(E, r);
 }
 
+/* `x & M` as a value, M one run of ones [h:l] within x's bits: the same
+ * value as x's bits [h:l] in place, zero-extended -- x[h:l] for l == 0, else
+ * {x[h:l], l'b0}. The bitwise-and propagator only bounds its result, so a
+ * pinned `t == x & 127` said nothing about x and the search found x by
+ * enumeration (pyvsc F5: abs(s - (b & 0x7F)) == 3 drew b ~2/256 per try).
+ * As a slice it propagates both ways, and the field split (_fd_split) makes
+ * x's bits under and outside the mask separate decisions. A mask that keeps
+ * every bit of x, or several runs, is left as it is. */
+static dvs_expr_t _mrw_runmask(SvE *E, dvs_expr_t a) {
+    if (a == EXPR_NULL || _kind(E, a) != EXPR_BINARY) return EXPR_NULL;
+    SvTy t = _type(E, a);
+    if (E->err || t.s || t.w > 64) return EXPR_NULL;
+    dvs_expr_t x; uint64_t m;
+    if (!_mrw_masked(E, a, t.w, 0, &x, &m)) return EXPR_NULL;
+    uint16_t lo[MRW_MAX_RUNS], hi[MRW_MAX_RUNS];
+    if (_mrw_runs(m, t.w, lo, hi) != 1) return EXPR_NULL;
+    MrwSrc s;
+    if (!_mrw_src(E, x, t.w, &s, 0) || lo[0] >= s.avail) return EXPR_NULL;
+    uint16_t h = hi[0] < s.avail ? hi[0] : (uint16_t)(s.avail - 1);
+    if (lo[0] == 0 && h == s.avail - 1) return EXPR_NULL;   /* keeps every bit */
+    dvs_expr_t f = _mrw_field(E, &s, h, lo[0]);
+    uint16_t fw = (uint16_t)(h + 1);                        /* bits [h:0] */
+    if (lo[0] > 0)
+        f = _mk_concat(E, f, _mk_const(E, 0, 0, lo[0]), lo[0]);
+    if (fw < t.w) f = _mk_ext(E, f, fw, t.w, 0);
+    return E->err ? EXPR_NULL : f;
+}
+
 static dvs_expr_t _mrw_cmp(SvE *E, dvs_expr_t ref) {
     ExprBinary b = *(ExprBinary *)_P(E, ref);
     SvTy lt = _type(E, b.lhs), rt = _type(E, b.rhs);
@@ -1462,10 +1490,16 @@ static dvs_expr_t _mrw_cmp(SvE *E, dvs_expr_t ref) {
         if ((r = _mrw_eq_const(E, b.op, b.rhs, b.lhs, W)) != EXPR_NULL) return r;
         if ((r = _mrw_align(E, b.op, b.lhs, b.rhs, W)) != EXPR_NULL) return r;
         if ((r = _mrw_align(E, b.op, b.rhs, b.lhs, W)) != EXPR_NULL) return r;
-        return _mrw_eq_masked(E, b.op, b.lhs, b.rhs, W);
+        if ((r = _mrw_eq_masked(E, b.op, b.lhs, b.rhs, W)) != EXPR_NULL) return r;
+    } else {
+        if ((r = _mrw_order(E, b.op, b.lhs, b.rhs, W)) != EXPR_NULL) return r;
+        if ((r = _mrw_order(E, _mrw_flip(b.op), b.rhs, b.lhs, W)) != EXPR_NULL) return r;
     }
-    if ((r = _mrw_order(E, b.op, b.lhs, b.rhs, W)) != EXPR_NULL) return r;
-    return _mrw_order(E, _mrw_flip(b.op), b.rhs, b.lhs, W);
+    /* Neither side compared with a constant: replace a masked operand by its
+     * bits, an equal value. */
+    dvs_expr_t l = _mrw_runmask(E, b.lhs), rr = _mrw_runmask(E, b.rhs);
+    if (E->err || (l == EXPR_NULL && rr == EXPR_NULL)) return EXPR_NULL;
+    return _mk_bin(E, b.op, l != EXPR_NULL ? l : b.lhs, rr != EXPR_NULL ? rr : b.rhs);
 }
 
 /* Whether ref is Boolean-valued: a comparison, or && || ! over them. */
