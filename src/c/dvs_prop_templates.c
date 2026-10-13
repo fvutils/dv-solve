@@ -1345,6 +1345,10 @@ uint32_t prop_add_bounds_eq_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uin
     return ref;
 }
 
+int prop_is_bounds_eq(const Propagator *p) {
+    return p->fire == _fire_bounds_eq_32 || p->fire == _fire_bounds_eq_64;
+}
+
 static PropResult _fire_bounds_ne_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       xid = ws->var_ids[0];

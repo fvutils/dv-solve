@@ -380,3 +380,7 @@ out:
     free(rels); free(uf); free(cyc); free(loc);
     return rc;
 }
+
+int prop_is_diffcycle(const Propagator *p) {
+    return p->fire == _fire_diffcycle;
+}

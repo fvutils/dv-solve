@@ -166,6 +166,8 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     memset(&ctx->divisors, 0, sizeof ctx->divisors);
     ctx->dec_tier        = NULL;
     ctx->dec_tier_n      = 0;
+    ctx->mul_count_max   = 0;
+    ctx->mul_count_probed = 0;
     ctx->var_n_values    = NULL;
     ctx->unassigned_mask = 0;
     ctx->assumption_var_ids = NULL;

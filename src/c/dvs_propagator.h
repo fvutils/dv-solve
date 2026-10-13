@@ -321,6 +321,8 @@ uint32_t prop_add_unary_neg_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uin
 uint32_t prop_add_bounds_le_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
 uint32_t prop_add_bounds_lt_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
 uint32_t prop_add_bounds_eq_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
+/* Whether p is a bounds_eq propagator, `x == y`: two names for one value. */
+int prop_is_bounds_eq(const Propagator *p);
 uint32_t prop_add_bounds_ne_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uint8_t priority);
 uint32_t prop_add_bounds_add_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t priority);
 /** Modular BV add with constant: r = (x + c) mod 2^width. width is 1..64. */

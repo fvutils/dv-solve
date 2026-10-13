@@ -13,6 +13,7 @@
 #include "dvs_shave.h"
 #include "dvs_lcg.h"
 #include "dvs_explain.h"
+#include "dvs_diffcycle.h"
 
 #ifdef DVS_STEP_CHECK
 #include <stdio.h>
@@ -909,6 +910,164 @@ static uint8_t _bound_decision(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
     return _split_upper_first(ctx, opts, lo, v, hi) ? 2 : 1;
 }
 
+/* The number of solutions left once a square's root is decided, when what is
+ * left is one fixed product: r == a * b with r fixed to K and a, b free, and
+ * every other free variable a copy of a or of b. Each divisor d of K in a's
+ * domain whose cofactor K / d is in b's is one solution. 1 when nothing is
+ * left free. 0 when anything else is left -- a second product, another
+ * variable, a propagator over a free variable other than the product, the
+ * copies and the cycle detector (which prunes nothing of its own) -- since
+ * the count would then not be the number of solutions. (Learned clauses
+ * follow from the problem, so they remove none.) */
+static uint64_t _mul_leftover_count(dvs_ctx_t *ctx) {
+    const DvsMulLink *ml = NULL;
+    for (uint32_t i = 0; i < ctx->n_mul_links; i++) {
+        const DvsMulLink *m = &ctx->mul_links[i];
+        if (m->a == m->b) continue;
+        const Variable *rv = &ctx->vars[m->r];
+        const Variable *av = &ctx->vars[m->a], *bv = &ctx->vars[m->b];
+        if (var_lo64(ctx, rv) != var_hi64(ctx, rv)) continue;
+        if (var_lo64(ctx, av) == var_hi64(ctx, av) || var_lo64(ctx, bv) == var_hi64(ctx, bv))
+            continue;
+        if (ml) return 0;                                   /* two products */
+        ml = m;
+    }
+    if (!ml) {
+        for (uint32_t i = 0; i < ctx->n_vars; i++) {
+            if (ctx->var_alias && ctx->var_alias[i] != i) continue;   /* reads its root */
+            if (var_lo64(ctx, &ctx->vars[i]) != var_hi64(ctx, &ctx->vars[i])) return 0;
+        }
+        return 1;
+    }
+    const uint32_t sa = dvs_value_src(ctx, ml->a), sb = dvs_value_src(ctx, ml->b);
+    if (sa == sb) return 0;
+    for (uint32_t i = 0; i < ctx->n_vars; i++) {
+        const Variable *v = &ctx->vars[i];
+        if (ctx->var_alias && ctx->var_alias[i] != i) continue;
+        if (var_lo64(ctx, v) == var_hi64(ctx, v)) continue;
+        uint32_t s = dvs_value_src(ctx, i);
+        if (s != sa && s != sb) return 0;
+    }
+    for (uint32_t p = 0; p < ctx->n_props; p++) {
+        if (p == ml->prop) continue;
+        const Propagator *pp = (const Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[p]);
+        uint32_t n;
+        const uint32_t *w = prop_watched_vars(pp, &n);
+        for (uint32_t k = 0; k < n; k++) {
+            const Variable *v = &ctx->vars[w[k]];
+            if (var_lo64(ctx, v) != var_hi64(ctx, v)) {
+                if (!prop_is_bounds_eq(pp) && !prop_is_diffcycle(pp)) return 0;
+                break;
+            }
+        }
+    }
+    const Variable *rv = &ctx->vars[ml->r];
+    const Variable *av = &ctx->vars[ml->a], *bv = &ctx->vars[ml->b];
+    if ((rv->flags | av->flags | bv->flags) & VAR_SIGNED) return 0;
+    uint64_t K = (uint64_t)var_lo64(ctx, rv);
+    uint64_t alo = (uint64_t)var_lo64(ctx, av), ahi = (uint64_t)var_hi64(ctx, av);
+    uint64_t blo = (uint64_t)var_lo64(ctx, bv), bhi = (uint64_t)var_hi64(ctx, bv);
+    uint64_t mask = ml->width >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << ml->width) - 1);
+    if (K == 0 || bhi == 0 || (ahi != 0 && bhi > mask / ahi)) return 0;    /* may wrap */
+    uint64_t L = K / bhi + (K % bhi != 0), U = blo ? K / blo : ahi;
+    if (L < alo) L = alo;
+    if (U > ahi) U = ahi;
+    if (L > U || !dvs_divisors(&ctx->divisors, K, 1u << 17)) return 0;
+    uint32_t j0 = dvs_divisors_lower(&ctx->divisors, L);
+    uint32_t j1 = dvs_divisors_upper(&ctx->divisors, U);
+    uint64_t n = 0;
+    for (uint32_t j = j0; j < j1; j++) {
+        int64_t d = (int64_t)ctx->divisors.divs[j], e = (int64_t)(K / (uint64_t)d);
+        if (!_is_hole(ctx, ml->a, d) && !_is_hole(ctx, sa, d)
+                && !_is_hole(ctx, ml->b, e) && !_is_hole(ctx, sb, e))
+            n++;
+    }
+    return n;
+}
+
+#define DVS_MUL_COUNT_PROBES 64u
+#define DVS_MUL_COUNT_TRIES  4096u
+
+/* The largest leftover count over DVS_MUL_COUNT_PROBES draws of x, each
+ * decided and propagated at a level of its own above `level` and undone. */
+static void _mul_count_probe(dvs_ctx_t *ctx, uint32_t x, uint32_t level) {
+    const Variable *xv = &ctx->vars[x];
+    const int64_t lo = var_lo64(ctx, xv), hi = var_hi64(ctx, xv);
+    for (uint32_t k = 0; k < DVS_MUL_COUNT_PROBES; k++) {
+        int64_t v = _rand_range64(ctx, lo, hi);
+        if (_is_hole(ctx, x, v)) continue;
+        trail_push_level(ctx);
+        ctx->conflict_prop_ref   = EXPR_NULL;
+        ctx->conflict_clause_idx = EXPR_NULL;
+        PropResult pr = ctx_tighten_lb64(ctx, x, v);
+        if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, v);
+        if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+        if (pr == PROP_OK) {
+            uint64_t n = _mul_leftover_count(ctx);
+            if (n > ctx->mul_count_max) ctx->mul_count_max = n;
+        }
+        trail_backtrack(ctx, level);
+        if (ctx->prop_aborted) break;
+    }
+    ctx->conflict_prop_ref   = EXPR_NULL;
+    ctx->conflict_clause_idx = EXPR_NULL;
+}
+
+/* Keep the value just decided for x, the root of a square (decision tier 2),
+ * or reject it?
+ *
+ * Deciding the root first fixes the product (_build_dec_tier), and then each
+ * divisor pair of the product is equally likely (_pick_mul_divisor). But the
+ * roots are drawn uniformly while the number of pairs differs from root to
+ * root, 1 to 64 for `a * b == c * c + 345` over u8, so a solution's
+ * probability was 1 / (its root's pair count): chi^2/df 6.9 over the 180
+ * solutions. When what is left after the decision is that one product
+ * (_mul_leftover_count), the value is kept with probability n / n_max, and
+ * otherwise undone -- excluding nothing -- and drawn again: rejection
+ * sampling, uniform over the solutions.
+ *
+ * n_max is not known up front; it is the largest count seen, kept across
+ * solves of the problem, and the first time the hook runs it probes
+ * DVS_MUL_COUNT_PROBES draws of x for it. A count above it raises it (the
+ * value is then kept), so a root whose count is above every one seen so far
+ * is under-drawn until it is seen; past that the draws are exactly uniform.
+ * After DVS_MUL_COUNT_TRIES rejections in one solve the value is kept.
+ * Returns 1 to keep the value; 0 when the decision was undone (the search is
+ * back at `level`). */
+static int _mul_count_accept(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
+                             uint32_t x, uint32_t level, PropResult pr,
+                             uint32_t *rejects) {
+    if (!(opts && opts->seed != 0 && ctx->fair_pick)) return 1;
+    if (*rejects >= DVS_MUL_COUNT_TRIES) return 1;
+    if (pr == PROP_CONFLICT) {
+        /* A root with no solution at all: rejected like any other, so it
+         * is not one of the failed draws after which the search splits
+         * x's domain (_redraw), which favours the values next to a run of
+         * infeasible ones (c = 219 of `a * b == c * c + 345`, above 12
+         * infeasible roots, was drawn 1.3x as often). */
+        trail_backtrack(ctx, level);
+        ctx->conflict_prop_ref   = EXPR_NULL;
+        ctx->conflict_clause_idx = EXPR_NULL;
+        if (ctx->keep_on && x < ctx->keep_cap) ctx->keep_state[x] = KEEP_DEAD;
+        ++*rejects;
+        return 0;
+    }
+    uint64_t n = _mul_leftover_count(ctx);
+    if (n == 0) return 1;
+    if (n > ctx->mul_count_max) ctx->mul_count_max = n;
+    if (ctx->mul_count_probed && n == ctx->mul_count_max) return 1;
+    if (ctx->mul_count_probed && _rand64(ctx) % ctx->mul_count_max < n) return 1;
+    trail_backtrack(ctx, level);
+    if (!ctx->mul_count_probed) {
+        /* Undone whatever its value was, so this rejection is fair too. */
+        ctx->mul_count_probed = 1;
+        _mul_count_probe(ctx, x, level);
+    }
+    if (ctx->keep_on && x < ctx->keep_cap) ctx->keep_state[x] = KEEP_DEAD;
+    ++*rejects;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* dvs_solver_solve                                                        */
 /* ------------------------------------------------------------------ */
@@ -1262,6 +1421,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                               ? opts->max_restarts  : 10000;
     uint32_t restart_count  = 0;
     uint32_t local_conflicts = 0;
+    uint32_t mul_rejects    = 0;   /* _mul_count_accept */
     uint32_t luby_idx       = 1;  /* 1-indexed Luby sequence */
     uint32_t luby_limit     = (max_conflicts > 0)
                               ? _luby(luby_idx) * max_conflicts
@@ -1411,6 +1571,9 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (pr == PROP_OK) {
             pr = dvs_solver_propagate(ctx);
         }
+        if (!bound && _tier(ctx, x_id) == 2 && !ABORTED()
+                && !_mul_count_accept(ctx, opts, x_id, dec_idx, pr, &mul_rejects))
+            continue;   /* a square's root rejected: draw again */
 
         /* The decision just made conflicted: its value is not kept. */
         if (pr == PROP_CONFLICT && ctx->keep_on && x_id < ctx->keep_cap)

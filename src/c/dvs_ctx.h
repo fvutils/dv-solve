@@ -233,6 +233,10 @@ typedef struct dvs_ctx_s {
     uint8_t           *dec_tier;      /* [dec_tier_n] decision tier from the
                                        * multiply links; NULL: all equal  */
     uint32_t           dec_tier_n;
+    uint64_t           mul_count_max; /* largest leftover-product count
+                                       * seen (_mul_count_accept); kept
+                                       * across solves of the problem    */
+    uint8_t            mul_count_probed;
     CheckpointMark    *checkpoints;   /* array[checkpoints_cap]: from
                                        * the fixed pool, else ctx->alloc */
     uint32_t           n_checkpoints;

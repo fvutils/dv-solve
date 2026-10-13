@@ -7,7 +7,8 @@ src/c/dvs_search.c):
   is a conflict;
 - a fixed product `a * b == K` narrows each operand to the divisors of K, and
   the operand is drawn from them;
-- the root of a square is decided before the operands of a product.
+- the root of a square is decided before the operands of a product, and kept
+  with probability proportional to the solutions it leaves.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import collections
 import time
 
 from dv_solve.builder import SolveProblemBuilder
-from dv_solve.problem import BIN_ADD, BIN_EQ, BIN_GTE, BIN_MUL
+from dv_solve.problem import BIN_ADD, BIN_EQ, BIN_GTE, BIN_LTE, BIN_MUL
 from dv_solve.ctx import SolveCtx, SOLVE_OK, SOLVE_UNSAT
 
 
@@ -168,3 +169,79 @@ def test_mul_sq_as_pyvsc_states_it():
     for rc, t, val in _solve(buf, range(1, 11)):
         assert rc == SOLVE_OK and t < 0.05, (rc, t)
         assert val[0] * val[1] == val[2] * val[2] + 12345
+
+
+def _mul_sq8(extra=None):
+    """a * b == c * c + 345 over 8-bit fields, the products at 16 bits."""
+    def c(b):
+        t3 = b.expr_binary(BIN_MUL, _ext(b, 0, 8, 16), _ext(b, 1, 8, 16))
+        t4 = b.expr_binary(BIN_MUL, _ext(b, 2, 8, 16), _ext(b, 2, 8, 16))
+        b.add_constraint(b.expr_binary(
+            BIN_EQ, t3, b.expr_binary(BIN_ADD, t4, b.expr_const(345, width=16))))
+        if extra:
+            extra(b)
+    return _build(3, [8, 8, 8], c)
+
+
+def test_square_root_weighted_by_its_solutions():
+    """With c decided first, each c was equally likely, but c leaves from 1
+    to 12 pairs (a, b): chi^2/df 6.9 over the 180 solutions. c is now kept
+    with probability (its pairs) / (the most pairs seen) (_mul_count_accept),
+    and a root with no pair is redrawn rather than split around."""
+    sols = {(a, k // a, c) for c in range(256) for k in [c * c + 345]
+            for a in range(1, 256) if k % a == 0 and k // a < 256}
+    n = 20 * len(sols)
+    seen = collections.Counter()
+    for rc, _, v in _solve(_mul_sq8(), range(1, n + 1)):
+        assert rc == SOLVE_OK
+        seen[tuple(v[:3])] += 1
+    assert set(seen) == sols
+    e = n / len(sols)
+    chi = sum((seen[x] - e) ** 2 / e for x in sols) / (len(sols) - 1)
+    assert chi < 1.4, chi
+
+
+def test_square_root_weighted_as_pyvsc_states_it():
+    """The same weighting in pyvsc's encoding (see
+    test_mul_sq_as_pyvsc_states_it), 8-bit: v5 is merged into v3 by
+    `v3 == v5`, and a merged variable's own domain stays wide, so it is
+    read through its root rather than taken for something left to solve."""
+    b = SolveProblemBuilder()
+    try:
+        for i, w in ((5, 16), (4, 16), (3, 16), (2, 8), (1, 8), (0, 8)):
+            b.add_var(i, w, False, 0, (1 << w) - 1)
+        v = b.expr_var
+        b.add_constraint(b.expr_binary(BIN_EQ, v(3), v(5)))
+        b.add_constraint(b.expr_binary(
+            BIN_EQ, v(5), b.expr_binary(BIN_ADD, v(4), b.expr_const(345, width=16))))
+        b.add_constraint(b.expr_binary(
+            BIN_EQ, v(4), b.expr_binary(BIN_MUL, _ext(b, 2, 8, 16), v(2))))
+        b.add_constraint(b.expr_binary(
+            BIN_EQ, v(3), b.expr_binary(BIN_MUL, _ext(b, 0, 8, 16), v(1))))
+        buf, _sz = b.finalize()
+    finally:
+        b.destroy()
+    sols = {(a, k // a, c) for c in range(256) for k in [c * c + 345]
+            for a in range(1, 256) if k % a == 0 and k // a < 256}
+    n = 20 * len(sols)
+    seen = collections.Counter()
+    for rc, _, val in _solve(buf, range(1, n + 1)):
+        assert rc == SOLVE_OK
+        seen[tuple(val[:3])] += 1
+    assert set(seen) == sols
+    e = n / len(sols)
+    chi = sum((seen[x] - e) ** 2 / e for x in sols) / (len(sols) - 1)
+    assert chi < 1.4, chi
+
+
+def test_square_root_with_more_left_than_the_product():
+    """`a <= b` is left over beside the product once c is decided: the count
+    of divisor pairs is not the number of solutions, so the root is not
+    weighted by it. The solve is still right and fast."""
+    def le(b):
+        b.add_constraint(b.expr_binary(BIN_LTE, b.expr_var(0), b.expr_var(1)))
+    for rc, t, v in _solve(_mul_sq8(le), range(1, 201)):
+        assert rc == SOLVE_OK and t < 0.02, (rc, t)
+        a, bb, c = v[:3]
+        assert a * bb == c * c + 345 and a <= bb
+

@@ -51,4 +51,8 @@ int prop_difference_relations(const struct Propagator *p,
  *  needed), -1 on allocation failure. */
 int diffcycle_build(struct dvs_ctx_s *ctx);
 
+/** Whether p is the cycle-detection propagator. It adds no pruning of its
+ *  own, so it removes no solution the relations' propagators keep. */
+int prop_is_diffcycle(const struct Propagator *p);
+
 #endif /* INCLUDED_DVS_DIFFCYCLE_H */
