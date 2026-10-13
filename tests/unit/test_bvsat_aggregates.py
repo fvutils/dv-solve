@@ -229,3 +229,37 @@ def test_select_of_substituted_elements():
         return (e0 == (a + 1) % 8 and e1 == (a + 2) % 8 and idx == (e1 - 1) % 8
                 and idx < 3 and r == 4 and r == v[idx])
     _check(vars_, build, holds)
+
+
+def test_select_of_empty_array_is_false():
+    """`r == arr[idx]` over an array of no elements: no index is in range, so
+    it is false, in the primary compile as in BV-SAT and the emitter. The
+    compile took it as vacuously true."""
+    from dv_solve.ctx import SolveCtx, CompileUnsatError
+    vars_ = [(2, False), (2, False)]
+
+    def build(b):
+        b.add_constraint(b.expr_array_select(0, 0, b.expr_var(0), b.expr_var(1)))
+    _check(vars_, build, lambda v: False)
+    b = SolveProblemBuilder()
+    try:
+        for i, (w, s) in enumerate(vars_):
+            b.add_var(i, w, s, 0, (1 << w) - 1)
+        build(b)
+        buf, _sz = b.finalize()
+    finally:
+        b.destroy()
+    with pytest.raises(CompileUnsatError):
+        SolveCtx(buf)
+
+
+def test_select_of_empty_array_under_a_guard():
+    """`g -> r == arr[idx]` over an empty array forces g == 0. (The primary
+    compile does not take a nested select; the client hands it to BV-SAT.)"""
+    vars_ = [(2, False), (2, False), (1, False)]
+
+    def build(b):
+        sel = b.expr_array_select(0, 0, b.expr_var(0), b.expr_var(1))
+        g = b.expr_binary(BIN_EQ, b.expr_var(2), _k(b, 1, 1))
+        b.add_constraint(b.expr_binary(BIN_OR, b.expr_unary(UN_NOT, g), sel))
+    _check(vars_, build, lambda v: v[2] == 0)

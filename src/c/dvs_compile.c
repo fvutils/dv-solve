@@ -3425,7 +3425,10 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
         uint32_t base = as->base_var_id;
         uint32_t n = as->n_elems;
 
-        if (n == 0) return 1;  /* empty array: vacuously true */
+        /* An empty array has no index in range, so the select is false,
+         * as an out-of-range index is below (and in BV-SAT and the
+         * SMT-LIB2 emitter). */
+        if (n == 0) return -1;
         /* Flat guard-reified select is O(n) propagators. Benchmarking showed it
          * wins over the vsc-layer ITE chain only up to ~64 elements and degrades
          * past ~96 (2n guard propagators fire poorly at scale), so the vsc layer
