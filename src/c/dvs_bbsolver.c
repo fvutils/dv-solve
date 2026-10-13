@@ -409,6 +409,33 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width);
 static int subst_reaches_var(dvs_bbsolver_t *S,
                              dvs_expr_t ref,
                              uint32_t target_var,
+                             uint32_t *visited);
+
+/* subst_reaches_var for a variable named by id: an EXPR_VAR, or an element
+ * of an array select (which names its elements by id). */
+static int reach_var_id(dvs_bbsolver_t *S, uint32_t id, uint32_t target_var,
+                        uint32_t *visited) {
+    if (id == target_var) return 1;
+    if (id >= S->n_vars) return 0;
+    if (visited[id] == S->reach_epoch) return 0;
+    visited[id] = S->reach_epoch;
+    /* A built variable's bits are fixed: bit-blasting never resolves
+     * through its substitution again, so no cycle passes through it.
+     * (Only a session builds variables between substitution passes.) */
+    if (S->vars[id].bv_built) return 0;
+    /* If this variable has its own substitution, look through it. */
+    if (S->subst[id] != EXPR_NULL)
+        return subst_reaches_var(S, S->subst[id], target_var, visited);
+    if (S->slice_head)
+        for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
+            if (subst_reaches_var(S, S->slices[i].eref, target_var, visited))
+                return 1;
+    return 0;
+}
+
+static int subst_reaches_var(dvs_bbsolver_t *S,
+                             dvs_expr_t ref,
+                             uint32_t target_var,
                              uint32_t *visited) {
     if (ref == EXPR_NULL) return 0;
     if (dvs_stack_low(&S->sg)) return 1;   /* cannot rule a cycle out */
@@ -416,27 +443,8 @@ static int subst_reaches_var(dvs_bbsolver_t *S,
     if (!kp) return 0;
     switch (*kp) {
     case EXPR_CONST: return 0;
-    case EXPR_VAR: {
-        ExprVar *v = (ExprVar *)kp;
-        if (v->var_id == target_var) return 1;
-        if (v->var_id >= S->n_vars) return 0;
-        if (visited[v->var_id] == S->reach_epoch) return 0;
-        visited[v->var_id] = S->reach_epoch;
-        /* A built variable's bits are fixed: bit-blasting never resolves
-         * through its substitution again, so no cycle passes through it.
-         * (Only a session builds variables between substitution passes.) */
-        if (S->vars[v->var_id].bv_built) return 0;
-        /* If this variable has its own substitution, look through it. */
-        if (S->subst[v->var_id] != EXPR_NULL) {
-            return subst_reaches_var(S, S->subst[v->var_id], target_var, visited);
-        }
-        if (S->slice_head)
-            for (uint32_t i = S->slice_head[v->var_id]; i != BB_NO_SLICE;
-                 i = S->slices[i].next)
-                if (subst_reaches_var(S, S->slices[i].eref, target_var, visited))
-                    return 1;
-        return 0;
-    }
+    case EXPR_VAR:
+        return reach_var_id(S, ((ExprVar *)kp)->var_id, target_var, visited);
     case EXPR_BINARY: {
         ExprBinary *b = (ExprBinary *)kp;
         return subst_reaches_var(S, b->lhs, target_var, visited)
@@ -485,6 +493,32 @@ static int subst_reaches_var(dvs_bbsolver_t *S,
         return subst_reaches_var(S, c->hi, target_var, visited)
             || subst_reaches_var(S, c->lo, target_var, visited);
     }
+    case EXPR_SUM: {
+        const ExprSum *es = (const ExprSum *)kp;
+        const dvs_expr_t *xs = (const dvs_expr_t *)(es + 1);
+        if (subst_reaches_var(S, es->result, target_var, visited)) return 1;
+        for (uint32_t i = 0; i < es->n_vars; i++)
+            if (subst_reaches_var(S, xs[i], target_var, visited)) return 1;
+        return 0;
+    }
+    case EXPR_COUNTONES: {
+        const ExprCountones *ec = (const ExprCountones *)kp;
+        return subst_reaches_var(S, ec->result, target_var, visited)
+            || subst_reaches_var(S, ec->operand, target_var, visited);
+    }
+    case EXPR_CLOG2: {
+        const ExprClog2 *ec = (const ExprClog2 *)kp;
+        return subst_reaches_var(S, ec->result, target_var, visited)
+            || subst_reaches_var(S, ec->operand, target_var, visited);
+    }
+    case EXPR_ARRAY_SELECT: {
+        const ExprArraySelect *as = (const ExprArraySelect *)kp;
+        if (subst_reaches_var(S, as->result, target_var, visited) ||
+            subst_reaches_var(S, as->index, target_var, visited)) return 1;
+        for (uint32_t i = 0; i < as->n_elems; i++)
+            if (reach_var_id(S, as->base_var_id + i, target_var, visited)) return 1;
+        return 0;
+    }
     default: return 0;
     }
 }
@@ -510,6 +544,12 @@ static uint32_t *reach_begin(dvs_bbsolver_t *S) {
 /* Walk `ref` down to its variables, not looking through substitutions. With
  * `flag`, mark each in rhs_var and return 0; otherwise return whether
  * `target` occurs. */
+static int direct_var_id(dvs_bbsolver_t *S, uint32_t id, uint32_t target, int flag) {
+    if (!flag) return id == target;
+    if (S->rhs_var && id < S->n_vars) S->rhs_var[id] = 1;
+    return 0;
+}
+
 static int expr_direct_vars(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t target,
                             int flag) {
     if (ref == EXPR_NULL) return 0;
@@ -524,12 +564,8 @@ static int expr_direct_vars(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t target,
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
-    case EXPR_VAR: {
-        uint32_t id = ((ExprVar *)kp)->var_id;
-        if (!flag) return id == target;
-        if (S->rhs_var && id < S->n_vars) S->rhs_var[id] = 1;
-        return 0;
-    }
+    case EXPR_VAR:
+        return direct_var_id(S, ((ExprVar *)kp)->var_id, target, flag);
     case EXPR_BINARY: {
         ExprBinary *b = (ExprBinary *)kp;
         return expr_direct_vars(S, b->lhs, target, flag)
@@ -577,6 +613,32 @@ static int expr_direct_vars(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t target,
         ExprConcat *c = (ExprConcat *)kp;
         return expr_direct_vars(S, c->hi, target, flag)
             || expr_direct_vars(S, c->lo, target, flag);
+    }
+    case EXPR_SUM: {
+        const ExprSum *es = (const ExprSum *)kp;
+        const dvs_expr_t *xs = (const dvs_expr_t *)(es + 1);
+        if (expr_direct_vars(S, es->result, target, flag)) return 1;
+        for (uint32_t i = 0; i < es->n_vars; i++)
+            if (expr_direct_vars(S, xs[i], target, flag)) return 1;
+        return 0;
+    }
+    case EXPR_COUNTONES: {
+        const ExprCountones *ec = (const ExprCountones *)kp;
+        return expr_direct_vars(S, ec->result, target, flag)
+            || expr_direct_vars(S, ec->operand, target, flag);
+    }
+    case EXPR_CLOG2: {
+        const ExprClog2 *ec = (const ExprClog2 *)kp;
+        return expr_direct_vars(S, ec->result, target, flag)
+            || expr_direct_vars(S, ec->operand, target, flag);
+    }
+    case EXPR_ARRAY_SELECT: {
+        const ExprArraySelect *as = (const ExprArraySelect *)kp;
+        if (expr_direct_vars(S, as->result, target, flag) ||
+            expr_direct_vars(S, as->index, target, flag)) return 1;
+        for (uint32_t i = 0; i < as->n_elems; i++)
+            if (direct_var_id(S, as->base_var_id + i, target, flag)) return 1;
+        return 0;
     }
     default: return 0;
     }
@@ -885,6 +947,34 @@ static void count_fanout_from(dvs_bbsolver_t *S, const dvs_expr_t *roots,
             if (S->slice_head && id < S->n_vars)
                 for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
                     FO_EDGE(S->slices[i].eref);
+            break;
+        }
+        case EXPR_SUM: {
+            const ExprSum *es = (const ExprSum *)kp;
+            const dvs_expr_t *xs = (const dvs_expr_t *)(es + 1);
+            FO_EDGE(es->result);
+            for (uint32_t i = 0; i < es->n_vars; i++) FO_EDGE(xs[i]);
+            break;
+        }
+        case EXPR_COUNTONES:
+            FO_EDGE(((ExprCountones *)kp)->result);
+            FO_EDGE(((ExprCountones *)kp)->operand);
+            break;
+        case EXPR_CLOG2:
+            FO_EDGE(((ExprClog2 *)kp)->result);
+            FO_EDGE(((ExprClog2 *)kp)->operand);
+            break;
+        case EXPR_ARRAY_SELECT: {
+            /* The elements are named by id; a sliced one reads its slices. */
+            const ExprArraySelect *as = (const ExprArraySelect *)kp;
+            FO_EDGE(as->result);
+            FO_EDGE(as->index);
+            for (uint32_t e = 0; e < as->n_elems && S->slice_head; e++) {
+                uint32_t id = as->base_var_id + e;
+                if (id < S->n_vars)
+                    for (uint32_t i = S->slice_head[id]; i != BB_NO_SLICE; i = S->slices[i].next)
+                        FO_EDGE(S->slices[i].eref);
+            }
             break;
         }
         default:
@@ -1542,6 +1632,111 @@ static BB_NOINLINE dvs_bv_t bb_concat(dvs_bbsolver_t *S, const ExprConcat *e) {
     return dvs_bb_concat(S->bb, hi, lo);
 }
 
+/* The aggregate relations. Each is a truth value (1 bit) with the meaning
+ * the SMT-LIB2 emitter gives it (dvs_smt2_emit.c, _aggregate), and the
+ * primary engine enforces when the relation is a top-level constraint. */
+
+/* Smallest width holding the unsigned value n. */
+static uint16_t bb_bits_for(uint64_t n) {
+    uint16_t b = 1;
+    while (b < 64 && (n >> b)) b++;
+    return b;
+}
+
+/* `result == base[index]`: some element i has index == i and result equal
+ * to it, each comparison in its SV context (the index against an int
+ * literal, at least 32 bits; result and element signed only if both are).
+ * An index outside the array, and so any index of an empty one, is false.
+ * One equality per element, then their disjunction: the multiplexer a
+ * select of a fixed-size array is. */
+static dvs_bv_t bb_array_select(dvs_bbsolver_t *S, const ExprArraySelect *as) {
+    dvs_bv_t any = dvs_bb_value_u64(S->bb, 1, 0);
+    if (as->n_elems == 0) return any;
+    dvs_bv_t idx = bb_expr(S, as->index, 0);
+    if (S->had_error) return idx;
+    dvs_bv_t res = bb_expr(S, as->result, 0);
+    if (S->had_error) return res;
+    uint16_t iw = idx.size > 32 ? (uint16_t)idx.size : 32;
+    idx = ext_ref(S, idx, as->index, iw);
+    const int rs = bb_signed(S, as->result, 0);
+    for (uint32_t i = 0; i < as->n_elems; i++) {
+        uint32_t id = as->base_var_id + i;
+        if (id >= S->n_vars || !S->vars[id].defined) {
+            S->had_unsupported = 1;
+            return dvs_bb_value_u64(S->bb, 1, 0);
+        }
+        dvs_bv_t el = bv_for_var(S, id);
+        if (S->had_error) return el;
+        const int sg = rs && S->vars[id].is_signed;
+        uint16_t w = res.size > el.size ? (uint16_t)res.size : (uint16_t)el.size;
+        dvs_bv_t r = sg ? sext_to(S, res, w) : zext_to(S, res, w);
+        dvs_bv_t e = sg ? sext_to(S, el, w) : zext_to(S, el, w);
+        dvs_bv_t hit = dvs_bb_and(S->bb,
+                                  dvs_bb_eq(S->bb, idx, dvs_bb_value_u64(S->bb, iw, i)),
+                                  dvs_bb_eq(S->bb, r, e));
+        any = dvs_bb_or(S->bb, any, hit);
+    }
+    return any;
+}
+
+/* `result == x0 + x1 + ...` as integers: every term extended by its own
+ * signedness to a width the sum cannot overflow. */
+static dvs_bv_t bb_sum(dvs_bbsolver_t *S, const ExprSum *es) {
+    const dvs_expr_t *xs = (const dvs_expr_t *)(es + 1);   /* refs follow the node */
+    dvs_bv_t res = bb_expr(S, es->result, 0);
+    if (S->had_error) return res;
+    uint32_t mw = res.size;
+    dvs_bv_t *t = es->n_vars ? (dvs_bv_t *)malloc(es->n_vars * sizeof(dvs_bv_t)) : NULL;
+    if (es->n_vars && !t) return err_bv(S, "out of memory");
+    for (uint32_t i = 0; i < es->n_vars; i++) {
+        t[i] = bb_expr(S, xs[i], 0);
+        if (S->had_error) { dvs_bv_t e = t[i]; free(t); return e; }
+        if (t[i].size > mw) mw = t[i].size;
+    }
+    uint32_t W = mw + bb_bits_for((uint64_t)es->n_vars + 1) + 1;
+    if (W > 0xFFFFu) { free(t); S->had_unsupported = 1; return dvs_bb_value_u64(S->bb, 1, 0); }
+    dvs_bv_t acc = dvs_bb_value_u64(S->bb, W, 0);
+    for (uint32_t i = 0; i < es->n_vars; i++)
+        acc = dvs_bb_add(S->bb, acc, ext_ref(S, t[i], xs[i], (uint16_t)W));
+    free(t);
+    return dvs_bb_eq(S->bb, ext_ref(S, res, es->result, (uint16_t)W), acc);
+}
+
+/* `result == popcount(x)`: the bits of x, each widened, summed. */
+static dvs_bv_t bb_countones(dvs_bbsolver_t *S, const ExprCountones *ec) {
+    dvs_bv_t x = bb_expr(S, ec->operand, 0);
+    if (S->had_error) return x;
+    dvs_bv_t res = bb_expr(S, ec->result, 0);
+    if (S->had_error) return res;
+    uint16_t xb = bb_bits_for(x.size);
+    uint16_t W = (uint16_t)((res.size > xb ? res.size : xb) + 1);
+    dvs_bv_t acc = dvs_bb_value_u64(S->bb, W, 0);
+    for (uint32_t i = 0; i < x.size; i++)
+        acc = dvs_bb_add(S->bb, acc,
+                         zext_to(S, dvs_bb_extract(S->bb, x, i, i), W));
+    return dvs_bb_eq(S->bb, ext_ref(S, res, ec->result, W), acc);
+}
+
+/* `result == clog2(x)`, x read unsigned: the least k with x <= 2^k (0 for
+ * x <= 1), as a chain from the widest k down. */
+static dvs_bv_t bb_clog2(dvs_bbsolver_t *S, const ExprClog2 *ec) {
+    dvs_bv_t x = bb_expr(S, ec->operand, 0);
+    if (S->had_error) return x;
+    dvs_bv_t res = bb_expr(S, ec->result, 0);
+    if (S->had_error) return res;
+    if (x.size > 64) { S->had_unsupported = 1; return dvs_bb_value_u64(S->bb, 1, 0); }
+    uint16_t xb = bb_bits_for(x.size);
+    uint16_t W = (uint16_t)((res.size > xb ? res.size : xb) + 1);
+    uint16_t XW = (uint16_t)(x.size + 1);
+    dvs_bv_t xx = zext_to(S, x, XW);
+    dvs_bv_t val = dvs_bb_value_u64(S->bb, W, x.size);
+    for (uint32_t k = x.size; k-- > 0;) {
+        dvs_bv_t gt = dvs_bb_ult(S->bb, dvs_bb_value_u64(S->bb, XW, (uint64_t)1 << k), xx);
+        val = dvs_bb_ite(S->bb, gt.bits[0], val, dvs_bb_value_u64(S->bb, W, k));
+    }
+    return dvs_bb_eq(S->bb, ext_ref(S, res, ec->result, W), val);
+}
+
 static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width) {
     if (S->had_error) { dvs_bv_t e = {NULL, 0}; return e; }
     if (ref == EXPR_NULL) return err_bv(S, "EXPR_NULL");
@@ -1577,29 +1772,10 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width) 
     case EXPR_SV_CAST:  out = bb_extend(S, (ExprExtend *)(void *)kp); break;
     case EXPR_EXTRACT:  out = bb_extract(S, (ExprExtract *)kp); break;
     case EXPR_CONCAT:   out = bb_concat(S, (ExprConcat *)kp); break;
-    case EXPR_SUM:
-    case EXPR_COUNTONES:
-    case EXPR_CLOG2:
-    case EXPR_ARRAY_SELECT:
-        /* UNSUPPORTED, not an error. This used to go through err_bv, so
-         * check() returned DVS_BB_ERROR and a caller reasonably reads that as
-         * "something went wrong" rather than "ask the other engine". The
-         * distinction is the one this file already draws for signed div/mod
-         * (had_unsupported -> DVS_BB_UNKNOWN -> the caller defers); err_bv is
-         * for MALFORMED input -- a bad dvs_expr_t, an unknown dvs_binop_t -- and these
-         * four nodes are well-formed, just not bit-blasted.
-         *
-         * It matters because the propagator engine handles all four correctly
-         * (measured: docs/aggregate_coverage_probe.py), so a deferral here
-         * reaches an engine that can answer, while an error may not.
-         *
-         * The returned bv is a well-formed 1-bit dummy rather than {NULL, 0}:
-         * intermediate callers check had_error, not had_unsupported, so they
-         * would keep operating on the result. Any gates they build from it are
-         * discarded -- _bb_encode tests had_unsupported before asserting
-         * anything at top level. */
-        S->had_unsupported = 1;
-        return dvs_bb_value_u64(S->bb, 1, 0);
+    case EXPR_SUM:      out = bb_sum(S, (ExprSum *)kp); break;
+    case EXPR_COUNTONES: out = bb_countones(S, (ExprCountones *)kp); break;
+    case EXPR_CLOG2:    out = bb_clog2(S, (ExprClog2 *)kp); break;
+    case EXPR_ARRAY_SELECT: out = bb_array_select(S, (ExprArraySelect *)kp); break;
     default:
         fprintf(stderr, "[dvs_bbsolver] error: unknown ExprKind %d\n", (int)*kp);
         S->had_error = 1;

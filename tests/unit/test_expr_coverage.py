@@ -120,19 +120,16 @@ def test_feature_axis(case):
     "case", _agg.CASES, ids=[c["cid"] for c in _agg.CASES]
 )
 def test_aggregate_construct(case):
-    """SUM / COUNTONES / CLOG2 / ARRAY_SELECT on the propagator engine.
+    """SUM / COUNTONES / CLOG2 / ARRAY_SELECT on both engines.
 
     These are reachable only through the growable builder API, which is why
     neither probe above covers them -- both build through SolveProblem. They
-    were the gap list's "known unknown": bb does not bit-blast them and cdcl's
-    support was never measured. It is measured now, and all four work.
-
-    The bit-blaster must DEFER (UNKNOWN) rather than error. It used to route
-    these through err_bv, so check() returned DVS_BB_ERROR -- which a caller
-    reads as "something went wrong" rather than "ask the other engine", and
-    the other engine is precisely the one that can answer.
+    were the gap list's "known unknown". The propagator engine handles all
+    four; the bit-blaster deferred them (UNKNOWN) until it encoded them
+    (bb_array_select and friends in dvs_bbsolver.c), so an UNSAT problem
+    using one had no engine to decide it. Both must now answer, with a
+    model that satisfies the constraint (test_bvsat_aggregates.py checks
+    them against brute force).
     """
     assert _agg.run_cdcl(case) == "ok", "cdcl: %s" % case["desc"]
-    assert _agg.run_bb(case) == "UNKNOWN", (
-        "bb must defer on %s, not error -- deferral is what sends the caller "
-        "to the engine that handles it" % case["cid"])
+    assert _agg.run_bb(case) == "ok", "bb: %s" % case["desc"]

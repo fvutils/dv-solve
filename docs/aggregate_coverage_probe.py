@@ -4,15 +4,15 @@
 growable builder API (`dv_solve.builder.SolveProblemBuilder`), not through
 `SolveProblem`, which is why neither `expr_coverage_probe.py` nor
 `feature_coverage_probe.py` covers them -- both build through `SolveProblem`.
-They were G11 in the gap list, the "known unknown": the bit-blaster rejects all
+They were G11 in the gap list, the "known unknown": the bit-blaster rejected all
 four outright, and the propagator engine's support for them was never measured.
 
 This measures it. Per row: whether the constraint compiled, and whether the
 returned assignment actually satisfies it, checked in Python.
 
-The bb column is expected to read UNKNOWN throughout -- these node kinds are not
-bit-blasted. That is a deferral, not a wrong answer, and it is recorded here so
-the expectation is explicit rather than assumed.
+The bb column read UNKNOWN throughout until the bit-blaster encoded these node
+kinds (2026-10-13, bb_array_select / bb_sum / bb_countones / bb_clog2 in
+dvs_bbsolver.c); it now reads ok.
 """
 import os
 import sys
