@@ -215,6 +215,20 @@ typedef struct dvs_ctx_s {
                                        * by the box tier, and decided by the
                                        * search only after every other var */
     uint32_t           box_skip_n;    /* its length                    */
+    /* Enumeration tier (see _enum_sample): every solution of a problem the
+     * box tier gives up on, when it has few, so a solve can draw one
+     * uniformly. Valid for the root state hashed in enum_key. */
+    uint32_t          *enum_vars;     /* [enum_nv] the enumerated vars */
+    int64_t           *enum_vals;     /* [enum_nsol][enum_nv]          */
+    uint32_t           enum_nv;
+    uint32_t           enum_nsol;
+    uint32_t           enum_cap;      /* int64 slots in enum_vals      */
+    uint64_t           enum_key;
+    uint8_t            enum_state;    /* 0 not yet tried, 1 on, 2 off  */
+    uint8_t            box_probe_acc; /* the box probe's accepts, and   */
+    uint8_t            box_probe_n;   /* tries: an estimate of how many
+                                       * solutions there are            */
+    uint8_t            enum_redo;     /* rebuilds left on a new root   */
     uint32_t           n_decl_vars;   /* vars the problem declared; compile
                                        * adds its own after them         */
     uint8_t           *var_order;     /* [n_decl_vars] solve-order stage

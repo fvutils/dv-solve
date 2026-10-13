@@ -1282,6 +1282,8 @@ static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
             if (r == 1) { acc++; trail_backtrack(ctx, base); }
         }
         ctx->rng_state = saved;
+        ctx->box_probe_acc = (uint8_t)acc;
+        ctx->box_probe_n   = (uint8_t)t;
         ctx->box_state = (r >= 0 && acc >= need)
                          ? BOX_ON : BOX_OFF;
         if (ctx->box_state == BOX_OFF) return 0;
@@ -1295,6 +1297,320 @@ static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
         if (r == 1) return 1;
         if (r < 0) return 0;
     }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Enumeration tier: uniform over the solutions of a small problem.   */
+/*                                                                     */
+/* The box tier draws from the root box and accepts a draw that is a  */
+/* solution; it is off where solutions are a small part of the box   */
+/* (below 1 in 16): `lo <= a * b <= hi`, `a * b == c * d`. There the  */
+/* search decided one variable at a time, uniformly over the values   */
+/* left, so a solution's probability went as 1 / the solutions next  */
+/* to it: in `1000 <= a * b <= 1100` (u8), pairs with a small operand */
+/* were drawn 1.4x as often as balanced ones.                         */
+/*                                                                     */
+/* This tier lists every solution once, by a depth-first walk that    */
+/* pins each drawn variable (the box tier's: not aux, not defined by  */
+/* an equality, not merged, not fixed) to each value its domain still */
+/* holds and propagates, so its cost follows the solutions and the    */
+/* dead ends propagation finds, not the box. A solve then pins one    */
+/* listed solution, drawn uniformly. Exact, since propagation removes */
+/* no solution.                                                       */
+/*                                                                     */
+/* The walk stops (and the tier is off for the context) past          */
+/* DVS_ENUM_NODES pins, DVS_ENUM_FIRES propagator firings or         */
+/* DVS_ENUM_MAX listed values, when a leaf                            */
+/* leaves a variable open, or when a drawn variable spans 2^32 values */
+/* or more. The list holds for the root state it was made at, hashed  */
+/* in enum_key; a later root that differs (pins, a soft relaxed, an   */
+/* added constraint) lists again, DVS_ENUM_REDO times at most. A walk */
+/* that finds no solution has refuted every value: UNSAT.             */
+/* DVS_ENUM=0 turns the tier off; DVS_ENUM_DEBUG=1 reports each walk.  */
+/* ------------------------------------------------------------------ */
+#define DVS_ENUM_NODES  (1u << 14)
+#define DVS_ENUM_FIRES  (1ULL << 17)
+#define DVS_ENUM_MAX    (1u << 18)
+#define DVS_ENUM_REDO   4u
+enum { ENUM_UNTRIED = 0, ENUM_ON = 1, ENUM_OFF = 2 };
+
+static int _enum_mode(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("DVS_ENUM");
+        cached = !(e && e[0] == '0');
+    }
+    return cached;
+}
+
+static uint64_t _enum_key(const dvs_ctx_t *ctx, uint32_t base) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+#define ENUM_MIX(x) (h = (h ^ (uint64_t)(x)) * 0x100000001b3ULL)
+    ENUM_MIX(ctx->n_vars);
+    ENUM_MIX(ctx->n_props);
+    ENUM_MIX(base);
+    for (uint32_t i = 0; i < ctx->n_vars; i++) {
+        const Variable *v = &ctx->vars[i];
+        int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
+        ENUM_MIX(lo);
+        ENUM_MIX(hi);
+        ENUM_MIX(_count_holes_in_range(ctx, i, lo, hi));
+    }
+#undef ENUM_MIX
+    return h;
+}
+
+/* Whether every variable is fixed (a complete assignment). */
+static int _all_fixed(const dvs_ctx_t *ctx) {
+    for (uint32_t i = 0; i < ctx->n_vars; i++) {
+        if (ctx->var_alias && ctx->var_alias[i] != i) continue;
+        const Variable *v = &ctx->vars[i];
+        if (var_lo64(ctx, v) != var_hi64(ctx, v)) return 0;
+    }
+    return 1;
+}
+
+/* Pin var `id` to `x` and propagate, at a new level. PROP_OK or not. */
+static PropResult _enum_pin(dvs_ctx_t *ctx, uint32_t id, int64_t x) {
+    trail_push_level(ctx);
+    ctx->conflict_prop_ref   = EXPR_NULL;
+    ctx->conflict_clause_idx = EXPR_NULL;
+    PropResult pr = ctx_tighten_lb64(ctx, id, x);
+    if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, id, x);
+    if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+    return pr;
+}
+
+/* List the solutions at the root `base`. 1: listed (possibly none). 0: the
+ * tier does not suit this problem. The trail is back at `base` either way. */
+static int _enum_build(dvs_ctx_t *ctx, uint32_t base) {
+    ctx->enum_nsol = 0;
+    uint32_t n = ctx->n_decl_vars < ctx->n_vars ? ctx->n_decl_vars : ctx->n_vars;
+    uint32_t nv = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const Variable *v = &ctx->vars[i];
+        if ((v->flags & VAR_AUX) || (ctx->var_alias && ctx->var_alias[i] != i)
+                || (ctx->box_skip && i < ctx->box_skip_n && ctx->box_skip[i]))
+            continue;
+        int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
+        if (lo == hi) continue;
+        if ((uint64_t)hi - (uint64_t)lo >= (1ULL << 32)) return 0;
+        if (ctx->dist_offsets && i < ctx->n_vars_capacity && ctx->dist_offsets[i])
+            return 0;
+        nv++;
+    }
+    if (nv < 2 || base + 2 * nv + 1 >= ctx->max_depth) return 0;
+    /* The box probe's accepts estimate the solutions: box size times the
+     * accept rate. Far more than the list holds, and the walk is not tried
+     * (`sum(list) == K` over ten elements). */
+    if (ctx->box_probe_acc && ctx->box_probe_n) {
+        double est = (double)ctx->box_probe_acc / ctx->box_probe_n;
+        for (uint32_t i = 0; i < n; i++) {
+            const Variable *v = &ctx->vars[i];
+            if ((v->flags & VAR_AUX) || (ctx->var_alias && ctx->var_alias[i] != i)
+                    || (ctx->box_skip && i < ctx->box_skip_n && ctx->box_skip[i]))
+                continue;
+            est *= (double)((uint64_t)var_hi64(ctx, v) - (uint64_t)var_lo64(ctx, v)) + 1.0;
+        }
+        if (est > 4.0 * (double)DVS_ENUM_MAX / nv) return 0;
+    }
+
+    if (ctx->enum_nv != nv) {
+        uint32_t *ev = (uint32_t *)dvs_ctx_resize(ctx, ctx->enum_vars,
+                                                  (size_t)ctx->enum_nv * sizeof(uint32_t),
+                                                  (size_t)nv * sizeof(uint32_t));
+        if (!ev) return 0;
+        ctx->enum_vars = ev;
+        ctx->enum_nv = nv;
+    }
+    /* Smallest domain first: fewer, shallower dead ends. */
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const Variable *v = &ctx->vars[i];
+        if ((v->flags & VAR_AUX) || (ctx->var_alias && ctx->var_alias[i] != i)
+                || (ctx->box_skip && i < ctx->box_skip_n && ctx->box_skip[i])
+                || var_lo64(ctx, v) == var_hi64(ctx, v))
+            continue;
+        uint64_t span = (uint64_t)var_hi64(ctx, v) - (uint64_t)var_lo64(ctx, v);
+        uint32_t j = k++;
+        while (j > 0) {
+            const Variable *u = &ctx->vars[ctx->enum_vars[j - 1]];
+            if ((uint64_t)var_hi64(ctx, u) - (uint64_t)var_lo64(ctx, u) <= span) break;
+            ctx->enum_vars[j] = ctx->enum_vars[j - 1];
+            j--;
+        }
+        ctx->enum_vars[j] = i;
+    }
+
+    /* Per depth: a scan level, under the value pins, where the variable's
+     * lower bound is raised past each value tried, so propagation skips the
+     * values that cannot hold (`a * b == K` steps from divisor to divisor);
+     * and the value last tried. */
+    size_t wsz = (size_t)nv * (sizeof(uint32_t) + sizeof(int64_t));
+    uint32_t *lvl = (uint32_t *)DVS_ALLOC(ctx->alloc, wsz);
+    if (!lvl) return 0;
+    int64_t *cur = (int64_t *)(lvl + nv);
+    int ok = 1;
+    uint32_t nodes = 0;
+    const uint64_t fires0 = ctx->prop_fires;
+    uint32_t d = 0;
+    int advance = 0;     /* back at depth d's scan level after a try */
+    trail_push_level(ctx);
+    lvl[0] = ctx->decision_level;
+    /* The first variable's range, to project the walk's totals from how far
+     * into it the walk is: a walk headed far past a budget stops early, not
+     * at the budget (a failed walk is what a problem the tier does not suit
+     * pays, once per process). */
+    const int64_t lo0 = var_lo64(ctx, &ctx->vars[ctx->enum_vars[0]]);
+    const double span0 = (double)((uint64_t)var_hi64(ctx, &ctx->vars[ctx->enum_vars[0]])
+                                  - (uint64_t)lo0) + 1.0;
+    for (;;) {
+        if (ctx->prop_fires - fires0 > DVS_ENUM_FIRES) { ok = 0; break; }
+        uint32_t id = ctx->enum_vars[d];
+        const Variable *v = &ctx->vars[id];
+        int done = 0;
+        if (advance) {
+            advance = 0;
+            if (cur[d] == var_hi64(ctx, v)) {
+                done = 1;
+            } else {
+                ctx->conflict_prop_ref   = EXPR_NULL;
+                ctx->conflict_clause_idx = EXPR_NULL;
+                PropResult pr = ctx_tighten_lb64(ctx, id, cur[d] + 1);
+                if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+                if (ctx->prop_aborted) { ok = 0; break; }
+                done = pr != PROP_OK;
+            }
+        }
+        if (done) {
+            /* Depth d is through its values: drop its scan level, and go on
+             * with the next value of the depth above. */
+            if (d == 0) break;
+            d--;
+            trail_backtrack(ctx, lvl[d]);
+            advance = 1;
+            continue;
+        }
+        int64_t x = var_lo64(ctx, v);
+        cur[d] = x;
+        if (_is_hole(ctx, id, x)) { advance = 1; continue; }
+        if (++nodes > DVS_ENUM_NODES) { ok = 0; break; }
+        /* Only once the walk has done some work: a walk whose first variable
+         * steps between sparse values (divisors) has covered little of the
+         * range when it has listed most solutions. */
+        if ((nodes & 63) == 0
+                && (nodes >= 1024 || ctx->prop_fires - fires0 >= (1u << 14))) {
+            double done_frac = ((double)((uint64_t)cur[0] - (uint64_t)lo0) + 1.0) / span0;
+            if ((double)ctx->enum_nsol * nv / done_frac > 4.0 * DVS_ENUM_MAX
+                    || (double)(ctx->prop_fires - fires0) / done_frac > 4.0 * DVS_ENUM_FIRES)
+                { ok = 0; break; }
+        }
+        PropResult pr = _enum_pin(ctx, id, x);
+        if (ctx->prop_aborted) { ok = 0; break; }
+        if (pr != PROP_OK) {
+            trail_backtrack(ctx, lvl[d]);
+            advance = 1;
+            continue;
+        }
+        if (d + 1 < nv) {
+            d++;
+            trail_push_level(ctx);
+            lvl[d] = ctx->decision_level;
+            continue;
+        }
+        /* A leaf: every enumerated var pinned, propagation quiet. */
+        if (!_all_fixed(ctx)) { ok = 0; break; }
+        if ((uint64_t)(ctx->enum_nsol + 1) * nv > DVS_ENUM_MAX) { ok = 0; break; }
+        size_t need = (size_t)(ctx->enum_nsol + 1) * nv;
+        if (need > ctx->enum_cap) {
+            size_t cap = ctx->enum_cap ? (size_t)ctx->enum_cap * 2 : (size_t)nv * 64;
+            if (cap > DVS_ENUM_MAX) cap = DVS_ENUM_MAX;
+            if (cap < need) cap = need;
+            int64_t *ev = (int64_t *)dvs_ctx_resize(ctx, ctx->enum_vals,
+                                                    (size_t)ctx->enum_cap * sizeof(int64_t),
+                                                    cap * sizeof(int64_t));
+            if (!ev) { ok = 0; break; }
+            ctx->enum_vals = ev;
+            ctx->enum_cap = (uint32_t)cap;
+        }
+        int64_t *row = ctx->enum_vals + (size_t)ctx->enum_nsol * nv;
+        for (uint32_t j = 0; j < nv; j++)
+            row[j] = var_lo64(ctx, &ctx->vars[ctx->enum_vars[j]]);
+        ctx->enum_nsol++;
+        trail_backtrack(ctx, lvl[d]);
+        advance = 1;
+    }
+    trail_backtrack(ctx, base);
+    if (getenv("DVS_ENUM_DEBUG"))
+        fprintf(stderr, "[enum] ok=%d nv=%u nsol=%u nodes=%u fires=%llu probe=%u/%u\n", ok, nv,
+                ctx->enum_nsol, nodes, (unsigned long long)(ctx->prop_fires - fires0),
+                ctx->box_probe_acc, ctx->box_probe_n);
+    DVS_RELEASE(ctx->alloc, lvl, wsz);
+    if (!ok) ctx->enum_nsol = 0;
+    return ok;
+}
+
+/* Walks that gave up, process-wide, by problem fingerprint and root key: a
+ * caller that compiles a fresh context per solve (the Verilator front end,
+ * a client that does not reuse contexts) pays for one walk, not one each. */
+#define DVS_ENUM_SLOTS 256u
+static uint64_t    _enum_fail_tab[DVS_ENUM_SLOTS];
+static dvs_mutex_t _enum_mu = DVS_MUTEX_INIT;
+
+static uint64_t _enum_fail_key(const dvs_ctx_t *ctx, uint64_t key) {
+    return ctx->problem_fp ? (ctx->problem_fp * 0x9E3779B97F4A7C15ULL) ^ key : 0;
+}
+
+static int _enum_failed_before(uint64_t fk) {
+    if (!fk) return 0;
+    dvs_mutex_lock(&_enum_mu);
+    int hit = _enum_fail_tab[fk % DVS_ENUM_SLOTS] == fk;
+    dvs_mutex_unlock(&_enum_mu);
+    return hit;
+}
+
+static void _enum_note_failed(uint64_t fk) {
+    if (!fk) return;
+    dvs_mutex_lock(&_enum_mu);
+    _enum_fail_tab[fk % DVS_ENUM_SLOTS] = fk;
+    dvs_mutex_unlock(&_enum_mu);
+}
+
+/* 1: a listed solution is pinned (the solve is done). 2: the walk found
+ * none (UNSAT). 0: search instead. Called at the root, `base`. */
+static int _enum_sample(dvs_ctx_t *ctx, uint32_t base) {
+    if (!_enum_mode() || ctx->enum_state == ENUM_OFF) return 0;
+    uint64_t key = _enum_key(ctx, base);
+    if (ctx->enum_state == ENUM_UNTRIED || key != ctx->enum_key) {
+        if (ctx->enum_state == ENUM_UNTRIED) ctx->enum_redo = DVS_ENUM_REDO;
+        else if (ctx->enum_redo-- == 0) { ctx->enum_state = ENUM_OFF; return 0; }
+        uint64_t fk = _enum_fail_key(ctx, key);
+        if (_enum_failed_before(fk) || !_enum_build(ctx, base)) {
+            _enum_note_failed(fk);
+            ctx->enum_state = ENUM_OFF;
+            return 0;
+        }
+        ctx->enum_state = ENUM_ON;
+        ctx->enum_key = key;
+    }
+    if (ctx->enum_nsol == 0) return 2;
+    uint32_t nv = ctx->enum_nv;
+    const int64_t *row = ctx->enum_vals
+                       + (size_t)_rand_range64(ctx, 0, (int64_t)ctx->enum_nsol - 1) * nv;
+    trail_push_level(ctx);
+    ctx->conflict_prop_ref   = EXPR_NULL;
+    ctx->conflict_clause_idx = EXPR_NULL;
+    PropResult pr = PROP_OK;
+    for (uint32_t j = 0; j < nv && pr == PROP_OK; j++) {
+        pr = ctx_tighten_lb64(ctx, ctx->enum_vars[j], row[j]);
+        if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, ctx->enum_vars[j], row[j]);
+    }
+    if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+    if (pr == PROP_OK && !ctx->prop_aborted && _all_fixed(ctx)) return 1;
+    /* A listed solution that no longer holds: the list is stale. */
+    trail_backtrack(ctx, base);
+    ctx->enum_state = ENUM_OFF;
     return 0;
 }
 
@@ -1481,6 +1797,14 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
     uint32_t box_stage_left = (box_ok && ctx->var_order) ? 4u : 0u;
     if (box_ok) {
         if (_box_sample(ctx, base, 0)) return DVS_SOLVE_OK;
+        if (ABORTED()) return DVS_SOLVE_TIMEOUT;
+        /* Where the box tier is off, few solutions may be listed instead. */
+        if (!ctx->var_order && ctx->box_state == BOX_OFF) {
+            int er = _enum_sample(ctx, base);
+            if (ABORTED()) return DVS_SOLVE_TIMEOUT;
+            if (er == 1) return DVS_SOLVE_OK;
+            if (er == 2) return DVS_SOLVE_UNSAT;
+        }
     }
 
     for (;;) {
