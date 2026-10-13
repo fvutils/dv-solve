@@ -135,6 +135,19 @@ typedef struct dvs_ctx_s {
                                        * of decision depth, or never compiled
                                        * the constraint at all. Read it via
                                        * DV_LOG=1 / --stats. */
+    /* Thrash memory for this compiled problem (see _solver_solve). A reset
+     * keeps it, so a randomize() loop that re-solves the problem pays a
+     * search that cannot finish once, not on every call; a compile clears it. */
+    uint64_t           prop_fires;    /* propagator firings, ever: the work count */
+    uint64_t           ok_fires_max;  /* most firings a solve that answered
+                                       * (sat or unsat) needed               */
+    uint64_t           thrash_limit;  /* prop_fires past which this solve
+                                       * gives up, 0: none                   */
+    uint8_t            thrashed;      /* a default-budget solve gave up       */
+    uint8_t            thrash_hit;    /* this solve reached thrash_limit      */
+    uint64_t           problem_fp;    /* the compiled problem's fingerprint, the
+                                       * key of the process-wide memory; 0 once
+                                       * an incremental add changed it        */
     dvs_block_alloc_t *block_alloc;   /* source of dynamic blocks      */
     uint8_t            own_header;    /* made by dvs_solver_new: the
                                        * header is from ctx->alloc      */

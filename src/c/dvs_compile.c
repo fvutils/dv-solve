@@ -4154,6 +4154,7 @@ static int _nomem_check(const dvs_ctx_t *ctx, int rc) {
 }
 
 static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    if (ctx) ctx->problem_fp = sp ? dvs_problem_fingerprint(sp) : 0;
 #ifdef DVS_STEP_CHECK
     /* The checker validates models against the problem after the call, and
      * a caller may free it then: keep a copy. */
@@ -4190,6 +4191,9 @@ int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 
 static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     uint32_t n = sp->n_vars;
+    /* A new problem: what earlier contexts learnt about it, if anything
+     * (_solver_solve). */
+    dvs_thrash_recall(ctx, ctx->problem_fp);
     if (n == 0) {
         ctx->vars   = NULL;
         ctx->n_vars = 0;
@@ -4695,6 +4699,9 @@ static int _solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
 }
 
 int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
+    /* Another problem now: keep this context's memory, but stop sharing it
+     * under the old problem's key. */
+    if (ctx) ctx->problem_fp = 0;
     dvs_search_discard(ctx);
     int rc = _solver_add_constraint(ctx, aux_sp);
     if (ctx && ctx->oracle) dvs_oracle_on_add(ctx, aux_sp, rc);

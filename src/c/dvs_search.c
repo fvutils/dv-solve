@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <time.h>
 #include "dvs_search.h"
+#include "dvs_thread.h"
 #include "dvs_ctx.h"
 #include "dvs_oracle_hooks.h"
 #include "dvs_propagator.h"
@@ -857,6 +858,7 @@ const char *dvs_solver_bail_reason_str(const dvs_ctx_t *ctx) {
     case DVS_BAIL_DEADLINE_CONF: return "wall-clock deadline (conflict analysis)";
     case DVS_BAIL_MAX_RESTARTS:  return "restart budget exhausted";
     case DVS_BAIL_PROPAGATION:   return "propagation ran past the deadline or trail cap";
+    case DVS_BAIL_THRASH:        return "work cap after an earlier solve of this problem gave up";
     default:                     return "no reason recorded";
     }
 }
@@ -1635,15 +1637,93 @@ void dvs_search_discard(dvs_ctx_t *ctx) {
     trail_backtrack(ctx, ctx->search_base);
 }
 
+/* Escalating a search that cannot finish.
+ *
+ * DVS_SOLVE_TIMEOUT tells the caller to use another engine (the bit-blaster),
+ * and the default budget -- DV_CDCL_TIME_LIMIT (10 s) or 10000 restarts -- is
+ * sized for one hard solve. A randomize() loop re-solves the same compiled
+ * problem, so a problem the search thrashes on paid the whole budget on every
+ * call: ~1.7 s a call on pyvsc's F5 before it was fixed, 10 s on a product
+ * of 16-bit fields. Each client grew its own probe-and-remember policy to
+ * avoid that (the SMT-LIB2 front end's cdcl_route). The context remembers
+ * instead: once a default-budget solve of this problem has given up, later
+ * ones stop after DVS_THRASH_MULT times the most propagator firings any
+ * solve of it needed to answer (at least DVS_THRASH_FLOOR), so the caller
+ * escalates in milliseconds. Firings, not conflicts or time: a conflict can
+ * cost one firing or a million, and a count keeps the cut deterministic. A
+ * solve that sets a budget of its own (max_conflicts, max_restarts or
+ * time_limit_ms) is not capped. */
+#define DVS_THRASH_FLOOR 200000u
+#define DVS_THRASH_MULT  8u
+
+/* The memory outlives the context: a client may compile the problem afresh
+ * for every call (pyvsc does, once its solve needed a fallback), and each
+ * fresh context would pay the whole budget again. So it is also kept per
+ * process, by problem fingerprint, in a small direct-mapped table: a
+ * collision only forgets, and what it holds only shortens a search that
+ * returns "unknown", never changes an answer. */
+#define DVS_THRASH_SLOTS 64u
+typedef struct { uint64_t fp, ok_fires_max; uint8_t thrashed; } ThrashSlot;
+static ThrashSlot  _thrash_tab[DVS_THRASH_SLOTS];
+static dvs_mutex_t _thrash_mu = DVS_MUTEX_INIT;
+
+void dvs_thrash_recall(dvs_ctx_t *ctx, uint64_t fp) {
+    ctx->problem_fp = fp;
+    ctx->ok_fires_max = 0;
+    ctx->thrashed = 0;
+    if (!fp) return;
+    dvs_mutex_lock(&_thrash_mu);
+    const ThrashSlot *s = &_thrash_tab[fp % DVS_THRASH_SLOTS];
+    if (s->fp == fp) {
+        ctx->ok_fires_max = s->ok_fires_max;
+        ctx->thrashed = s->thrashed;
+    }
+    dvs_mutex_unlock(&_thrash_mu);
+}
+
+static void _thrash_store(const dvs_ctx_t *ctx) {
+    if (!ctx->problem_fp) return;
+    dvs_mutex_lock(&_thrash_mu);
+    ThrashSlot *s = &_thrash_tab[ctx->problem_fp % DVS_THRASH_SLOTS];
+    *s = (ThrashSlot){ ctx->problem_fp, ctx->ok_fires_max, ctx->thrashed };
+    dvs_mutex_unlock(&_thrash_mu);
+}
+
 static dvs_result_t _solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     dvs_search_discard(ctx);
+    const int default_budget = !(opts && (opts->max_conflicts || opts->max_restarts
+                                          || opts->time_limit_ms));
+    const uint64_t f0 = ctx->prop_fires;
+    ctx->thrash_hit = 0;
+    ctx->thrash_limit = 0;
+    if (default_budget && ctx->thrashed) {
+        uint64_t cap = ctx->ok_fires_max * DVS_THRASH_MULT;
+        ctx->thrash_limit = f0 + (cap > DVS_THRASH_FLOOR ? cap : DVS_THRASH_FLOOR);
+    }
     dvs_result_t r = _solver_solve_relax(ctx, opts);
+    ctx->thrash_limit = 0;
     /* The propagation deadline belongs to this solve only: a later pin or
      * incremental add must not abort on it. */
     ctx->prop_deadline = 0.0;
     if (ctx->prop_aborted) {
         ctx->prop_aborted = 0;
-        return DVS_SOLVE_TIMEOUT;
+        r = DVS_SOLVE_TIMEOUT;
+    }
+    if (ctx->thrash_hit) {
+        ctx->thrash_hit = 0;
+        r = DVS_SOLVE_TIMEOUT;
+        ctx->bail_reason = DVS_BAIL_THRASH;
+    }
+    if (r == DVS_SOLVE_OK || r == DVS_SOLVE_UNSAT) {
+        uint64_t used = ctx->prop_fires - f0;
+        if (used > ctx->ok_fires_max) {
+            ctx->ok_fires_max = used;
+            if (ctx->thrashed) _thrash_store(ctx);
+        }
+    } else if (r == DVS_SOLVE_TIMEOUT && default_budget && !ctx->thrashed
+               && ctx->bail_reason != DVS_BAIL_MAX_DEPTH) {
+        ctx->thrashed = 1;
+        _thrash_store(ctx);
     }
     return r;
 }

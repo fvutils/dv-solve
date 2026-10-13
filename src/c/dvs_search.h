@@ -46,8 +46,15 @@ typedef struct {
 #define DVS_BAIL_MAX_RESTARTS  4   /* restart budget exhausted               */
 #define DVS_BAIL_PROPAGATION   5   /* one propagation ran past the deadline or
                                     * trail cap (ctx->prop_aborted, B61)      */
+#define DVS_BAIL_THRASH        6   /* an earlier solve of this problem gave
+                                    * up, and this one passed the work cap
+                                    * that set (ctx->thrash_limit)           */
 
 const char *dvs_solver_bail_reason_str(const dvs_ctx_t *ctx);
+
+/* Thrash memory across contexts (see _solver_solve): compile seeds a new
+ * context from what earlier contexts of the same problem learnt. */
+void dvs_thrash_recall(dvs_ctx_t *ctx, uint64_t problem_fp);
 
 
 /* ------------------------------------------------------------------ */

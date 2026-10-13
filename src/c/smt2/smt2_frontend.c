@@ -4815,12 +4815,7 @@ static uint64_t _fp_mix(uint64_t h, const uint8_t *d, size_t n) {
 }
 
 static uint64_t _problem_fingerprint(const dvs_problem_t *p) {
-    uint64_t h = 1469598103934665603ULL;
-    size_t lead_len = (size_t)((const uint8_t *)&p->pool - (const uint8_t *)p);
-    h = _fp_mix(h, (const uint8_t *)p, lead_len);
-    h = _fp_mix(h, (const uint8_t *)&p->pool + sizeof(dvs_pool_t), p->pool.used);
-    h ^= (uint64_t)p->pool.used;
-    return h ? h : 1;                                  /* never return 0 */
+    return dvs_problem_fingerprint(p);
 }
 
 /* Emit the array theory axioms for all abstract-array reads + equalities

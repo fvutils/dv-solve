@@ -240,6 +240,10 @@ PropResult ctx_tighten_ub64(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub) {
 
 static int _prop_over_budget(dvs_ctx_t *ctx) {
     if (ctx->trail_count > DVS_PROP_TRAIL_CAP) return 1;
+    if (ctx->thrash_limit && ctx->prop_fires > ctx->thrash_limit) {
+        ctx->thrash_hit = 1;      /* see _solver_solve */
+        return 1;
+    }
     if (ctx->prop_deadline > 0.0) {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -273,6 +277,7 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
 
         if (p->flags & PROP_FLAG_ENTAILED) continue;
 
+        ctx->prop_fires++;
         if ((++ctx->prop_ticks & 0x3FFu) == 0 && _prop_over_budget(ctx)) {
             /* Put back the propagator just taken: an abandoned propagation
              * must leave the queue whole, or whoever carries on from here

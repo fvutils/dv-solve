@@ -517,6 +517,12 @@ uint32_t *source_spec_vars(dvs_problem_t *sp, dvs_expr_t src_ref);
  */
 void *solve_problem_pool_base(dvs_problem_t *sp);
 
+/**
+ * A 64-bit fingerprint of the problem's bytes (header and pool), never 0.
+ * Two problems built by the same calls in the same order have the same one.
+ */
+uint64_t dvs_problem_fingerprint(const dvs_problem_t *p);
+
 #ifdef __cplusplus
 }
 #endif

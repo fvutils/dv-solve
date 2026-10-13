@@ -418,3 +418,26 @@ uint32_t *source_spec_vars(dvs_problem_t *sp, dvs_expr_t src_ref) {
 void *solve_problem_pool_base(dvs_problem_t *sp) {
     return &sp->pool;
 }
+
+static uint64_t _fp_mix(uint64_t h, const uint8_t *d, size_t n) {
+    /* Eight bytes per step: the byte-wise loop was ~17% of an enumeration-heavy
+     * run, since every check-sat hashes the whole pool. */
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        memcpy(&w, d + i, 8);
+        h = (h ^ w) * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 32;
+    }
+    for (; i < n; i++) { h ^= d[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
+uint64_t dvs_problem_fingerprint(const dvs_problem_t *p) {
+    uint64_t h = 1469598103934665603ULL;
+    size_t lead_len = (size_t)((const uint8_t *)&p->pool - (const uint8_t *)p);
+    h = _fp_mix(h, (const uint8_t *)p, lead_len);
+    h = _fp_mix(h, (const uint8_t *)&p->pool + sizeof(dvs_pool_t), p->pool.used);
+    h ^= (uint64_t)p->pool.used;
+    return h ? h : 1;                                  /* never return 0 */
+}

@@ -43,12 +43,14 @@ typedef void *(*dvs_thread_fn)(void *);
 
 typedef struct { HANDLE handle; dvs_thread_fn fn; void *arg; void *ret; } dvs_thread_t;
 typedef struct { SRWLOCK lock; } dvs_mutex_t;
+#define DVS_MUTEX_INIT { SRWLOCK_INIT }   /* a static mutex, no init call */
 typedef struct { CONDITION_VARIABLE cv; } dvs_cond_t;
 
 #else
 
 typedef struct { pthread_t handle; } dvs_thread_t;
 typedef struct { pthread_mutex_t m; } dvs_mutex_t;
+#define DVS_MUTEX_INIT { PTHREAD_MUTEX_INITIALIZER }   /* a static mutex, no init call */
 typedef struct { pthread_cond_t c; } dvs_cond_t;
 
 #endif
