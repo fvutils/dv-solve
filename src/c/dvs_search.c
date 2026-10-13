@@ -741,6 +741,35 @@ static int _split_upper_first(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
     return (_rand64(ctx) % tot) >= n_lo;
 }
 
+#define DVS_BOUND_DECISION_MIN 64u
+#define DVS_BOUND_DECISION_TRIES 32u
+
+/* A plain value decision `x = v` has failed, and v is interior to x's
+ * domain. Should the search draw again instead of splitting around v?
+ *
+ * Excluding an interior value takes a split, [lo, v-1] or [v+1, hi], chosen
+ * by size (_split_upper_first), and the search then draws inside that half.
+ * That hands v's share to its half's values, and the values next to a run of
+ * infeasible ones collect the run's share: with s's feasible values
+ * {3..127} and {-128..-126}, the three negative ones got 8% of the draws
+ * instead of 2.3% (pyvsc F5). Undoing the decision and drawing again from the
+ * whole domain is rejection sampling: each feasible value of x stays equally
+ * likely. v is not excluded, so it may be drawn again; that costs time, not
+ * uniformity. A seeded fair_pick solve does this up to
+ * DVS_BOUND_DECISION_TRIES failed value decisions per variable (the count
+ * _bound_decision uses), then splits, so a sparse domain still converges.
+ * `counted`: this failure is already in value_fails (the decision's own
+ * propagation conflicted); a failure found deeper in the search is not. */
+static int _redraw(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
+                   uint32_t x, int counted) {
+    if (!(opts && opts->seed != 0 && ctx->fair_pick)) return 0;
+    if (!ctx->value_fails_on || x >= ctx->value_fails_cap) return 0;
+    if (!counted && ctx->value_fails[x] < 255) ctx->value_fails[x]++;
+    if (ctx->value_fails[x] > DVS_BOUND_DECISION_TRIES) return 0;
+    if (ctx->keep_on && x < ctx->keep_cap) ctx->keep_state[x] = KEEP_DEAD;
+    return 1;
+}
+
 /* Should the decision on `x` (value `v` picked) be a bound decision?
  *
  * With clause learning, deciding a wide variable to a value teaches, on
@@ -764,8 +793,6 @@ static int _split_upper_first(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
  * chi-square p < 0.001). Sparse domains, where draws keep failing, still
  * switch to bounds after a few tries.
  * Returns 0 (value decision), 1 (x <= v) or 2 (x >= v). */
-#define DVS_BOUND_DECISION_MIN 64u
-#define DVS_BOUND_DECISION_TRIES 32u
 static uint8_t _bound_decision(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
                                uint32_t x, int64_t v) {
     const LCGCtx *L = (const LCGCtx *)ctx->lcg;
@@ -1291,7 +1318,10 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
             ctx->value_fails[x_id]++;
 
         /* ── Conflict loop ── */
+        int fresh = 1;   /* first pass: the conflict is the decision just made */
         while (pr == PROP_CONFLICT) {
+            const int counted = fresh;   /* value_fails already has it */
+            fresh = 0;
             /* An aborted propagation proves nothing: no unsat, no learning. */
             if (ABORTED()) return DVS_SOLVE_TIMEOUT;
             ctx->conflict_count++;
@@ -1459,6 +1489,10 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                 pr = ctx_tighten_lb64(ctx, dv, dlo + 1);
             } else if (!var_b_lt(dvv, val, dhi)) {  /* val >= dhi */
                 pr = ctx_tighten_ub64(ctx, dv, dhi - 1);
+            } else if (_redraw(ctx, opts, dv, counted)) {
+                /* Rejection: the decision is undone and nothing excluded; the
+                 * search draws again (see _redraw). */
+                pr = PROP_OK;
             } else {
                 /* Interior value: open a reversible split excluding `val`.
                  * Phase 1 explores one half at a fresh level; on backtrack to
