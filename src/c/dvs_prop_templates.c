@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include "dvs_numth.h"
 #include "dvs_propagator.h"
 #include "dvs_ctx.h"
 #include "dvs_lcg.h"
@@ -2024,6 +2025,32 @@ static PropResult _bv_mul_divide(dvs_ctx_t *ctx, uint32_t rid, uint32_t aid,
     return PROP_OK;
 }
 
+/* r == x * x (one variable on both sides: a square). When the square cannot
+ * wrap -- everything unsigned and hi(x)^2 < 2^w -- x lies between the integer
+ * square roots of r's bounds: x in [ceil(sqrt(lo r)), floor(sqrt(hi r))]. So
+ * a fixed r pins x, or is a conflict when r is not a perfect square; without
+ * this a fixed r taught x only r / hi(x), and the search tried x's values
+ * one by one for a square it could not find. When the square may wrap, a
+ * fixed r must still be a square mod 2^w (dvs_is_square_residue). SOUND. */
+static PropResult _bv_square(dvs_ctx_t *ctx, uint32_t rid, uint32_t xid, uint8_t w) {
+    const Variable *rv = &ctx->vars[rid], *xv = &ctx->vars[xid];
+    if ((rv->flags | xv->flags) & VAR_SIGNED) return PROP_OK;
+    if (rv->width == 0 || rv->width > w || xv->width == 0 || xv->width > w) return PROP_OK;
+    const uint64_t mask = _bv_mask(w);
+    uint64_t rlo = (uint64_t)var_lo64(ctx, rv), rhi = (uint64_t)var_hi64(ctx, rv);
+    uint64_t xhi = (uint64_t)var_hi64(ctx, xv);
+    if (xhi <= dvs_isqrt_u64(mask)) {
+        PropResult res;
+        uint64_t lo = dvs_isqrt_ceil_u64(rlo), hi = dvs_isqrt_u64(rhi);
+        if (lo > hi) return PROP_CONFLICT;
+        if ((res = ctx_tighten_lb64(ctx, xid, (int64_t)lo)) != PROP_OK) return res;
+        if ((res = ctx_tighten_ub64(ctx, xid, (int64_t)hi)) != PROP_OK) return res;
+        return PROP_OK;
+    }
+    if (rlo == rhi && !dvs_is_square_residue(rlo, w)) return PROP_CONFLICT;
+    return PROP_OK;
+}
+
 static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
@@ -2081,6 +2108,7 @@ static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
          * interval of r taught the operands nothing; only a fixed r did, so
          * `n == k * 512 or k * 4096` was searched one value of n at a time.) */
         if ((res = _bv_mul_divide(ctx, rid, aid, bid, w)) != PROP_OK) return res;
+        if (aid == bid && (res = _bv_square(ctx, rid, aid, w)) != PROP_OK) return res;
     } else if (op == DVS_BIN_LSHIFT) {
         uint64_t s0, s1;
         if (_shift_amount_range(ctx, bid, B, w, &s0, &s1)) {
@@ -2231,6 +2259,27 @@ static int _explain_bvbin_64(Propagator *self, dvs_ctx_t *ctx,
         if (self->fire == _fire_bvsub_64 &&
             _explain_bvsum_lifted(ctx, a, r, b, bp->width, var_id, is_lb, new_bound, out) == 0)
             return 0;
+        if (self->fire == _fire_bvmul_64) {
+            /* A multiply's narrowing of var_id rests on the others' bounds and
+             * on var_id's own OTHER bound too: the no-wrap test reads hi(a)
+             * and hi(b), and for a square the other operand is var_id. */
+            uint32_t ids[3] = { r, a, b };
+            int n = 0;
+            for (int i = 0; i < 3; i++) {
+                if (i == 2 && b == a) break;
+                for (int lb = 1; lb >= 0; lb--) {
+                    if (ids[i] == var_id && lb == is_lb) continue;
+                    const Variable *v = &ctx->vars[ids[i]];
+                    out->lits[n].var_id = ids[i];
+                    out->lits[n].is_lb = (uint8_t)lb;
+                    out->lits[n].bound = lb ? var_lo64(ctx, v) : var_hi64(ctx, v);
+                    out->lits[n]._pad[0] = out->lits[n]._pad[1] = out->lits[n]._pad[2] = 0;
+                    n++;
+                }
+            }
+            out->n_lits = (uint32_t)n;
+            return 0;
+        }
     }
     uint32_t ids[3] = { ws->var_ids[0], ws->var_ids[1], ws->var_ids[2] };
     int n = 0;
@@ -2269,6 +2318,13 @@ uint32_t prop_add_bvsub_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_
     return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvsub_64);
 }
 uint32_t prop_add_bvmul_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
+    /* `ext(c) * c`, or two extensions of c that were made apart: one value
+     * on both sides. Name it by one variable, so the propagator sees the
+     * square (_bv_square); the extension is c's value, so this is exact. */
+    if (a_id != b_id && dvs_value_src(ctx, a_id) == dvs_value_src(ctx, b_id)) {
+        if (ctx->vars[a_id].width >= ctx->vars[b_id].width) b_id = a_id;
+        else a_id = b_id;
+    }
     return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvmul_64);
 }
 uint32_t prop_add_bvshl_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {

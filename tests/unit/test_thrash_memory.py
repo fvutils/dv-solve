@@ -13,26 +13,27 @@ from __future__ import annotations
 import time
 
 from dv_solve.builder import SolveProblemBuilder
-from dv_solve.problem import BIN_ADD, BIN_EQ, BIN_MUL
+from dv_solve.problem import BIN_BXOR, BIN_EQ, BIN_MUL
 from dv_solve.ctx import SolveCtx, SOLVE_TIMEOUT
 
 LIMIT_S = 0.3     # the default budget, shortened for the test
 
 
-def _mul_sq():
-    """a * b == c * c + 12345 over 16-bit fields: the search thrashes."""
+def _xor_mul():
+    """a * (a ^ b) == 1234567891 over 16-bit fields: the search thrashes.
+    (Nothing inverts a product through an XOR. The earlier example here,
+    `a * b == c * c + 12345`, now solves: see the square rule in
+    _fire_bvbin_64.)"""
     b = SolveProblemBuilder()
     try:
-        for i in range(3):
+        for i in range(2):
             b.add_var(i, 16, False, 0, 0xFFFF)
-        b.add_var(3, 32, False, 0, (1 << 32) - 1)
-        b.add_var(4, 32, False, 0, (1 << 32) - 1)
         v = b.expr_var
-        e = lambda i: b.expr_extend(v(i), 16, 32, False)
-        b.add_constraint(b.expr_binary(BIN_EQ, v(3), b.expr_binary(BIN_MUL, e(0), e(1))))
-        b.add_constraint(b.expr_binary(BIN_EQ, v(4), b.expr_binary(BIN_MUL, e(2), e(2))))
+        e = lambda x: b.expr_extend(x, 16, 32, False)
         b.add_constraint(b.expr_binary(
-            BIN_EQ, v(3), b.expr_binary(BIN_ADD, v(4), b.expr_const(12345, width=32))))
+            BIN_EQ,
+            b.expr_binary(BIN_MUL, e(v(0)), b.expr_binary(BIN_BXOR, e(v(0)), e(v(1)))),
+            b.expr_const(1234567891, width=32)))
         buf, _sz = b.finalize()
     finally:
         b.destroy()
@@ -48,7 +49,7 @@ def _timed(ctx, seed, **opts):
 
 def test_thrashing_problem_escalates_at_once(monkeypatch):
     monkeypatch.setenv("DV_CDCL_TIME_LIMIT", str(LIMIT_S))
-    buf = _mul_sq()
+    buf = _xor_mul()
     ctx = SolveCtx(buf)
     try:
         rc, t = _timed(ctx, 1)
@@ -59,7 +60,7 @@ def test_thrashing_problem_escalates_at_once(monkeypatch):
     finally:
         ctx.destroy()
     # A context compiled afresh from the same problem remembers too.
-    ctx = SolveCtx(_mul_sq())
+    ctx = SolveCtx(_xor_mul())
     try:
         rc, t = _timed(ctx, 5)
         assert rc == SOLVE_TIMEOUT and t < LIMIT_S / 3, t

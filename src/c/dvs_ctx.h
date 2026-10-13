@@ -92,6 +92,17 @@ typedef struct {
     int64_t  b;
 } DvsModLink;
 
+/* A variable compile made for a value-preserving extension of `src`: an
+ * aux var that IS src's value at width `to` (see _value_to_var). Kept so a
+ * second extension of the same value reuses it, which is what lets `c * c`
+ * over extended operands be seen as a square. */
+typedef struct {
+    uint32_t src, r;
+    uint16_t to;
+    uint8_t  sgn;
+    uint8_t  _pad;
+} DvsExtMemo;
+
 typedef struct dvs_ctx_s {
     Variable          *vars;          /* pointer into static pool      */
     uint32_t           n_vars;        /* number of compiled variables  */
@@ -202,6 +213,9 @@ typedef struct dvs_ctx_s {
     DvsModLink        *mod_links;
     uint32_t           n_mod_links;
     uint32_t           mod_links_cap;
+    DvsExtMemo        *ext_memo;
+    uint32_t           n_ext_memo;
+    uint32_t           ext_memo_cap;
     CheckpointMark    *checkpoints;   /* array[checkpoints_cap]: from
                                        * the fixed pool, else ctx->alloc */
     uint32_t           n_checkpoints;
@@ -318,6 +332,19 @@ void dvs_solver_set_value_selector(dvs_ctx_t *ctx,
 static inline HoleEntry *dvs_hole_first(const dvs_ctx_t *ctx, uint32_t var_id) {
     uint32_t off = ctx->var_holes_head[var_id];
     return off ? (HoleEntry *)dvs_spool_ptr(&ctx->pool, off) : NULL;
+}
+
+/* The variable a compile-made, value-preserving extension stands for
+ * (DvsExtMemo), or id itself. Both are the same value. */
+static inline uint32_t dvs_value_src(const dvs_ctx_t *ctx, uint32_t id) {
+    for (int hop = 0; hop < 8; hop++) {
+        uint32_t i;
+        for (i = 0; i < ctx->n_ext_memo; i++)
+            if (ctx->ext_memo[i].r == id) break;
+        if (i == ctx->n_ext_memo) return id;
+        id = ctx->ext_memo[i].src;
+    }
+    return id;
 }
 
 /* The context's heap memory comes from ctx->alloc (dvs_alloc.h). */

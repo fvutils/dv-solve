@@ -273,6 +273,8 @@ static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
 
     /* Restore variable count */
     ctx->n_vars = m->n_vars_at_cp;
+    while (ctx->n_ext_memo && ctx->ext_memo[ctx->n_ext_memo - 1].r >= ctx->n_vars)
+        ctx->n_ext_memo--;
 
     /* The backtrack above rebuilt unassigned_mask over the scope's
      * variables too; the search would decide on one of them, gone now. */

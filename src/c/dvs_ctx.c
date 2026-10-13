@@ -157,6 +157,9 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->mod_links       = NULL;
     ctx->n_mod_links     = 0;
     ctx->mod_links_cap   = 0;
+    ctx->ext_memo        = NULL;
+    ctx->n_ext_memo      = 0;
+    ctx->ext_memo_cap    = 0;
     ctx->var_n_values    = NULL;
     ctx->unassigned_mask = 0;
     ctx->assumption_var_ids = NULL;
@@ -427,6 +430,8 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     ctx->value_fails = NULL; ctx->value_fails_cap = 0;
     dvs_ctx_free(ctx, ctx->mod_links, (size_t)ctx->mod_links_cap * sizeof(DvsModLink));
     ctx->mod_links = NULL; ctx->n_mod_links = ctx->mod_links_cap = 0;
+    dvs_ctx_free(ctx, ctx->ext_memo, (size_t)ctx->ext_memo_cap * sizeof(DvsExtMemo));
+    ctx->ext_memo = NULL; ctx->n_ext_memo = ctx->ext_memo_cap = 0;
     if (ctx->phase_save)
         DVS_RELEASE(ctx->alloc, ctx->phase_save,
                     ctx->phase_save_cap * sizeof(int64_t));

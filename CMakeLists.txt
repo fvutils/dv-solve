@@ -199,6 +199,7 @@ set(DVS_SOURCES
     src/c/dvs_prop_templates.c
     src/c/dvs_search.c
     src/c/dvs_shave.c
+    src/c/dvs_numth.c
     src/c/dvs_stack.c
     src/c/dvs_checkpoint.c
     src/c/dvs_trail.c

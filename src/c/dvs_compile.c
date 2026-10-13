@@ -1889,6 +1889,22 @@ static int _fold_const_unary(const dvs_problem_t *sp, dvs_expr_t ref,
     return 1;
 }
 
+/* Record r as the value-preserving extension of src (DvsExtMemo). Best
+ * effort: without memory the next extension just makes its own var. */
+static void _note_ext_memo(dvs_ctx_t *ctx, uint32_t src, uint32_t r,
+                           uint16_t to, uint8_t sgn) {
+    if (ctx->n_ext_memo == ctx->ext_memo_cap) {
+        uint32_t cap = ctx->ext_memo_cap ? 2 * ctx->ext_memo_cap : 8;
+        DvsExtMemo *m = (DvsExtMemo *)dvs_ctx_resize(ctx, ctx->ext_memo,
+                                                     ctx->ext_memo_cap * sizeof(DvsExtMemo),
+                                                     cap * sizeof(DvsExtMemo));
+        if (!m) return;
+        ctx->ext_memo = m;
+        ctx->ext_memo_cap = cap;
+    }
+    ctx->ext_memo[ctx->n_ext_memo++] = (DvsExtMemo){ .src = src, .r = r, .to = to, .sgn = sgn };
+}
+
 static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                                dvs_expr_t ref, uint16_t width) {
     if (ref == EXPR_NULL || dvs_stack_low(&ctx->stack_guard)) return EXPR_NULL;
@@ -2150,6 +2166,14 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
             rhi = (to >= 64) ? (int64_t)UINT64_MAX : (int64_t)((1ULL << to) - 1);
         }
         if (preserve) {
+            /* The same value extended the same way again: reuse its var, so
+             * operators over both see one variable (`c * c` is a square). */
+            for (uint32_t i = 0; i < ctx->n_ext_memo; i++) {
+                const DvsExtMemo *em = &ctx->ext_memo[i];
+                if (em->src == src_id && em->to == to && em->sgn == dst_signed
+                        && em->r < ctx->n_vars)
+                    return em->r;
+            }
             if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
             r_id = ctx->n_vars;
             if (_init_aux_tiered(ctx, &ctx->vars[r_id], to,
@@ -2168,6 +2192,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                     ctx_tighten_ub64(ctx, r_id, shi) == PROP_CONFLICT)
                     return EXPR_NULL;
             }
+            _note_ext_memo(ctx, src_id, r_id, to, dst_signed);
             return r_id;
         }
 
