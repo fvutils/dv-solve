@@ -15,6 +15,7 @@
 #include "dvs_propagator.h"  /* PropQueue */
 #include "dvs_search.h"      /* DecisionRecord */
 #include "dvs_stackinfo.h"   /* dvs_stack_guard_t */
+#include "dvs_numth.h"       /* DvsDivisors */
 
 /** Maximum decision depth of one search, counted from its root (the level
  *  the open checkpoints hold). The search pushes one level per decided
@@ -91,6 +92,15 @@ typedef struct {
     uint32_t prop;     /* its propagator's id: dropped with it on restore */
     int64_t  b;
 } DvsModLink;
+
+/* `r == a * b` (a == b: a square), recorded for the value picker (see
+ * _note_mul_link in dvs_prop_templates.c). */
+typedef struct {
+    uint32_t r, a, b;
+    uint32_t prop;     /* its propagator's id: dropped with it on restore */
+    uint8_t  width;
+    uint8_t  _pad[3];
+} DvsMulLink;
 
 /* A variable compile made for a value-preserving extension of `src`: an
  * aux var that IS src's value at width `to` (see _value_to_var). Kept so a
@@ -213,9 +223,13 @@ typedef struct dvs_ctx_s {
     DvsModLink        *mod_links;
     uint32_t           n_mod_links;
     uint32_t           mod_links_cap;
+    DvsMulLink        *mul_links;
+    uint32_t           n_mul_links;
+    uint32_t           mul_links_cap;
     DvsExtMemo        *ext_memo;
     uint32_t           n_ext_memo;
     uint32_t           ext_memo_cap;
+    DvsDivisors        divisors;      /* last fixed product factored     */
     CheckpointMark    *checkpoints;   /* array[checkpoints_cap]: from
                                        * the fixed pool, else ctx->alloc */
     uint32_t           n_checkpoints;

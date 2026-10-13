@@ -2051,6 +2051,51 @@ static PropResult _bv_square(dvs_ctx_t *ctx, uint32_t rid, uint32_t xid, uint8_t
     return PROP_OK;
 }
 
+/* r == a * b, a and b distinct, with r fixed to K and no wrap possible
+ * (unsigned, hi(a) * hi(b) < 2^w): each operand is a divisor of K whose
+ * cofactor lies in the other operand's domain. Each operand narrows to the
+ * smallest and largest such divisor; none is a conflict. Interval division
+ * (_bv_mul_divide) narrows to [ceil(K / hi(b)), K / lo(b)] but cannot see
+ * that most values there do not divide K, so `a * b == K` was searched one
+ * value of `a` at a time. The value picker draws from the same divisors
+ * (_pick_mul_divisor in dvs_search.c). SOUND. */
+#define BV_MUL_MAX_DIVISORS (1u << 17)
+static PropResult _bv_mul_divisors(dvs_ctx_t *ctx, uint32_t rid, uint32_t aid,
+                                   uint32_t bid, uint8_t w) {
+    const uint32_t ids[3] = { rid, aid, bid };
+    for (int i = 0; i < 3; i++) {
+        const Variable *v = &ctx->vars[ids[i]];
+        if ((v->flags & VAR_SIGNED) || v->width == 0 || v->width > w) return PROP_OK;
+    }
+    uint64_t K = (uint64_t)var_lo64(ctx, &ctx->vars[rid]);
+    if (K == 0 || (uint64_t)var_hi64(ctx, &ctx->vars[rid]) != K) return PROP_OK;
+    const uint64_t mask = _bv_mask(w);
+    uint64_t ahi = (uint64_t)var_hi64(ctx, &ctx->vars[aid]);
+    uint64_t bhi = (uint64_t)var_hi64(ctx, &ctx->vars[bid]);
+    if (ahi != 0 && bhi > mask / ahi) return PROP_OK;        /* may wrap */
+    for (int k = 0; k < 2; k++) {
+        uint32_t x = k ? bid : aid, y = k ? aid : bid;
+        uint64_t xlo = (uint64_t)var_lo64(ctx, &ctx->vars[x]);
+        uint64_t xhi = (uint64_t)var_hi64(ctx, &ctx->vars[x]);
+        if (xlo == xhi) continue;                            /* the singleton rule's */
+        uint64_t ylo = (uint64_t)var_lo64(ctx, &ctx->vars[y]);
+        uint64_t yhi = (uint64_t)var_hi64(ctx, &ctx->vars[y]);
+        if (yhi == 0) return PROP_CONFLICT;
+        uint64_t L = K / yhi + (K % yhi != 0), U = ylo ? K / ylo : xhi;
+        if (L < xlo) L = xlo;
+        if (U > xhi) U = xhi;
+        if (L > U) return PROP_CONFLICT;
+        if (!dvs_divisors(&ctx->divisors, K, BV_MUL_MAX_DIVISORS)) return PROP_OK;
+        uint32_t i = dvs_divisors_lower(&ctx->divisors, L);
+        uint32_t j = dvs_divisors_upper(&ctx->divisors, U);
+        if (i >= j) return PROP_CONFLICT;
+        PropResult res;
+        if ((res = ctx_tighten_lb64(ctx, x, (int64_t)ctx->divisors.divs[i])) != PROP_OK) return res;
+        if ((res = ctx_tighten_ub64(ctx, x, (int64_t)ctx->divisors.divs[j - 1])) != PROP_OK) return res;
+    }
+    return PROP_OK;
+}
+
 static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
@@ -2108,7 +2153,11 @@ static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
          * interval of r taught the operands nothing; only a fixed r did, so
          * `n == k * 512 or k * 4096` was searched one value of n at a time.) */
         if ((res = _bv_mul_divide(ctx, rid, aid, bid, w)) != PROP_OK) return res;
-        if (aid == bid && (res = _bv_square(ctx, rid, aid, w)) != PROP_OK) return res;
+        if (aid == bid) {
+            if ((res = _bv_square(ctx, rid, aid, w)) != PROP_OK) return res;
+        } else {
+            if ((res = _bv_mul_divisors(ctx, rid, aid, bid, w)) != PROP_OK) return res;
+        }
     } else if (op == DVS_BIN_LSHIFT) {
         uint64_t s0, s1;
         if (_shift_amount_range(ctx, bid, B, w, &s0, &s1)) {
@@ -2317,6 +2366,24 @@ uint32_t prop_add_bvadd_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_
 uint32_t prop_add_bvsub_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
     return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvsub_64);
 }
+/* Record `r == a * b` for the value picker (DvsMulLink). Best effort:
+ * without memory there is no link, and the search draws as it did before. */
+static void _note_mul_link(dvs_ctx_t *ctx, uint32_t ref, uint32_t r_id,
+                           uint32_t a_id, uint32_t b_id, uint8_t width) {
+    if (ref == EXPR_NULL) return;
+    if (ctx->n_mul_links == ctx->mul_links_cap) {
+        uint32_t cap = ctx->mul_links_cap ? 2 * ctx->mul_links_cap : 8;
+        DvsMulLink *m = (DvsMulLink *)dvs_ctx_resize(ctx, ctx->mul_links,
+                                                     ctx->mul_links_cap * sizeof(DvsMulLink),
+                                                     cap * sizeof(DvsMulLink));
+        if (!m) return;
+        ctx->mul_links = m;
+        ctx->mul_links_cap = cap;
+    }
+    ctx->mul_links[ctx->n_mul_links++] = (DvsMulLink){
+        .r = r_id, .a = a_id, .b = b_id, .prop = ctx->n_props - 1, .width = width };
+}
+
 uint32_t prop_add_bvmul_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
     /* `ext(c) * c`, or two extensions of c that were made apart: one value
      * on both sides. Name it by one variable, so the propagator sees the
@@ -2325,7 +2392,9 @@ uint32_t prop_add_bvmul_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_
         if (ctx->vars[a_id].width >= ctx->vars[b_id].width) b_id = a_id;
         else a_id = b_id;
     }
-    return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvmul_64);
+    uint32_t ref = _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvmul_64);
+    _note_mul_link(ctx, ref, r_id, a_id, b_id, width);
+    return ref;
 }
 uint32_t prop_add_bvshl_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
     return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvshl_64);

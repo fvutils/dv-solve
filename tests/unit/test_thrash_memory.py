@@ -22,8 +22,8 @@ LIMIT_S = 0.3     # the default budget, shortened for the test
 def _xor_mul():
     """a * (a ^ b) == 1234567891 over 16-bit fields: the search thrashes.
     (Nothing inverts a product through an XOR. The earlier example here,
-    `a * b == c * c + 12345`, now solves: see the square rule in
-    _fire_bvbin_64.)"""
+    `a * b == c * c + 12345`, now solves: see the square and divisor rules
+    in _fire_bvbin_64.)"""
     b = SolveProblemBuilder()
     try:
         for i in range(2):

@@ -1,9 +1,11 @@
 """Products the search reasons about natively (_fire_bvbin_64 in
-src/c/dvs_prop_templates.c):
+src/c/dvs_prop_templates.c, _pick_mul_divisor in src/c/dvs_search.c):
 
 - a square `x * x` bounds x by the integer square roots of the product's
   bounds, and a fixed product that is not a square (mod 2^w when it may wrap)
-  is a conflict.
+  is a conflict;
+- a fixed product `a * b == K` narrows each operand to the divisors of K, and
+  the operand is drawn from them.
 """
 from __future__ import annotations
 
@@ -74,6 +76,37 @@ def test_wrapping_square_residue():
             assert rc == SOLVE_OK and (v[0] * v[0]) % 256 == k
         else:
             assert rc == SOLVE_UNSAT, k
+
+
+def test_product_of_prime_without_unit_factor_is_unsat():
+    """a * b == 65521 * 3 with a, b >= 4: no divisor pair fits."""
+    def c(b):
+        p = b.expr_binary(BIN_MUL, _ext(b, 0, 16, 32), _ext(b, 1, 16, 32))
+        b.add_constraint(b.expr_binary(BIN_EQ, p, b.expr_const(65521 * 3, width=32)))
+        for i in range(2):
+            b.add_constraint(b.expr_binary(BIN_GTE, b.expr_var(i), b.expr_const(4, width=16)))
+    (rc, t, _), = _solve(_build(2, [16, 16], c), [1])
+    assert rc == SOLVE_UNSAT and t < 0.1
+
+
+def test_fixed_product_drawn_uniformly_over_divisor_pairs():
+    """a * b == 720720 over 16-bit fields has 220 solutions. A draw from the
+    hull of the divisors and a redraw on conflict favoured some (chi^2/df ~21);
+    drawing among the divisors is uniform."""
+    K = 720720
+    def c(b):
+        p = b.expr_binary(BIN_MUL, _ext(b, 0, 16, 32), _ext(b, 1, 16, 32))
+        b.add_constraint(b.expr_binary(BIN_EQ, p, b.expr_const(K, width=32)))
+    sols = [(d, K // d) for d in range(1, 1 << 16) if K % d == 0 and K // d < 1 << 16]
+    n = 20 * len(sols)
+    seen = collections.Counter()
+    for rc, _, v in _solve(_build(2, [16, 16], c), range(1, n + 1)):
+        assert rc == SOLVE_OK
+        seen[tuple(v[:2])] += 1
+    assert set(seen) == set(sols)
+    e = n / len(sols)
+    chi = sum((seen[s] - e) ** 2 / e for s in sols) / (len(sols) - 1)
+    assert chi < 1.5, chi
 
 
 def test_square_over_one_extended_operand():

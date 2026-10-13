@@ -270,6 +270,8 @@ static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
     ctx->n_props = m->n_props_at_cp;
     while (ctx->n_mod_links && ctx->mod_links[ctx->n_mod_links - 1].prop >= ctx->n_props)
         ctx->n_mod_links--;
+    while (ctx->n_mul_links && ctx->mul_links[ctx->n_mul_links - 1].prop >= ctx->n_props)
+        ctx->n_mul_links--;
 
     /* Restore variable count */
     ctx->n_vars = m->n_vars_at_cp;

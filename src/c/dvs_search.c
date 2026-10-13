@@ -630,6 +630,48 @@ static int64_t _pick_mod_aligned(dvs_ctx_t *ctx, uint32_t var_id, int64_t v,
     return v;
 }
 
+/* A drawn value of an operand of a fixed product moved to a divisor of it
+ * (DvsMulLink). Once `r == a * b` has r fixed to K, a's feasible values are
+ * the divisors of K whose cofactor is in b's domain (_bv_mul_divisors), but
+ * its domain is only their hull, so a uniform draw from the hull nearly
+ * always fails. Drawing among the divisors themselves is uniform over the
+ * feasible values, and b then follows. */
+static int64_t _pick_mul_divisor(dvs_ctx_t *ctx, uint32_t var_id, int64_t v,
+                                 int64_t lo, int64_t hi) {
+    if (!ctx->n_mul_links || (ctx->vars[var_id].flags & VAR_SIGNED)) return v;
+    for (uint32_t i = 0; i < ctx->n_mul_links; i++) {
+        const DvsMulLink *ml = &ctx->mul_links[i];
+        if (ml->a == ml->b) continue;
+        for (int side = 0; side < 2; side++) {
+            uint32_t x = side ? ml->b : ml->a, y = side ? ml->a : ml->b;
+            if (x != var_id && dvs_value_src(ctx, x) != var_id) continue;
+            const Variable *rv = &ctx->vars[ml->r], *yv = &ctx->vars[y];
+            if ((rv->flags | yv->flags | ctx->vars[x].flags) & VAR_SIGNED) continue;
+            uint64_t K = (uint64_t)var_lo64(ctx, rv);
+            if (K == 0 || (uint64_t)var_hi64(ctx, rv) != K) continue;
+            uint64_t ylo = (uint64_t)var_lo64(ctx, yv), yhi = (uint64_t)var_hi64(ctx, yv);
+            if (ylo == yhi || yhi == 0) continue;
+            uint64_t mask = ml->width >= 64 ? ~(uint64_t)0
+                                            : (((uint64_t)1 << ml->width) - 1);
+            if ((uint64_t)hi != 0 && yhi > mask / (uint64_t)hi) continue;   /* may wrap */
+            uint64_t L = K / yhi + (K % yhi != 0), U = ylo ? K / ylo : (uint64_t)hi;
+            if (L < (uint64_t)lo) L = (uint64_t)lo;
+            if (U > (uint64_t)hi) U = (uint64_t)hi;
+            if (L > U) continue;
+            if (!dvs_divisors(&ctx->divisors, K, 1u << 17)) continue;
+            uint32_t j0 = dvs_divisors_lower(&ctx->divisors, L);
+            uint32_t j1 = dvs_divisors_upper(&ctx->divisors, U);
+            if (j0 >= j1) continue;
+            for (int attempt = 0; attempt < 8; attempt++) {
+                int64_t d = (int64_t)ctx->divisors.divs[j0 + _rand64(ctx) % (j1 - j0)];
+                if (!_is_hole(ctx, var_id, d)) return d;
+            }
+            return v;
+        }
+    }
+    return v;
+}
+
 enum { KEEP_NONE = 0, KEEP_SET = 1, KEEP_DEAD = 2 };
 
 static int _keep_draws_enabled(void) {
@@ -698,6 +740,7 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
     } else {
         v = _rand_range64(ctx, lo, hi);
         v = _pick_mod_aligned(ctx, var_id, v, lo, hi);
+        v = _pick_mul_divisor(ctx, var_id, v, lo, hi);
     }
     v = _pick_avoiding_holes(ctx, var_id, v, lo, hi);
     if (keep && ctx->keep_state[var_id] == KEEP_NONE) {
