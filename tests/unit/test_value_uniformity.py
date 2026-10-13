@@ -1,12 +1,15 @@
 """Uniformity of a seeded fair_pick solve where the box tier is off.
 
-Causes of skew found on pyvsc's F5 shape:
+Three causes of skew, each found on pyvsc's F5 shape (s: s8, b: u8,
+`zext(s) - (zext(b) & 127) == 3`, 256 solutions):
 
 * A failed value decision split the domain around the value, and the values
   next to a run of infeasible ones collected the run's share (_redraw in
   src/c/dvs_search.c).
 * `t == x & 127` did not narrow x, so with t pinned the search drew x at
   ~2/256 a try and fell back to splitting (_mrw_runmask in src/c/dvs_sv.c).
+* xorshift's low bits are linear in the previous draw's, so a 1-bit draw
+  after an 8-bit one was a function of it (_rand64).
 """
 from __future__ import annotations
 
@@ -47,6 +50,45 @@ def _chi2(counts, cells):
     n = sum(counts.values())
     exp = n / len(cells)
     return sum((counts.get(c, 0) - exp) ** 2 / exp for c in cells)
+
+
+def _f5(order=None):
+    def build(b):
+        b.add_var(0, 8, True, -128, 127)
+        b.add_var(1, 8, False, 0, 255)
+        b.add_var(2, 32, False, 0, (1 << 32) - 1)
+        b.add_var(3, 32, False, 0, (1 << 32) - 1)
+        v = b.expr_var
+        c32 = lambda k: b.expr_const(k, width=32)
+        b.add_constraint(b.expr_binary(
+            BIN_EQ, b.expr_binary(BIN_SUB, v(3), v(2)), c32(3)))
+        b.add_constraint(b.expr_binary(BIN_EQ, v(3), b.expr_extend(v(0), 8, 32, False)))
+        b.add_constraint(b.expr_binary(BIN_EQ, v(2), b.expr_binary(
+            BIN_BAND, b.expr_extend(v(1), 8, 32, False), c32(127))))
+        if order is not None:
+            b.set_var_order(order, 1)
+    return build
+
+
+F5_CELLS = [((x + 3) - 256 if x + 3 > 127 else x + 3, bb)
+            for x in range(128) for bb in (x, x + 128)]
+
+
+def test_f5_uniform_over_solutions():
+    draws = _draws(_f5(), 16000, [0, 1])
+    assert set(draws) <= set(F5_CELLS)
+    # Was ~1700 (the split's skew); ~4900 once the temporaries were decided
+    # last and s was drawn directly.
+    assert _chi2(draws, F5_CELLS) < CHI2_256
+
+
+def test_f5_s_first_keeps_both_b():
+    # `solve s before b`: given s, b is one of two values, the top bit drawn
+    # after s. With xorshift's raw low bits the top bit was a function of s
+    # (128 of the 256 solutions came up).
+    draws = _draws(_f5(order=0), 16000, [0, 1])
+    assert len(draws) == 256
+    assert _chi2(draws, F5_CELLS) < CHI2_256
 
 
 def test_pinned_mask_narrows_its_operand():

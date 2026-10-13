@@ -293,7 +293,15 @@ static uint64_t _rand64(dvs_ctx_t *ctx) {
     x ^= x >> 7;
     x ^= x << 17;
     ctx->rng_state = x;
-    return x;
+    /* The state is not the output. Callers reduce draws `% span`, i.e. take
+     * the low bits, and xorshift's low bits are linear in the previous
+     * state's: bit 0 of one draw is bit 0 ^ bit 7 of the draw before it. An
+     * 8-bit value drawn and then a 1-bit one gave the second as a function of
+     * the first (a field split's top bit fixed by s: 128 of 256 solutions).
+     * The SplitMix64 finalizer mixes every bit into every output bit. */
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
 }
 
 /* Return a random integer in [lo, hi] (inclusive), 64-bit range. */
