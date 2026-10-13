@@ -1,11 +1,13 @@
 """Products the search reasons about natively (_fire_bvbin_64 in
-src/c/dvs_prop_templates.c, _pick_mul_divisor in src/c/dvs_search.c):
+src/c/dvs_prop_templates.c, _pick_mul_divisor and _build_dec_tier in
+src/c/dvs_search.c):
 
 - a square `x * x` bounds x by the integer square roots of the product's
   bounds, and a fixed product that is not a square (mod 2^w when it may wrap)
   is a conflict;
 - a fixed product `a * b == K` narrows each operand to the divisors of K, and
-  the operand is drawn from them.
+  the operand is drawn from them;
+- the root of a square is decided before the operands of a product.
 """
 from __future__ import annotations
 
@@ -46,6 +48,22 @@ def _solve(buf, seeds, limit_ms=2000):
     finally:
         ctx.destroy()
     return out
+
+
+def test_mul_sq_solves_in_default_order():
+    """a * b == c * c + 12345 over 16-bit fields timed out (2 s) every seed
+    with a, b decided first, and took ~60 ms a solve with the square and
+    divisor rules alone. c is now decided first, which fixes the product, and
+    a is drawn from its divisors: ~15 us."""
+    def c(b):
+        t3 = b.expr_binary(BIN_MUL, _ext(b, 0, 16, 32), _ext(b, 1, 16, 32))
+        t4 = b.expr_binary(BIN_MUL, _ext(b, 2, 16, 32), _ext(b, 2, 16, 32))
+        b.add_constraint(b.expr_binary(
+            BIN_EQ, t3, b.expr_binary(BIN_ADD, t4, b.expr_const(12345, width=32))))
+    for rc, t, v in _solve(_build(3, [16, 16, 16], c), range(1, 11)):
+        assert rc == SOLVE_OK and t < 0.02, (rc, t)
+        a, bb, cc = v[:3]
+        assert a * bb == cc * cc + 12345
 
 
 def test_square_of_non_square_is_unsat():
@@ -124,3 +142,29 @@ def test_square_over_one_extended_operand():
             assert rc == SOLVE_UNSAT and t < 0.05, (rc, t)
         else:
             assert rc == SOLVE_OK and v[0] == root and t < 0.05, (rc, t, v)
+
+
+def test_mul_sq_as_pyvsc_states_it():
+    """pyvsc's encoding of the same constraint: the product variables
+    declared first, a copy v5 of the left side, and each product's operands
+    given as `ext(x) * y`: only the left one extended. The multiply then got
+    c's extension and c itself, two variables. Both are c's value: still a
+    square (prop_add_bvmul_64)."""
+    b = SolveProblemBuilder()
+    try:
+        for i, w in ((5, 32), (4, 32), (3, 32), (2, 16), (1, 16), (0, 16)):
+            b.add_var(i, w, False, 0, (1 << w) - 1)
+        v = b.expr_var
+        b.add_constraint(b.expr_binary(BIN_EQ, v(3), v(5)))
+        b.add_constraint(b.expr_binary(
+            BIN_EQ, v(5), b.expr_binary(BIN_ADD, v(4), b.expr_const(12345, width=32))))
+        b.add_constraint(b.expr_binary(
+            BIN_EQ, v(4), b.expr_binary(BIN_MUL, _ext(b, 2, 16, 32), v(2))))
+        b.add_constraint(b.expr_binary(
+            BIN_EQ, v(3), b.expr_binary(BIN_MUL, _ext(b, 0, 16, 32), v(1))))
+        buf, _sz = b.finalize()
+    finally:
+        b.destroy()
+    for rc, t, val in _solve(buf, range(1, 11)):
+        assert rc == SOLVE_OK and t < 0.05, (rc, t)
+        assert val[0] * val[1] == val[2] * val[2] + 12345

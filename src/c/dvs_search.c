@@ -377,6 +377,47 @@ static inline int _is_defined(const dvs_ctx_t *ctx, uint32_t i) {
            && _order_key(ctx, i) == DVS_ORDER_LAST;
 }
 
+/* Decision tiers from the multiply links (ctx->dec_tier); higher is decided
+ * first, and MRV orders the variables inside a tier.
+ *   2  the root of a square, `x` in `x * x`: x follows from the square only
+ *      when the square is a perfect one, which a draw of the rest of the
+ *      problem almost never gives (`a * b == c * c + k` thrashed for seconds
+ *      deciding a and b first, and solves in microseconds deciding c first:
+ *      the product is then fixed and a is drawn from its divisors).
+ *   1  everything else.
+ * Operands of a two-variable product are NOT moved later, though they too
+ * follow from a fixed product: deciding them after everything else changes
+ * which values the rest is drawn with (`nb == nlb * sz` put a guarded
+ * `slba % 8 == 0` first, and sz came out 4096 6% of the time, not half).
+ * This changes only the order of decisions, so no solution is lost. */
+static void _build_dec_tier(dvs_ctx_t *ctx) {
+    int any = 0;
+    for (uint32_t i = 0; i < ctx->n_mul_links && !any; i++)
+        any = ctx->mul_links[i].a == ctx->mul_links[i].b;
+    if (!any || ctx->n_vars == 0) {
+        if (ctx->dec_tier) dvs_ctx_free(ctx, ctx->dec_tier, ctx->dec_tier_n);
+        ctx->dec_tier = NULL; ctx->dec_tier_n = 0;
+        return;
+    }
+    if (ctx->dec_tier_n < ctx->n_vars) {
+        if (ctx->dec_tier) dvs_ctx_free(ctx, ctx->dec_tier, ctx->dec_tier_n);
+        ctx->dec_tier = (uint8_t *)DVS_ALLOC(ctx->alloc, ctx->n_vars);
+        ctx->dec_tier_n = ctx->dec_tier ? ctx->n_vars : 0;
+        if (!ctx->dec_tier) return;
+    }
+    memset(ctx->dec_tier, 1, ctx->dec_tier_n);
+    for (uint32_t i = 0; i < ctx->n_mul_links; i++) {
+        const DvsMulLink *ml = &ctx->mul_links[i];
+        if (ml->a != ml->b || (ctx->vars[ml->a].flags & VAR_SIGNED)) continue;
+        uint32_t x = dvs_value_src(ctx, ml->a);
+        if (x < ctx->dec_tier_n) ctx->dec_tier[x] = 2;
+    }
+}
+
+static inline uint32_t _tier(const dvs_ctx_t *ctx, uint32_t i) {
+    return (ctx->dec_tier && i < ctx->dec_tier_n) ? ctx->dec_tier[i] : 1u;
+}
+
 static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
     /* With a solve order, only the open stage's variables are candidates. */
     const uint32_t stage = ctx->var_order ? _open_stage(ctx) : 0;
@@ -391,6 +432,7 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
         if (L->enabled && L->n_analyses > 0) {
             uint32_t best_v = EXPR_NULL;
             double   best_a = -1.0;
+            uint32_t best_t = 0;
             uint32_t lim = L->vsids.n_vars < ctx->n_vars
                            ? L->vsids.n_vars : ctx->n_vars;
             for (uint32_t i = 0; i < lim; i++) {
@@ -400,9 +442,12 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
                 int64_t lo = var_lo64(ctx, v);
                 int64_t hi = var_hi64(ctx, v);
                 if (lo == hi) continue;
-                if (L->vsids.activity[i] > best_a) {
+                uint32_t t = _tier(ctx, i);
+                if (best_v == EXPR_NULL || t > best_t ||
+                    (t == best_t && L->vsids.activity[i] > best_a)) {
                     best_a = L->vsids.activity[i];
                     best_v = i;
+                    best_t = t;
                 }
             }
             if (best_v != EXPR_NULL) return best_v;
@@ -417,6 +462,7 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
      * by `best == EXPR_NULL` rather than by comparison. */
     uint64_t best_dom     = UINT64_MAX;
     uint32_t n_best       = 0;       /* # real vars tied at best_dom (reservoir) */
+    uint32_t best_t       = 0;       /* best's decision tier (_build_dec_tier) */
     uint32_t best_aux     = EXPR_NULL;
     uint64_t best_aux_dom = UINT64_MAX;
 
@@ -445,9 +491,10 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
                 continue;
             }
             if (stage && _order_key(ctx, i) != stage) continue;
-            if (best == EXPR_NULL || dom < best_dom) {
-                best_dom = dom; best = i; n_best = 1;
-            } else if (ctx->fair_pick && dom == best_dom) {
+            uint32_t t = _tier(ctx, i);
+            if (best == EXPR_NULL || t > best_t || (t == best_t && dom < best_dom)) {
+                best_dom = dom; best = i; n_best = 1; best_t = t;
+            } else if (ctx->fair_pick && t == best_t && dom == best_dom) {
                 /* uniform mode: reservoir-sample among smallest-domain vars */
                 n_best++;
                 if ((_rand64(ctx) % n_best) == 0) best = i;
@@ -466,9 +513,10 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
                 continue;
             }
             if (stage && _order_key(ctx, i) != stage) continue;
-            if (best == EXPR_NULL || dom < best_dom) {
-                best_dom = dom; best = i; n_best = 1;
-            } else if (ctx->fair_pick && dom == best_dom) {
+            uint32_t t = _tier(ctx, i);
+            if (best == EXPR_NULL || t > best_t || (t == best_t && dom < best_dom)) {
+                best_dom = dom; best = i; n_best = 1; best_t = t;
+            } else if (ctx->fair_pick && t == best_t && dom == best_dom) {
                 /* uniform mode: reservoir-sample among smallest-domain vars */
                 n_best++;
                 if ((_rand64(ctx) % n_best) == 0) best = i;
@@ -1121,6 +1169,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
 
     /* Decision-variable tie-break mode for this solve (default fast). */
     ctx->fair_pick = (opts && opts->fair_pick) ? 1 : 0;
+    _build_dec_tier(ctx);
 
     /* Lazy LCG initialization on first solve when use_lcg is requested. */
     if (opts && opts->use_lcg && !ctx->lcg && ctx->n_vars > 0) {

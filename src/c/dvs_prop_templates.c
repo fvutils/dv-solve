@@ -2366,8 +2366,9 @@ uint32_t prop_add_bvadd_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_
 uint32_t prop_add_bvsub_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id, uint8_t width, uint8_t priority) {
     return _prop_add_bvbin_64(ctx, r_id, a_id, b_id, width, priority, _fire_bvsub_64);
 }
-/* Record `r == a * b` for the value picker (DvsMulLink). Best effort:
- * without memory there is no link, and the search draws as it did before. */
+/* Record `r == a * b` for the value picker and the decision order
+ * (DvsMulLink). Best effort: without memory there is no link, and the search
+ * draws and orders as it did before. */
 static void _note_mul_link(dvs_ctx_t *ctx, uint32_t ref, uint32_t r_id,
                            uint32_t a_id, uint32_t b_id, uint8_t width) {
     if (ref == EXPR_NULL) return;

@@ -93,8 +93,8 @@ typedef struct {
     int64_t  b;
 } DvsModLink;
 
-/* `r == a * b` (a == b: a square), recorded for the value picker (see
- * _note_mul_link in dvs_prop_templates.c). */
+/* `r == a * b` (a == b: a square), recorded for the value picker and the
+ * decision order (see DvsMulLink in dvs_prop_templates.c). */
 typedef struct {
     uint32_t r, a, b;
     uint32_t prop;     /* its propagator's id: dropped with it on restore */
@@ -230,6 +230,9 @@ typedef struct dvs_ctx_s {
     uint32_t           n_ext_memo;
     uint32_t           ext_memo_cap;
     DvsDivisors        divisors;      /* last fixed product factored     */
+    uint8_t           *dec_tier;      /* [dec_tier_n] decision tier from the
+                                       * multiply links; NULL: all equal  */
+    uint32_t           dec_tier_n;
     CheckpointMark    *checkpoints;   /* array[checkpoints_cap]: from
                                        * the fixed pool, else ctx->alloc */
     uint32_t           n_checkpoints;
