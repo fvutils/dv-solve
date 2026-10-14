@@ -55,18 +55,18 @@ extern "C" {
  *   else                                               -> 64-bit unsigned
  * So an ordinary literal (`5`, `-3`) is a signed int whatever is_signed says;
  * is_signed only matters for a value that does not fit in int32. */
-void dvs_sv_const_type(const ExprConst *c, uint16_t *width, uint8_t *is_signed);
+void dvs_sv_const_type(const ExprConst *c, uint32_t *width, uint8_t *is_signed);
 
 /** The value of `v` read as a `width`-bit (<= 64) number of the given
  * signedness: its low `width` bits, sign-extended when signed. For width 64
  * an unsigned value >= 2^63 is returned as its (negative) int64 pattern. */
-int64_t dvs_sv_wrap(int64_t v, uint16_t width, uint8_t is_signed);
+int64_t dvs_sv_wrap(int64_t v, uint32_t width, uint8_t is_signed);
 
 /** Width / signedness of a variable that has no VarSpec in the problem being
  * elaborated (an incrementally added constraint over existing vars). Return 0
  * and fill the outputs, or -1 if unknown. */
 typedef int (*dvs_sv_var_type_fn)(void *ud, uint32_t var_id,
-                                  uint16_t *width, uint8_t *is_signed);
+                                  uint32_t *width, uint8_t *is_signed);
 
 /** Rewrite every constraint and soft-constraint root of `sp` into explicit
  * form (see above).

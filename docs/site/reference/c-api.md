@@ -94,6 +94,19 @@ The {c:type}`dvs_expr_t` a builder function returns when it cannot allocate
 memory. A program that may run out of memory should check for it.
 ```
 
+```{c:macro} DVS_MAX_WIDTH
+The widest variable, constant or expression the engine solves: 2{sup}`24`
+bits. Widths are 32-bit in the API; this ceiling keeps the bit-blaster's
+arithmetic inside 32 bits. A variable or constant past it is refused when it
+is built ({c:macro}`DVS_EXPR_NULL`), and a wider intermediate expression
+fails the solve.
+```
+
+```{c:function} uint32_t dvs_max_width(void)
+{c:macro}`DVS_MAX_WIDTH` of the loaded library, for bindings that cannot read
+the header.
+```
+
 ## Building a problem
 
 ```{c:function} dvs_builder_t *dvs_builder_create(uint32_t block_size, dvs_alloc_t *alloc)
@@ -113,12 +126,14 @@ Free the builder. Problems it finalized are not freed.
 Empty the builder so it can build another problem, keeping its memory.
 ```
 
-```{c:function} dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id, uint16_t width, uint8_t is_signed, int64_t lo, int64_t hi)
+```{c:function} dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id, uint32_t width, uint8_t is_signed, int64_t lo, int64_t hi)
 Declare a variable.
 
 :param var_id: The variable's id. A problem with *n* variables uses the ids
   0 to *n*−1, each declared once.
-:param width: Width in bits, 1 to 64.
+:param width: Width in bits, 1 to {c:macro}`DVS_MAX_WIDTH`. Over 64 bits
+  the variable is solved by the bit-blaster, and `lo`/`hi` do not bound it.
+  Returns {c:macro}`DVS_EXPR_NULL` for a width of 0 or over the ceiling.
 :param is_signed: 1 if the variable is signed.
 :param lo: Lowest value the variable may take.
 :param hi: Highest value the variable may take.
@@ -201,7 +216,7 @@ value, unless it doesn't fit in 32 bits.
 ```
 
 ```{c:function} dvs_expr_t dvs_builder_expr_const_wide(dvs_builder_t *b, uint32_t n_limbs, const uint64_t *limbs, uint32_t width, uint8_t is_signed)
-A sized constant of `width` bits (1 to 65535), signed when `is_signed`. Its
+A sized constant of `width` bits (1 to {c:macro}`DVS_MAX_WIDTH`), signed when `is_signed`. Its
 bit pattern is `n_limbs` = ceil(`width` / 64) 64-bit limbs, least significant
 first, so `limbs[0]` holds bits 63:0; bits at and above `width` are ignored.
 It is one node at any width, so use it for a constant wider than 64 bits.
@@ -237,12 +252,12 @@ is compiled.
 `value inside {[los[0]:his[0]], [los[1]:his[1]], ...}`.
 ```
 
-```{c:function} dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand, uint16_t from_bits, uint16_t to_bits, uint8_t sign_extend)
+```{c:function} dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand, uint32_t from_bits, uint32_t to_bits, uint8_t sign_extend)
 Extend `operand` from `from_bits` to `to_bits` bits: with zeros when
 `sign_extend` is 0, with copies of the sign bit when it is 1.
 ```
 
-```{c:function} dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand, uint16_t to_bits, uint8_t to_signed)
+```{c:function} dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand, uint32_t to_bits, uint8_t to_signed)
 A cast of `operand` to a `to_bits`-bit integer, signed when `to_signed`:
 SystemVerilog's `T'(operand)`. When `to_bits` is wider than the operand, the
 operand is evaluated at `to_bits`, so a 64-bit cast of the product of two
@@ -251,11 +266,11 @@ operand is evaluated at `to_bits`, so a 64-bit cast of the product of two
 unsigned.
 ```
 
-```{c:function} dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand, uint16_t hi_bit, uint16_t lo_bit)
+```{c:function} dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand, uint32_t hi_bit, uint32_t lo_bit)
 `operand[hi_bit:lo_bit]`.
 ```
 
-```{c:function} dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi, dvs_expr_t lo, uint16_t lo_width)
+```{c:function} dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi, dvs_expr_t lo, uint32_t lo_width)
 `{hi, lo}`, where `lo` is `lo_width` bits wide.
 ```
 
@@ -460,10 +475,11 @@ or the problem needs more than 65,535 propagators).
 ```
 
 ```{c:macro} DVS_COMPILE_UNSUPPORTED_WIDTH
-−3: the problem goes beyond a supported limit: a variable is wider than
-64 bits, an expression is wider than 255 bits or nested more than 20000 deep,
-or an all-different constraint has more than 16 variables or one wider than
-32 bits. Wider bit-vectors are supported through the SMT-LIB2 front end
+−3: the problem goes beyond a supported limit of the CDCL engine: a variable
+is wider than 64 bits, an expression is wider than {c:macro}`DVS_MAX_WIDTH`
+bits or nested more than 20000 deep, or an all-different constraint has more
+than 16 variables or one wider than 32 bits. Wider bit-vectors are solved by
+the bit-blaster, and through the SMT-LIB2 front end
 ({doc}`../guides/smt2-solver`).
 ```
 

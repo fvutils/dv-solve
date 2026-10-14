@@ -63,7 +63,7 @@ def _setup(lib: ctypes.CDLL):
 
     lib.problem_add_var.restype  = ctypes.c_uint32
     lib.problem_add_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
-                                    ctypes.c_uint16, ctypes.c_uint8,
+                                    ctypes.c_uint32, ctypes.c_uint8,
                                     ctypes.c_int64, ctypes.c_int64]
     # SolveCtx
     lib.dvs_solver_create.restype  = ctypes.c_void_p

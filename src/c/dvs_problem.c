@@ -80,7 +80,7 @@ void solve_problem_destroy(dvs_problem_t *sp) {
 /* ------------------------------------------------------------------ */
 
 dvs_expr_t expr_const_sized(dvs_problem_t *sp, int64_t value, uint8_t is_signed,
-                         uint16_t width) {
+                         uint32_t width) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprConst),
                               (uint32_t)_Alignof(ExprConst));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -100,11 +100,12 @@ dvs_expr_t expr_const(dvs_problem_t *sp, int64_t value, uint8_t is_signed) {
 dvs_expr_t expr_const_wide(dvs_problem_t *sp, uint32_t n_limbs,
                            const uint64_t *limbs, uint32_t width,
                            uint8_t is_signed) {
-    if (width == 0 || width > 65535u || !limbs || n_limbs != (width + 63u) / 64u)
+    if (width == 0 || width > DVS_MAX_WIDTH || !limbs
+        || n_limbs != (width + 63u) / 64u)
         return EXPR_NULL;
     if (width <= 64)
         return expr_const_sized(sp, (int64_t)limbs[0], is_signed ? 1 : 0,
-                                (uint16_t)width);
+                                (uint32_t)width);
     dvs_expr_t ref = _pool_alloc(sp,
         (uint32_t)(sizeof(ExprConstWide) + n_limbs * sizeof(uint64_t)),
         (uint32_t)_Alignof(ExprConstWide));
@@ -188,7 +189,7 @@ dvs_expr_t expr_in_set(dvs_problem_t *sp, dvs_expr_t value,
 }
 
 dvs_expr_t expr_extend(dvs_problem_t *sp, dvs_expr_t operand,
-                    uint16_t from_bits, uint16_t to_bits, uint8_t sign_extend) {
+                    uint32_t from_bits, uint32_t to_bits, uint8_t sign_extend) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprExtend),
                               (uint32_t)_Alignof(ExprExtend));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -197,13 +198,13 @@ dvs_expr_t expr_extend(dvs_problem_t *sp, dvs_expr_t operand,
     n->sign_extend  = sign_extend;
     n->from_bits    = from_bits;
     n->to_bits      = to_bits;
-    n->_p8 = 0; n->_p16 = 0;
+    n->_p8 = 0;
     n->operand      = operand;
     return ref;
 }
 
 dvs_expr_t expr_cast(dvs_problem_t *sp, dvs_expr_t operand,
-                  uint16_t to_bits, uint8_t to_signed) {
+                  uint32_t to_bits, uint8_t to_signed) {
     if (to_bits == 0) return EXPR_NULL;
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprCast),
                               (uint32_t)_Alignof(ExprCast));
@@ -218,7 +219,7 @@ dvs_expr_t expr_cast(dvs_problem_t *sp, dvs_expr_t operand,
 }
 
 dvs_expr_t expr_extract(dvs_problem_t *sp, dvs_expr_t operand,
-                     uint16_t hi_bit, uint16_t lo_bit) {
+                     uint32_t hi_bit, uint32_t lo_bit) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprExtract),
                               (uint32_t)_Alignof(ExprExtract));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -231,14 +232,14 @@ dvs_expr_t expr_extract(dvs_problem_t *sp, dvs_expr_t operand,
 }
 
 dvs_expr_t expr_concat(dvs_problem_t *sp, dvs_expr_t hi, dvs_expr_t lo,
-                    uint16_t lo_width) {
+                    uint32_t lo_width) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprConcat),
                               (uint32_t)_Alignof(ExprConcat));
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprConcat *n = (ExprConcat *)POOL_PTR(sp, ref);
     n->kind     = EXPR_CONCAT;
     n->lo_width = lo_width;
-    n->_p16 = 0;
+   
     n->hi       = hi;
     n->lo       = lo;
     return ref;
@@ -300,8 +301,9 @@ dvs_expr_t expr_clog2(dvs_problem_t *sp, dvs_expr_t result, dvs_expr_t operand) 
 /* ------------------------------------------------------------------ */
 
 dvs_expr_t problem_add_var(dvs_problem_t *sp, uint32_t var_id,
-                        uint16_t width, uint8_t is_signed,
+                        uint32_t width, uint8_t is_signed,
                         int64_t lo, int64_t hi) {
+    if (width == 0 || width > DVS_MAX_WIDTH) return EXPR_NULL;
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(VarSpec),
                               (uint32_t)_Alignof(VarSpec));
     if (ref == EXPR_NULL) return EXPR_NULL;

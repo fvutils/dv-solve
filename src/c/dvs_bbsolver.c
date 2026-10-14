@@ -36,7 +36,7 @@
 #define BB_INVALID_WIDTH 0
 
 typedef struct {
-    uint16_t width;
+    uint32_t width;
     uint8_t  is_signed;
     uint8_t  defined;   /* 0 if var_id not seen */
     int64_t  lo;
@@ -53,7 +53,7 @@ typedef struct {
 typedef struct {
     dvs_expr_t eref;
     uint32_t   next;
-    uint16_t   hi, lo;
+    uint32_t   hi, lo;
 } bb_slice_t;
 
 #define BB_NO_SLICE UINT32_MAX
@@ -258,7 +258,7 @@ static void assert_top(dvs_bbsolver_t *S, dvs_aig_node_t node) {
     S->assert_nodes[S->n_asserts++] = node;
 }
 
-static uint16_t max_w(uint16_t a, uint16_t b) { return a > b ? a : b; }
+static uint32_t max_w(uint32_t a, uint32_t b) { return a > b ? a : b; }
 
 /* Self-determined signedness of `ref` under the SystemVerilog typing rules
  * (dvs_sv.h): a variable / sized constant has its own; arithmetic and bitwise
@@ -278,7 +278,7 @@ static int bb_signed(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
     if (!kp) return 0;
     switch (*kp) {
     case EXPR_CONST: {
-        uint16_t w; uint8_t sg;
+        uint32_t w; uint8_t sg;
         dvs_sv_const_type((ExprConst *)kp, &w, &sg);
         return sg;
     }
@@ -322,14 +322,14 @@ static int bb_signed(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
 }
 
 /* Self-determined width of `ref` (0 = an unsized constant, which adapts). */
-static uint16_t bb_self_width(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
+static uint32_t bb_self_width(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
     if (ref == EXPR_NULL) return 0;
     if (dvs_stack_deep(&S->sg, depth, 4096)) { S->had_unsupported = 1; return 0; }
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
     case EXPR_CONST: return ((ExprConst *)kp)->width;
-    case EXPR_CONST_WIDE: return (uint16_t)((ExprConstWide *)kp)->width;
+    case EXPR_CONST_WIDE: return (uint32_t)((ExprConstWide *)kp)->width;
     case EXPR_VAR: {
         uint32_t id = ((ExprVar *)kp)->var_id;
         return id < S->n_vars ? S->vars[id].width : 0;
@@ -344,8 +344,8 @@ static uint16_t bb_self_width(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
         case DVS_BIN_LSHIFT: case DVS_BIN_RSHIFT: case DVS_BIN_ASHR:
             return bb_self_width(S, b->lhs, depth + 1);
         default: {
-            uint16_t l = bb_self_width(S, b->lhs, depth + 1);
-            uint16_t r = bb_self_width(S, b->rhs, depth + 1);
+            uint32_t l = bb_self_width(S, b->lhs, depth + 1);
+            uint32_t r = bb_self_width(S, b->rhs, depth + 1);
             return l > r ? l : r;
         }
         }
@@ -357,32 +357,32 @@ static uint16_t bb_self_width(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
     }
     case EXPR_ITE: {
         ExprITE *e = (ExprITE *)kp;
-        uint16_t t = bb_self_width(S, e->then_e, depth + 1);
-        uint16_t f = bb_self_width(S, e->else_e, depth + 1);
+        uint32_t t = bb_self_width(S, e->then_e, depth + 1);
+        uint32_t f = bb_self_width(S, e->else_e, depth + 1);
         return t > f ? t : f;
     }
     case EXPR_EXTEND: return ((ExprExtend *)kp)->to_bits;
     case EXPR_SV_CAST: return ((ExprSvCast *)kp)->to_bits;
     case EXPR_EXTRACT: {
         ExprExtract *x = (ExprExtract *)kp;
-        return (uint16_t)(x->hi_bit - x->lo_bit + 1);
+        return (uint32_t)(x->hi_bit - x->lo_bit + 1);
     }
     case EXPR_CONCAT: {
         ExprConcat *c = (ExprConcat *)kp;
-        uint16_t h = bb_self_width(S, c->hi, depth + 1);
-        return h ? (uint16_t)(h + c->lo_width) : 0;
+        uint32_t h = bb_self_width(S, c->hi, depth + 1);
+        return h ? (uint32_t)(h + c->lo_width) : 0;
     }
     default:
         return 1;
     }
 }
 
-static dvs_bv_t zext_to(dvs_bbsolver_t *S, dvs_bv_t v, uint16_t target) {
+static dvs_bv_t zext_to(dvs_bbsolver_t *S, dvs_bv_t v, uint32_t target) {
     if (v.size >= target) return v;
     return dvs_bb_zero_ext(S->bb, v, (uint32_t)(target - v.size));
 }
 
-static dvs_bv_t sext_to(dvs_bbsolver_t *S, dvs_bv_t v, uint16_t target) {
+static dvs_bv_t sext_to(dvs_bbsolver_t *S, dvs_bv_t v, uint32_t target) {
     if (v.size >= target) return v;
     return dvs_bb_sign_ext(S->bb, v, (uint32_t)(target - v.size));
 }
@@ -390,13 +390,13 @@ static dvs_bv_t sext_to(dvs_bbsolver_t *S, dvs_bv_t v, uint16_t target) {
 /* Extend the value of `ref` (already blasted to `v`) to `target` bits by
  * ref's OWN signedness -- the SV rule for an operand of a wider context. */
 static dvs_bv_t ext_ref(dvs_bbsolver_t *S, dvs_bv_t v, dvs_expr_t ref,
-                        uint16_t target) {
+                        uint32_t target) {
     if (v.size >= target) return v;
     return bb_signed(S, ref, 0) ? sext_to(S, v, target) : zext_to(S, v, target);
 }
 
 /* Forward decl — needed because bv_for_var may recurse through bb_expr. */
-static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width);
+static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t hint_width);
 
 /* True iff `ref`'s subtree (transitively following the current subst[]
  * map for any EXPR_VAR encountered) reaches EXPR_VAR with id `target_var`.
@@ -703,7 +703,7 @@ static int try_record_subst(dvs_bbsolver_t *S, dvs_expr_t vref, dvs_expr_t eref)
 /* `ref`, looking through whole substitutions, as (extract var hi lo) of an
  * unsubstituted variable. */
 static int as_var_slice(dvs_bbsolver_t *S, dvs_expr_t ref,
-                        uint32_t *var, uint16_t *hi, uint16_t *lo) {
+                        uint32_t *var, uint32_t *hi, uint32_t *lo) {
     for (int guard = 0; guard < 64 && ref != EXPR_NULL; guard++) {
         ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
         if (!kp) return 0;
@@ -733,7 +733,7 @@ static int as_var_slice(dvs_bbsolver_t *S, dvs_expr_t ref,
  * the var's slices must not overlap. */
 static int try_record_slice(dvs_bbsolver_t *S, dvs_expr_t sref, dvs_expr_t eref) {
     if (!S->slice_head) return 0;
-    uint32_t id; uint16_t hi, lo;
+    uint32_t id; uint32_t hi, lo;
     if (!as_var_slice(S, sref, &id, &hi, &lo)) return 0;
     if (!subst_definable(S, id)) return 0;
     if (bb_self_width(S, eref, 0) > (uint32_t)(hi - lo + 1)) return 0;
@@ -1118,7 +1118,7 @@ static dvs_bv_t bv_for_var(dvs_bbsolver_t *S, uint32_t var_id) {
             for (uint32_t i = S->slice_head[var_id]; i != BB_NO_SLICE;
                  i = S->slices[i].next) {
                 const bb_slice_t *sl = &S->slices[i];
-                uint16_t sw = (uint16_t)(sl->hi - sl->lo + 1);
+                uint32_t sw = (uint32_t)(sl->hi - sl->lo + 1);
                 dvs_bv_t e = bb_expr(S, sl->eref, sw);
                 if (S->had_error) break;
                 if (e.size < sw)      e = ext_ref(S, e, sl->eref, sw);
@@ -1141,7 +1141,7 @@ static dvs_bv_t bv_for_var(dvs_bbsolver_t *S, uint32_t var_id) {
  * passed to size EXPR_CONST values to context; pass 0 to use the natural
  * width (64 — the engine's int64 value domain — for unconstrained constants).
  * On error, sets S->had_error = 1 and returns {NULL, 0}. */
-static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width);
+static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t hint_width);
 
 /* Same as bb_expr but the result is a 1-bit predicate. */
 static dvs_bv_t bb_predicate(dvs_bbsolver_t *S, dvs_expr_t ref);
@@ -1151,14 +1151,14 @@ static dvs_bv_t bb_predicate(dvs_bbsolver_t *S, dvs_expr_t ref);
  * zero-fill bits 64+, corrupting a negative value; build the 64-bit pattern and
  * extend — sign-extend when `is_signed` (a negative value must set the high
  * bits), zero-extend otherwise. */
-static dvs_bv_t bb_value_i64(dvs_bbsolver_t *S, uint16_t w, int64_t value,
+static dvs_bv_t bb_value_i64(dvs_bbsolver_t *S, uint32_t w, int64_t value,
                              int is_signed) {
     if (w <= 64) return dvs_bb_value_u64(S->bb, w, (uint64_t)value);
     dvs_bv_t lo64 = dvs_bb_value_u64(S->bb, 64, (uint64_t)value);
     return is_signed ? sext_to(S, lo64, w) : zext_to(S, lo64, w);
 }
 
-static dvs_bv_t bb_const(dvs_bbsolver_t *S, const ExprConst *c, uint16_t hint) {
+static dvs_bv_t bb_const(dvs_bbsolver_t *S, const ExprConst *c, uint32_t hint) {
     /* A sized constant is exactly its own width. */
     if (c->width) return bb_value_i64(S, c->width, c->value, c->is_signed);
     /* A width-less constant defaults to 64 bits — the engine's int64 value
@@ -1168,7 +1168,7 @@ static dvs_bv_t bb_const(dvs_bbsolver_t *S, const ExprConst *c, uint16_t hint) {
      * arithmetic operand) the caller passes a non-zero hint, and width
      * reconciliation (max_w + zext/sext) sizes it to the other operand anyway,
      * so a wider default never changes a value outcome. */
-    uint16_t w = hint ? hint : 64;
+    uint32_t w = hint ? hint : 64;
     return bb_value_i64(S, w, c->value, c->is_signed);
 }
 
@@ -1273,7 +1273,7 @@ static dvs_bv_t bb_word_eq(dvs_bbsolver_t *S, dvs_expr_t lref, dvs_expr_t rref,
 }
 
 static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref,
-                          uint16_t hint) {
+                          uint32_t hint) {
     /* Comparison / logical ops always produce 1-bit; arithmetic / bitwise
      * widen lhs and rhs to a common width = max(lhs, rhs, hint). */
     switch (b->op) {
@@ -1350,7 +1350,7 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
         if (S->had_error) return l;
         dvs_bv_t r = bb_expr(S, b->rhs, l.size);
         if (S->had_error) return r;
-        uint16_t w = max_w(l.size, r.size);
+        uint32_t w = max_w(l.size, r.size);
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
         dvs_bv_t eq = bb_word_eq(S, b->lhs, b->rhs, l, r);
@@ -1368,7 +1368,7 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
         /* SV: the comparison is signed only when both sides are; each side
          * is first extended by its own signedness. */
         int is_signed = bb_signed(S, b->lhs, 0) && bb_signed(S, b->rhs, 0);
-        uint16_t w = max_w(l.size, r.size);
+        uint32_t w = max_w(l.size, r.size);
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
         dvs_bv_t lt;
@@ -1418,7 +1418,7 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
         if (S->had_error) return l;
         dvs_bv_t r = bb_expr(S, b->rhs, l.size > hint ? l.size : hint);
         if (S->had_error) return r;
-        uint16_t w = max_w(l.size, r.size);
+        uint32_t w = max_w(l.size, r.size);
         if (hint > w) w = hint;
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
@@ -1451,7 +1451,7 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
         if (S->had_error) return l;
         dvs_bv_t r = bb_expr(S, b->rhs, l.size > hint ? l.size : hint);
         if (S->had_error) return r;
-        uint16_t w = max_w(l.size, r.size);
+        uint32_t w = max_w(l.size, r.size);
         if (hint > w) w = hint;
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
@@ -1484,7 +1484,7 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
     }
 }
 
-static BB_NOINLINE dvs_bv_t bb_unary(dvs_bbsolver_t *S, const ExprUnary *u, uint16_t hint) {
+static BB_NOINLINE dvs_bv_t bb_unary(dvs_bbsolver_t *S, const ExprUnary *u, uint32_t hint) {
     switch (u->op) {
     case DVS_UN_NOT: {
         dvs_bv_t a = bb_predicate(S, u->operand);
@@ -1505,14 +1505,14 @@ static BB_NOINLINE dvs_bv_t bb_unary(dvs_bbsolver_t *S, const ExprUnary *u, uint
     return err_bv(S, "unknown dvs_unop_t");
 }
 
-static BB_NOINLINE dvs_bv_t bb_ite(dvs_bbsolver_t *S, const ExprITE *e, uint16_t hint) {
+static BB_NOINLINE dvs_bv_t bb_ite(dvs_bbsolver_t *S, const ExprITE *e, uint32_t hint) {
     dvs_bv_t c = bb_predicate(S, e->cond);
     if (S->had_error) return c;
     dvs_bv_t t = bb_expr(S, e->then_e, hint);
     if (S->had_error) return t;
     dvs_bv_t f = bb_expr(S, e->else_e, t.size > hint ? t.size : hint);
     if (S->had_error) return f;
-    uint16_t w = max_w(t.size, f.size);
+    uint32_t w = max_w(t.size, f.size);
     if (hint > w) w = hint;
     t = ext_ref(S, t, e->then_e, w);
     f = ext_ref(S, f, e->else_e, w);
@@ -1528,7 +1528,7 @@ static BB_NOINLINE dvs_bv_t bb_in_range(dvs_bbsolver_t *S, const ExprInRange *r)
     if (S->had_error) return lo;
     dvs_bv_t hi = bb_expr(S, r->hi, v.size);
     if (S->had_error) return hi;
-    uint16_t w = max_w(max_w(v.size, lo.size), hi.size);
+    uint32_t w = max_w(max_w(v.size, lo.size), hi.size);
     /* Elaboration keeps a membership node only when every bound shares the
      * value's signedness, so one flag orders all three. */
     int is_signed = bb_signed(S, r->value, 0);
@@ -1553,7 +1553,7 @@ static BB_NOINLINE dvs_bv_t bb_in_set(dvs_bbsolver_t *S, dvs_expr_t ref) {
     for (uint32_t i = 0; i < node->n_elems; i++) {
         dvs_bv_t ei = bb_expr(S, elems[i], v.size);
         if (S->had_error) return ei;
-        uint16_t w = max_w(v.size, ei.size);
+        uint32_t w = max_w(v.size, ei.size);
         dvs_bv_t vw = ext_ref(S, v, node->value, w);
         dvs_bv_t ew = ext_ref(S, ei, elems[i], w);
         dvs_bv_t eq = dvs_bb_eq(S->bb, vw, ew);
@@ -1581,7 +1581,7 @@ static BB_NOINLINE dvs_bv_t bb_in_ranges(dvs_bbsolver_t *S, dvs_expr_t ref) {
         if (S->had_error) return lo;
         dvs_bv_t hi = bb_expr(S, his[i], v.size);
         if (S->had_error) return hi;
-        uint16_t w = max_w(max_w(v.size, lo.size), hi.size);
+        uint32_t w = max_w(max_w(v.size, lo.size), hi.size);
         dvs_bv_t vw = ext_ref(S, v, node->value, w);
         dvs_bv_t lw = ext_ref(S, lo, los[i], w);
         dvs_bv_t hw = ext_ref(S, hi, his[i], w);
@@ -1648,8 +1648,8 @@ static BB_NOINLINE dvs_bv_t bb_concat(dvs_bbsolver_t *S, const ExprConcat *e) {
  * primary engine enforces when the relation is a top-level constraint. */
 
 /* Smallest width holding the unsigned value n. */
-static uint16_t bb_bits_for(uint64_t n) {
-    uint16_t b = 1;
+static uint32_t bb_bits_for(uint64_t n) {
+    uint32_t b = 1;
     while (b < 64 && (n >> b)) b++;
     return b;
 }
@@ -1667,7 +1667,7 @@ static dvs_bv_t bb_array_select(dvs_bbsolver_t *S, const ExprArraySelect *as) {
     if (S->had_error) return idx;
     dvs_bv_t res = bb_expr(S, as->result, 0);
     if (S->had_error) return res;
-    uint16_t iw = idx.size > 32 ? (uint16_t)idx.size : 32;
+    uint32_t iw = idx.size > 32 ? (uint32_t)idx.size : 32;
     idx = ext_ref(S, idx, as->index, iw);
     const int rs = bb_signed(S, as->result, 0);
     for (uint32_t i = 0; i < as->n_elems; i++) {
@@ -1679,7 +1679,7 @@ static dvs_bv_t bb_array_select(dvs_bbsolver_t *S, const ExprArraySelect *as) {
         dvs_bv_t el = bv_for_var(S, id);
         if (S->had_error) return el;
         const int sg = rs && S->vars[id].is_signed;
-        uint16_t w = res.size > el.size ? (uint16_t)res.size : (uint16_t)el.size;
+        uint32_t w = res.size > el.size ? (uint32_t)res.size : (uint32_t)el.size;
         dvs_bv_t r = sg ? sext_to(S, res, w) : zext_to(S, res, w);
         dvs_bv_t e = sg ? sext_to(S, el, w) : zext_to(S, el, w);
         dvs_bv_t hit = dvs_bb_and(S->bb,
@@ -1705,12 +1705,12 @@ static dvs_bv_t bb_sum(dvs_bbsolver_t *S, const ExprSum *es) {
         if (t[i].size > mw) mw = t[i].size;
     }
     uint32_t W = mw + bb_bits_for((uint64_t)es->n_vars + 1) + 1;
-    if (W > 0xFFFFu) { free(t); S->had_unsupported = 1; return dvs_bb_value_u64(S->bb, 1, 0); }
+    if (W > DVS_MAX_WIDTH) { free(t); S->had_unsupported = 1; return dvs_bb_value_u64(S->bb, 1, 0); }
     dvs_bv_t acc = dvs_bb_value_u64(S->bb, W, 0);
     for (uint32_t i = 0; i < es->n_vars; i++)
-        acc = dvs_bb_add(S->bb, acc, ext_ref(S, t[i], xs[i], (uint16_t)W));
+        acc = dvs_bb_add(S->bb, acc, ext_ref(S, t[i], xs[i], (uint32_t)W));
     free(t);
-    return dvs_bb_eq(S->bb, ext_ref(S, res, es->result, (uint16_t)W), acc);
+    return dvs_bb_eq(S->bb, ext_ref(S, res, es->result, (uint32_t)W), acc);
 }
 
 /* `result == popcount(x)`: the bits of x, each widened, summed. */
@@ -1719,8 +1719,8 @@ static dvs_bv_t bb_countones(dvs_bbsolver_t *S, const ExprCountones *ec) {
     if (S->had_error) return x;
     dvs_bv_t res = bb_expr(S, ec->result, 0);
     if (S->had_error) return res;
-    uint16_t xb = bb_bits_for(x.size);
-    uint16_t W = (uint16_t)((res.size > xb ? res.size : xb) + 1);
+    uint32_t xb = bb_bits_for(x.size);
+    uint32_t W = (uint32_t)((res.size > xb ? res.size : xb) + 1);
     dvs_bv_t acc = dvs_bb_value_u64(S->bb, W, 0);
     for (uint32_t i = 0; i < x.size; i++)
         acc = dvs_bb_add(S->bb, acc,
@@ -1736,9 +1736,9 @@ static dvs_bv_t bb_clog2(dvs_bbsolver_t *S, const ExprClog2 *ec) {
     dvs_bv_t res = bb_expr(S, ec->result, 0);
     if (S->had_error) return res;
     if (x.size > 64) { S->had_unsupported = 1; return dvs_bb_value_u64(S->bb, 1, 0); }
-    uint16_t xb = bb_bits_for(x.size);
-    uint16_t W = (uint16_t)((res.size > xb ? res.size : xb) + 1);
-    uint16_t XW = (uint16_t)(x.size + 1);
+    uint32_t xb = bb_bits_for(x.size);
+    uint32_t W = (uint32_t)((res.size > xb ? res.size : xb) + 1);
+    uint32_t XW = (uint32_t)(x.size + 1);
     dvs_bv_t xx = zext_to(S, x, XW);
     dvs_bv_t val = dvs_bb_value_u64(S->bb, W, x.size);
     for (uint32_t k = x.size; k-- > 0;) {
@@ -1748,7 +1748,7 @@ static dvs_bv_t bb_clog2(dvs_bbsolver_t *S, const ExprClog2 *ec) {
     return dvs_bb_eq(S->bb, ext_ref(S, res, ec->result, W), val);
 }
 
-static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width) {
+static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t hint_width) {
     if (S->had_error) { dvs_bv_t e = {NULL, 0}; return e; }
     if (ref == EXPR_NULL) return err_bv(S, "EXPR_NULL");
 
@@ -2301,7 +2301,7 @@ static int _bb_encode_alldiff(dvs_bbsolver_t *S) {
                 if (S->had_error || S->had_unsupported) return 0;
                 /* Widths can differ across the group; widen to the wider one,
                  * sign-extending only when the narrower operand is signed. */
-                uint16_t w = max_w(a.size, b.size);
+                uint32_t w = max_w(a.size, b.size);
                 dvs_bv_t aw = a, bw = b;
                 if (aw.size < w)
                     aw = S->vars[ids[i]].is_signed ? sext_to(S, aw, w)

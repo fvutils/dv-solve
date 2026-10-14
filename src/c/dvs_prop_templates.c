@@ -160,7 +160,7 @@ static int64_t sv_smod64(int64_t a, int64_t b) {
 /* Wrap a value into a w-bit 2's-complement signed domain. Used for the one
  * overflowing signed-division case (INT_MIN / -1), where the true quotient
  * exceeds the result width and SV truncates it back into range. */
-static int64_t sv_wrap_signed(int64_t v, uint16_t w) {
+static int64_t sv_wrap_signed(int64_t v, uint32_t w) {
     if (w == 0 || w >= 64) return v;
     uint64_t m = ((uint64_t)1 << w) - 1;
     uint64_t u = (uint64_t)v & m;
@@ -169,7 +169,7 @@ static int64_t sv_wrap_signed(int64_t v, uint16_t w) {
 }
 
 /* Does signed value v fit in a w-bit signed domain (no truncation)? */
-static int sv_fits_signed(int64_t v, uint16_t w) {
+static int sv_fits_signed(int64_t v, uint32_t w) {
     if (w == 0 || w >= 64) return 1;
     int64_t lo = -((int64_t)1 << (w - 1));
     int64_t hi =  ((int64_t)1 << (w - 1)) - 1;
@@ -539,7 +539,7 @@ static PropResult _fire_bounds_div_32(Propagator *self, dvs_ctx_t *ctx) {
             return PROP_OK;
         }
         if (blo == bhi && blo != 0) {
-            uint16_t w   = r->width;
+            uint32_t w   = r->width;
             int64_t k   = blo;
             int64_t alo = var_lo64(ctx, a);
             int64_t ahi = var_hi64(ctx, a);
@@ -2536,7 +2536,7 @@ static PropResult _fire_bounds_div_64(Propagator *self, dvs_ctx_t *ctx) {
     /* Only propagate when divisor is a non-zero singleton or positive range */
     if (signed_op && blo == bhi && blo != 0) {
         /* SV-truncated signed division. */
-        uint16_t w   = ctx->vars[rid].width;
+        uint32_t w   = ctx->vars[rid].width;
         int64_t  k   = blo;
         int64_t  alo = var_lo64(ctx, &ctx->vars[aid]);
         int64_t  ahi = var_hi64(ctx, &ctx->vars[aid]);
@@ -3432,7 +3432,7 @@ static PropResult _fire_bounds_bnot_64(Propagator *self, dvs_ctx_t *ctx) {
      * Use min(r.width, a.width) since they should match for bvnot. */
     Variable *rv = &ctx->vars[rid];
     Variable *av = &ctx->vars[aid];
-    uint16_t  w  = rv->width ? rv->width : av->width;
+    uint32_t  w  = rv->width ? rv->width : av->width;
     uint64_t  mask = (w >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
     /* bvnot is antitone. For a SIGNED domain it is the two's-complement
      * identity ~a = -a-1, whose value stays in the signed w-bit range, so we
@@ -3634,7 +3634,7 @@ static PropResult _fire_bounds_lshr_64(Propagator *self, dvs_ctx_t *ctx) {
      * behaviour of shifting by >= 64). The previous code clamped only bhi, and
      * to 63 not w, so e.g. b==128 (128 & 63 == 0 on x86) was treated as a
      * shift-by-0 and returned ~a instead of 0. */
-    uint16_t aw = ctx->vars[aid].width;
+    uint32_t aw = ctx->vars[aid].width;
     int64_t maxsh = (aw != 0 && aw <= 63) ? (int64_t)aw : 63;
     if (blo < 0) blo = 0;
     if (bhi < 0) bhi = 0;
@@ -4497,7 +4497,7 @@ static PropResult _fire_countones_32(Propagator *self, dvs_ctx_t *ctx) {
     Variable *rv = &ctx->vars[rid];
     Variable *xv = &ctx->vars[xid];
 
-    uint16_t width = xv->width;
+    uint32_t width = xv->width;
     if (width > 64) width = 64;
     uint64_t mask = (width < 64) ? (((uint64_t)1 << width) - 1) : ~(uint64_t)0;
     int bw_safe = (width <= 62);  /* backward shifts stay in positive int64 */
@@ -4555,7 +4555,7 @@ static PropResult _fire_countones_32(Propagator *self, dvs_ctx_t *ctx) {
             /* min x with popcount k: lowest k bits set = (1<<k)-1 */
             uint64_t min_x = ((uint64_t)1 << k) - 1;
             /* max x with popcount k: highest k bits set (within width) */
-            uint64_t max_x = (((uint64_t)1 << k) - 1) << (width - (uint16_t)k);
+            uint64_t max_x = (((uint64_t)1 << k) - 1) << (width - (uint32_t)k);
             if ((r = ctx_tighten_lb64(ctx, xid, (int64_t)min_x)) != PROP_OK) return r;
             if ((r = ctx_tighten_ub64(ctx, xid, (int64_t)max_x)) != PROP_OK) return r;
         }
@@ -4570,7 +4570,7 @@ static PropResult _fire_countones_32(Propagator *self, dvs_ctx_t *ctx) {
             uint64_t max_bits = (uint64_t)rhi;
             uint64_t max_x = (max_bits == 0)
                 ? 0
-                : ((((uint64_t)1 << max_bits) - 1) << (width - (uint16_t)max_bits));
+                : ((((uint64_t)1 << max_bits) - 1) << (width - (uint32_t)max_bits));
             if ((r = ctx_tighten_ub64(ctx, xid, (int64_t)max_x)) != PROP_OK) return r;
         }
     }
@@ -4615,7 +4615,7 @@ static PropResult _fire_clog2_32(Propagator *self, dvs_ctx_t *ctx) {
     Variable *rv = &ctx->vars[rid];
     Variable *xv = &ctx->vars[xid];
 
-    uint16_t width = xv->width;
+    uint32_t width = xv->width;
     if (width > 64) width = 64;
     uint64_t mask = (width < 64) ? (((uint64_t)1 << width) - 1) : ~(uint64_t)0;
     int64_t xlo = var_lo64(ctx, xv);

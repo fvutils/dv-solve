@@ -17,7 +17,7 @@
 #include "dvs_sv.h"
 #include "dvs_stackinfo.h"
 
-typedef struct { uint16_t w; uint8_t s; } ETy;
+typedef struct { uint32_t w; uint8_t s; } ETy;
 
 /* A small open-addressing map from 64-bit keys to 32-bit values. */
 typedef struct { uint64_t *k; uint32_t *v; uint32_t cap, n; } EMap;
@@ -126,10 +126,10 @@ static int _is_boolish(E *e, dvs_expr_t r) {
 static int _var_type(E *e, uint32_t id, ETy *t) {
     uint32_t v;
     if (_map_get(&e->vtypes, (uint64_t)id + 1, &v)) {
-        t->w = (uint16_t)(v >> 8); t->s = (uint8_t)(v & 1);
+        t->w = (uint32_t)(v >> 8); t->s = (uint8_t)(v & 1);
         return 0;
     }
-    uint16_t w; uint8_t s;
+    uint32_t w; uint8_t s;
     if (e->fn && e->fn(e->ud, id, &w, &s) == 0) { t->w = w; t->s = s ? 1 : 0; return 0; }
     char msg[64];
     snprintf(msg, sizeof(msg), "undeclared variable %u", id);
@@ -145,7 +145,7 @@ static ETy _type(E *e, dvs_expr_t ref) {
     if (_deep(e)) return t;
     uint32_t mv;
     if (_map_get(&e->types, (uint64_t)ref + 1, &mv)) {
-        t.w = (uint16_t)(mv >> 8); t.s = (uint8_t)(mv & 1);
+        t.w = (uint32_t)(mv >> 8); t.s = (uint8_t)(mv & 1);
         return t;
     }
     switch (_kind(e, ref)) {
@@ -153,14 +153,14 @@ static ETy _type(E *e, dvs_expr_t ref) {
         _var_type(e, ((ExprVar *)_P(e, ref))->var_id, &t);
         break;
     case EXPR_CONST: {
-        uint16_t w; uint8_t s;
+        uint32_t w; uint8_t s;
         dvs_sv_const_type((ExprConst *)_P(e, ref), &w, &s);
         t.w = w; t.s = s;
         break;
     }
     case EXPR_CONST_WIDE: {
         const ExprConstWide *ec = (const ExprConstWide *)_P(e, ref);
-        t.w = (uint16_t)ec->width; t.s = ec->is_signed ? 1 : 0;
+        t.w = (uint32_t)ec->width; t.s = ec->is_signed ? 1 : 0;
         break;
     }
     case EXPR_BINARY: {
@@ -207,12 +207,12 @@ static ETy _type(E *e, dvs_expr_t ref) {
     }
     case EXPR_EXTRACT: {
         ExprExtract *ex = (ExprExtract *)_P(e, ref);
-        t.w = (uint16_t)(ex->hi_bit - ex->lo_bit + 1);
+        t.w = (uint32_t)(ex->hi_bit - ex->lo_bit + 1);
         break;
     }
     case EXPR_CONCAT: {
         ExprConcat *ec = (ExprConcat *)_P(e, ref);
-        t.w = (uint16_t)(_type(e, ec->hi).w + ec->lo_width);
+        t.w = (uint32_t)(_type(e, ec->hi).w + ec->lo_width);
         break;
     }
     default:
@@ -227,7 +227,7 @@ static ETy _type(E *e, dvs_expr_t ref) {
 /* Term writers                                                        */
 /* ------------------------------------------------------------------ */
 
-void dvs_smt2_emit_value(DvsOBuf *out, int64_t value, uint16_t w) {
+void dvs_smt2_emit_value(DvsOBuf *out, int64_t value, uint32_t w) {
     uint64_t u = (uint64_t)value;
     if (w < 64) u &= (((uint64_t)1) << w) - 1;
     dvs_ob_printf(out, "(_ bv%" PRIu64 " %u)", u, (unsigned)w);
@@ -235,7 +235,7 @@ void dvs_smt2_emit_value(DvsOBuf *out, int64_t value, uint16_t w) {
 
 /* Open a conversion of a term of (from_w, from_s) to width to_w: extension by
  * the source's signedness, or truncation. Returns the number of ')' to close. */
-static int _conv_open(DvsOBuf *o, uint16_t from_w, uint8_t from_s, uint16_t to_w) {
+static int _conv_open(DvsOBuf *o, uint32_t from_w, uint8_t from_s, uint32_t to_w) {
     if (to_w > from_w) {
         dvs_ob_printf(o, "((_ %s %u) ", from_s ? "sign_extend" : "zero_extend",
                       (unsigned)(to_w - from_w));
@@ -249,12 +249,12 @@ static int _conv_open(DvsOBuf *o, uint16_t from_w, uint8_t from_s, uint16_t to_w
 }
 static void _close(DvsOBuf *o, int n) { while (n-- > 0) dvs_ob_add(o, ")", 1); }
 
-static void _val(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o);
-static void _val_raw(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o);
+static void _val(E *e, dvs_expr_t ref, uint32_t W, uint8_t S, DvsOBuf *o);
+static void _val_raw(E *e, dvs_expr_t ref, uint32_t W, uint8_t S, DvsOBuf *o);
 static void _truth(E *e, dvs_expr_t ref, DvsOBuf *o);
 static void _bool(E *e, dvs_expr_t ref, DvsOBuf *o);
 
-static void _var_term(E *e, uint32_t id, uint16_t W, DvsOBuf *o) {
+static void _var_term(E *e, uint32_t id, uint32_t W, DvsOBuf *o) {
     ETy t;
     _var_type(e, id, &t);
     int c = _conv_open(o, t.w, t.s, W);
@@ -265,7 +265,7 @@ static void _var_term(E *e, uint32_t id, uint16_t W, DvsOBuf *o) {
 /* `l op r` for a comparison, in the comparison's own context. */
 static void _cmp(E *e, dvs_binop_t op, dvs_expr_t l, dvs_expr_t r, DvsOBuf *o) {
     ETy a = _type(e, l), b = _type(e, r);
-    uint16_t w = a.w > b.w ? a.w : b.w;
+    uint32_t w = a.w > b.w ? a.w : b.w;
     uint8_t  s = (uint8_t)(a.s && b.s);
     const char *f;
     switch (op) {
@@ -285,8 +285,8 @@ static void _cmp(E *e, dvs_binop_t op, dvs_expr_t l, dvs_expr_t r, DvsOBuf *o) {
 }
 
 /* Smallest width holding the unsigned value n. */
-static uint16_t _bits_for(uint64_t n) {
-    uint16_t b = 1;
+static uint32_t _bits_for(uint64_t n) {
+    uint32_t b = 1;
     while (b < 64 && (n >> b)) b++;
     return b;
 }
@@ -301,12 +301,12 @@ static void _aggregate(E *e, dvs_expr_t ref, DvsOBuf *o) {
         ExprSum *es = (ExprSum *)_P(e, ref);
         const dvs_expr_t *xs = (const dvs_expr_t *)(es + 1);
         ETy rt = _type(e, es->result);
-        uint16_t mw = rt.w;
+        uint32_t mw = rt.w;
         for (uint32_t i = 0; i < es->n_vars; i++) {
             ETy t = _type(e, xs[i]);
             if (t.w > mw) mw = t.w;
         }
-        uint16_t W = (uint16_t)(mw + _bits_for((uint64_t)es->n_vars + 1) + 1);
+        uint32_t W = (uint32_t)(mw + _bits_for((uint64_t)es->n_vars + 1) + 1);
         dvs_ob_str(o, "(= ");
         _val(e, es->result, W, rt.s, o);
         dvs_ob_add(o, " ", 1);
@@ -326,11 +326,11 @@ static void _aggregate(E *e, dvs_expr_t ref, DvsOBuf *o) {
     case EXPR_COUNTONES: {
         ExprCountones *ec = (ExprCountones *)_P(e, ref);
         ETy xt = _type(e, ec->operand), rt = _type(e, ec->result);
-        uint16_t W = (uint16_t)((rt.w > _bits_for(xt.w) ? rt.w : _bits_for(xt.w)) + 1);
+        uint32_t W = (uint32_t)((rt.w > _bits_for(xt.w) ? rt.w : _bits_for(xt.w)) + 1);
         dvs_ob_str(o, "(= ");
         _val(e, ec->result, W, rt.s, o);
         dvs_ob_str(o, " (bvadd");
-        for (uint16_t i = 0; i < xt.w; i++) {
+        for (uint32_t i = 0; i < xt.w; i++) {
             dvs_ob_printf(o, " ((_ zero_extend %u) ((_ extract %u %u) ",
                           (unsigned)(W - 1), (unsigned)i, (unsigned)i);
             _val(e, ec->operand, xt.w, xt.s, o);
@@ -346,12 +346,12 @@ static void _aggregate(E *e, dvs_expr_t ref, DvsOBuf *o) {
         ExprClog2 *ec = (ExprClog2 *)_P(e, ref);
         ETy xt = _type(e, ec->operand), rt = _type(e, ec->result);
         if (xt.w > 64) { _fail(e, "clog2 of a value wider than 64 bits"); dvs_ob_str(o, "false"); return; }
-        uint16_t XW = (uint16_t)(xt.w + 1);
-        uint16_t W = (uint16_t)((rt.w > _bits_for(xt.w) ? rt.w : _bits_for(xt.w)) + 1);
+        uint32_t XW = (uint32_t)(xt.w + 1);
+        uint32_t W = (uint32_t)((rt.w > _bits_for(xt.w) ? rt.w : _bits_for(xt.w)) + 1);
         dvs_ob_str(o, "(= ");
         _val(e, ec->result, W, rt.s, o);
         dvs_ob_add(o, " ", 1);
-        for (uint16_t k = 0; k < xt.w; k++) {
+        for (uint32_t k = 0; k < xt.w; k++) {
             dvs_ob_printf(o, "(ite (bvule ((_ zero_extend 1) ");
             _val(e, ec->operand, xt.w, xt.s, o);
             dvs_ob_printf(o, ") (_ bv%" PRIu64 " %u)) ", ((uint64_t)1) << k, (unsigned)XW);
@@ -367,14 +367,14 @@ static void _aggregate(E *e, dvs_expr_t ref, DvsOBuf *o) {
         /* result == base[index]; an index outside the array is false. */
         ExprArraySelect *as = (ExprArraySelect *)_P(e, ref);
         ETy it = _type(e, as->index), rt = _type(e, as->result);
-        uint16_t iw = it.w > 32 ? it.w : 32;     /* the index vs an int literal */
+        uint32_t iw = it.w > 32 ? it.w : 32;     /* the index vs an int literal */
         if (as->n_elems == 0) { dvs_ob_str(o, "false"); return; }
         dvs_ob_str(o, "(or");
         for (uint32_t i = 0; i < as->n_elems; i++) {
             ETy vt;
             uint32_t vid = as->base_var_id + i;
             _var_type(e, vid, &vt);
-            uint16_t w = rt.w > vt.w ? rt.w : vt.w;
+            uint32_t w = rt.w > vt.w ? rt.w : vt.w;
             dvs_ob_str(o, " (and (= ");
             _val(e, as->index, iw, it.s, o);
             dvs_ob_add(o, " ", 1);
@@ -459,7 +459,7 @@ static void _bool_raw(E *e, dvs_expr_t ref, DvsOBuf *o) {
 /* A node with more than one parent becomes a define-fun, so a shared DAG is
  * not expanded into a tree. `mode` 0: value at (W, S); 1: Bool. Returns 1 when
  * the reference to the definition was written. */
-static int _shared(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, int mode, DvsOBuf *o) {
+static int _shared(E *e, dvs_expr_t ref, uint32_t W, uint8_t S, int mode, DvsOBuf *o) {
     uint32_t uses = 0;
     _map_get(&e->uses, (uint64_t)ref + 1, &uses);
     if (uses < 2) return 0;
@@ -505,7 +505,7 @@ static void _truth(E *e, dvs_expr_t ref, DvsOBuf *o) {
     dvs_ob_str(o, "))");
 }
 
-static void _val_raw(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
+static void _val_raw(E *e, dvs_expr_t ref, uint32_t W, uint8_t S, DvsOBuf *o) {
     if (_is_boolish(e, ref)) {
         dvs_ob_str(o, "(ite ");
         _bool(e, ref, o);
@@ -519,7 +519,7 @@ static void _val_raw(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
     switch (_kind(e, ref)) {
     case EXPR_CONST: {
         ExprConst *ec = (ExprConst *)_P(e, ref);
-        uint16_t cw; uint8_t cs;
+        uint32_t cw; uint8_t cs;
         dvs_sv_const_type(ec, &cw, &cs);
         int c = _conv_open(o, cw, cs, W);
         if (cw <= 64) {
@@ -537,7 +537,7 @@ static void _val_raw(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
     }
     case EXPR_CONST_WIDE: {
         const ExprConstWide *ec = (const ExprConstWide *)_P(e, ref);
-        int c = _conv_open(o, (uint16_t)ec->width, ec->is_signed, W);
+        int c = _conv_open(o, (uint32_t)ec->width, ec->is_signed, W);
         dvs_ob_str(o, "#b");
         for (uint32_t i = ec->width; i-- > 0; )
             dvs_ob_add(o, dvs_const_wide_bit(ec, i) ? "1" : "0", 1);
@@ -660,7 +660,7 @@ static void _val_raw(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
          * own signedness; its low to_bits bits, read at the cast's. */
         ExprCast *ec = (ExprCast *)_P(e, ref);
         ETy ot = _type(e, ec->operand);
-        uint16_t ow = ot.w > ec->to_bits ? ot.w : ec->to_bits;
+        uint32_t ow = ot.w > ec->to_bits ? ot.w : ec->to_bits;
         if (ec->to_bits == 0) { _fail(e, "zero-width cast"); dvs_smt2_emit_value(o, 0, W); return; }
         int c2 = _conv_open(o, ec->to_bits, ec->to_signed ? 1 : 0, W);
         int c1 = _conv_open(o, ow, ot.s, ec->to_bits);
@@ -674,8 +674,8 @@ static void _val_raw(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
         ExprExtract *ex = (ExprExtract *)_P(e, ref);
         ETy ot = _type(e, ex->operand);
         if (ex->hi_bit < ex->lo_bit) { _fail(e, "bad extract"); dvs_smt2_emit_value(o, 0, W); return; }
-        uint16_t w = (uint16_t)(ex->hi_bit - ex->lo_bit + 1);
-        uint16_t ew = ot.w > ex->hi_bit + 1 ? ot.w : (uint16_t)(ex->hi_bit + 1);
+        uint32_t w = (uint32_t)(ex->hi_bit - ex->lo_bit + 1);
+        uint32_t ew = ot.w > ex->hi_bit + 1 ? ot.w : (uint32_t)(ex->hi_bit + 1);
         int c2 = _conv_open(o, w, 0, W);
         dvs_ob_printf(o, "((_ extract %u %u) ", (unsigned)ex->hi_bit, (unsigned)ex->lo_bit);
         int c1 = _conv_open(o, ot.w, ot.s, ew);
@@ -687,7 +687,7 @@ static void _val_raw(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
         ExprConcat *ec = (ExprConcat *)_P(e, ref);
         ETy ht = _type(e, ec->hi), lt = _type(e, ec->lo);
         if (ec->lo_width == 0) { _fail(e, "zero-width concat"); dvs_smt2_emit_value(o, 0, W); return; }
-        int c2 = _conv_open(o, (uint16_t)(ht.w + ec->lo_width), 0, W);
+        int c2 = _conv_open(o, (uint32_t)(ht.w + ec->lo_width), 0, W);
         dvs_ob_str(o, "(concat ");
         _val(e, ec->hi, ht.w, ht.s, o);
         dvs_ob_add(o, " ", 1);
@@ -703,7 +703,7 @@ static void _val_raw(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
     }
 }
 
-static void _val(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
+static void _val(E *e, dvs_expr_t ref, uint32_t W, uint8_t S, DvsOBuf *o) {
     if (W == 0) W = 1;
     if (ref == EXPR_NULL) { _fail(e, "null expression"); dvs_smt2_emit_value(o, 0, W); return; }
     if (_deep(e)) { dvs_smt2_emit_value(o, 0, W); return; }
@@ -767,9 +767,9 @@ static void _count(E *e, dvs_expr_t ref) {
 /* Entry points                                                        */
 /* ------------------------------------------------------------------ */
 
-void dvs_smt2_emit_var_decl(DvsOBuf *out, uint32_t id, uint16_t width,
+void dvs_smt2_emit_var_decl(DvsOBuf *out, uint32_t id, uint32_t width,
                             uint8_t is_signed, int64_t lo, int64_t hi) {
-    uint16_t w = width ? width : 1;
+    uint32_t w = width ? width : 1;
     dvs_ob_printf(out, "(declare-const v%u (_ BitVec %u))\n", id, (unsigned)w);
     if (w > 64) return;
     /* An unsigned 64-bit variable's bounds are bit patterns. */
@@ -855,7 +855,7 @@ int dvs_smt2_emit_asserts(const dvs_problem_t *p, dvs_emit_var_type_fn fn,
                 ETy a, b;
                 _var_type(&e, ids[i], &a);
                 _var_type(&e, ids[j], &b);
-                uint16_t w = a.w > b.w ? a.w : b.w;
+                uint32_t w = a.w > b.w ? a.w : b.w;
                 dvs_ob_str(out, " (distinct ");
                 _var_term(&e, ids[i], w, out);
                 dvs_ob_add(out, " ", 1);

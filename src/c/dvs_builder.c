@@ -529,7 +529,7 @@ void dvs_builder_free_problem(dvs_builder_t *b, dvs_problem_t *sp, size_t size) 
 /* ------------------------------------------------------------------ */
 
 dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value,
-                                 uint8_t is_signed, uint16_t width) {
+                                 uint8_t is_signed, uint32_t width) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprConst),
                                 (uint32_t)_Alignof(ExprConst));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -549,11 +549,12 @@ dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value,
 dvs_expr_t dvs_builder_expr_const_wide(dvs_builder_t *b, uint32_t n_limbs,
                                        const uint64_t *limbs, uint32_t width,
                                        uint8_t is_signed) {
-    if (width == 0 || width > 65535u || !limbs || n_limbs != (width + 63u) / 64u)
+    if (width == 0 || width > DVS_MAX_WIDTH || !limbs
+        || n_limbs != (width + 63u) / 64u)
         return EXPR_NULL;
     if (width <= 64)
         return dvs_builder_expr_const_sized(b, (int64_t)limbs[0],
-                                            is_signed ? 1 : 0, (uint16_t)width);
+                                            is_signed ? 1 : 0, (uint32_t)width);
     dvs_expr_t ref = dvs_builder_alloc(b,
         (uint32_t)(sizeof(ExprConstWide) + n_limbs * sizeof(uint64_t)),
         (uint32_t)_Alignof(ExprConstWide));
@@ -690,7 +691,7 @@ dvs_expr_t dvs_builder_expr_in_ranges(dvs_builder_t *b, dvs_expr_t value,
 }
 
 dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
-                            uint16_t from_bits, uint16_t to_bits,
+                            uint32_t from_bits, uint32_t to_bits,
                             uint8_t sign_extend) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprExtend),
                                 (uint32_t)_Alignof(ExprExtend));
@@ -703,13 +704,13 @@ dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
     n->sign_extend = sign_extend;
     n->from_bits   = from_bits;
     n->to_bits     = to_bits;
-    n->_p8 = 0; n->_p16 = 0;
+    n->_p8 = 0;
     n->operand     = operand;
     return ref;
 }
 
 dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand,
-                                 uint16_t to_bits, uint8_t to_signed) {
+                                 uint32_t to_bits, uint8_t to_signed) {
     if (to_bits == 0) return EXPR_NULL;
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprCast),
                                 (uint32_t)_Alignof(ExprCast));
@@ -727,7 +728,7 @@ dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand,
 }
 
 dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
-                             uint16_t from_bits, uint16_t to_bits,
+                             uint32_t from_bits, uint32_t to_bits,
                              uint8_t sign_extend, uint8_t dst_signed) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprSvCast),
                                 (uint32_t)_Alignof(ExprSvCast));
@@ -741,13 +742,13 @@ dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
     n->from_bits   = from_bits;
     n->to_bits     = to_bits;
     n->dst_signed  = dst_signed;
-    n->_p16        = 0;
+
     n->operand     = operand;
     return ref;
 }
 
 dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand,
-                             uint16_t hi_bit, uint16_t lo_bit) {
+                             uint32_t hi_bit, uint32_t lo_bit) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprExtract),
                                 (uint32_t)_Alignof(ExprExtract));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -763,7 +764,7 @@ dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand,
 }
 
 dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi,
-                            dvs_expr_t lo, uint16_t lo_width) {
+                            dvs_expr_t lo, uint32_t lo_width) {
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprConcat),
                                 (uint32_t)_Alignof(ExprConcat));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -773,7 +774,7 @@ dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi,
     ExprConcat *n = (ExprConcat *)_block_ptr_at(b->current, local);
     n->kind     = EXPR_CONCAT;
     n->lo_width = lo_width;
-    n->_p16 = 0;
+   
     n->hi       = hi;
     n->lo       = lo;
     return ref;
@@ -849,8 +850,9 @@ dvs_expr_t dvs_builder_expr_clog2(dvs_builder_t *b, dvs_expr_t result,
 /* ------------------------------------------------------------------ */
 
 dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id,
-                        uint16_t width, uint8_t is_signed,
+                        uint32_t width, uint8_t is_signed,
                         int64_t lo, int64_t hi) {
+    if (width == 0 || width > DVS_MAX_WIDTH) return EXPR_NULL;
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(VarSpec),
                                 (uint32_t)_Alignof(VarSpec));
     if (ref == EXPR_NULL) return EXPR_NULL;
@@ -980,3 +982,5 @@ dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,
     b->n_dists++;
     return ref;
 }
+
+uint32_t dvs_max_width(void) { return DVS_MAX_WIDTH; }

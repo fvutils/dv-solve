@@ -23,12 +23,12 @@
 #include "dvs_stackinfo.h"
 
 #define SV_POOL_HDR   ((uint32_t)sizeof(dvs_pool_t))
-#define SV_MAX_W      65535u    /* node formats hold widths in a uint16_t */
+#define SV_MAX_W      DVS_MAX_WIDTH   /* keeps width sums inside a uint32_t */
 /* Nesting limit where the stack cannot be measured (dvs_stack_deep); where it
  * can, the stack itself is the limit. */
 #define SV_MAX_DEPTH  20000
 
-void dvs_sv_const_type(const ExprConst *c, uint16_t *width, uint8_t *is_signed) {
+void dvs_sv_const_type(const ExprConst *c, uint32_t *width, uint8_t *is_signed) {
     if (c->width) {
         *width = c->width;
         *is_signed = c->is_signed ? 1 : 0;
@@ -43,7 +43,7 @@ void dvs_sv_const_type(const ExprConst *c, uint16_t *width, uint8_t *is_signed) 
     *is_signed = (v < 0 || c->is_signed) ? 1 : 0;
 }
 
-int64_t dvs_sv_wrap(int64_t v, uint16_t width, uint8_t is_signed) {
+int64_t dvs_sv_wrap(int64_t v, uint32_t width, uint8_t is_signed) {
     if (width == 0 || width >= 64) return v;
     uint64_t m = ((uint64_t)1 << width) - 1;
     uint64_t u = (uint64_t)v & m;
@@ -55,7 +55,7 @@ int64_t dvs_sv_wrap(int64_t v, uint16_t width, uint8_t is_signed) {
 /* Elaboration state                                                   */
 /* ------------------------------------------------------------------ */
 
-typedef struct { uint16_t w; uint8_t s; } SvTy;
+typedef struct { uint32_t w; uint8_t s; } SvTy;
 
 typedef struct {
     uint64_t key;
@@ -70,7 +70,7 @@ typedef struct {
 
     dvs_sv_var_type_fn vfn;
     void              *vud;
-    uint16_t *vw;              /* VarSpec widths, by var id     */
+    uint32_t *vw;              /* VarSpec widths, by var id     */
     uint8_t  *vs;              /* VarSpec signedness            */
     uint8_t  *vk;              /* 1 if a VarSpec exists          */
     uint32_t  nv;
@@ -98,7 +98,7 @@ static ExprKind _kind(SvE *E, dvs_expr_t r) {
 
 /* ---- memo -------------------------------------------------------- */
 
-static uint64_t _key(dvs_expr_t r, uint16_t w, uint8_t s, int mode) {
+static uint64_t _key(dvs_expr_t r, uint32_t w, uint8_t s, int mode) {
     return ((uint64_t)r << 32) | ((uint64_t)w << 8) | ((uint64_t)s << 4)
          | (uint64_t)mode;
 }
@@ -185,7 +185,7 @@ static dvs_expr_t _alloc(SvE *E, uint32_t bytes, uint32_t align) {
     return SV_POOL_HDR + base;
 }
 
-static dvs_expr_t _mk_const(SvE *E, int64_t v, uint8_t s, uint16_t w) {
+static dvs_expr_t _mk_const(SvE *E, int64_t v, uint8_t s, uint32_t w) {
     if (w > SV_MAX_W) { E->err = 1; return EXPR_NULL; }
     dvs_expr_t r = _alloc(E, sizeof(ExprConst), _Alignof(ExprConst));
     if (r == EXPR_NULL) return r;
@@ -227,7 +227,7 @@ static dvs_expr_t _mk_ite(SvE *E, dvs_expr_t c, dvs_expr_t t, dvs_expr_t e) {
     return r;
 }
 
-static dvs_expr_t _mk_ext(SvE *E, dvs_expr_t x, uint16_t from, uint16_t to,
+static dvs_expr_t _mk_ext(SvE *E, dvs_expr_t x, uint32_t from, uint32_t to,
                        uint8_t sext) {
     if (x == EXPR_NULL || from > SV_MAX_W || to > SV_MAX_W) {
         E->err = 1; return EXPR_NULL;
@@ -236,12 +236,12 @@ static dvs_expr_t _mk_ext(SvE *E, dvs_expr_t x, uint16_t from, uint16_t to,
     if (r == EXPR_NULL) return r;
     ExprExtend *n = (ExprExtend *)_P(E, r);
     n->kind = EXPR_EXTEND; n->sign_extend = sext;
-    n->from_bits = from; n->to_bits = to; n->_p8 = 0; n->_p16 = 0;
+    n->from_bits = from; n->to_bits = to; n->_p8 = 0;
     n->operand = x;
     return r;
 }
 
-static dvs_expr_t _mk_cast(SvE *E, dvs_expr_t x, uint16_t from, uint16_t to,
+static dvs_expr_t _mk_cast(SvE *E, dvs_expr_t x, uint32_t from, uint32_t to,
                         uint8_t sext, uint8_t dst_s) {
     if (x == EXPR_NULL || from > SV_MAX_W || to > SV_MAX_W) {
         E->err = 1; return EXPR_NULL;
@@ -250,12 +250,12 @@ static dvs_expr_t _mk_cast(SvE *E, dvs_expr_t x, uint16_t from, uint16_t to,
     if (r == EXPR_NULL) return r;
     ExprSvCast *n = (ExprSvCast *)_P(E, r);
     n->kind = EXPR_SV_CAST; n->sign_extend = sext;
-    n->from_bits = from; n->to_bits = to; n->_p16 = 0;
+    n->from_bits = from; n->to_bits = to;
     n->dst_signed = dst_s; n->operand = x;
     return r;
 }
 
-static dvs_expr_t _mk_extract(SvE *E, dvs_expr_t x, uint16_t hi, uint16_t lo) {
+static dvs_expr_t _mk_extract(SvE *E, dvs_expr_t x, uint32_t hi, uint32_t lo) {
     if (x == EXPR_NULL) { E->err = 1; return EXPR_NULL; }
     dvs_expr_t r = _alloc(E, sizeof(ExprExtract), _Alignof(ExprExtract));
     if (r == EXPR_NULL) return r;
@@ -265,12 +265,12 @@ static dvs_expr_t _mk_extract(SvE *E, dvs_expr_t x, uint16_t hi, uint16_t lo) {
     return r;
 }
 
-static dvs_expr_t _mk_concat(SvE *E, dvs_expr_t hi, dvs_expr_t lo, uint16_t lo_w) {
+static dvs_expr_t _mk_concat(SvE *E, dvs_expr_t hi, dvs_expr_t lo, uint32_t lo_w) {
     if (hi == EXPR_NULL || lo == EXPR_NULL) { E->err = 1; return EXPR_NULL; }
     dvs_expr_t r = _alloc(E, sizeof(ExprConcat), _Alignof(ExprConcat));
     if (r == EXPR_NULL) return r;
     ExprConcat *n = (ExprConcat *)_P(E, r);
-    n->kind = EXPR_CONCAT; n->lo_width = lo_w; n->_p16 = 0;
+    n->kind = EXPR_CONCAT; n->lo_width = lo_w;
     n->hi = hi; n->lo = lo;
     return r;
 }
@@ -338,7 +338,7 @@ static SvTy _var_type(SvE *E, uint32_t vid) {
         return t;
     }
     if (E->vfn) {
-        uint16_t w; uint8_t s;
+        uint32_t w; uint8_t s;
         if (E->vfn(E->vud, vid, &w, &s) == 0) { t.w = w; t.s = s ? 1 : 0; return t; }
     }
     E->err = E->unknown_var = 1;   /* cannot type the expression */
@@ -351,7 +351,7 @@ static SvTy _type(SvE *E, dvs_expr_t ref) {
     if (ref == EXPR_NULL || E->err) return t;
     uint64_t k = _key(ref, 0, 0, M_TYPE);
     uint32_t mv;
-    if (_memo_get(E, k, &mv)) { t.w = (uint16_t)(mv >> 8); t.s = (uint8_t)(mv & 1); return t; }
+    if (_memo_get(E, k, &mv)) { t.w = (uint32_t)(mv >> 8); t.s = (uint8_t)(mv & 1); return t; }
     if (dvs_stack_deep(&E->sg, ++E->depth, SV_MAX_DEPTH)) { E->err = 1; E->depth--; return t; }
 
     switch (_kind(E, ref)) {
@@ -359,7 +359,7 @@ static SvTy _type(SvE *E, dvs_expr_t ref) {
         t = _var_type(E, ((ExprVar *)_P(E, ref))->var_id);
         break;
     case EXPR_CONST: {
-        uint16_t w; uint8_t s;
+        uint32_t w; uint8_t s;
         dvs_sv_const_type((ExprConst *)_P(E, ref), &w, &s);
         t.w = w; t.s = s;
         break;
@@ -367,7 +367,7 @@ static SvTy _type(SvE *E, dvs_expr_t ref) {
     case EXPR_CONST_WIDE: {
         const ExprConstWide *c = (const ExprConstWide *)_P(E, ref);
         if (c->width > SV_MAX_W) { E->err = 1; break; }
-        t.w = (uint16_t)c->width; t.s = c->is_signed ? 1 : 0;
+        t.w = (uint32_t)c->width; t.s = c->is_signed ? 1 : 0;
         break;
     }
     case EXPR_BINARY: {
@@ -413,14 +413,14 @@ static SvTy _type(SvE *E, dvs_expr_t ref) {
     case EXPR_EXTRACT: {
         ExprExtract x = *(ExprExtract *)_P(E, ref);
         if (x.hi_bit < x.lo_bit) { E->err = 1; break; }
-        t.w = (uint16_t)(x.hi_bit - x.lo_bit + 1); t.s = 0;
+        t.w = (uint32_t)(x.hi_bit - x.lo_bit + 1); t.s = 0;
         break;
     }
     case EXPR_CONCAT: {
         ExprConcat x = *(ExprConcat *)_P(E, ref);
         uint32_t cw = (uint32_t)_type(E, x.hi).w + x.lo_width;
         if (cw > SV_MAX_W) { E->err = 1; break; }   /* a width would wrap */
-        t.w = (uint16_t)cw; t.s = 0;
+        t.w = (uint32_t)cw; t.s = 0;
         break;
     }
     default:
@@ -448,11 +448,11 @@ static dvs_expr_t _nonzero(SvE *E, dvs_expr_t ref) {
     return _cmp(E, DVS_BIN_NEQ, ref, z, EXPR_NULL);
 }
 
-static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint16_t W, uint8_t S);
+static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint32_t W, uint8_t S);
 static dvs_expr_t _bool(SvE *E, dvs_expr_t ref);
 
 /* Convert an already-elaborated node to the context (W, S). */
-static dvs_expr_t _conv(SvE *E, dvs_expr_t x, uint16_t W, uint8_t S) {
+static dvs_expr_t _conv(SvE *E, dvs_expr_t x, uint32_t W, uint8_t S) {
     if (x == EXPR_NULL || E->err) return EXPR_NULL;
     SvTy t = _type(E, x);
     if (t.s == S && t.w <= W) return x;
@@ -460,16 +460,16 @@ static dvs_expr_t _conv(SvE *E, dvs_expr_t x, uint16_t W, uint8_t S) {
 }
 
 /* Value-preserving widening of an elaborated node to width W. */
-static dvs_expr_t _widen(SvE *E, dvs_expr_t x, uint16_t W) {
+static dvs_expr_t _widen(SvE *E, dvs_expr_t x, uint32_t W) {
     if (x == EXPR_NULL || E->err) return EXPR_NULL;
     SvTy t = _type(E, x);
     if (t.w >= W) return x;
     return _mk_ext(E, x, t.w, W, t.s);
 }
 
-static dvs_expr_t _val_const(SvE *E, dvs_expr_t ref, uint16_t W, uint8_t S) {
+static dvs_expr_t _val_const(SvE *E, dvs_expr_t ref, uint32_t W, uint8_t S) {
     ExprConst c = *(ExprConst *)_P(E, ref);
-    uint16_t cw; uint8_t cs;
+    uint32_t cw; uint8_t cs;
     dvs_sv_const_type(&c, &cw, &cs);
     int64_t own = dvs_sv_wrap(c.value, cw, cs);
     if (W <= 64) {
@@ -488,7 +488,7 @@ static dvs_expr_t _val_const(SvE *E, dvs_expr_t ref, uint16_t W, uint8_t S) {
     return _conv(E, base, W, S);
 }
 
-static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint16_t W, uint8_t S) {
+static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint32_t W, uint8_t S) {
     if (ref == EXPR_NULL || E->err) { E->err = 1; return EXPR_NULL; }
     uint64_t k = _key(ref, W, S, M_VAL);
     uint32_t mv;
@@ -607,14 +607,14 @@ static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint16_t W, uint8_t S) {
          * signedness, and read at the cast's signedness. */
         ExprCast x = *(ExprCast *)_P(E, ref);
         SvTy ot = _type(E, x.operand);
-        uint16_t ow = ot.w > x.to_bits ? ot.w : x.to_bits;
+        uint32_t ow = ot.w > x.to_bits ? ot.w : x.to_bits;
         dvs_expr_t o = _val(E, x.operand, ow, ot.s);
         if (E->err) break;
         SvTy vt = _type(E, o);
         dvs_expr_t n;
         if (vt.w > x.to_bits) {
             if (vt.w > SV_MAX_W) { E->err = 1; break; }
-            n = _mk_extract(E, o, (uint16_t)(x.to_bits - 1), 0);
+            n = _mk_extract(E, o, (uint32_t)(x.to_bits - 1), 0);
             if (x.to_signed)
                 n = _mk_cast(E, n, x.to_bits, x.to_bits, 0, 1);
         } else {
@@ -765,7 +765,7 @@ static dvs_expr_t _cmp_var_wide(SvE *E, dvs_binop_t op, dvs_expr_t l0,
 /* Comparison `l op r` in its own SV context. */
 static dvs_expr_t _cmp(SvE *E, dvs_binop_t op, dvs_expr_t l0, dvs_expr_t r0, dvs_expr_t reuse) {
     SvTy lt = _type(E, l0), rt = _type(E, r0);
-    uint16_t W = lt.w > rt.w ? lt.w : rt.w;
+    uint32_t W = lt.w > rt.w ? lt.w : rt.w;
     uint8_t  S = (uint8_t)(lt.s && rt.s);
     if (W > 64) {
         dvs_expr_t n = _cmp_var_wide(E, op, l0, r0, S);
@@ -993,7 +993,7 @@ dvs_problem_t *dvs_sv_elaborate(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
     }
     if (any) {
         E.nv = max_id + 1;
-        E.vw = (uint16_t *)calloc(E.nv, sizeof(uint16_t));
+        E.vw = (uint32_t *)calloc(E.nv, sizeof(uint32_t));
         E.vs = (uint8_t *)calloc(E.nv, 1);
         E.vk = (uint8_t *)calloc(E.nv, 1);
         if (!E.vw || !E.vs || !E.vk) E.err = E.oom = 1;
@@ -1079,7 +1079,7 @@ int dvs_sv_elaborate_more(dvs_problem_t **elab, const dvs_problem_t *orig,
     }
     if (any) {
         E.nv = max_id + 1;
-        E.vw = (uint16_t *)calloc(E.nv, sizeof(uint16_t));
+        E.vw = (uint32_t *)calloc(E.nv, sizeof(uint32_t));
         E.vs = (uint8_t *)calloc(E.nv, 1);
         E.vk = (uint8_t *)calloc(E.nv, 1);
         if (!E.vw || !E.vs || !E.vk) E.err = E.oom = 1;
@@ -1122,12 +1122,12 @@ void dvs_sv_release(dvs_problem_t *orig, dvs_problem_t *elab) {
  * variable `var` (`vw` bits wide); bits avail.. of x are zero. */
 typedef struct {
     dvs_expr_t var;
-    uint16_t   vw;
-    uint16_t   off;
-    uint16_t   avail;
+    uint32_t   vw;
+    uint32_t   off;
+    uint32_t   avail;
 } MrwSrc;
 
-static int _mrw_src(SvE *E, dvs_expr_t x, uint16_t W, MrwSrc *o, int depth) {
+static int _mrw_src(SvE *E, dvs_expr_t x, uint32_t W, MrwSrc *o, int depth) {
     if (x == EXPR_NULL || depth > 8) return 0;
     switch (_kind(E, x)) {
     case EXPR_VAR: {
@@ -1149,7 +1149,7 @@ static int _mrw_src(SvE *E, dvs_expr_t x, uint16_t W, MrwSrc *o, int depth) {
         ExprSvCast c = *(ExprSvCast *)_P(E, x);
         if (c.to_bits > c.from_bits && c.sign_extend) return 0;
         if (!_mrw_src(E, c.operand, c.from_bits, o, depth + 1)) return 0;
-        uint16_t keep = c.to_bits < c.from_bits ? c.to_bits : c.from_bits;
+        uint32_t keep = c.to_bits < c.from_bits ? c.to_bits : c.from_bits;
         if (o->avail > keep) o->avail = keep;
         return 1;
     }
@@ -1159,9 +1159,9 @@ static int _mrw_src(SvE *E, dvs_expr_t x, uint16_t W, MrwSrc *o, int depth) {
         if (E->err || e.hi_bit < e.lo_bit || e.hi_bit >= ot.w) return 0;
         if (!_mrw_src(E, e.operand, ot.w, o, depth + 1)) return 0;
         if (e.lo_bit >= o->avail) return 0;       /* all zero: leave it */
-        o->off = (uint16_t)(o->off + e.lo_bit);
-        o->avail = (uint16_t)(o->avail - e.lo_bit);
-        uint16_t ew = (uint16_t)(e.hi_bit - e.lo_bit + 1);
+        o->off = (uint32_t)(o->off + e.lo_bit);
+        o->avail = (uint32_t)(o->avail - e.lo_bit);
+        uint32_t ew = (uint32_t)(e.hi_bit - e.lo_bit + 1);
         if (o->avail > ew) o->avail = ew;
         return 1;
     }
@@ -1173,8 +1173,8 @@ static int _mrw_src(SvE *E, dvs_expr_t x, uint16_t W, MrwSrc *o, int depth) {
         int64_t k = ((ExprConst *)_P(E, b.rhs))->value;
         if (!_mrw_src(E, b.lhs, W, o, depth + 1)) return 0;
         if (k < 0 || k >= o->avail) return 0;     /* all zero: leave it */
-        o->off = (uint16_t)(o->off + k);
-        o->avail = (uint16_t)(o->avail - k);
+        o->off = (uint32_t)(o->off + k);
+        o->avail = (uint32_t)(o->avail - k);
         return 1;
     }
     default:
@@ -1183,17 +1183,17 @@ static int _mrw_src(SvE *E, dvs_expr_t x, uint16_t W, MrwSrc *o, int depth) {
 }
 
 /* Bits [h:l] of x, all within src->avail: the variable itself or an extract. */
-static dvs_expr_t _mrw_field(SvE *E, const MrwSrc *s, uint16_t h, uint16_t l) {
-    uint16_t vh = (uint16_t)(h + s->off), vl = (uint16_t)(l + s->off);
+static dvs_expr_t _mrw_field(SvE *E, const MrwSrc *s, uint32_t h, uint32_t l) {
+    uint32_t vh = (uint32_t)(h + s->off), vl = (uint32_t)(l + s->off);
     if (vl == 0 && vh == s->vw - 1) return s->var;
     return _mk_extract(E, s->var, vh, vl);
 }
 
 /* The value of a constant leaf as a W-bit pattern. */
-static int _mrw_const(SvE *E, dvs_expr_t c, uint16_t W, uint64_t *out) {
+static int _mrw_const(SvE *E, dvs_expr_t c, uint32_t W, uint64_t *out) {
     if (c == EXPR_NULL || _kind(E, c) != EXPR_CONST) return 0;
     ExprConst *k = (ExprConst *)_P(E, c);
-    uint16_t w; uint8_t s;
+    uint32_t w; uint8_t s;
     dvs_sv_const_type(k, &w, &s);
     if (w > 64 || W > 64) return 0;
     uint64_t m = W >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << W) - 1);
@@ -1202,27 +1202,27 @@ static int _mrw_const(SvE *E, dvs_expr_t c, uint16_t W, uint64_t *out) {
 }
 
 /* Runs of set bits of m (below W), low to high. */
-static int _mrw_runs(uint64_t m, uint16_t W, uint16_t *lo, uint16_t *hi) {
+static int _mrw_runs(uint64_t m, uint32_t W, uint32_t *lo, uint32_t *hi) {
     int n = 0;
-    for (uint16_t i = 0; i < W; ) {
+    for (uint32_t i = 0; i < W; ) {
         if (!((m >> i) & 1u)) { i++; continue; }
-        uint16_t j = i;
+        uint32_t j = i;
         while (j + 1 < W && ((m >> (j + 1)) & 1u)) j++;
         if (n == MRW_MAX_RUNS) return -1;
         lo[n] = i; hi[n] = j; n++;
-        i = (uint16_t)(j + 1);
+        i = (uint32_t)(j + 1);
     }
     return n;
 }
 
-static uint64_t _mrw_bits(uint64_t v, uint16_t h, uint16_t l) {
-    uint16_t n = (uint16_t)(h - l + 1);
+static uint64_t _mrw_bits(uint64_t v, uint32_t h, uint32_t l) {
+    uint32_t n = (uint32_t)(h - l + 1);
     return (v >> l) & (n >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << n) - 1));
 }
 
 /* `x & M` (either operand order) or, with or_form, `x | M`: x and M's
  * pattern. */
-static int _mrw_masked(SvE *E, dvs_expr_t a, uint16_t W, int or_form,
+static int _mrw_masked(SvE *E, dvs_expr_t a, uint32_t W, int or_form,
                        dvs_expr_t *x, uint64_t *m) {
     if (_kind(E, a) != EXPR_BINARY) return 0;
     ExprBinary b = *(ExprBinary *)_P(E, a);
@@ -1235,7 +1235,7 @@ static int _mrw_masked(SvE *E, dvs_expr_t a, uint16_t W, int or_form,
 /* (x & M) == V or != V over x's runs, or EXPR_NULL. For the OR form, the
  * runs are those of ~M and M's bits of V must be ones. */
 static dvs_expr_t _mrw_eq_const(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t c,
-                                uint16_t W) {
+                                uint32_t W) {
     uint64_t wm = W >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << W) - 1);
     for (int or_form = 0; or_form < 2; or_form++) {
         dvs_expr_t x; uint64_t m, v;
@@ -1248,7 +1248,7 @@ static dvs_expr_t _mrw_eq_const(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t
         }
         MrwSrc s;
         if (!_mrw_src(E, x, W, &s, 0)) return EXPR_NULL;
-        uint16_t lo[MRW_MAX_RUNS], hi[MRW_MAX_RUNS];
+        uint32_t lo[MRW_MAX_RUNS], hi[MRW_MAX_RUNS];
         int n = _mrw_runs(m, W, lo, hi);
         if (n <= 0) return EXPR_NULL;
         dvs_expr_t acc = EXPR_NULL;
@@ -1258,9 +1258,9 @@ static dvs_expr_t _mrw_eq_const(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t
                 if (_mrw_bits(v, hi[i], lo[i])) return EXPR_NULL;
                 continue;
             }
-            uint16_t h = hi[i] < s.avail ? hi[i] : (uint16_t)(s.avail - 1);
-            if (h < hi[i] && _mrw_bits(v, hi[i], (uint16_t)(h + 1))) return EXPR_NULL;
-            uint16_t n_w = (uint16_t)(h - lo[i] + 1);
+            uint32_t h = hi[i] < s.avail ? hi[i] : (uint32_t)(s.avail - 1);
+            if (h < hi[i] && _mrw_bits(v, hi[i], (uint32_t)(h + 1))) return EXPR_NULL;
+            uint32_t n_w = (uint32_t)(h - lo[i] + 1);
             dvs_expr_t f = _mrw_field(E, &s, h, lo[i]);
             dvs_expr_t k = _mk_const(E, (int64_t)_mrw_bits(v, h, lo[i]), 0, n_w);
             dvs_expr_t t = _mk_bin(E, op, f, k);
@@ -1275,13 +1275,13 @@ static dvs_expr_t _mrw_eq_const(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t
 
 /* (x & M) == (y & M) or != with one M. */
 static dvs_expr_t _mrw_eq_masked(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t b,
-                                 uint16_t W) {
+                                 uint32_t W) {
     dvs_expr_t x, y; uint64_t mx, my;
     if (!_mrw_masked(E, a, W, 0, &x, &mx) || !_mrw_masked(E, b, W, 0, &y, &my) || mx != my)
         return EXPR_NULL;
     MrwSrc sx, sy;
     if (!_mrw_src(E, x, W, &sx, 0) || !_mrw_src(E, y, W, &sy, 0)) return EXPR_NULL;
-    uint16_t lo[MRW_MAX_RUNS], hi[MRW_MAX_RUNS];
+    uint32_t lo[MRW_MAX_RUNS], hi[MRW_MAX_RUNS];
     int n = _mrw_runs(mx, W, lo, hi);
     if (n <= 0) return EXPR_NULL;
     dvs_expr_t acc = EXPR_NULL;
@@ -1302,15 +1302,15 @@ static dvs_expr_t _mrw_eq_masked(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_
  *   > K  : f >  floor(K / 2^l)     >= K : f >= ceil(K / 2^l)
  * A comparison the field's range decides either way is left as it was. */
 static dvs_expr_t _mrw_order(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t c,
-                             uint16_t W) {
+                             uint32_t W) {
     dvs_expr_t x; uint64_t m, k;
     if (!_mrw_masked(E, a, W, 0, &x, &m) || !_mrw_const(E, c, W, &k)) return EXPR_NULL;
     if (_type(E, a).s || _type(E, c).s || E->err) return EXPR_NULL;
-    uint16_t lo[MRW_MAX_RUNS], hi[MRW_MAX_RUNS];
+    uint32_t lo[MRW_MAX_RUNS], hi[MRW_MAX_RUNS];
     if (_mrw_runs(m, W, lo, hi) != 1) return EXPR_NULL;
     MrwSrc s;
     if (!_mrw_src(E, x, W, &s, 0) || hi[0] >= s.avail) return EXPR_NULL;
-    uint16_t l = lo[0], n_w = (uint16_t)(hi[0] - lo[0] + 1);
+    uint32_t l = lo[0], n_w = (uint32_t)(hi[0] - lo[0] + 1);
     uint64_t fmax = n_w >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << n_w) - 1);
     uint64_t fl = l ? k >> l : k;                               /* floor */
     uint64_t ce = fl + ((l && (k & (((uint64_t)1 << l) - 1))) ? 1 : 0);  /* ceil */
@@ -1327,7 +1327,7 @@ static dvs_expr_t _mrw_order(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t c,
 
 /* `s` read as a whole unsigned variable, zero-extended at most: that
  * variable, or EXPR_NULL. */
-static dvs_expr_t _mrw_shift_var(SvE *E, dvs_expr_t s, uint16_t *vw) {
+static dvs_expr_t _mrw_shift_var(SvE *E, dvs_expr_t s, uint32_t *vw) {
     SvTy t = _type(E, s);
     MrwSrc o;
     if (E->err || t.s || !_mrw_src(E, s, t.w, &o, 0)) return EXPR_NULL;
@@ -1337,7 +1337,7 @@ static dvs_expr_t _mrw_shift_var(SvE *E, dvs_expr_t s, uint16_t *vw) {
 }
 
 /* `1 << s`, s a whole unsigned variable: s, or EXPR_NULL. */
-static dvs_expr_t _mrw_pow2(SvE *E, dvs_expr_t a, uint16_t *vw) {
+static dvs_expr_t _mrw_pow2(SvE *E, dvs_expr_t a, uint32_t *vw) {
     if (a == EXPR_NULL || _kind(E, a) != EXPR_BINARY) return EXPR_NULL;
     ExprBinary b = *(ExprBinary *)_P(E, a);
     uint64_t one;
@@ -1357,13 +1357,13 @@ static dvs_expr_t _mrw_pow2(SvE *E, dvs_expr_t a, uint16_t *vw) {
  * variable: the slice form `s == k -> x[k-1:0] == 0` for every k, which
  * propagates like any field constraint. */
 static dvs_expr_t _mrw_align(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t c,
-                             uint16_t W) {
+                             uint32_t W) {
     uint64_t z;
     if (!_mrw_const(E, c, W, &z) || z != 0 || _kind(E, a) != EXPR_BINARY) return EXPR_NULL;
     ExprBinary b = *(ExprBinary *)_P(E, a);
     if (_type(E, a).s || E->err) return EXPR_NULL;
     dvs_expr_t x = EXPR_NULL, sv = EXPR_NULL;
-    uint16_t vw = 0;
+    uint32_t vw = 0;
     if (b.op == DVS_BIN_MOD) {
         x = b.lhs;
         sv = _mrw_pow2(E, b.rhs, &vw);
@@ -1384,11 +1384,11 @@ static dvs_expr_t _mrw_align(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t c,
     if (!_mrw_src(E, x, W, &src, 0)) return EXPR_NULL;
     dvs_expr_t acc = EXPR_NULL;
     for (uint32_t k = 1; k < (1u << vw); k++) {
-        uint16_t h = (uint16_t)(k <= src.avail ? k - 1 : src.avail - 1);
+        uint32_t h = (uint32_t)(k <= src.avail ? k - 1 : src.avail - 1);
         dvs_expr_t is_k = _mk_bin(E, op == DVS_BIN_EQ ? DVS_BIN_NEQ : DVS_BIN_EQ,
                                   sv, _mk_const(E, (int64_t)k, 0, vw));
         dvs_expr_t f = _mk_bin(E, op, _mrw_field(E, &src, h, 0),
-                               _mk_const(E, 0, 0, (uint16_t)(h + 1)));
+                               _mk_const(E, 0, 0, (uint32_t)(h + 1)));
         /* ==: s != k || x[k-1:0] == 0, all k.  !=: s == k && x[k-1:0] != 0,
          * some k. */
         dvs_expr_t t = _mk_bin(E, op == DVS_BIN_EQ ? DVS_BIN_OR : DVS_BIN_AND, is_k, f);
@@ -1530,14 +1530,14 @@ static dvs_expr_t _mrw_runmask(SvE *E, dvs_expr_t a) {
     if (E->err || t.s || t.w > 64) return EXPR_NULL;
     dvs_expr_t x; uint64_t m;
     if (!_mrw_masked(E, a, t.w, 0, &x, &m)) return EXPR_NULL;
-    uint16_t lo[MRW_MAX_RUNS], hi[MRW_MAX_RUNS];
+    uint32_t lo[MRW_MAX_RUNS], hi[MRW_MAX_RUNS];
     if (_mrw_runs(m, t.w, lo, hi) != 1) return EXPR_NULL;
     MrwSrc s;
     if (!_mrw_src(E, x, t.w, &s, 0) || lo[0] >= s.avail) return EXPR_NULL;
-    uint16_t h = hi[0] < s.avail ? hi[0] : (uint16_t)(s.avail - 1);
+    uint32_t h = hi[0] < s.avail ? hi[0] : (uint32_t)(s.avail - 1);
     if (lo[0] == 0 && h == s.avail - 1) return EXPR_NULL;   /* keeps every bit */
     dvs_expr_t f = _mrw_field(E, &s, h, lo[0]);
-    uint16_t fw = (uint16_t)(h + 1);                        /* bits [h:0] */
+    uint32_t fw = (uint32_t)(h + 1);                        /* bits [h:0] */
     if (lo[0] > 0)
         f = _mk_concat(E, f, _mk_const(E, 0, 0, lo[0]), lo[0]);
     if (fw < t.w) f = _mk_ext(E, f, fw, t.w, 0);
@@ -1551,7 +1551,7 @@ static dvs_expr_t _mrw_cmp(SvE *E, dvs_expr_t ref) {
     dvs_expr_t r;
     if ((r = _mrw_ite_self(E, b.op, b.lhs, b.rhs)) != EXPR_NULL) return r;
     if ((r = _mrw_ite_self(E, _mrw_flip(b.op), b.rhs, b.lhs)) != EXPR_NULL) return r;
-    uint16_t W = lt.w > rt.w ? lt.w : rt.w;
+    uint32_t W = lt.w > rt.w ? lt.w : rt.w;
     if (W > 64) return EXPR_NULL;
     if (b.op == DVS_BIN_EQ || b.op == DVS_BIN_NEQ) {
         if ((r = _mrw_eq_const(E, b.op, b.lhs, b.rhs, W)) != EXPR_NULL) return r;
@@ -1684,13 +1684,13 @@ typedef struct {
     uint64_t cuts;              /* bit i set: a field starts at bit i */
     uint8_t  need;
     uint8_t  skip;              /* not splittable (cut overflow, bad extract) */
-    uint16_t n_iv;              /* distinct extracts */
+    uint32_t n_iv;              /* distinct extracts */
 } FdWord;
 
 typedef struct {
     dvs_expr_t node;
     uint32_t   var;
-    uint16_t   hi, lo;
+    uint32_t   hi, lo;
 } FdUse;
 
 typedef struct {
@@ -1818,7 +1818,7 @@ static void _fd_root(SvE *E, FdState *S, dvs_expr_t r, int depth) {
     _fd_walk(E, S, r, depth + 1, 0);
 }
 
-static dvs_expr_t _fd_add_var(SvE *E, uint32_t id, uint16_t w, uint8_t aux) {
+static dvs_expr_t _fd_add_var(SvE *E, uint32_t id, uint32_t w, uint8_t aux) {
     dvs_expr_t r = _alloc(E, sizeof(VarSpec), _Alignof(VarSpec));
     if (r == EXPR_NULL) return r;
     VarSpec *v = (VarSpec *)_P(E, r);
@@ -1854,18 +1854,18 @@ static void _fd_add_constraint(SvE *E, dvs_expr_t root) {
 typedef struct {
     FdState  *S;
     uint32_t  v, *next_id;
-    uint16_t  W;
+    uint32_t  W;
     uint64_t  cuts;
     int       n;                                   /* fields */
-    uint16_t  seg_lo[FD_MAX_SEGS], seg_w[FD_MAX_SEGS];
+    uint32_t  seg_lo[FD_MAX_SEGS], seg_w[FD_MAX_SEGS];
     uint32_t  seg_id[FD_MAX_SEGS];
     dvs_expr_t seg_e[FD_MAX_SEGS];
     int       nw;                                  /* words over several */
-    uint16_t  w_lo[FD_MAX_WORDS], w_hi[FD_MAX_WORDS];
+    uint32_t  w_lo[FD_MAX_WORDS], w_hi[FD_MAX_WORDS];
     uint32_t  w_id[FD_MAX_WORDS];
 } FdBuild;
 
-static int _fd_lookup(FdBuild *B, uint16_t lo, uint16_t hi, uint32_t *id) {
+static int _fd_lookup(FdBuild *B, uint32_t lo, uint32_t hi, uint32_t *id) {
     for (int i = 0; i < B->n; i++)
         if (B->seg_lo[i] == lo && B->seg_lo[i] + B->seg_w[i] - 1 == hi) {
             *id = B->seg_id[i]; return 1;
@@ -1879,7 +1879,7 @@ static int _fd_lookup(FdBuild *B, uint16_t lo, uint16_t hi, uint32_t *id) {
  * already made; a span of several is `self` (x itself at the top, else a
  * new hidden word) tied to its parts, the largest extracts inside it and the
  * fields between them, by a chain of one-level concats. */
-static dvs_expr_t _fd_build(SvE *E, FdBuild *B, uint16_t lo, uint16_t hi,
+static dvs_expr_t _fd_build(SvE *E, FdBuild *B, uint32_t lo, uint32_t hi,
                             dvs_expr_t self, uint32_t self_id, int depth) {
     if (E->err) return EXPR_NULL;
     if (depth > FD_MAX_SEGS + 1) { E->err = 1; return EXPR_NULL; }
@@ -1889,7 +1889,7 @@ static dvs_expr_t _fd_build(SvE *E, FdBuild *B, uint16_t lo, uint16_t hi,
     if (self == EXPR_NULL) {
         if (B->nw == FD_MAX_WORDS) { E->err = 1; return EXPR_NULL; }
         self_id = (*B->next_id)++;
-        self = _fd_add_var(E, self_id, (uint16_t)(hi - lo + 1), 1);
+        self = _fd_add_var(E, self_id, (uint32_t)(hi - lo + 1), 1);
         if (self == EXPR_NULL) return EXPR_NULL;
         B->w_lo[B->nw] = lo; B->w_hi[B->nw] = hi; B->w_id[B->nw] = self_id;
         B->nw++;
@@ -1898,11 +1898,11 @@ static dvs_expr_t _fd_build(SvE *E, FdBuild *B, uint16_t lo, uint16_t hi,
         B->nw++;
     }
     dvs_expr_t cur = EXPR_NULL;
-    uint16_t cur_w = 0;
-    for (uint16_t b = lo; b <= hi && !E->err; ) {
+    uint32_t cur_w = 0;
+    for (uint32_t b = lo; b <= hi && !E->err; ) {
         /* The largest extract starting at b inside [hi:lo], else the field
          * at b. */
-        uint16_t e = b;
+        uint32_t e = b;
         while (e < hi && !((B->cuts >> (e + 1)) & 1)) e++;
         for (uint32_t u = 0; u < B->S->n_use; u++) {
             FdUse *x = &B->S->use[u];
@@ -1911,7 +1911,7 @@ static dvs_expr_t _fd_build(SvE *E, FdBuild *B, uint16_t lo, uint16_t hi,
             e = x->hi;
         }
         dvs_expr_t part = _fd_build(E, B, b, e, EXPR_NULL, 0, depth + 1);
-        uint16_t pw = (uint16_t)(e - b + 1);
+        uint32_t pw = (uint32_t)(e - b + 1);
         if (hi - lo + 1 >= 64) {
             /* A 64-bit word: the concat propagator reasons in int64, so each
              * part is tied to its bits by a slice instead. */
@@ -1921,11 +1921,11 @@ static dvs_expr_t _fd_build(SvE *E, FdBuild *B, uint16_t lo, uint16_t hi,
         } else {
             int last = e == hi;
             dvs_expr_t t = last ? self
-                : _fd_add_var(E, (*B->next_id)++, (uint16_t)(cur_w + pw), 1);
+                : _fd_add_var(E, (*B->next_id)++, (uint32_t)(cur_w + pw), 1);
             _fd_add_constraint(E, _mk_bin(E, DVS_BIN_EQ, t, _mk_concat(E, part, cur, cur_w)));
-            cur = t; cur_w = (uint16_t)(cur_w + pw);
+            cur = t; cur_w = (uint32_t)(cur_w + pw);
         }
-        b = (uint16_t)(e + 1);
+        b = (uint32_t)(e + 1);
         if (e == hi) break;
     }
     return self;
@@ -1998,15 +1998,15 @@ static void _fd_split(SvE *E) {
         FdWord *w = &S.w[v];
         uint64_t cuts = w->cuts & ~1ULL;
         if (w->skip) continue;
-        uint16_t W = E->vw[v];
+        uint32_t W = E->vw[v];
         FdBuild B;
         memset(&B, 0, sizeof(B));
         B.S = &S; B.v = v; B.W = W; B.cuts = cuts; B.next_id = &next_id;
         /* The fields first, lowest bits first: they are the decisions. */
-        for (uint16_t b = 0; b < W; ) {
-            uint16_t e = b + 1;
+        for (uint32_t b = 0; b < W; ) {
+            uint32_t e = b + 1;
             while (e < W && !((cuts >> e) & 1)) e++;
-            B.seg_lo[B.n] = b; B.seg_w[B.n] = (uint16_t)(e - b);
+            B.seg_lo[B.n] = b; B.seg_w[B.n] = (uint32_t)(e - b);
             B.seg_id[B.n] = next_id++;
             B.seg_e[B.n] = _fd_add_var(E, B.seg_id[B.n], B.seg_w[B.n], 0);
             B.n++;
@@ -2017,7 +2017,7 @@ static void _fd_split(SvE *E) {
         if (xv == EXPR_NULL) break;
         ((ExprVar *)_P(E, xv))->kind = EXPR_VAR;
         ((ExprVar *)_P(E, xv))->var_id = v;
-        (void)_fd_build(E, &B, 0, (uint16_t)(W - 1), xv, v, 0);
+        (void)_fd_build(E, &B, 0, (uint32_t)(W - 1), xv, v, 0);
         /* The fields are the decisions and fix x; x drawn first would be a
          * guess the fields then reject (a 64-bit word whose low field is
          * `inside {0, max}` ties with x once its top field is drawn, and
@@ -2065,7 +2065,7 @@ dvs_problem_t *dvs_sv_rewrite_masks(dvs_problem_t *sp, dvs_sv_var_type_fn fn, vo
     }
     if (any) {
         E.nv = max_id + 1;
-        E.vw = (uint16_t *)calloc(E.nv, sizeof(uint16_t));
+        E.vw = (uint32_t *)calloc(E.nv, sizeof(uint32_t));
         E.vs = (uint8_t *)calloc(E.nv, 1);
         E.vk = (uint8_t *)calloc(E.nv, 1);
         if (!E.vw || !E.vs || !E.vk) E.err = 1;

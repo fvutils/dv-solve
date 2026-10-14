@@ -161,9 +161,9 @@ class SolveCtx:
             self._drop_native()
             raise CompileUnsupportedError(
                 "problem goes beyond a supported limit: a variable wider than "
-                "64 bits, an expression wider than 255 bits or nested more "
+                "64 bits, an expression wider than %d bits or nested more "
                 "than 20000 deep, or an all-different over more than 16 "
-                "variables or one wider than 32 bits"
+                "variables or one wider than 32 bits" % self._lib.dvs_max_width()
             )
         if rc == _COMPILE_BAD_VAR:
             self._drop_native()

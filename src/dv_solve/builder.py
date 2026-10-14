@@ -124,7 +124,9 @@ class SolveProblemBuilder:
             var_id: The variable's id, which expressions and
                 :meth:`SolveCtx.get_value` use to refer to it. A problem with
                 n variables uses the ids 0 to n-1, each declared once.
-            width: Width in bits, 1 to 64.
+            width: Width in bits, 1 to :func:`dv_solve.lib.max_width`.
+                Over 64 bits the variable is solved by bit-blasting, and
+                ``lo``/``hi`` do not bound it.
             is_signed: Whether the variable holds signed values.
             lo: Smallest value the variable may take.
             hi: Largest value the variable may take.
@@ -136,12 +138,15 @@ class SolveProblemBuilder:
         ref = self._lib.dvs_builder_add_var(
             self._b,
             ctypes.c_uint32(var_id),
-            ctypes.c_uint16(width),
+            ctypes.c_uint32(width),
             ctypes.c_uint8(1 if is_signed else 0),
             ctypes.c_int64(lo),
             ctypes.c_int64(hi),
         )
         if ref == EXPR_NULL:
+            if not 1 <= width <= self._lib.dvs_max_width():
+                raise ValueError("variable %d: width %d is outside 1..%d bits" % (
+                    var_id, width, self._lib.dvs_max_width()))
             raise RuntimeError("dvs_builder_add_var returned EXPR_NULL (malloc failure)")
         return ref
 
@@ -200,7 +205,7 @@ class SolveProblemBuilder:
         if width:
             return self._lib.dvs_builder_expr_const_sized(
                 self._b, ctypes.c_int64(value),
-                ctypes.c_uint8(1 if is_signed else 0), ctypes.c_uint16(width),
+                ctypes.c_uint8(1 if is_signed else 0), ctypes.c_uint32(width),
             )
         return self._lib.dvs_builder_expr_const(
             self._b, ctypes.c_int64(value),
@@ -209,7 +214,8 @@ class SolveProblemBuilder:
 
     def expr_const_wide(self, value: int, width: int,
                         is_signed: bool = False) -> int:
-        """A ``width``-bit constant of any width up to 65535, as one node.
+        """A ``width``-bit constant of any width up to ``lib.max_width()``, as
+        one node.
 
         ``value`` is a Python int; its low ``width`` bits are the constant's
         bit pattern (a negative value is taken in two's complement). Read as
@@ -336,8 +342,8 @@ class SolveProblemBuilder:
         return self._lib.dvs_builder_expr_extend(
             self._b,
             ctypes.c_uint32(operand),
-            ctypes.c_uint16(from_bits),
-            ctypes.c_uint16(to_bits),
+            ctypes.c_uint32(from_bits),
+            ctypes.c_uint32(to_bits),
             ctypes.c_uint8(1 if sign_extend else 0),
         )
 
@@ -352,7 +358,7 @@ class SolveProblemBuilder:
         own signedness, and read as signed or unsigned.
         """
         return self._lib.dvs_builder_expr_cast(
-            self._b, ctypes.c_uint32(operand), ctypes.c_uint16(to_bits),
+            self._b, ctypes.c_uint32(operand), ctypes.c_uint32(to_bits),
             ctypes.c_uint8(1 if to_signed else 0),
         )
 
@@ -361,8 +367,8 @@ class SolveProblemBuilder:
         return self._lib.dvs_builder_expr_extract(
             self._b,
             ctypes.c_uint32(operand),
-            ctypes.c_uint16(hi_bit),
-            ctypes.c_uint16(lo_bit),
+            ctypes.c_uint32(hi_bit),
+            ctypes.c_uint32(lo_bit),
         )
 
     def expr_concat(self, hi: int, lo: int, lo_width: int) -> int:
@@ -371,7 +377,7 @@ class SolveProblemBuilder:
             self._b,
             ctypes.c_uint32(hi),
             ctypes.c_uint32(lo),
-            ctypes.c_uint16(lo_width),
+            ctypes.c_uint32(lo_width),
         )
 
     def expr_array_select(self, base_var_id: int, n_elems: int,

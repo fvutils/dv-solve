@@ -30,11 +30,11 @@ extern "C" {
 /* Type of a variable the problem names but does not declare (an added
  * problem over the context's variables). 0 and the outputs, or -1. */
 typedef int (*dvs_emit_var_type_fn)(void *ud, uint32_t var_id,
-                                    uint16_t *width, uint8_t *is_signed);
+                                    uint32_t *width, uint8_t *is_signed);
 
 /* Append `(declare-const v<id> (_ BitVec w))` and the assert of the declared
  * domain [lo, hi] (none when it is the whole type). */
-void dvs_smt2_emit_var_decl(DvsOBuf *out, uint32_t id, uint16_t width,
+void dvs_smt2_emit_var_decl(DvsOBuf *out, uint32_t id, uint32_t width,
                             uint8_t is_signed, int64_t lo, int64_t hi);
 
 /* dvs_smt2_emit_var_decl() for every VarSpec of `p`. */
@@ -51,7 +51,7 @@ int dvs_smt2_emit_asserts(const dvs_problem_t *p, dvs_emit_var_type_fn fn,
                           DvsOBuf *out, unsigned *flags, char *why, size_t why_n);
 
 /* `(_ bv<N> w)` for the low `w` bits of `value`; for w > 64, value >= 0. */
-void dvs_smt2_emit_value(DvsOBuf *out, int64_t value, uint16_t w);
+void dvs_smt2_emit_value(DvsOBuf *out, int64_t value, uint32_t w);
 
 #ifdef __cplusplus
 }

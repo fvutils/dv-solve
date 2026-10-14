@@ -110,7 +110,8 @@ guess.
 
 The bit-blaster translates the problem into logic over individual bits:
 first an and-inverter graph, simplified as it is built, then a CNF formula
-for a SAT solver. It handles bit-vectors up to 65535 bits and the array and
+for a SAT solver. It handles bit-vectors up to 2^24 bits (`DVS_MAX_WIDTH`;
+65535 through the SMT-LIB2 front end) and the array and
 uninterpreted-function logics of SMT-LIB2.
 
 A SAT solver returns one solution, usually much like the last. To vary them,

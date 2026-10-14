@@ -107,15 +107,15 @@ typedef uint64_t          VU;
 #define V_MAXW 64
 #endif
 
-typedef struct { uint16_t w; uint8_t s; } VTy;
+typedef struct { uint32_t w; uint8_t s; } VTy;
 
-static VU _mask_for(uint16_t w) {
+static VU _mask_for(uint32_t w) {
     if (w == 0 || w >= V_MAXW) return ~(VU)0;
     return ((VU)1 << w) - 1;
 }
 
 /* The value of pattern `u` read as a `w`-bit number of signedness `s`. */
-static VI _wrap(VU u, uint16_t w, uint8_t s) {
+static VI _wrap(VU u, uint32_t w, uint8_t s) {
     if (w == 0 || w >= V_MAXW) return (VI)u;
     VU m = ((VU)1 << w) - 1;
     u &= m;
@@ -163,14 +163,14 @@ static VTy _vtype(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         break;
     }
     case EXPR_CONST: {
-        uint16_t w; uint8_t s;
+        uint32_t w; uint8_t s;
         dvs_sv_const_type((ExprConst *)dvs_pool_ptr(&sp->pool, ref), &w, &s);
         t.w = w; t.s = s;
         break;
     }
     case EXPR_CONST_WIDE: {
         const ExprConstWide *ec = (const ExprConstWide *)dvs_pool_ptr(&sp->pool, ref);
-        t.w = (uint16_t)ec->width;
+        t.w = (uint32_t)ec->width;
         t.s = ec->is_signed ? 1 : 0;
         break;
     }
@@ -220,12 +220,12 @@ static VTy _vtype(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
     }
     case EXPR_EXTRACT: {
         ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ref);
-        t.w = (uint16_t)(ex->hi_bit - ex->lo_bit + 1);
+        t.w = (uint32_t)(ex->hi_bit - ex->lo_bit + 1);
         break;
     }
     case EXPR_CONCAT: {
         ExprConcat *ec = (ExprConcat *)dvs_pool_ptr(&sp->pool, ref);
-        t.w = (uint16_t)(_vtype(ctx, sp, ec->hi, skip).w + ec->lo_width);
+        t.w = (uint32_t)(_vtype(ctx, sp, ec->hi, skip).w + ec->lo_width);
         break;
     }
     default:
@@ -236,7 +236,7 @@ static VTy _vtype(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
 }
 
 static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
-              uint16_t W, uint8_t S, int *skip);
+              uint32_t W, uint8_t S, int *skip);
 
 /* Truth value of a node evaluated in its own type. */
 static int _truth(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
@@ -253,7 +253,7 @@ static int _cmp(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_binop_t op,
     VTy a = _vtype(ctx, sp, l, skip);
     VTy b = _vtype(ctx, sp, r, skip);
     if (*skip) return 0;
-    uint16_t w = a.w > b.w ? a.w : b.w;
+    uint32_t w = a.w > b.w ? a.w : b.w;
     uint8_t  s = (uint8_t)(a.s && b.s);
     if (w > V_MAXW) { *skip = 1; return 0; }
     VI x = _ev(ctx, sp, l, w, s, skip);
@@ -272,7 +272,7 @@ static int _cmp(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_binop_t op,
 }
 
 static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
-              uint16_t W, uint8_t S, int *skip) {
+              uint32_t W, uint8_t S, int *skip) {
     if (*skip) return 0;
     if (ref == EXPR_NULL || W > V_MAXW || _deep(ctx)) { *skip = 1; return 0; }
     VU M = _mask_for(W);
@@ -280,7 +280,7 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
     switch (k) {
     case EXPR_CONST: {
         ExprConst *ec = (ExprConst *)dvs_pool_ptr(&sp->pool, ref);
-        uint16_t cw; uint8_t cs;
+        uint32_t cw; uint8_t cs;
         dvs_sv_const_type(ec, &cw, &cs);
         if (cw > V_MAXW) { *skip = 1; return 0; }
         /* The int64 `value` spells the constant's low 64 bits; a wider one is
@@ -297,7 +297,7 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         VU u = 0;
         for (uint32_t i = ec->n_limbs; i-- > 0; )
             u = ((u << 32) << 32) | ec->limbs[i];   /* two steps: defined at 64 */
-        VI own = _wrap(u, (uint16_t)ec->width, ec->is_signed ? 1 : 0);
+        VI own = _wrap(u, (uint32_t)ec->width, ec->is_signed ? 1 : 0);
         return _wrap((VU)own, W, S);
     }
     case EXPR_VAR: {
@@ -425,7 +425,7 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         ExprCast *ec = (ExprCast *)dvs_pool_ptr(&sp->pool, ref);
         VTy ot = _vtype(ctx, sp, ec->operand, skip);
         if (*skip) return 0;
-        uint16_t ow = ot.w > ec->to_bits ? ot.w : ec->to_bits;
+        uint32_t ow = ot.w > ec->to_bits ? ot.w : ec->to_bits;
         if (ow > V_MAXW) { *skip = 1; return 0; }
         VI o = _ev(ctx, sp, ec->operand, ow, ot.s, skip);
         if (*skip) return 0;
@@ -438,7 +438,7 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         if (ot.w > V_MAXW) { *skip = 1; return 0; }
         VI o = _ev(ctx, sp, ex->operand, ot.w, ot.s, skip);
         if (*skip) return 0;
-        uint16_t w = (uint16_t)(ex->hi_bit - ex->lo_bit + 1);
+        uint32_t w = (uint32_t)(ex->hi_bit - ex->lo_bit + 1);
         VI sh = ex->lo_bit < V_MAXW ? (o >> ex->lo_bit) : (o < 0 ? -1 : 0);
         return _wrap((VU)_wrap((VU)sh, w, 0), W, S);
     }
@@ -453,7 +453,7 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         if (*skip) return 0;
         VU own = (((VU)h & _mask_for(ht.w)) << ec->lo_width)
                | ((VU)l & _mask_for(ec->lo_width));
-        return _wrap((VU)_wrap(own, (uint16_t)(ht.w + ec->lo_width), 0), W, S);
+        return _wrap((VU)_wrap(own, (uint32_t)(ht.w + ec->lo_width), 0), W, S);
     }
     case EXPR_IN_RANGE: {
         /* Each comparison is its own SV context. */

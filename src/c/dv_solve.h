@@ -67,6 +67,18 @@ typedef uint32_t dvs_expr_t;
 /** The dvs_expr_t a builder function returns when it cannot allocate memory. */
 #define DVS_EXPR_NULL ((dvs_expr_t)0xFFFFFFFFu)
 
+/** The widest variable, constant or expression the engine solves, in bits.
+ *  Widths are 32-bit in the API; this is the engine's own ceiling, set so
+ *  bit-blasting stays within 32-bit node and buffer arithmetic. A wider
+ *  variable or constant is refused when it is built (DVS_EXPR_NULL), and a
+ *  wider intermediate expression fails the solve. Variables of 1 to 64 bits
+ *  go to the CDCL engine; wider ones are bit-blasted (BV-SAT). */
+#define DVS_MAX_WIDTH (1u << 24)
+
+/** DVS_MAX_WIDTH of the loaded library, for bindings that can't read the
+ *  header. */
+uint32_t dvs_max_width(void);
+
 /** Binary operators, for dvs_builder_expr_binary(). */
 typedef enum {
     DVS_BIN_ADD = 0,    /* +   */
@@ -143,8 +155,9 @@ typedef struct {
 #define DVS_COMPILE_NOMEM             (-1)  /* the context buffer is too small */
 #define DVS_COMPILE_UNSAT             (-2)  /* no solution exists              */
 #define DVS_COMPILE_UNSUPPORTED_WIDTH (-3)  /* a variable is wider than 64 bits,
-                                             * an expression wider than 255
-                                             * bits or nested too deeply, or
+                                             * an expression wider than
+                                             * DVS_MAX_WIDTH bits or nested
+                                             * too deeply, or
                                              * an all-different over more
                                              * than 16 variables or one
                                              * wider than 32 bits            */
@@ -178,12 +191,15 @@ void dvs_builder_reset(dvs_builder_t *b);
  * @param var_id     The variable's id, used in dvs_builder_expr_var() and
  *                   dvs_solver_get_value(). A problem with n variables uses
  *                   the ids 0 to n-1, each declared once.
- * @param width      Width in bits, 1 to 64.
+ * @param width      Width in bits, 1 to DVS_MAX_WIDTH. Over 64 bits the
+ *                   variable is solved by bit-blasting (BV-SAT), and lo/hi
+ *                   do not bound it. DVS_EXPR_NULL for a width of 0 or over
+ *                   DVS_MAX_WIDTH.
  * @param is_signed  1 if the variable is signed.
  * @param lo, hi     The variable's value must lie in [lo, hi].
  */
 dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id,
-                               uint16_t width, uint8_t is_signed,
+                               uint32_t width, uint8_t is_signed,
                                int64_t lo, int64_t hi);
 
 /** Require the Boolean expression `root` to hold. */
@@ -224,7 +240,7 @@ dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,
 dvs_expr_t dvs_builder_expr_const(dvs_builder_t *b, int64_t value,
                                   uint8_t is_signed);
 
-/** A sized constant of `width` bits (1..65535), signed when `is_signed`,
+/** A sized constant of `width` bits (1..DVS_MAX_WIDTH), signed when `is_signed`,
  *  given as `n_limbs` = ceil(width / 64) 64-bit limbs, least significant
  *  first: limbs[0] holds bits 63:0. Bits at and above `width` are ignored.
  *  It is one node whatever its width, so it is how to spell a constant wider
@@ -264,7 +280,7 @@ dvs_expr_t dvs_builder_expr_in_ranges(dvs_builder_t *b, dvs_expr_t value,
 /** Zero-extend (sign_extend 0) or sign-extend `operand` from `from_bits`
  *  to `to_bits`. */
 dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
-                                   uint16_t from_bits, uint16_t to_bits,
+                                   uint32_t from_bits, uint32_t to_bits,
                                    uint8_t sign_extend);
 
 /** A cast of `operand` to a `to_bits`-bit integer, signed when `to_signed`:
@@ -274,15 +290,15 @@ dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
  *  The value is truncated to `to_bits`, or extended by the operand's own
  *  signedness, and then read as signed or unsigned. */
 dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand,
-                                 uint16_t to_bits, uint8_t to_signed);
+                                 uint32_t to_bits, uint8_t to_signed);
 
 /** `operand[hi_bit:lo_bit]`. */
 dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand,
-                                    uint16_t hi_bit, uint16_t lo_bit);
+                                    uint32_t hi_bit, uint32_t lo_bit);
 
 /** `{hi, lo}`, where `lo` is `lo_width` bits wide. */
 dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi,
-                                   dvs_expr_t lo, uint16_t lo_width);
+                                   dvs_expr_t lo, uint32_t lo_width);
 
 /** The constraint `result == var_refs[0] + var_refs[1] + ...`. Pass it to
  *  dvs_builder_add_constraint(). */

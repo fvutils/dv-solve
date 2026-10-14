@@ -47,7 +47,7 @@ class ExprConst(ctypes.Structure):
         ("kind",      ctypes.c_uint32),
         ("is_signed", ctypes.c_uint8),
         ("_p8",       ctypes.c_uint8),
-        ("width",     ctypes.c_uint16),
+        ("width",     ctypes.c_uint32),
         ("value",     ctypes.c_int64),
     ]
 
@@ -100,17 +100,16 @@ class ExprExtend(ctypes.Structure):
         ("kind",         ctypes.c_uint32),
         ("sign_extend",  ctypes.c_uint8),
         ("_p8",          ctypes.c_uint8),
-        ("from_bits",    ctypes.c_uint16),
-        ("to_bits",      ctypes.c_uint16),
-        ("_p16",         ctypes.c_uint16),
+        ("from_bits",    ctypes.c_uint32),
+        ("to_bits",      ctypes.c_uint32),
         ("operand",      ctypes.c_uint32),
     ]
 
 class ExprExtract(ctypes.Structure):
     _fields_ = [
         ("kind",    ctypes.c_uint32),
-        ("hi_bit",  ctypes.c_uint16),
-        ("lo_bit",  ctypes.c_uint16),
+        ("hi_bit",  ctypes.c_uint32),
+        ("lo_bit",  ctypes.c_uint32),
         ("operand", ctypes.c_uint32),
     ]
 
@@ -118,7 +117,7 @@ class VarSpec(ctypes.Structure):
     _fields_ = [
         ("next",      ctypes.c_uint32),
         ("var_id",    ctypes.c_uint32),
-        ("width",     ctypes.c_uint16),
+        ("width",     ctypes.c_uint32),
         ("is_signed", ctypes.c_uint8),
         ("is_aux",    ctypes.c_uint8),
         ("lo",        ctypes.c_int64),
@@ -202,15 +201,15 @@ def _setup(lib: ctypes.CDLL):
 
     lib.expr_extend.restype  = ctypes.c_uint32
     lib.expr_extend.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
-                                ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint8]
+                                ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint8]
 
     lib.expr_extract.restype  = ctypes.c_uint32
     lib.expr_extract.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
-                                 ctypes.c_uint16, ctypes.c_uint16]
+                                 ctypes.c_uint32, ctypes.c_uint32]
 
     lib.problem_add_var.restype  = ctypes.c_uint32
     lib.problem_add_var.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
-                                    ctypes.c_uint16, ctypes.c_uint8,
+                                    ctypes.c_uint32, ctypes.c_uint8,
                                     ctypes.c_int64, ctypes.c_int64]
 
     lib.problem_add_constraint.restype  = ctypes.c_uint32

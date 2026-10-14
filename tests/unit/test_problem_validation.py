@@ -17,6 +17,7 @@ import threading
 
 import pytest
 
+from dv_solve import lib
 from dv_solve.builder import SolveProblemBuilder
 from dv_solve.ctx import CompileUnsupportedError, SolveCtx, SOLVE_OK
 from dv_solve.problem import BIN_AND, BIN_EQ, BIN_GT
@@ -46,16 +47,13 @@ def test_bad_variable_ids_are_refused(decl, refs):
         SolveCtx(_problem(decl, refs))
 
 
-def test_expression_wider_than_65535_bits_is_refused():
+def test_expression_wider_than_the_ceiling_is_refused():
+    m = lib.max_width()
     b = SolveProblemBuilder()
-    n = 65536 // 64 + 1
-    for i in range(n):
-        b.add_var(i, 64, False, 0, 2**63 - 1)
-    e = b.expr_var(0)
-    for i in range(1, n):
-        e = b.expr_concat(e, b.expr_var(i), 64)       # 65600 bits
+    b.add_var(0, 8, False, 0, 255)
+    e = b.expr_extend(b.expr_var(0), 8, m + 8, False)
     b.add_constraint(b.expr_binary(BIN_EQ, e, b.expr_const(5)))
-    with pytest.raises(CompileUnsupportedError):
+    with pytest.raises(CompileUnsupportedError, match="wider than %d bits" % m):
         SolveCtx(b.finalize()[0])
 
 

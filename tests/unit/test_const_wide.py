@@ -16,6 +16,7 @@ import random
 
 import pytest
 
+from dv_solve import lib
 from dv_solve.builder import SolveProblemBuilder
 from dv_solve.problem import BIN_ADD, BIN_EQ, BIN_LT, EXPR_NULL
 from dv_solve.bvsat import BVSatCtx, BVSAT_SAT
@@ -124,7 +125,6 @@ def test_bad_arguments_are_refused():
         f = b._lib.dvs_builder_expr_const_wide
         assert f(b._b, 2, limbs, 0, 0) == EXPR_NULL         # no width
         assert f(b._b, 1, limbs, 100, 0) == EXPR_NULL       # too few limbs
-        assert f(b._b, 2, limbs, 65536, 0) == EXPR_NULL     # over the cap
         assert f(b._b, 2, limbs, 100, 0) != EXPR_NULL
     finally:
         b.destroy()
@@ -250,7 +250,7 @@ def test_a_refused_constant_is_an_error_not_a_crash():
     b = SolveProblemBuilder()
     try:
         b.add_var(0, 100, False, 0, _FULL)
-        k = b.expr_const_wide(1, 65536)
+        k = b.expr_const_wide(1, lib.max_width() + 1)
         assert k == EXPR_NULL
         b.add_constraint(b.expr_binary(BIN_LT, b.expr_var(0), k))
         buf, _sz = b.finalize()

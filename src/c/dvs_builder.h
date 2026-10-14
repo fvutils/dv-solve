@@ -180,13 +180,13 @@ void *dvs_builder_ref_ptr(const dvs_builder_t *b, dvs_expr_t ref);
 /** A sized constant of `width` bits (see ExprConst in dvs_problem.h).
  *  width 0 is the same as dvs_builder_expr_const (an unsized literal). */
 dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value,
-                                 uint8_t is_signed, uint16_t width);
+                                 uint8_t is_signed, uint32_t width);
 /** INTERNAL (not part of the documented surface): an explicit
  *  width/signedness conversion node, EXPR_SV_CAST (see dvs_problem.h). Used
  *  by front ends that build explicit problems, e.g. the SMT-LIB2 front end
  *  reading an unsigned bit pattern as signed for `bvashr`. */
 dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
-                             uint16_t from_bits, uint16_t to_bits,
+                             uint32_t from_bits, uint32_t to_bits,
                              uint8_t sign_extend, uint8_t dst_signed);
 
 /** Build an array-select expression: result = base[index]. */

@@ -137,7 +137,7 @@ class SolveProblem:
     ) -> int:
         """Declare a variable; returns its ExprRef (EXPR_NULL on overflow)."""
         return self._call(self._lib.problem_add_var, ctypes.c_uint32(var_id),
-            ctypes.c_uint16(width),
+            ctypes.c_uint32(width),
             ctypes.c_uint8(1 if is_signed else 0),
             ctypes.c_int64(lo),
             ctypes.c_int64(hi),
@@ -237,8 +237,8 @@ class SolveProblem:
         sign_extend: bool = False,
     ) -> int:
         return self._call(self._lib.expr_extend, ctypes.c_uint32(operand),
-            ctypes.c_uint16(from_bits),
-            ctypes.c_uint16(to_bits),
+            ctypes.c_uint32(from_bits),
+            ctypes.c_uint32(to_bits),
             ctypes.c_uint8(1 if sign_extend else 0),
         )
 
@@ -252,20 +252,20 @@ class SolveProblem:
         value is then truncated to ``to_bits``, or extended by the operand's
         own signedness, and read as signed or unsigned.
         """
-        return self._call(self._lib.expr_cast, ctypes.c_uint32(operand), ctypes.c_uint16(to_bits),
+        return self._call(self._lib.expr_cast, ctypes.c_uint32(operand), ctypes.c_uint32(to_bits),
             ctypes.c_uint8(1 if to_signed else 0),
         )
 
     def expr_extract(self, operand: int, hi_bit: int, lo_bit: int) -> int:
         return self._call(self._lib.expr_extract, ctypes.c_uint32(operand),
-            ctypes.c_uint16(hi_bit),
-            ctypes.c_uint16(lo_bit),
+            ctypes.c_uint32(hi_bit),
+            ctypes.c_uint32(lo_bit),
         )
 
     def expr_concat(self, hi: int, lo: int, lo_width: int) -> int:
         return self._call(self._lib.expr_concat, ctypes.c_uint32(hi),
             ctypes.c_uint32(lo),
-            ctypes.c_uint16(lo_width),
+            ctypes.c_uint32(lo_width),
         )
 
     def add_soft_constraint(self, root: int, priority: int = 0) -> int:

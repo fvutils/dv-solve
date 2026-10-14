@@ -219,7 +219,7 @@ static int _grow_vars(struct dvs_octx_s *c, uint32_t id) {
     return 0;
 }
 
-static int _var_type(void *ud, uint32_t id, uint16_t *w, uint8_t *s) {
+static int _var_type(void *ud, uint32_t id, uint32_t *w, uint8_t *s) {
     struct dvs_octx_s *c = (struct dvs_octx_s *)ud;
     if (id >= c->n_vars || !c->vars[id].known) return -1;
     *w = c->vars[id].w;
@@ -274,7 +274,7 @@ static void _push(struct dvs_octx_s *c, uint8_t kind, char *text) {
     c->n_e++;
 }
 
-static char *_value_assert(const char *rel, uint32_t id, int64_t value, uint16_t w) {
+static char *_value_assert(const char *rel, uint32_t id, int64_t value, uint32_t w) {
     DvsOBuf b = {0};
     dvs_ob_printf(&b, "(assert (%s v%u ", rel, id);
     dvs_smt2_emit_value(&b, value, w);

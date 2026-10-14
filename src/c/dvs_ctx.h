@@ -107,7 +107,7 @@ typedef struct {
  * over extended operands be seen as a square. */
 typedef struct {
     uint32_t src, r;
-    uint16_t to;
+    uint32_t to;
     uint8_t  sgn;
     uint8_t  _pad;
 } DvsExtMemo;
@@ -575,7 +575,7 @@ static inline int64_t var_b_max(const Variable *v, int64_t a, int64_t b) {
 /** Smallest value representable by `v`.  Always fits in int64_t. */
 static inline int64_t var_repr_min(const Variable *v) {
     if (v->flags & VAR_SIGNED) {
-        uint16_t w = v->width;
+        uint32_t w = v->width;
         if (w >= 64) return INT64_MIN;
         return -((int64_t)1 << (w - 1));
     }
@@ -588,7 +588,7 @@ static inline int64_t var_repr_min(const Variable *v) {
  *  width > 64 (tier-2) the true max exceeds 64 bits and is handled by the
  *  wide path, so INT64_MAX is kept as the int64-domain ceiling for guards. */
 static inline int64_t var_repr_max(const Variable *v) {
-    uint16_t w = v->width;
+    uint32_t w = v->width;
     if (v->flags & VAR_SIGNED) {
         if (w >= 64) return INT64_MAX;
         return ((int64_t)1 << (w - 1)) - 1;
