@@ -480,6 +480,7 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     ctx->checkpoints = NULL; ctx->checkpoints_cap = 0;
     _tbl_free(ctx, ctx->prop_block, (size_t)ctx->n_prop_refs_capacity * PROP_ROW);
     ctx->var_block = ctx->prop_block = NULL;
+    dvs_guard_ix_free(ctx);
     dvs_spool_destroy(&ctx->pool);
     if (ctx->own_block_alloc) {
         dvs_block_alloc_destroy(ctx->own_block_alloc);

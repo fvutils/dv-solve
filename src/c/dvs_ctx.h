@@ -257,6 +257,17 @@ typedef struct dvs_ctx_s {
     uint32_t          *prop_refs;     /* pool offsets of propagators   */
     uint32_t           n_prop_refs_capacity;
     uint32_t          *prop_guard_vars; /* guard var per prop, EXPR_NULL=unconditional */
+    /* prop_guard_vars inverted, for waking a guard's propagators without a
+     * scan of every propagator (_wake_var): guard_ix[v]..guard_ix[v+1] index
+     * guard_ix_props, the prop ids guarded by v in id order. Built lazily
+     * from ctx->alloc; rebuilt when the var or prop count it was built for
+     * changes or a guard is written (guard_ix_dirty). */
+    uint32_t          *guard_ix;
+    uint32_t          *guard_ix_props;
+    uint32_t           guard_ix_nvars;
+    uint32_t           guard_ix_nprops;
+    size_t             guard_ix_bytes;
+    uint8_t            guard_ix_dirty;
     uint32_t          *prop_constraint_id; /* constraint_id for each propagator */
     PropQueue          queue;         /* 16-level priority queue       */
     uint64_t           unassigned_mask; /* bit i set = var i unassigned */
@@ -393,6 +404,8 @@ static inline void dvs_ctx_free(dvs_ctx_t *ctx, void *p, size_t sz) {
 /** Make level_marks and decisions hold at least `n` levels. A fixed-pool
  *  context cannot grow them. 0, or -1 (unchanged). */
 int dvs_ctx_reserve_levels(dvs_ctx_t *ctx, uint32_t n);
+/** Free the guard index (guard_ix); it is rebuilt on next use. */
+void dvs_guard_ix_free(dvs_ctx_t *ctx);
 
 /** Allocate ctx->phase_save (uninitialised) from ctx->alloc; 0 or -1. */
 int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx);

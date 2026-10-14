@@ -3473,8 +3473,10 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
             prop_add_bounds_eq_32(ctx, r_id, elem_id, 0);
             /* Gate the EQ propagator with the guard */
             for (uint32_t pi = props_before; pi < ctx->n_props; pi++) {
-                if (ctx->prop_guard_vars && pi < ctx->n_prop_refs_capacity)
+                if (ctx->prop_guard_vars && pi < ctx->n_prop_refs_capacity) {
                     ctx->prop_guard_vars[pi] = gid;
+                    ctx->guard_ix_dirty = 1;
+                }
             }
         }
         return 1;

@@ -1,10 +1,61 @@
 #include <stdint.h>
 #include <time.h>
+#include <string.h>
 #include "dvs_propagator.h"
 #include "dvs_ctx.h"
 #include "dvs_trail.h"
 #include "dvs_lcg.h"
 #include "dvs_search.h"
+
+/* ------------------------------------------------------------------ */
+/* Internal: the guard index (guard_ix in dvs_ctx.h)                   */
+/* ------------------------------------------------------------------ */
+
+/* Make the guard index current for `nv` vars and `np` props. 0 on
+ * success; -1 (no growable pool, or no memory) leaves the caller to scan. */
+static int _guard_ix_build(dvs_ctx_t *ctx, uint32_t nv, uint32_t np) {
+    if (ctx->guard_ix && !ctx->guard_ix_dirty
+            && ctx->guard_ix_nvars == nv && ctx->guard_ix_nprops == np)
+        return 0;
+    if (!ctx->pool.alloc) return -1;
+    const uint32_t *g = ctx->prop_guard_vars;
+    uint32_t n_guarded = 0;
+    for (uint32_t i = 0; i < np; i++)
+        if (g[i] < nv) n_guarded++;
+    size_t bytes = ((size_t)nv + 1u + n_guarded) * sizeof(uint32_t);
+    if (bytes > ctx->guard_ix_bytes) {
+        size_t cap = ctx->guard_ix_bytes * 2u > bytes ? ctx->guard_ix_bytes * 2u : bytes;
+        uint32_t *b = (uint32_t *)DVS_ALLOC(ctx->alloc, cap);
+        if (!b) return -1;
+        if (ctx->guard_ix)
+            DVS_RELEASE(ctx->alloc, ctx->guard_ix, ctx->guard_ix_bytes);
+        ctx->guard_ix = b;
+        ctx->guard_ix_bytes = cap;
+    }
+    uint32_t *off = ctx->guard_ix, *list = off + nv + 1u;
+    memset(off, 0, ((size_t)nv + 1u) * sizeof *off);
+    for (uint32_t i = 0; i < np; i++)
+        if (g[i] < nv) off[g[i] + 1u]++;
+    for (uint32_t v = 0; v < nv; v++) off[v + 1u] += off[v];
+    /* Fill in id order, using off[v] as v's cursor, then shift back. */
+    for (uint32_t i = 0; i < np; i++)
+        if (g[i] < nv) list[off[g[i]]++] = i;
+    for (uint32_t v = nv; v > 0; v--) off[v] = off[v - 1u];
+    off[0] = 0;
+    ctx->guard_ix_props  = list;
+    ctx->guard_ix_nvars  = nv;
+    ctx->guard_ix_nprops = np;
+    ctx->guard_ix_dirty  = 0;
+    return 0;
+}
+
+void dvs_guard_ix_free(dvs_ctx_t *ctx) {
+    if (ctx->guard_ix)
+        DVS_RELEASE(ctx->alloc, ctx->guard_ix, ctx->guard_ix_bytes);
+    ctx->guard_ix = ctx->guard_ix_props = NULL;
+    ctx->guard_ix_bytes = 0;
+    ctx->guard_ix_nvars = ctx->guard_ix_nprops = 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* Internal: wake all watchers on a variable                          */
@@ -51,10 +102,21 @@ static void _wake_var(dvs_ctx_t *ctx, uint32_t var_id) {
      * Cap to n_prop_refs_capacity: when n_props grows past the side-table
      * capacity (e.g. via ITE-chain aux materialisation), the higher
      * prop_ids weren't registered and reading prop_refs[i] there would
-     * be an out-of-bounds read into adjacent pool memory. */
+     * be an out-of-bounds read into adjacent pool memory. The guard index
+     * lists them; scanning every propagator on every wake made a search
+     * quadratic in the problem (2000-element select: 79% of the time). */
     if (ctx->prop_guard_vars && ctx->prop_refs) {
         uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
                        ? ctx->n_props : ctx->n_prop_refs_capacity;
+        if (_guard_ix_build(ctx, ctx->n_vars, lim) == 0) {
+            if (var_id >= ctx->guard_ix_nvars) return;
+            for (uint32_t k = ctx->guard_ix[var_id]; k < ctx->guard_ix[var_id + 1u]; k++) {
+                uint32_t i = ctx->guard_ix_props[k];
+                if (ctx->prop_refs[i] != EXPR_NULL)
+                    prop_enqueue(ctx, ctx->prop_refs[i]);
+            }
+            return;
+        }
         for (uint32_t i = 0; i < lim; i++) {
             if (ctx->prop_guard_vars[i] == var_id &&
                 ctx->prop_refs[i] != EXPR_NULL) {
@@ -96,6 +158,7 @@ void prop_set_guard(dvs_ctx_t *ctx, uint32_t prop_ref, uint32_t guard_var_id) {
     Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, prop_ref);
     if (ctx->prop_guard_vars && p->prop_id < ctx->n_prop_refs_capacity) {
         ctx->prop_guard_vars[p->prop_id] = guard_var_id;
+        ctx->guard_ix_dirty = 1;
     }
 }
 
@@ -131,7 +194,6 @@ PropResult ctx_tighten_lb32(dvs_ctx_t *ctx, uint32_t var_id, int32_t new_lb) {
     trail_record_lb(ctx, var_id, (int64_t)new_lb);  /* applies change */
 
     if (v->lo > v->hi) return PROP_CONFLICT;
-    /* Update unassigned_mask: clear bit when variable becomes singleton */
     /* Clear the unassigned bit when the variable becomes singleton. */
     if (v->lo == v->hi && var_id < 64)
         ctx->unassigned_mask &= ~(1ULL << var_id);
