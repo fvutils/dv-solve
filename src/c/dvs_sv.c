@@ -674,11 +674,103 @@ static int _may_be_huge(SvE *E, dvs_expr_t x) {
     return 1;
 }
 
+/* `op` read as `const op var` turned around to `var op' const`. */
+static dvs_binop_t _flip_cmp(dvs_binop_t op) {
+    switch (op) {
+    case DVS_BIN_LT:  return DVS_BIN_GT;
+    case DVS_BIN_LTE: return DVS_BIN_GTE;
+    case DVS_BIN_GT:  return DVS_BIN_LT;
+    case DVS_BIN_GTE: return DVS_BIN_LTE;
+    default:          return op;
+    }
+}
+
+/* `var vop cv` when the variable's whole range of type `vt` (<= 64 bits)
+ * decides it: 1 or 0, else -1. */
+static int _range_truth(dvs_binop_t vop, SvTy vt, dvs_i128 cv) {
+    dvs_i128 vmin, vmax;
+    if (vt.s) {
+        vmin = dvs_i128_from_i64(vt.w >= 64 ? INT64_MIN
+                                 : -((int64_t)1 << (vt.w - 1)));
+        vmax = dvs_i128_from_i64(vt.w >= 64 ? INT64_MAX
+                                 : ((int64_t)1 << (vt.w - 1)) - 1);
+    } else {
+        vmin = dvs_i128_from_i64(0);
+        vmax = dvs_i128_from_u64(vt.w >= 64 ? UINT64_MAX
+                                 : ((uint64_t)1 << vt.w) - 1);
+    }
+    int below = dvs_i128_lt(cv, vmin);      /* cv <  vmin */
+    int above = dvs_i128_lt(vmax, cv);      /* cv >  vmax */
+    int at_lo = dvs_i128_le(cv, vmin);      /* cv <= vmin */
+    int at_hi = dvs_i128_le(vmax, cv);      /* cv >= vmax */
+    switch (vop) {
+    case DVS_BIN_EQ:  return (below || above) ? 0 : -1;
+    case DVS_BIN_NEQ: return (below || above) ? 1 : -1;
+    case DVS_BIN_LT:  return at_lo ? 0 : (above ? 1 : -1);
+    case DVS_BIN_LTE: return below ? 0 : (at_hi ? 1 : -1);
+    case DVS_BIN_GT:  return at_hi ? 0 : (below ? 1 : -1);
+    case DVS_BIN_GTE: return above ? 0 : (at_lo ? 1 : -1);
+    default:          return -1;
+    }
+}
+
+/* `var op K` (or `K op var`) with a variable of 64 bits or less and a wide
+ * constant K: the context is wider than 64 bits only because of K, and no
+ * engine but the bit-blaster takes such a comparison. When the variable's
+ * value in the context is its own value (it is unsigned, or the context is
+ * signed), the comparison is of two numbers: decided by the variable's range
+ * when K lies outside it, else the same comparison at the variable's own
+ * type, against K spelled at that type. Returns EXPR_NULL when it does not
+ * apply. (pyvsc types the literal 2**63 as 65-bit signed, so `x > 2**63` on
+ * an unsigned 64-bit x arrives here.) */
+static dvs_expr_t _cmp_var_wide(SvE *E, dvs_binop_t op, dvs_expr_t l0,
+                                dvs_expr_t r0, uint8_t S) {
+    if (l0 == EXPR_NULL || r0 == EXPR_NULL) return EXPR_NULL;   /* _val reports it */
+    int var_left = _kind(E, l0) == EXPR_VAR;
+    dvs_expr_t v = var_left ? l0 : r0, k = var_left ? r0 : l0;
+    if (_kind(E, v) != EXPR_VAR || _kind(E, k) != EXPR_CONST_WIDE) return EXPR_NULL;
+    SvTy vt = _type(E, v);
+    if (vt.w > 64 || (vt.s && !S)) return EXPR_NULL;
+    const ExprConstWide *c = (const ExprConstWide *)_P(E, k);
+    int neg = c->is_signed && dvs_const_wide_bit(c, c->width - 1);
+    /* K's value is an int64 when every bit from 63 up is its sign, a uint64
+     * when (non-negative) every bit from 64 up is 0; otherwise it lies beyond
+     * any 64-bit range, on the side of its sign. */
+    int fits = 1;
+    for (uint32_t i = neg ? 63u : 64u; i < c->width && fits; i++)
+        if (dvs_const_wide_bit(c, i) != neg) fits = 0;
+    if (neg && !S) fits = neg = 0;   /* extended by its sign, read unsigned: >= 2^64 */
+    dvs_binop_t vop = var_left ? op : _flip_cmp(op);
+    if (!fits) {
+        /* Strictly beyond every 64-bit range: below when negative. */
+        int t;
+        switch (vop) {
+        case DVS_BIN_EQ:  t = 0; break;
+        case DVS_BIN_NEQ: t = 1; break;
+        case DVS_BIN_LT: case DVS_BIN_LTE: t = !neg; break;
+        case DVS_BIN_GT: case DVS_BIN_GTE: t = neg; break;
+        default: return EXPR_NULL;
+        }
+        return _mk_const(E, t, 0, 1);
+    }
+    int64_t kv = (int64_t)c->limbs[0];
+    dvs_i128 cv = neg ? dvs_i128_from_i64(kv) : dvs_i128_from_u64((uint64_t)kv);
+    int t = _range_truth(vop, vt, cv);
+    if (t >= 0) return _mk_const(E, t, 0, 1);
+    dvs_expr_t kc = _mk_const(E, kv, vt.s, vt.w);
+    if (E->err) return EXPR_NULL;
+    return var_left ? _mk_bin(E, op, v, kc) : _mk_bin(E, op, kc, v);
+}
+
 /* Comparison `l op r` in its own SV context. */
 static dvs_expr_t _cmp(SvE *E, dvs_binop_t op, dvs_expr_t l0, dvs_expr_t r0, dvs_expr_t reuse) {
     SvTy lt = _type(E, l0), rt = _type(E, r0);
     uint16_t W = lt.w > rt.w ? lt.w : rt.w;
     uint8_t  S = (uint8_t)(lt.s && rt.s);
+    if (W > 64) {
+        dvs_expr_t n = _cmp_var_wide(E, op, l0, r0, S);
+        if (n != EXPR_NULL || E->err) return n;
+    }
     dvs_expr_t l = _val(E, l0, W, S);
     dvs_expr_t r = _val(E, r0, W, S);
     if (E->err) return EXPR_NULL;
@@ -711,41 +803,7 @@ static dvs_expr_t _cmp(SvE *E, dvs_binop_t op, dvs_expr_t l0, dvs_expr_t r0, dvs
             if (vt.w <= 64) {
                 dvs_i128 cv = c.is_signed ? dvs_i128_from_i64(c.value)
                                           : dvs_i128_from_u64((uint64_t)c.value);
-                dvs_i128 vmin, vmax;
-                if (vt.s) {
-                    vmin = dvs_i128_from_i64(vt.w >= 64 ? INT64_MIN
-                                             : -((int64_t)1 << (vt.w - 1)));
-                    vmax = dvs_i128_from_i64(vt.w >= 64 ? INT64_MAX
-                                             : ((int64_t)1 << (vt.w - 1)) - 1);
-                } else {
-                    vmin = dvs_i128_from_i64(0);
-                    vmax = dvs_i128_from_u64(vt.w >= 64 ? UINT64_MAX
-                                             : ((uint64_t)1 << vt.w) - 1);
-                }
-                dvs_binop_t vop = op;      /* as `var vop const` */
-                if (!var_left) {
-                    switch (op) {
-                    case DVS_BIN_LT:  vop = DVS_BIN_GT;  break;
-                    case DVS_BIN_LTE: vop = DVS_BIN_GTE; break;
-                    case DVS_BIN_GT:  vop = DVS_BIN_LT;  break;
-                    case DVS_BIN_GTE: vop = DVS_BIN_LTE; break;
-                    default: break;
-                    }
-                }
-                int below = dvs_i128_lt(cv, vmin);      /* cv <  vmin */
-                int above = dvs_i128_lt(vmax, cv);      /* cv >  vmax */
-                int at_lo = dvs_i128_le(cv, vmin);      /* cv <= vmin */
-                int at_hi = dvs_i128_le(vmax, cv);      /* cv >= vmax */
-                int t = -1;
-                switch (vop) {
-                case DVS_BIN_EQ:  if (below || above) t = 0; break;
-                case DVS_BIN_NEQ: if (below || above) t = 1; break;
-                case DVS_BIN_LT:  t = at_lo ? 0 : (above ? 1 : -1); break;
-                case DVS_BIN_LTE: t = below ? 0 : (at_hi ? 1 : -1); break;
-                case DVS_BIN_GT:  t = at_hi ? 0 : (below ? 1 : -1); break;
-                case DVS_BIN_GTE: t = above ? 0 : (at_lo ? 1 : -1); break;
-                default: break;
-                }
+                int t = _range_truth(var_left ? op : _flip_cmp(op), vt, cv);
                 if (t >= 0) return _mk_const(E, t, 0, 1);
             }
         }
