@@ -17,13 +17,12 @@
 #include "dvs_stackinfo.h"   /* dvs_stack_guard_t */
 #include "dvs_numth.h"       /* DvsDivisors */
 
-/** Maximum decision depth of one search, counted from its root (the level
- *  the open checkpoints hold). The search pushes one level per decided
- *  variable, so this also caps the number of decision variables a single
- *  solve can carry natively -- e.g. a symbolic array select frees every array
- *  element as a decision var, so a very large indexed array can exceed this.
- *  `_solver_solve_core` then bails with DVS_SOLVE_TIMEOUT (clean defer). It
- *  is search policy: the level arrays are sized to the root plus this. */
+/** Decision depth a search may use beyond one level per variable, counted
+ *  from its root (the level the open checkpoints hold). The search pushes
+ *  one level per decided variable, and splits push more. A growable context
+ *  sizes its level arrays at the start of each search to the root plus
+ *  n_vars plus this (up to the 16-bit level limit); a fixed pool keeps the
+ *  root plus this. Past the limit the search bails with DVS_SOLVE_TIMEOUT. */
 #define MAX_DECISION_DEPTH  256u
 
 #ifdef __cplusplus

@@ -1774,10 +1774,18 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
      * to [1,1], out of reach of a restart. */
     const uint32_t base = ctx->decision_level;
     ctx->search_base = base;
-    /* The search may decide MAX_DECISION_DEPTH levels above its root, within
-     * the level arrays (a checkpoint reserves that room as it opens). */
-    ctx->max_depth = base + MAX_DECISION_DEPTH < ctx->level_cap
-                   ? base + MAX_DECISION_DEPTH : ctx->level_cap;
+    /* The search may decide one level per variable plus MAX_DECISION_DEPTH
+     * more (for splits) above its root. A fixed 256 made any problem with
+     * more decision variables bail (a 300-element array freed by a symbolic
+     * select). A growable context grows its level arrays to that; a fixed
+     * pool keeps the room its checkpoints reserved. */
+    {
+        uint32_t want = base + MAX_DECISION_DEPTH + ctx->n_vars + 2u;
+        if (want > 0xFFFFu) want = 0xFFFFu;
+        if (want > ctx->level_cap) (void)dvs_ctx_reserve_levels(ctx, want);
+        uint32_t room = ctx->level_cap - 2u;
+        ctx->max_depth = want - 2u < room ? want - 2u : room;
+    }
     ctx->level_marks[base].trail_top   = ctx->trail_top;
     ctx->level_marks[base].trail_count = ctx->trail_count;
     ctx->level_marks[base].stack_mark  = dvs_stack_push(ctx->dynamic);
