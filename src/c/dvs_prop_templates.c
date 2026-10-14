@@ -4422,16 +4422,22 @@ static PropResult _fire_sum_eq_32(Propagator *self, dvs_ctx_t *ctx) {
 uint32_t prop_add_sum_eq_32(dvs_ctx_t *ctx, uint32_t result_id,
                              uint32_t n_summands, const uint32_t *summand_ids,
                              uint8_t priority) {
-    if (n_summands < 1 || n_summands > MAX_SUM_VARS) return EXPR_NULL;
+    /* Sized to the summands: var_ids[n_total] then watcher_nexts[n_total].
+     * The bound keeps the byte size within the pool's uint32 allocation. */
+    if (n_summands < 1 ||
+        n_summands > (UINT32_MAX - (uint32_t)sizeof(SumEq_32_t)) / 8u - 1u)
+        return EXPR_NULL;
 
     uint32_t n_total = 1 + n_summands;  /* result + summands */
+    uint32_t sz = (uint32_t)sizeof(SumEq_32_t) + 2u * n_total * (uint32_t)sizeof(uint32_t);
 
     if (dvs_ctx_room_prop(ctx) != 0) return EXPR_NULL;  /* prop_refs slot */
-    uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(SumEq_32_t), 8u);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, sz, 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     SumEq_32_t *s = (SumEq_32_t *)dvs_spool_ptr(&ctx->pool, ref);
-    memset(s, 0, sizeof(SumEq_32_t));
+    memset(s, 0, sz);
+    uint32_t *watcher_nexts = s->var_ids + n_total;
 
     s->hdr.fire       = _fire_sum_eq_32;
     s->hdr.queue_next = EXPR_NULL;
@@ -4439,7 +4445,7 @@ uint32_t prop_add_sum_eq_32(dvs_ctx_t *ctx, uint32_t result_id,
     s->hdr.priority   = priority;
     s->hdr.flags      = PROP_FLAG_WIDE_WATCH;
     s->n_vars         = n_total;
-    s->_capacity      = MAX_SUM_VARS + 1;
+    s->_capacity      = n_total;
 
     s->var_ids[0] = result_id;
     for (uint32_t i = 0; i < n_summands; i++) {
@@ -4449,7 +4455,7 @@ uint32_t prop_add_sum_eq_32(dvs_ctx_t *ctx, uint32_t result_id,
     /* Register watchers */
     for (uint32_t i = 0; i < n_total; i++) {
         uint32_t vid = s->var_ids[i];
-        s->watcher_nexts[i]     = ctx->watcher_heads[vid];
+        watcher_nexts[i]        = ctx->watcher_heads[vid];
         ctx->watcher_heads[vid] = ref;
     }
 

@@ -95,6 +95,27 @@ def test_sum_reduction_forward():
     assert v[0] == sum(elems)
 
 
+def test_sum_reduction_many_summands():
+    """A sum's propagator is sized to its summands. It had room for 64, so a
+    larger sum was left uncompiled (CompileIncompleteError) and only BV-SAT
+    could serve it: `sum_100` took ~1 s per randomize in pyvsc. (Kept under
+    MAX_DECISION_DEPTH = 256 decided variables; past that the search bails
+    whatever the constraint.)"""
+    for n in (65, 100, 250):
+        def build(b, n=n):
+            b.add_var(0, 32, True, 3 * n, 3 * n)    # result pinned
+            for i in range(1, n + 1):
+                b.add_var(i, 32, True, 0, 5)
+            b.add_constraint(b.expr_sum(b.expr_var(0),
+                                        [b.expr_var(i) for i in range(1, n + 1)]))
+            return list(range(n + 1))
+
+        rc, v = _cdcl(build)
+        assert rc == SOLVE_OK, n
+        assert sum(v[i] for i in range(1, n + 1)) == 3 * n, n
+        assert all(0 <= v[i] <= 5 for i in range(1, n + 1)), n
+
+
 def test_sum_with_predicate_count():
     """`a.sum() with (item > k)` counts elements > k. Runs on the bitblast
     engine: each guard g_i == (a[i] > k) is a comparison-as-value (not compiled

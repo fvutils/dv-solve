@@ -3488,16 +3488,25 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
         r_id = _resolve(ctx, r_id);
 
         dvs_expr_t *sum_refs = (dvs_expr_t *)(es + 1);
-        uint32_t summand_ids[MAX_SUM_VARS];
         uint32_t ns = es->n_vars;
-        if (ns > MAX_SUM_VARS) return 0;
-
-        for (uint32_t i = 0; i < ns; i++) {
-            if (!_is_var(sp, sum_refs[i], &summand_ids[i])) return 0;
-            summand_ids[i] = _resolve(ctx, summand_ids[i]);
+        /* Any summand count: a large sum's ids go in a heap buffer. */
+        uint32_t local_ids[64];
+        uint32_t *summand_ids = local_ids;
+        if (ns > 64u) {
+            summand_ids = (uint32_t *)DVS_ALLOC(ctx->alloc, (size_t)ns * sizeof *summand_ids);
+            if (!summand_ids) return 0;
         }
 
-        uint32_t ref = prop_add_sum_eq_32(ctx, r_id, ns, summand_ids, 0);
+        uint32_t ref = EXPR_NULL;
+        uint32_t i = 0;
+        for (; i < ns; i++) {
+            if (!_is_var(sp, sum_refs[i], &summand_ids[i])) break;
+            summand_ids[i] = _resolve(ctx, summand_ids[i]);
+        }
+        if (i == ns)
+            ref = prop_add_sum_eq_32(ctx, r_id, ns, summand_ids, 0);
+        if (summand_ids != local_ids)
+            DVS_RELEASE(ctx->alloc, summand_ids, (size_t)ns * sizeof *summand_ids);
         return (ref != EXPR_NULL) ? 1 : 0;
     }
 

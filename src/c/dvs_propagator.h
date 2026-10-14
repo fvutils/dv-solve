@@ -512,26 +512,25 @@ uint32_t prop_disj_eq_set(const Propagator *p, uint32_t *out_var,
                           int64_t *out_vals, uint32_t max_vals);
 
 /* ------------------------------------------------------------------ */
-/* SumEq: result == var_ids[0] + var_ids[1] + ... + var_ids[n-1]      */
+/* SumEq: result == var_ids[1] + ... + var_ids[n_vars-1]              */
 /*                                                                     */
 /* Uses PROP_FLAG_WIDE_WATCH for variable-length watch list.           */
-/* var_ids[0] = result, var_ids[1..n] = summands.                     */
+/* var_ids[0] = result, var_ids[1..] = summands. Sized to its summand  */
+/* count: var_ids[_capacity] is followed by watcher_nexts[_capacity]   */
+/* (the generic wide-watch layout), so there is no summand limit.      */
 /* ------------------------------------------------------------------ */
-#define MAX_SUM_VARS 64u  /* max summands (not counting result) */
-
 typedef struct {
     Propagator    hdr;
     uint32_t      n_vars;      /* total watched vars (1 result + N summands) */
-    uint32_t      _capacity;   /* max var_ids/watcher_nexts entries */
-    uint32_t      var_ids[MAX_SUM_VARS + 1];
-    uint32_t      watcher_nexts[MAX_SUM_VARS + 1];
+    uint32_t      _capacity;   /* var_ids/watcher_nexts entries (= n_vars) */
+    uint32_t      var_ids[];   /* var_ids[_capacity], watcher_nexts[_capacity] */
 } SumEq_32_t;
 
 /**
  * Sum-equality constraint: result == sum of summand variables.
  *
  * @param result_id   Variable ID for the result.
- * @param n_summands  Number of summand variables (1 <= n <= MAX_SUM_VARS).
+ * @param n_summands  Number of summand variables (>= 1).
  * @param summand_ids Array of summand variable IDs.
  * @param priority    Queue priority level.
  * @return Pool offset of the propagator, or EXPR_NULL on failure.
