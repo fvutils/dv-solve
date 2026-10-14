@@ -2229,12 +2229,18 @@ static int _bb_encode_dists(dvs_bbsolver_t *S) {
         int is_signed = S->vars[vid].is_signed;
         int64_t dlo = S->vars[vid].lo, dhi = S->vars[vid].hi;
 
+        /* Bounds are bit patterns: an unsigned 64-bit var orders them
+         * unsigned, as the picker does (var_b_lt), or its upper-half entries
+         * would clip away. (Wider vars carry the [0, INT64_MAX] "free"
+         * sentinel and take no dist.) */
+        int uns = !is_signed && v.size == 64;
+#define DIST_LT(a, b) (uns ? (uint64_t)(a) < (uint64_t)(b) : (a) < (b))
         dvs_bv_t acc = { NULL, 0 };
         for (uint32_t i = 0; i < ds->n_entries; i++) {
             if (ents[i].weight == 0) continue;          /* never picked */
-            int64_t elo = ents[i].lo < dlo ? dlo : ents[i].lo;
-            int64_t ehi = ents[i].hi > dhi ? dhi : ents[i].hi;
-            if (elo > ehi) continue;                    /* outside the domain */
+            int64_t elo = DIST_LT(ents[i].lo, dlo) ? dlo : ents[i].lo;
+            int64_t ehi = DIST_LT(dhi, ents[i].hi) ? dhi : ents[i].hi;
+            if (DIST_LT(ehi, elo)) continue;            /* outside the domain */
 
             dvs_bv_t lo = bb_value_i64(S, v.size, elo, is_signed);
             dvs_bv_t hi = bb_value_i64(S, v.size, ehi, is_signed);
@@ -2247,6 +2253,7 @@ static int _bb_encode_dists(dvs_bbsolver_t *S) {
                                               dvs_bb_not(S->bb, hi_lt_v));
             acc = (acc.size == 0) ? in_i : dvs_bb_or(S->bb, acc, in_i);
         }
+#undef DIST_LT
         if (acc.size != 0) assert_top(S, acc.bits[0]);
         dref = ds->next;
     }

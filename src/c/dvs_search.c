@@ -544,15 +544,19 @@ static int64_t _pick_value_dist(dvs_ctx_t *ctx, uint32_t var_id,
     DistMeta *dm = (DistMeta *)dvs_spool_ptr(&ctx->pool, dm_off);
     DistMetaEntry *entries = (DistMetaEntry *)(dm + 1);
     uint32_t ne = dm->n_entries;
+    /* Entry bounds are bit patterns like the var's own: order them per the
+     * var's signedness, or an unsigned 64-bit var's upper-half entries
+     * (negative as int64) never overlap its domain and are never drawn. */
+    const Variable *var = &ctx->vars[var_id];
 
     /* Recompute effective weights considering only ranges that intersect
      * the current feasible domain [lo, hi]. */
     uint64_t total_weight = 0;
     for (uint32_t i = 0; i < ne; i++) {
         if (entries[i].weight == 0) continue;
-        int64_t elo = entries[i].lo < lo ? lo : entries[i].lo;
-        int64_t ehi = entries[i].hi > hi ? hi : entries[i].hi;
-        if (elo > ehi) continue;  /* no overlap with feasible domain */
+        int64_t elo = var_b_max(var, entries[i].lo, lo);
+        int64_t ehi = var_b_min(var, entries[i].hi, hi);
+        if (var_b_gt(var, elo, ehi)) continue;  /* no overlap with feasible domain */
 
         uint64_t ew;
         if (entries[i].is_per_value) {
@@ -573,9 +577,9 @@ static int64_t _pick_value_dist(dvs_ctx_t *ctx, uint32_t var_id,
     uint64_t cum = 0;
     for (uint32_t i = 0; i < ne; i++) {
         if (entries[i].weight == 0) continue;
-        int64_t elo = entries[i].lo < lo ? lo : entries[i].lo;
-        int64_t ehi = entries[i].hi > hi ? hi : entries[i].hi;
-        if (elo > ehi) continue;
+        int64_t elo = var_b_max(var, entries[i].lo, lo);
+        int64_t ehi = var_b_min(var, entries[i].hi, hi);
+        if (var_b_gt(var, elo, ehi)) continue;
 
         uint64_t ew;
         if (entries[i].is_per_value) {
