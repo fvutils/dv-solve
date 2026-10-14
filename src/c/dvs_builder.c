@@ -546,6 +546,26 @@ dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value,
     return ref;
 }
 
+dvs_expr_t dvs_builder_expr_const_wide(dvs_builder_t *b, uint32_t n_limbs,
+                                       const uint64_t *limbs, uint32_t width,
+                                       uint8_t is_signed) {
+    if (width == 0 || width > 65535u || !limbs || n_limbs != (width + 63u) / 64u)
+        return EXPR_NULL;
+    if (width <= 64)
+        return dvs_builder_expr_const_sized(b, (int64_t)limbs[0],
+                                            is_signed ? 1 : 0, (uint16_t)width);
+    dvs_expr_t ref = dvs_builder_alloc(b,
+        (uint32_t)(sizeof(ExprConstWide) + n_limbs * sizeof(uint64_t)),
+        (uint32_t)_Alignof(ExprConstWide));
+    if (ref == EXPR_NULL) return EXPR_NULL;
+
+    uint32_t voff = ref - POOL_HEADER_SZ;
+    uint32_t local = voff - b->current->base_offset;
+    ExprConstWide *n = (ExprConstWide *)_block_ptr_at(b->current, local);
+    dvs_const_wide_init(n, n_limbs, limbs, width, is_signed);
+    return ref;
+}
+
 dvs_expr_t dvs_builder_expr_const(dvs_builder_t *b, int64_t value,
                            uint8_t is_signed) {
     return dvs_builder_expr_const_sized(b, value, is_signed, 0);

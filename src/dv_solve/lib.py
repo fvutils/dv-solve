@@ -323,6 +323,11 @@ def _wire_builder_argtypes(lib: ctypes.CDLL) -> None:
     lib.dvs_builder_expr_const_sized.argtypes = [c.c_void_p, c.c_int64, c.c_uint8,
                                              c.c_uint16]
 
+    lib.dvs_builder_expr_const_wide.restype  = c.c_uint32
+    lib.dvs_builder_expr_const_wide.argtypes = [c.c_void_p, c.c_uint32,
+                                                c.POINTER(c.c_uint64),
+                                                c.c_uint32, c.c_uint8]
+
     lib.dvs_builder_expr_var.restype  = c.c_uint32
     lib.dvs_builder_expr_var.argtypes = [c.c_void_p, c.c_uint32]
 

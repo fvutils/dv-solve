@@ -364,6 +364,12 @@ static SvTy _type(SvE *E, dvs_expr_t ref) {
         t.w = w; t.s = s;
         break;
     }
+    case EXPR_CONST_WIDE: {
+        const ExprConstWide *c = (const ExprConstWide *)_P(E, ref);
+        if (c->width > SV_MAX_W) { E->err = 1; break; }
+        t.w = (uint16_t)c->width; t.s = c->is_signed ? 1 : 0;
+        break;
+    }
     case EXPR_BINARY: {
         ExprBinary b = *(ExprBinary *)_P(E, ref);
         if (_is_arith(b.op)) {
@@ -496,6 +502,9 @@ static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint16_t W, uint8_t S) {
         break;
     case EXPR_CONST:
         out = _val_const(E, ref, W, S);
+        break;
+    case EXPR_CONST_WIDE:
+        out = _conv(E, ref, W, S);   /* a leaf at its own type, like a variable */
         break;
     case EXPR_BINARY: {
         ExprBinary b = *(ExprBinary *)_P(E, ref);
@@ -880,6 +889,7 @@ static dvs_expr_t _bool(SvE *E, dvs_expr_t ref) {
     case EXPR_IN_RANGES:
         out = _in(E, ref);
         break;
+    case EXPR_CONST_WIDE:
     case EXPR_EXTEND:
     case EXPR_EXTRACT:
     case EXPR_CONCAT:

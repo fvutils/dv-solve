@@ -168,6 +168,12 @@ static VTy _vtype(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         t.w = w; t.s = s;
         break;
     }
+    case EXPR_CONST_WIDE: {
+        const ExprConstWide *ec = (const ExprConstWide *)dvs_pool_ptr(&sp->pool, ref);
+        t.w = (uint16_t)ec->width;
+        t.s = ec->is_signed ? 1 : 0;
+        break;
+    }
     case EXPR_BINARY: {
         ExprBinary *eb = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
         if (_vis_arith(eb->op)) {
@@ -283,6 +289,15 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
          * context. */
         VI own = cs ? (VI)ec->value : (VI)(VU)(uint64_t)ec->value;
         own = _wrap((VU)own, cw, cs);
+        return _wrap((VU)own, W, S);
+    }
+    case EXPR_CONST_WIDE: {
+        const ExprConstWide *ec = (const ExprConstWide *)dvs_pool_ptr(&sp->pool, ref);
+        if (ec->width > V_MAXW) { *skip = 1; return 0; }
+        VU u = 0;
+        for (uint32_t i = ec->n_limbs; i-- > 0; )
+            u = ((u << 32) << 32) | ec->limbs[i];   /* two steps: defined at 64 */
+        VI own = _wrap(u, (uint16_t)ec->width, ec->is_signed ? 1 : 0);
         return _wrap((VU)own, W, S);
     }
     case EXPR_VAR: {
@@ -506,6 +521,14 @@ static void _dump_expr(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
     case EXPR_CONST: {
         ExprConst *ec = (ExprConst *)dvs_pool_ptr(&sp->pool, ref);
         _dput(d, "%lld", (long long)ec->value);
+        return;
+    }
+    case EXPR_CONST_WIDE: {
+        const ExprConstWide *ec = (const ExprConstWide *)dvs_pool_ptr(&sp->pool, ref);
+        _dput(d, "%u'h", ec->width);
+        for (uint32_t i = ec->n_limbs; i-- > 0; )
+            _dput(d, i + 1 == ec->n_limbs ? "%llx" : "%016llx",
+                  (unsigned long long)ec->limbs[i]);
         return;
     }
     case EXPR_VAR: {

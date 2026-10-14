@@ -44,6 +44,9 @@ ExprRef dvs_builder_add_var(SolveProblemBuilder *b, uint32_t var_id,
                         int64_t lo, int64_t hi);
 
 ExprRef dvs_builder_expr_const(SolveProblemBuilder *b, int64_t value, uint8_t is_signed);
+ExprRef dvs_builder_expr_const_wide(SolveProblemBuilder *b, uint32_t n_limbs,
+                                const uint64_t *limbs, uint32_t width,
+                                uint8_t is_signed);   /* > 64-bit constant */
 ExprRef dvs_builder_expr_var(SolveProblemBuilder *b, uint32_t var_id);
 ExprRef dvs_builder_expr_binary(SolveProblemBuilder *b, uint32_t op,
                             ExprRef lhs, ExprRef rhs);

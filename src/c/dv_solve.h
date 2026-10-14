@@ -224,6 +224,15 @@ dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,
 dvs_expr_t dvs_builder_expr_const(dvs_builder_t *b, int64_t value,
                                   uint8_t is_signed);
 
+/** A sized constant of `width` bits (1..65535), signed when `is_signed`,
+ *  given as `n_limbs` = ceil(width / 64) 64-bit limbs, least significant
+ *  first: limbs[0] holds bits 63:0. Bits at and above `width` are ignored.
+ *  It is one node whatever its width, so it is how to spell a constant wider
+ *  than 64 bits. Returns EXPR_NULL for a bad width or limb count. */
+dvs_expr_t dvs_builder_expr_const_wide(dvs_builder_t *b, uint32_t n_limbs,
+                                       const uint64_t *limbs, uint32_t width,
+                                       uint8_t is_signed);
+
 /** A reference to variable `var_id`. */
 dvs_expr_t dvs_builder_expr_var(dvs_builder_t *b, uint32_t var_id);
 

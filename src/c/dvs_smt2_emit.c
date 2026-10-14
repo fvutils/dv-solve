@@ -158,6 +158,11 @@ static ETy _type(E *e, dvs_expr_t ref) {
         t.w = w; t.s = s;
         break;
     }
+    case EXPR_CONST_WIDE: {
+        const ExprConstWide *ec = (const ExprConstWide *)_P(e, ref);
+        t.w = (uint16_t)ec->width; t.s = ec->is_signed ? 1 : 0;
+        break;
+    }
     case EXPR_BINARY: {
         ExprBinary *eb = (ExprBinary *)_P(e, ref);
         if (_is_arith(eb->op)) {
@@ -459,7 +464,7 @@ static int _shared(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, int mode, DvsOBu
     _map_get(&e->uses, (uint64_t)ref + 1, &uses);
     if (uses < 2) return 0;
     ExprKind k = _kind(e, ref);
-    if (k == EXPR_VAR || k == EXPR_CONST) return 0;
+    if (k == EXPR_VAR || k == EXPR_CONST || k == EXPR_CONST_WIDE) return 0;
     uint64_t key = ((uint64_t)ref << 26) ^ ((uint64_t)W << 2) ^ ((uint64_t)S << 1)
                  ^ (uint64_t)mode;
     key = key * 2 + 1;   /* never 0 */
@@ -527,6 +532,15 @@ static void _val_raw(E *e, dvs_expr_t ref, uint16_t W, uint8_t S, DvsOBuf *o) {
             dvs_smt2_emit_value(o, ec->value, 64);
             dvs_ob_add(o, ")", 1);
         }
+        _close(o, c);
+        return;
+    }
+    case EXPR_CONST_WIDE: {
+        const ExprConstWide *ec = (const ExprConstWide *)_P(e, ref);
+        int c = _conv_open(o, (uint16_t)ec->width, ec->is_signed, W);
+        dvs_ob_str(o, "#b");
+        for (uint32_t i = ec->width; i-- > 0; )
+            dvs_ob_add(o, dvs_const_wide_bit(ec, i) ? "1" : "0", 1);
         _close(o, c);
         return;
     }

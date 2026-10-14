@@ -33,6 +33,7 @@ typedef enum {
     EXPR_SV_CAST  = 15, /* INTERNAL: explicit width/signedness conversion,
                          * produced only by SV elaboration (dvs_sv.h) */
     EXPR_CAST     = 16, /* cast to a type: SV `T'(x)`  */
+    EXPR_CONST_WIDE = 17, /* integer constant wider than 64 bits */
 } ExprKind;
 
 
@@ -63,6 +64,42 @@ typedef struct {
     uint16_t width;      /* 0 = unsized, else the literal's width */
     int64_t  value;      /* bit pattern / signed value           */
 } ExprConst;
+
+/** A sized constant wider than an int64 can spell: `width` bits (65..65535),
+ * read as signed when `is_signed`. `n_limbs` = ceil(width / 64) 64-bit limbs
+ * follow the node, least significant first; the bits of the top limb above
+ * `width` are zero. A single node, so a constant of any width is one leaf
+ * (a chain of 64-bit `concat`s nests one level a limb, and the bit-blaster
+ * refused one 1024 limbs deep). The builder emits a plain ExprConst for a
+ * width of 64 or less. */
+typedef struct {
+    ExprKind kind;       /* EXPR_CONST_WIDE                      */
+    uint8_t  is_signed;
+    uint8_t  _p8[3];
+    uint32_t width;
+    uint32_t n_limbs;
+    uint64_t limbs[];
+} ExprConstWide;
+
+/* Fill a freshly allocated ExprConstWide (the caller checked the arguments),
+ * clearing the bits above `width`. */
+static inline void dvs_const_wide_init(ExprConstWide *n, uint32_t n_limbs,
+                                       const uint64_t *limbs, uint32_t width,
+                                       uint8_t is_signed) {
+    n->kind = EXPR_CONST_WIDE;
+    n->is_signed = is_signed ? 1 : 0;
+    n->_p8[0] = n->_p8[1] = n->_p8[2] = 0;
+    n->width = width;
+    n->n_limbs = n_limbs;
+    for (uint32_t i = 0; i < n_limbs; i++) n->limbs[i] = limbs[i];
+    if (width % 64u)
+        n->limbs[n_limbs - 1] &= ((uint64_t)1 << (width % 64u)) - 1;
+}
+
+/* Bit `i` of a wide constant's own `width`-bit pattern. */
+static inline int dvs_const_wide_bit(const ExprConstWide *n, uint32_t i) {
+    return (int)((n->limbs[i / 64u] >> (i % 64u)) & 1u);
+}
 
 /** Variable reference */
 typedef struct {
@@ -392,6 +429,13 @@ dvs_expr_t expr_const(dvs_problem_t *sp, int64_t value, uint8_t is_signed);
 /** A sized constant of `width` bits (see ExprConst). width 0 == expr_const. */
 dvs_expr_t expr_const_sized(dvs_problem_t *sp, int64_t value, uint8_t is_signed,
                          uint16_t width);
+/** A constant of `width` bits from `n_limbs` 64-bit limbs, least significant
+ *  first (see ExprConstWide; a plain sized ExprConst when width <= 64).
+ *  Bits at and above `width` are ignored. EXPR_NULL when `width` is 0 or
+ *  over 65535, or `n_limbs` is not ceil(width / 64). */
+dvs_expr_t expr_const_wide(dvs_problem_t *sp, uint32_t n_limbs,
+                           const uint64_t *limbs, uint32_t width,
+                           uint8_t is_signed);
 dvs_expr_t expr_var(dvs_problem_t *sp, uint32_t var_id);
 dvs_expr_t expr_binary(dvs_problem_t *sp, dvs_binop_t op, dvs_expr_t lhs, dvs_expr_t rhs);
 dvs_expr_t expr_unary(dvs_problem_t *sp, dvs_unop_t op, dvs_expr_t operand);

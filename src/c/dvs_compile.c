@@ -1205,6 +1205,8 @@ static uint16_t _expr_width(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
     case EXPR_CONST:
         /* A sized constant has its own width; an unsized one adapts. */
         return ((ExprConst *)dvs_pool_ptr(&sp->pool, ref))->width;
+    case EXPR_CONST_WIDE:
+        return (uint16_t)((ExprConstWide *)dvs_pool_ptr(&sp->pool, ref))->width;
     case EXPR_EXTEND: {
         ExprExtend *ee = (ExprExtend *)dvs_pool_ptr(&sp->pool, ref);
         return ee->to_bits;
@@ -1268,6 +1270,8 @@ static int _expr_has_signed(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
         ExprConst *ec = (ExprConst *)dvs_pool_ptr(&sp->pool, ref);
         return ec->width != 0 && ec->is_signed != 0;
     }
+    case EXPR_CONST_WIDE:
+        return ((ExprConstWide *)dvs_pool_ptr(&sp->pool, ref))->is_signed != 0;
     case EXPR_EXTEND:
         /* An extend keeps its operand's signedness (dvs_sv.h). */
         return _expr_has_signed(ctx, sp,

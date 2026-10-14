@@ -200,6 +200,14 @@ A constant. Like an unsized SystemVerilog literal it is a 32-bit signed
 value, unless it doesn't fit in 32 bits.
 ```
 
+```{c:function} dvs_expr_t dvs_builder_expr_const_wide(dvs_builder_t *b, uint32_t n_limbs, const uint64_t *limbs, uint32_t width, uint8_t is_signed)
+A sized constant of `width` bits (1 to 65535), signed when `is_signed`. Its
+bit pattern is `n_limbs` = ceil(`width` / 64) 64-bit limbs, least significant
+first, so `limbs[0]` holds bits 63:0; bits at and above `width` are ignored.
+It is one node at any width, so use it for a constant wider than 64 bits.
+Returns `EXPR_NULL` for a bad width or limb count.
+```
+
 ```{c:function} dvs_expr_t dvs_builder_expr_var(dvs_builder_t *b, uint32_t var_id)
 A reference to variable `var_id`, which must be declared before the problem
 is compiled.

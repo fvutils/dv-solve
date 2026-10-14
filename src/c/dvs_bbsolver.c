@@ -282,6 +282,8 @@ static int bb_signed(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
         dvs_sv_const_type((ExprConst *)kp, &w, &sg);
         return sg;
     }
+    case EXPR_CONST_WIDE:
+        return ((ExprConstWide *)kp)->is_signed != 0;
     case EXPR_VAR: {
         uint32_t id = ((ExprVar *)kp)->var_id;
         return id < S->n_vars && S->vars[id].is_signed;
@@ -327,6 +329,7 @@ static uint16_t bb_self_width(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
     if (!kp) return 0;
     switch (*kp) {
     case EXPR_CONST: return ((ExprConst *)kp)->width;
+    case EXPR_CONST_WIDE: return (uint16_t)((ExprConstWide *)kp)->width;
     case EXPR_VAR: {
         uint32_t id = ((ExprVar *)kp)->var_id;
         return id < S->n_vars ? S->vars[id].width : 0;
@@ -1169,6 +1172,14 @@ static dvs_bv_t bb_const(dvs_bbsolver_t *S, const ExprConst *c, uint16_t hint) {
     return bb_value_i64(S, w, c->value, c->is_signed);
 }
 
+/* A wide constant is exactly its own width, like a sized one. */
+static dvs_bv_t bb_const_wide(dvs_bbsolver_t *S, const ExprConstWide *c) {
+    dvs_bv_t r = dvs_bb_value_u64(S->bb, c->width, 0);
+    for (uint32_t i = 0; i < c->width; i++)          /* bits[0] is the MSB */
+        if (dvs_const_wide_bit(c, i)) r.bits[c->width - 1 - i] = DVS_AIG_TRUE;
+    return r;
+}
+
 static BB_NOINLINE dvs_bv_t bb_var_expr(dvs_bbsolver_t *S, const ExprVar *v) {
     return bv_for_var(S, v->var_id);
 }
@@ -1761,6 +1772,7 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint16_t hint_width) 
     dvs_bv_t out;
     switch (*kp) {
     case EXPR_CONST:    return bb_const(S, (ExprConst *)kp, hint_width);
+    case EXPR_CONST_WIDE: out = bb_const_wide(S, (ExprConstWide *)kp); break;
     case EXPR_VAR:      out = bb_var_expr(S, (ExprVar *)kp); break;
     case EXPR_BINARY:   out = bb_binary(S, (ExprBinary *)kp, ref, hint_width); break;
     case EXPR_UNARY:    out = bb_unary(S, (ExprUnary *)kp, hint_width); break;

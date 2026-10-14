@@ -49,6 +49,7 @@ static int _visit(Walk *w, dvs_expr_t r) {
     int rc = 0;
     switch (*(const ExprKind *)n) {
     case EXPR_CONST:
+    case EXPR_CONST_WIDE:
         return 0;
     case EXPR_VAR:
         o->n_vars++;

@@ -97,6 +97,23 @@ dvs_expr_t expr_const(dvs_problem_t *sp, int64_t value, uint8_t is_signed) {
     return expr_const_sized(sp, value, is_signed, 0);
 }
 
+dvs_expr_t expr_const_wide(dvs_problem_t *sp, uint32_t n_limbs,
+                           const uint64_t *limbs, uint32_t width,
+                           uint8_t is_signed) {
+    if (width == 0 || width > 65535u || !limbs || n_limbs != (width + 63u) / 64u)
+        return EXPR_NULL;
+    if (width <= 64)
+        return expr_const_sized(sp, (int64_t)limbs[0], is_signed ? 1 : 0,
+                                (uint16_t)width);
+    dvs_expr_t ref = _pool_alloc(sp,
+        (uint32_t)(sizeof(ExprConstWide) + n_limbs * sizeof(uint64_t)),
+        (uint32_t)_Alignof(ExprConstWide));
+    if (ref == EXPR_NULL) return EXPR_NULL;
+    ExprConstWide *n = (ExprConstWide *)POOL_PTR(sp, ref);
+    dvs_const_wide_init(n, n_limbs, limbs, width, is_signed);
+    return ref;
+}
+
 dvs_expr_t expr_var(dvs_problem_t *sp, uint32_t var_id) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprVar),
                               (uint32_t)_Alignof(ExprVar));

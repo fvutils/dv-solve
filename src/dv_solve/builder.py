@@ -207,6 +207,23 @@ class SolveProblemBuilder:
             ctypes.c_uint8(1 if is_signed else 0),
         )
 
+    def expr_const_wide(self, value: int, width: int,
+                        is_signed: bool = False) -> int:
+        """A ``width``-bit constant of any width up to 65535, as one node.
+
+        ``value`` is a Python int; its low ``width`` bits are the constant's
+        bit pattern (a negative value is taken in two's complement). Read as
+        signed when ``is_signed``.
+        """
+        n = (width + 63) // 64
+        u = value & ((1 << (n * 64)) - 1)
+        limbs = (ctypes.c_uint64 * n)(
+            *((u >> (64 * i)) & 0xFFFFFFFFFFFFFFFF for i in range(n)))
+        return self._lib.dvs_builder_expr_const_wide(
+            self._b, ctypes.c_uint32(n), limbs, ctypes.c_uint32(width),
+            ctypes.c_uint8(1 if is_signed else 0),
+        )
+
     def expr_var(self, var_id: int) -> int:
         """The value of variable ``var_id``."""
         return self._lib.dvs_builder_expr_var(
