@@ -37,13 +37,6 @@ typedef enum {
 /* entries.  Backtracking walks the chain from trail_top backward.     */
 /* ------------------------------------------------------------------ */
 /* TrailEntry.flags bits */
-#define TRAIL_FLAG_SINGLETON 0x1u   /* this entry is one half of a
-                                     * paired LB+UB tightening that
-                                     * encodes a singleton pin
-                                     * (decision "v = c" or propagator
-                                     * exact assignment). Both halves
-                                     * carry the flag; analyzer treats
-                                     * the pair as one logical event. */
 #define TRAIL_FLAG_FROM_CLAUSE 0x2u /* tightening came from a learnt
                                      * clause's unit propagation. When
                                      * set, prop_ref holds the clause

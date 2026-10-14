@@ -1885,10 +1885,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         ctx->decisions[dec_idx].second_phase = 0;
         ctx->decisions[dec_idx].bound        = bound;
 
-        /* ── Push level and assign ──
-         * The tighten helpers auto-detect singleton pinning (lo == hi
-         * after the change) and stamp TRAIL_FLAG_SINGLETON on the new
-         * entry plus the companion-bound entry at the same level. */
+        /* ── Push level and assign ── */
         trail_push_level(ctx);
         /* A conflict from the search's own tightenings (here, and the
          * chronological path below) has no culprit propagator or clause.
