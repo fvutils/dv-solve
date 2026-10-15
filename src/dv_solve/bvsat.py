@@ -169,9 +169,8 @@ class BVSatCtx:
         if rc != 0:
             raise RuntimeError(
                 "dvs_bbsolver_value_wide failed for var %d (rc=%d)" % (var_id, rc))
-        val = 0
-        for i in range(n_limbs):
-            val |= int(buf[i]) << (64 * i)
+        # One conversion, not a shift-or per limb (quadratic in the width).
+        val = int.from_bytes(bytes(buf), "little")
         # Mask to width, then sign-extend from the MSB if signed.
         if width > 0:
             val &= (1 << width) - 1

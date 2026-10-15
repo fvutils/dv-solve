@@ -223,8 +223,8 @@ class SolveProblemBuilder:
         """
         n = (width + 63) // 64
         u = value & ((1 << (n * 64)) - 1)
-        limbs = (ctypes.c_uint64 * n)(
-            *((u >> (64 * i)) & 0xFFFFFFFFFFFFFFFF for i in range(n)))
+        # One conversion, not a shift per limb (quadratic in the width).
+        limbs = (ctypes.c_uint64 * n).from_buffer_copy(u.to_bytes(n * 8, "little"))
         return self._lib.dvs_builder_expr_const_wide(
             self._b, ctypes.c_uint32(n), limbs, ctypes.c_uint32(width),
             ctypes.c_uint8(1 if is_signed else 0),
