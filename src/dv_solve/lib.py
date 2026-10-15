@@ -248,6 +248,16 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.dvs_bbsolver_free.argtypes = [c.c_void_p]
     lib.dvs_bbsolver_check.restype  = c.c_int                  # DVS_BB_SAT/UNSAT/...
     lib.dvs_bbsolver_check.argtypes = [c.c_void_p, c.c_uint64]  # bb, seed
+
+    lib.dvs_bbsolver_new_backend.restype  = c.c_void_p
+    lib.dvs_bbsolver_new_backend.argtypes = [c.c_void_p, c.c_void_p, c.c_int]
+    lib.dvs_bbsolver_is_incremental.restype  = c.c_int
+    lib.dvs_bbsolver_is_incremental.argtypes = [c.c_void_p]
+    lib.dvs_bbsolver_sample_stale.restype  = c.c_int
+    lib.dvs_bbsolver_sample_stale.argtypes = [c.c_void_p]
+    lib.dvs_bbsolver_sample.restype  = c.c_int
+    lib.dvs_bbsolver_sample.argtypes = [c.c_void_p, c.POINTER(c.c_uint32),
+                                        c.c_uint32, c.c_uint64]
     # DSE-2 soft-aware serve.
     lib.dvs_bbsolver_check_maxsat.restype  = c.c_int
     lib.dvs_bbsolver_check_maxsat.argtypes = [

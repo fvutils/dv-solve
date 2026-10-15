@@ -145,6 +145,18 @@ void dvs_sat_set_decision_limit(dvs_sat_t *s, uint32_t limit);
  *  The bitblast solve gates this on clause count. */
 void dvs_sat_set_light_search(dvs_sat_t *s, int on);
 
+/** Tune for many short incremental solves under changing assumptions, as
+ *  dvs_bbsolver_sample makes (CaDiCaL: no "lucky" phase, which otherwise runs
+ *  on every solve and costs ~3x there). Call before adding any clause; a
+ *  no-op on a backend without it. */
+void dvs_sat_set_sampling(dvs_sat_t *s, int on);
+
+/** Decide |lit|'s variable as `lit` first on later solves (CaDiCaL: a forced
+ *  phase, ahead of the saved one). dvs_bbsolver_sample randomizes these per
+ *  draw so bits no parity plane hashes still vary. A no-op on a backend
+ *  without it. */
+void dvs_sat_phase(dvs_sat_t *s, dvs_sat_lit_t lit);
+
 /** Return number of clauses added (units + binary + general). */
 uint64_t dvs_sat_num_clauses(const dvs_sat_t *s);
 

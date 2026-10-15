@@ -55,6 +55,12 @@ typedef struct dvs_sat_vtbl {
     /* Optional (may be NULL): enable a lighter inprocessing schedule suited to
      * small/easy instances (e.g. disable probing). Caller gates on size. */
     void          (*set_light_search)(void *impl, int on);
+    /* Optional (may be NULL): tune for many short incremental solves under
+     * changing assumptions (near-uniform sampling). Set before any clause. */
+    void          (*set_sampling)(void *impl, int on);
+    /* Optional (may be NULL): the decision phase to try first for |lit|'s
+     * variable on later solves (lit's sign), until set again. */
+    void          (*phase)(void *impl, dvs_sat_lit_t lit);
 
     /* Register a terminate callback the backend polls during solve; when it
      * returns non-zero the solver aborts and returns DVS_SAT_UNKNOWN. Optional

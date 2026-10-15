@@ -59,7 +59,7 @@ class BVSatCtx:
     so the two engines share one encoding with no re-translation.
     """
 
-    def __init__(self, problem) -> None:
+    def __init__(self, problem, incremental: bool = False) -> None:
         lib = _load_lib()
         if lib is None:
             raise _library_not_found_error()
@@ -76,7 +76,12 @@ class BVSatCtx:
 
         # alloc may be NULL: the bbsolver owns its transient AIG/CNF/SAT memory
         # and releases it in dvs_bbsolver_free.
-        self._bb = lib.dvs_bbsolver_new(None, sp_ptr)
+        # incremental: prefer CaDiCaL, which keeps the instance across solves
+        # and takes assumptions (sample() needs it); kissat when not built in.
+        if incremental:
+            self._bb = lib.dvs_bbsolver_new_backend(None, sp_ptr, 2)
+        else:
+            self._bb = lib.dvs_bbsolver_new(None, sp_ptr)
         if not self._bb:
             self._bb = None
             raise RuntimeError("dvs_bbsolver_new failed")
@@ -131,6 +136,43 @@ class BVSatCtx:
         rc = self._lib.dvs_bbsolver_check(self._bb, ctypes.c_uint64(seed & ((1 << 64) - 1)))
         self._checked = (rc == BVSAT_SAT)
         return rc
+
+    def is_incremental(self) -> bool:
+        """True when the SAT backend keeps its instance across solves, as
+        :meth:`sample` needs."""
+        if self._bb is None:
+            raise RuntimeError("BVSatCtx used after destroy()")
+        return bool(self._lib.dvs_bbsolver_is_incremental(self._bb))
+
+    def sample(self, var_ids, seed: int, soft_keep=None) -> int:
+        """Draw a near-uniform model over the variables ``var_ids`` (XOR-hash
+        sampling in the engine; see ``dvs_bbsolver_sample``) and leave it for
+        :meth:`value` / :meth:`value_wide`. The problem is encoded on the first
+        call; later calls draw again from the same instance. Needs a context
+        made with ``incremental=True`` on a build with CaDiCaL
+        (:meth:`is_incremental`); returns ``BVSAT_ERROR`` otherwise.
+
+        ``soft_keep`` is as for :meth:`check`, and takes effect on the first
+        call only."""
+        if self._bb is None:
+            raise RuntimeError("BVSatCtx used after destroy()")
+        if soft_keep is not None:
+            self._lib.dvs_bbsolver_set_soft_keep(
+                self._bb, soft_keep, ctypes.c_uint32(len(soft_keep)))
+        ids = (ctypes.c_uint32 * len(var_ids))(*var_ids)
+        rc = self._lib.dvs_bbsolver_sample(
+            self._bb, ids, ctypes.c_uint32(len(var_ids)),
+            ctypes.c_uint64(seed & ((1 << 64) - 1)))
+        self._checked = (rc == BVSAT_SAT)
+        return rc
+
+    def sample_stale(self) -> bool:
+        """True once the planes of earlier :meth:`sample` draws outweigh the
+        problem (``dvs_bbsolver_sample_stale``): draws slow down from here, so
+        a caller that keeps this context should make a new one."""
+        if self._bb is None:
+            raise RuntimeError("BVSatCtx used after destroy()")
+        return bool(self._lib.dvs_bbsolver_sample_stale(self._bb))
 
     def value(self, var_id: int) -> int:
         """Return the model value for ``var_id`` after a ``BVSAT_SAT`` check.

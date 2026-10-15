@@ -56,7 +56,8 @@ dvs_bbsolver_t *dvs_bbsolver_new(dvs_alloc_t *alloc, dvs_problem_t *problem);
 
 /** Create a bbsolver with an explicit backend preference: prefer_cadical -1 =
  * env-driven (as dvs_bbsolver_new), 0 = force kissat, 1 = prefer CaDiCaL (falls
- * back to kissat when CaDiCaL is not compiled in). The cube engine uses 1 so it
+ * back to kissat when CaDiCaL is not compiled in), 2 = as 1, tuned for
+ * dvs_bbsolver_sample (dvs_sat_set_sampling). The cube engine uses 1 so it
  * gets retractable assumptions without the caller setting DV_SAT_BACKEND. */
 dvs_bbsolver_t *dvs_bbsolver_new_backend(dvs_alloc_t *alloc,
                                          dvs_problem_t *problem,
@@ -191,6 +192,26 @@ int      dvs_bbsolver_sess_solve(dvs_bbsolver_t *bb, uint64_t seed);
  * Returns DVS_BB_SAT/UNSAT/UNKNOWN/ERROR. On the incremental backend it may be
  * called repeatedly with different cubes (assumptions retract between solves).
  */
+/**
+ * Draw a near-uniform model of the problem over the variables `vars`
+ * (XOR-hash sampling): encode the problem once, then add random parity planes
+ * over the variables' low bits, each an assumption, and solve after each; the
+ * model of the last non-empty cell is the draw, with its free bits filled
+ * from `seed`. Read it with dvs_bbsolver_value[_wide].
+ *
+ * Needs an incremental backend (dvs_bbsolver_new_backend(..., 2)); returns
+ * DVS_BB_ERROR on another. Can be called again on the same solver for the
+ * next draw: the problem is encoded once and the learned clauses are kept.
+ * Returns DVS_BB_SAT / UNSAT / UNKNOWN / ERROR.
+ */
+int dvs_bbsolver_sample(dvs_bbsolver_t *bb, const uint32_t *vars,
+                        uint32_t n_vars, uint64_t seed);
+
+/** 1 once the parity planes earlier draws added outweigh the problem itself
+ *  (more AIG gates than the encoded problem, plus 8192). Every solve assigns
+ *  them, so draws slow down as they pile up: rebuild the solver then. */
+int dvs_bbsolver_sample_stale(const dvs_bbsolver_t *bb);
+
 int dvs_bbsolver_prepare(dvs_bbsolver_t *bb, uint64_t seed);
 int dvs_bbsolver_is_incremental(const dvs_bbsolver_t *bb);
 /* Why the last check or solve gave no verdict, for (get-info :reason-unknown).

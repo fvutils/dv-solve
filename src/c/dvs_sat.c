@@ -277,6 +277,14 @@ void dvs_sat_set_light_search(dvs_sat_t *s, int on) {
     if (s && s->vt->set_light_search) s->vt->set_light_search(s->impl, on);
 }
 
+void dvs_sat_phase(dvs_sat_t *s, dvs_sat_lit_t lit) {
+    if (s && s->vt->phase) s->vt->phase(s->impl, lit);
+}
+
+void dvs_sat_set_sampling(dvs_sat_t *s, int on) {
+    if (s && s->vt->set_sampling) s->vt->set_sampling(s->impl, on);
+}
+
 void dvs_sat_set_seed(dvs_sat_t *s, uint64_t seed) {
     if (!s) return;
     s->vt->set_seed(s->impl, seed);

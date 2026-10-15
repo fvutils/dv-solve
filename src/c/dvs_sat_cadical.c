@@ -112,6 +112,16 @@ static void cd_interrupt(void *impl) { (void)impl; }
 /* CaDiCaL exposes no kissat-style clause-arena words; telemetry returns 0. */
 static size_t cd_arena_zero(void *impl) { (void)impl; return 0; }
 
+static void cd_set_sampling(void *impl, int on) {
+    cadical_impl_t *c = (cadical_impl_t *)impl;
+    ccadical_set_option(c->solver, "lucky", on ? 0 : 1);
+}
+
+static void cd_phase(void *impl, dvs_sat_lit_t lit) {
+    cadical_impl_t *c = (cadical_impl_t *)impl;
+    ccadical_phase(c->solver, (int)lit);
+}
+
 static const dvs_sat_vtbl CADICAL_VTBL = {
     .incremental        = 1,   /* real assumptions + post-solve clause add */
     .destroy            = cd_destroy,
@@ -124,6 +134,8 @@ static const dvs_sat_vtbl CADICAL_VTBL = {
     .set_conflict_limit = cd_set_conflict_limit,
     .set_decision_limit = cd_set_decision_limit,
     .set_terminate      = cd_set_terminate,
+    .set_sampling       = cd_set_sampling,
+    .phase              = cd_phase,
     .arena_size_bytes     = cd_arena_zero,
     .arena_capacity_bytes = cd_arena_zero,
     .arena_save_mark      = cd_arena_zero,

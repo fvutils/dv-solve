@@ -209,6 +209,10 @@ struct dvs_bbsolver_s {
     uint32_t        assert_frame;
     uint32_t       *assert_tags;
     uint32_t        tags_cap;
+    /* dvs_bbsolver_sample has encoded the problem (it encodes once and then
+     * only adds parity planes, which it assumes rather than asserts). */
+    int             sample_ready;
+    uint64_t        sample_base_ands;   /* AIG size after that encode */
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -1882,8 +1886,10 @@ static dvs_sat_t *bb_new_sat(dvs_alloc_t *alloc, int prefer_cadical) {
             prefer_cadical = 0;
         }
     }
-    return dvs_sat_new_backend(alloc, prefer_cadical ? DVS_SAT_BACKEND_CADICAL
-                                                     : DVS_SAT_BACKEND_KISSAT);
+    dvs_sat_t *sat = dvs_sat_new_backend(alloc, prefer_cadical ? DVS_SAT_BACKEND_CADICAL
+                                                               : DVS_SAT_BACKEND_KISSAT);
+    if (sat && prefer_cadical == 2) dvs_sat_set_sampling(sat, 1);
+    return sat;
 }
 
 static dvs_bbsolver_t *bbsolver_new_ex(dvs_alloc_t *alloc, dvs_problem_t *problem,
@@ -3100,6 +3106,209 @@ int dvs_bbsolver_solve_assuming(dvs_bbsolver_t *S, const int32_t *lits,
         _diversify(S);
     }
     return rc;
+}
+
+/* ---- near-uniform sampling (dvs_bbsolver_sample) ------------------------ */
+
+/* The sampler's settings. A feasible set over 2^BB_SAMPLE_M_CAP solutions
+ * cannot be covered by the draws a randomize loop makes, so more planes only
+ * cost solves. A CDCL solver handles a long parity badly, so each variable
+ * contributes at most BB_SAMPLE_BITS_PER_VAR of its low bits to the planes;
+ * the bits above vary through _diversify. */
+#define BB_SAMPLE_M_CAP          16u
+#define BB_SAMPLE_BITS_PER_VAR   16u
+
+static uint64_t bb_splitmix64(uint64_t *st) {
+    uint64_t z = (*st += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+/* The bits of `v` a plane may hash, LSB first: an unsigned domain anchored at
+ * 0 is carried by its low bit_length(hi) bits; a signed or offset domain may
+ * use them all. Capped at BB_SAMPLE_BITS_PER_VAR. Bounds are int64 bit
+ * patterns: an unsigned 64-bit hi above INT64_MAX is negative. */
+static uint32_t bb_sample_bits_of(const bb_var_t *v) {
+    uint32_t eff = v->width;
+    if (!v->is_signed && v->lo == 0) {
+        uint32_t bl = 0;
+        for (uint64_t h = (uint64_t)v->hi; h; h >>= 1) bl++;
+        if (bl == 0) bl = 1;
+        if (bl < eff) eff = bl;
+    }
+    return eff < BB_SAMPLE_BITS_PER_VAR ? eff : BB_SAMPLE_BITS_PER_VAR;
+}
+
+/* floor(log2) of the declared domains' product, which over-bounds
+ * log2(#solutions) (constraints only shrink the set); capped. */
+static uint32_t bb_sample_m_estimate(dvs_bbsolver_t *S, const uint32_t *vars,
+                                     uint32_t n_vars) {
+    const uint64_t cap = (uint64_t)1 << (BB_SAMPLE_M_CAP + 2);
+    uint64_t n = 1;
+    for (uint32_t i = 0; i < n_vars && n < cap; i++) {
+        if (vars[i] >= S->n_vars || !S->vars[vars[i]].defined) continue;
+        const bb_var_t *v = &S->vars[vars[i]];
+        int empty = v->is_signed ? v->hi < v->lo
+                                 : (uint64_t)v->hi < (uint64_t)v->lo;
+        uint64_t span = empty ? 1 : (uint64_t)v->hi - (uint64_t)v->lo + 1;
+        if (span == 0 || span >= cap) { n = cap; break; }   /* 0: the full 2^64 */
+        n = n > cap / span ? cap : n * span;
+    }
+    uint32_t m = 0;
+    while ((n >> 1) >= 1 && m < 63) { n >>= 1; m++; }
+    return m;
+}
+
+/* One random parity plane over `bits`: an assumption literal that holds
+ * when the XOR of a random half of the bits equals a random bit. 0 when
+ * eight draws gave only constant planes. */
+static int32_t bb_sample_plane(dvs_bbsolver_t *S, const dvs_aig_node_t *bits,
+                               uint32_t n_bits, uint64_t *rng) {
+    for (int attempt = 0; attempt < 8; attempt++) {
+        dvs_aig_node_t x = DVS_AIG_FALSE;
+        uint64_t word = 0;
+        for (uint32_t i = 0; i < n_bits; i++) {
+            if ((i & 63u) == 0) word = bb_splitmix64(rng);
+            if ((word >> (i & 63u)) & 1u) x = dvs_aig_mk_xor(S->aig, x, bits[i]);
+        }
+        if (bb_splitmix64(rng) & 1u) x = dvs_aig_not(x);
+        if (x == DVS_AIG_TRUE || x == DVS_AIG_FALSE) continue;
+        dvs_aig_cnf_encode(S->cnf, x, /*top_level=*/0);
+        return (int32_t)x;
+    }
+    return 0;
+}
+
+static int bb_sample_solve(dvs_bbsolver_t *S, const int32_t *planes, uint32_t k) {
+    for (uint32_t i = 0; i < S->n_frames; i++)
+        dvs_sat_assume(S->sat, (dvs_sat_lit_t)S->frames[i].sel);
+    for (uint32_t i = 0; i < k; i++)
+        dvs_sat_assume(S->sat, (dvs_sat_lit_t)planes[i]);
+    return dvs_sat_solve(S->sat);
+}
+
+int dvs_bbsolver_sample_stale(const dvs_bbsolver_t *S) {
+    if (!S || !S->sample_ready) return 0;
+    uint64_t planes = dvs_aig_num_ands(S->aig) - S->sample_base_ands;
+    return planes > S->sample_base_ands + 8192u;
+}
+
+int dvs_bbsolver_sample(dvs_bbsolver_t *S, const uint32_t *vars,
+                        uint32_t n_vars, uint64_t seed) {
+    if (!S || !S->problem || !S->sat) return DVS_BB_ERROR;
+    if (!dvs_sat_is_incremental(S->sat)) return DVS_BB_ERROR;
+
+    if (!S->sample_ready) {
+        S->seed = seed;
+        dvs_sat_set_seed(S->sat, seed);
+        int enc = _bb_encode(S);
+        if (enc != DVS_BB_ENCODE_READY) return enc;
+        S->sample_ready = 1;
+        S->sample_base_ands = dvs_aig_num_ands(S->aig);
+        const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
+        uint64_t thresh = mcl && *mcl ? strtoull(mcl, NULL, 10) : 2000000;
+        dvs_sat_set_light_search(S->sat, dvs_aig_cnf_num_clauses(S->cnf) < thresh);
+    }
+    {
+        const char *mc = getenv("DV_BB_MAX_CONFLICTS");
+        dvs_sat_set_conflict_limit(S->sat, mc && *mc ? (uint32_t)atoi(mc) : 0);
+    }
+
+    /* The hashed bits: AIG nodes of the variables' low bits (inputs, or the
+     * gates of a substituted variable), constants left out. A variable no
+     * constraint names has no bits; it is free, and _diversify fills it. */
+    uint32_t n_bits = 0;
+    for (uint32_t i = 0; i < n_vars; i++)
+        if (vars[i] < S->n_vars && S->vars[vars[i]].defined && S->vars[vars[i]].bv_built)
+            n_bits += bb_sample_bits_of(&S->vars[vars[i]]);
+    dvs_aig_node_t *bits = n_bits
+        ? (dvs_aig_node_t *)malloc(n_bits * sizeof(dvs_aig_node_t)) : NULL;
+    if (n_bits && !bits) return DVS_BB_ERROR;
+    n_bits = 0;
+    for (uint32_t i = 0; i < n_vars; i++) {
+        if (vars[i] >= S->n_vars || !S->vars[vars[i]].defined) continue;
+        bb_var_t *v = &S->vars[vars[i]];
+        if (!v->bv_built) continue;
+        uint32_t eff = bb_sample_bits_of(v);
+        for (uint32_t b = 0; b < eff && b < v->bv.size; b++) {
+            dvs_aig_node_t nd = v->bv.bits[v->bv.size - 1 - b];   /* MSB first */
+            if (nd != DVS_AIG_TRUE && nd != DVS_AIG_FALSE) bits[n_bits++] = nd;
+        }
+    }
+
+    uint32_t m_max = bb_sample_m_estimate(S, vars, n_vars) + 2;
+    if (m_max > n_bits) m_max = n_bits;
+    if (m_max > BB_SAMPLE_M_CAP) m_max = BB_SAMPLE_M_CAP;
+
+    /* A random first-try phase for every bit of the sampled variables: the
+     * planes hash only low bits, and a reused instance would otherwise decide
+     * the rest as it did last draw (its saved phases). */
+    {
+        uint64_t prng = seed ^ 0xA0761D6478BD642Full;
+        uint64_t word = 0;
+        uint32_t used = 64;
+        for (uint32_t i = 0; i < n_vars; i++) {
+            if (vars[i] >= S->n_vars || !S->vars[vars[i]].defined) continue;
+            bb_var_t *v = &S->vars[vars[i]];
+            if (!v->bv_built) continue;
+            for (uint32_t b = 0; b < v->bv.size; b++) {
+                dvs_aig_node_t nd = v->bv.bits[b];
+                if (nd == DVS_AIG_TRUE || nd == DVS_AIG_FALSE) continue;
+                if (used == 64) { word = bb_splitmix64(&prng); used = 0; }
+                int32_t var = nd < 0 ? -nd : nd;
+                dvs_sat_phase(S->sat, (dvs_sat_lit_t)(((word >> used++) & 1u) ? var : -var));
+            }
+        }
+    }
+
+    /* Nested cells: plane k+1 only shrinks the cell of planes 1..k, so the
+     * satisfiable levels are 0..k* for some k*. The cell at k* is the smallest
+     * non-empty one, near log2(#solutions), where one model is a near-uniform
+     * draw. Find k* from the top: a feasible set too big to empty (the common
+     * case) takes one solve; otherwise binary search, ~log2(m_max) solves. */
+    uint64_t rng = seed;
+    int32_t planes[BB_SAMPLE_M_CAP];
+    uint32_t n_planes = 0;
+    while (n_planes < m_max) {
+        int32_t p = bb_sample_plane(S, bits, n_bits, &rng);
+        if (!p) break;
+        planes[n_planes++] = p;
+    }
+    free(bits);
+
+    int rc = bb_sample_solve(S, planes, n_planes);
+    int best = rc == DVS_BB_SAT ? (int)n_planes : -1, solved_at = best;
+    if (best < 0) {
+        int lo = 0, hi = (int)n_planes - 1, undecided = rc != DVS_BB_UNSAT;
+        while (lo <= hi) {
+            int mid = lo + (hi - lo) / 2;
+            rc = bb_sample_solve(S, planes, (uint32_t)mid);
+            if (rc == DVS_BB_SAT) { best = solved_at = mid; lo = mid + 1; continue; }
+            if (rc != DVS_BB_UNSAT) undecided = 1;   /* conflict limit: no model here */
+            hi = mid - 1;
+        }
+        if (best < 0) {
+            S->model_in_sat = 0;
+            S->last_result = undecided ? DVS_BB_UNKNOWN : DVS_BB_UNSAT;
+            return S->last_result;
+        }
+        if (solved_at != best || rc != DVS_BB_SAT) {
+            rc = bb_sample_solve(S, planes, (uint32_t)best);
+            if (rc != DVS_BB_SAT) {
+                S->model_in_sat = 0;
+                S->last_result = rc;
+                return rc;
+            }
+        }
+    }
+    S->model_in_sat = 1;
+    S->last_result = DVS_BB_SAT;
+    free(S->node_val);
+    S->node_val = NULL;
+    S->seed = seed ? seed : 1;
+    _diversify(S);
+    return DVS_BB_SAT;
 }
 
 /* --- Parallel cube-and-conquer support (P2; see dvs_bbsolver.h, dvs_cube.c). */
