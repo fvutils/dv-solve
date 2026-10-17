@@ -234,6 +234,13 @@ kept if every assertion still holds; otherwise it is undone. Flips are
 sequential, so each is checked against the model as changed so far, and the
 result always satisfies the assertions.
 
+The pass can visit one input many times: the builder's intermediate
+variables share the bits of the operands they are built from, and each has
+its own target. When the visits cover at most 16 distinct inputs, the pass
+records, per assignment of those inputs, whether every assertion holds, so a
+repeated assignment costs a table lookup rather than a cone propagation. The
+flips kept, and so the sample, are the same.
+
 Each flip is a **Gibbs step** for the uniform distribution. Given all the
 other bits, a bit can be 0, 1, or both. If both satisfy, it ends at a random
 value; if only one does, it keeps it. That leaves a uniform sample uniform,

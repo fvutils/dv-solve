@@ -2094,6 +2094,72 @@ static int _prop_cone(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t 
  * far cheaper than the old full O(nodes) re-simulation. Skipped on very large
  * problems (where BMC-style seed 0 is used anyway). */
 #define DVS_DIVERSIFY_MAX_NODES 200000u
+/* Distinct candidate inputs up to which the flip loop memoizes validity. */
+#define DVS_DIVERSIFY_MEMO_BITS 16u
+
+/* Recompute every AND node of nv[] from its inputs, ascending id. Returns 1
+ * when every assertion in areq holds; with `stop`, returns 0 at the first
+ * violated one (nv is then partly updated). */
+static int _eval_all(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t *R,
+                     const uint8_t *areq, uint32_t N, int stop) {
+    int ok = 1;
+    for (uint32_t id = 1; id <= N; id++) {
+        if (L[id]) nv[id] = (int8_t)(_lit_val(nv, L[id]) & _lit_val(nv, R[id]));
+        if (areq[id] & (nv[id] ? 2u : 1u)) {
+            ok = 0;
+            if (stop) return 0;
+        }
+    }
+    return ok;
+}
+
+/* The flip loop when the candidate bits cover only k <= DVS_DIVERSIFY_MEMO_BITS
+ * distinct inputs but visit them more often than once (builder intermediates
+ * alias the bits of the variables they are built from: an 8-bit CRC filter
+ * has ~1800 vars over 8 inputs, so each input is visited ~2800 times). A flip
+ * is kept exactly when the flipped assignment satisfies every assertion, which
+ * depends only on the k candidate inputs (no other input changes here), so
+ * valid[] caches that per assignment and the accept/reject sequence is the
+ * same as the cone-propagating loop's, given a starting model that satisfies
+ * (checked here). Each new assignment costs one full pass, at most 2^k of
+ * them, so the caller uses this only when that is at most a quarter of the
+ * visits. cand[] holds (base, desired) pairs in visit order, slot[] the
+ * input's bit in the assignment. Returns 0, nv unchanged, when the memo
+ * cannot be allocated or the start does not satisfy (the caller then runs
+ * the plain loop). */
+static int _diversify_memo(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t *R,
+                           const uint8_t *areq, uint32_t N,
+                           const uint32_t *cand, uint32_t ncand,
+                           const uint32_t *inputs, uint32_t k, const uint32_t *slot) {
+    if (!_eval_all(nv, L, R, areq, N, /*stop=*/1)) return 0;   /* nv already consistent */
+    uint8_t *valid = (uint8_t *)calloc((size_t)1 << k, 1);   /* 0 ?, 1 yes, 2 no */
+    if (!valid) return 0;
+    uint32_t st = 0;
+    for (uint32_t i = 0; i < k; i++) if (nv[inputs[i]]) st |= 1u << i;
+    valid[st] = 1;                       /* the starting model satisfies */
+    uint32_t nv_st = st;                 /* the assignment nv[] holds; ~0 = stale */
+    for (uint32_t c = 0; c < ncand; c++) {
+        uint32_t base = cand[2 * c], desired = cand[2 * c + 1];
+        uint32_t bit = 1u << slot[base];
+        if (((st & bit) != 0) == desired) continue;
+        if (areq[base] & (desired ? 2u : 1u)) continue;      /* asserted input */
+        uint32_t nst = st ^ bit;
+        if (!valid[nst]) {
+            for (uint32_t i = 0; i < k; i++) nv[inputs[i]] = (int8_t)((nst >> i) & 1u);
+            int ok = _eval_all(nv, L, R, areq, N, /*stop=*/1);
+            valid[nst] = ok ? 1 : 2;
+            nv_st = ok ? nst : ~0u;
+        }
+        if (valid[nst] == 1) st = nst;
+    }
+    if (nv_st != st) {
+        for (uint32_t i = 0; i < k; i++) nv[inputs[i]] = (int8_t)((st >> i) & 1u);
+        _eval_all(nv, L, R, areq, N, /*stop=*/0);
+    }
+    free(valid);
+    return 1;
+}
+
 static void _diversify(dvs_bbsolver_t *S) {
     if (S->seed == 0 || !S->aig || S->no_diversify) return;
     uint32_t N = (uint32_t)dvs_aig_num_nodes(S->aig);
@@ -2169,27 +2235,73 @@ static void _diversify(dvs_bbsolver_t *S) {
         if (cr > 1) fo_adj[cnt[cr]++] = id;
     }
 
+    /* The candidate flips, in visit order: each variable bit that is a
+     * primary input, with its seeded target. A constant bit (TRUE, id 1) is
+     * not a candidate: readback takes constants from the literal, never from
+     * nv[1]. Count the distinct inputs on the way (cnt is free again; it
+     * becomes slot[], the input's index + 1). */
+    uint32_t ncand = 0, k = 0;
+    for (uint32_t i = 0; i <= N; i++) cnt[i] = 0;
     for (uint32_t vi = 0; vi < S->n_vars; vi++) {
         bb_var_t *v = &S->vars[vi];
         if (!v->defined || !v->bv_built) continue;
         for (uint32_t p = 0; p < v->bv.size; p++) {
             dvs_aig_node_t lit = v->bv.bits[p];
             uint32_t base = (uint32_t)(lit < 0 ? -lit : lit);
-            if (base == 0 || base > N) continue;
-            if (L[base] != 0) continue;                 /* not a primary input */
-            int tgt = (int)(_free_var_fill(S->seed, vi, p) & 1);
-            int desired = (lit < 0) ? !tgt : tgt;       /* input-node polarity */
-            if (nv[base] == desired) continue;
-            if (areq[base] & (desired ? 2u : 1u)) continue;  /* asserted input */
-            uint32_t nt = 0;
-            nv[base] = (int8_t)desired;
-            trail[nt++] = base;
-            if (!_prop_cone(nv, L, R, fo_off, fo_adj, areq, wl, inq, trail, &nt, base)) {
-                /* revert: every touched node was boolean-inverted */
-                for (uint32_t t = 0; t < nt; t++) nv[trail[t]] = (int8_t)!nv[trail[t]];
+            if (base <= 1 || base > N || L[base] != 0) continue;
+            ncand++;
+            if (!cnt[base]) cnt[base] = ++k;
+        }
+    }
+    uint32_t *cand = (uint32_t *)malloc(((size_t)ncand + 1) * 2 * sizeof(uint32_t));
+    uint32_t *inputs = (uint32_t *)malloc(((size_t)k + 1) * sizeof(uint32_t));
+    int memo_done = 0;
+    if (cand && inputs) {
+        uint32_t c = 0;
+        for (uint32_t vi = 0; vi < S->n_vars; vi++) {
+            bb_var_t *v = &S->vars[vi];
+            if (!v->defined || !v->bv_built) continue;
+            for (uint32_t p = 0; p < v->bv.size; p++) {
+                dvs_aig_node_t lit = v->bv.bits[p];
+                uint32_t base = (uint32_t)(lit < 0 ? -lit : lit);
+                if (base <= 1 || base > N || L[base] != 0) continue;
+                int tgt = (int)(_free_var_fill(S->seed, vi, p) & 1);
+                cand[2 * c] = base;
+                cand[2 * c + 1] = (uint32_t)((lit < 0) ? !tgt : tgt);  /* input-node polarity */
+                c++;
+                inputs[cnt[base] - 1] = base;
+            }
+        }
+        for (uint32_t i = 0; i <= N; i++) if (cnt[i]) cnt[i]--;   /* slot = index */
+        const char *dm = getenv("DV_DIVERSIFY_MEMO");      /* =0: plain loop (A/B tests) */
+        if (k <= DVS_DIVERSIFY_MEMO_BITS && ((size_t)4 << k) <= ncand && !(dm && *dm == '0'))
+            memo_done = _diversify_memo(nv, L, R, areq, N, cand, ncand, inputs, k, cnt);
+    }
+    if (!memo_done) {
+        for (uint32_t vi = 0; vi < S->n_vars; vi++) {
+            bb_var_t *v = &S->vars[vi];
+            if (!v->defined || !v->bv_built) continue;
+            for (uint32_t p = 0; p < v->bv.size; p++) {
+                dvs_aig_node_t lit = v->bv.bits[p];
+                uint32_t base = (uint32_t)(lit < 0 ? -lit : lit);
+                if (base <= 1 || base > N) continue;
+                if (L[base] != 0) continue;                 /* not a primary input */
+                int tgt = (int)(_free_var_fill(S->seed, vi, p) & 1);
+                int desired = (lit < 0) ? !tgt : tgt;       /* input-node polarity */
+                if (nv[base] == desired) continue;
+                if (areq[base] & (desired ? 2u : 1u)) continue;  /* asserted input */
+                uint32_t nt = 0;
+                nv[base] = (int8_t)desired;
+                trail[nt++] = base;
+                if (!_prop_cone(nv, L, R, fo_off, fo_adj, areq, wl, inq, trail, &nt, base)) {
+                    /* revert: every touched node was boolean-inverted */
+                    for (uint32_t t = 0; t < nt; t++) nv[trail[t]] = (int8_t)!nv[trail[t]];
+                }
             }
         }
     }
+    free(cand);
+    free(inputs);
 
     free(cnt);
     free(fo_off);
