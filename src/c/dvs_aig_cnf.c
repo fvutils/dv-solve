@@ -272,9 +272,10 @@ void dvs_aig_cnf_encode(dvs_aig_cnf_t *e, dvs_aig_node_t root, int top_level) {
 
     /* Top-level flatten: walk through positive ANDs collecting leaves, then
      * encode each leaf and assert it as a unit clause. */
-    e->visited_cap = 0; /* reset visited bitmap for this flatten pass */
+    /* reset visited bitmap for this flatten pass */
     xfree(e->alloc, e->visited, e->visited_cap);
     e->visited = NULL;
+    e->visited_cap = 0;
 
     uint32_t leaf_start = e->stack_size;
     /* phase 1: collect leaves into a temporary buffer past the visit stack */
