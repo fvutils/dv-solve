@@ -1788,6 +1788,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
     }
     ctx->level_marks[base].trail_top   = ctx->trail_top;
     ctx->level_marks[base].trail_count = ctx->trail_count;
+    ctx->level_marks[base].entail_top  = ctx->entail_top;
     ctx->level_marks[base].stack_mark  = dvs_stack_push(ctx->dynamic);
     ctx->search_sealed = 1;
 
@@ -2443,6 +2444,7 @@ static void _reset_in_scope(dvs_ctx_t *ctx) {
     uint32_t lvl = m->decision_level;
     ctx->level_marks[lvl].trail_top   = m->trail_top;
     ctx->level_marks[lvl].trail_count = m->trail_count;
+    ctx->level_marks[lvl].entail_top  = m->entail_top;
     ctx->level_marks[lvl].stack_mark  = m->stack_mark;
     trail_backtrack(ctx, lvl);
     trail_push_level(ctx);            /* the level the checkpoint opened */
@@ -2520,6 +2522,7 @@ static void _solver_reset(dvs_ctx_t *ctx) {
     ctx->decision_level = 0;
     ctx->trail_top      = NULL;
     ctx->trail_count    = 0;
+    ctx->entail_top     = NULL;
     ctx->conflict_count = 0;
 
     /* Clear propagator queue */

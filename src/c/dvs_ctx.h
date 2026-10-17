@@ -63,6 +63,7 @@ typedef struct {
     uint32_t         n_clauses_at_cp;  /* learnt-clause count at checkpoint */
     TrailEntry      *trail_top;
     uint64_t         trail_count;
+    EntailEntry     *entail_top;
     dvs_stack_mark_t stack_mark;
     /* Phase B.1 step 5 (plumbing slice): SAT clause-arena position at
      * the time of the checkpoint. Zero today; populated once step 6
@@ -181,6 +182,7 @@ typedef struct dvs_ctx_s {
                                        * restore never frees below it   */
     dvs_stack_t       *dynamic;       /* dynamic stack (trail etc.)    */
     TrailEntry        *trail_top;     /* newest trail entry, or NULL   */
+    EntailEntry       *entail_top;    /* newest entailment record (dvs_trail.h) */
     LevelMark         *level_marks;   /* array[level_cap]              */
     uint32_t           max_depth;     /* the search's level limit: its
                                        * root + MAX_DECISION_DEPTH     */

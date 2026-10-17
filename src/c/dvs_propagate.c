@@ -328,7 +328,7 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
                 int64_t ghi = var_hi64(ctx, &ctx->vars[gid]);
                 if (glo == 0 && ghi == 0) {
                     /* Guard is false: propagator is entailed */
-                    p->flags |= PROP_FLAG_ENTAILED;
+                    trail_mark_entailed(ctx, prop_ref);
                     continue;
                 }
                 if (glo != ghi) {
@@ -376,7 +376,7 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
             prop_enqueue(ctx, prop_ref);
             return PROP_CONFLICT;
         }
-        if (r == PROP_ENTAILED) p->flags |= PROP_FLAG_ENTAILED;
+        if (r == PROP_ENTAILED) trail_mark_entailed(ctx, prop_ref);
     }
     return PROP_OK;
 }

@@ -27,6 +27,7 @@ void trail_push_level(dvs_ctx_t *ctx) {
     mark->stack_mark  = dvs_stack_push(ctx->dynamic);
     mark->trail_top   = ctx->trail_top;
     mark->trail_count = ctx->trail_count;
+    mark->entail_top  = ctx->entail_top;
     /* Phase B.1 step 5 (plumbing slice): SAT-arena top defaults to 0 —
      * dvs_ctx_t does not hold a dvs_sat handle yet. Future step 6 will
      * set this from dvs_sat_arena_save_mark. */
@@ -131,6 +132,21 @@ int trail_record_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t removed_val) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Entailment                                                          */
+/* ------------------------------------------------------------------ */
+
+void trail_mark_entailed(dvs_ctx_t *ctx, uint32_t prop_ref) {
+    EntailEntry *x = (EntailEntry *)dvs_stack_alloc(
+        ctx->dynamic, sizeof(EntailEntry), _Alignof(EntailEntry));
+    if (!x) return;
+    Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, prop_ref);
+    p->flags |= PROP_FLAG_ENTAILED;
+    x->prop_ref     = prop_ref;
+    x->prev         = ctx->entail_top;
+    ctx->entail_top = x;
+}
+
+/* ------------------------------------------------------------------ */
 /* Backtrack                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -172,6 +188,30 @@ void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
         e = e->prev;
     }
 
+    /* Clear ENTAILED on the propagators found entailed since the mark:
+     * their entailment rested on bounds just restored. Propagators that
+     * fired and returned PROP_ENTAILED during the backtracked levels were
+     * dequeued, so the queue walk below does not reach them. One entailed
+     * before the mark still holds, over the bounds the backtrack keeps.
+     *
+     * Exception: stale post-cp propagators left in watcher chains by
+     * dvs_solver_restore (marked ENTAILED + their prop_refs[] slot NULL'd
+     * but not detached from the chain) MUST stay ENTAILED. Their
+     * underlying var ids may have been rolled back and re-bound to a
+     * new variable in the post-pop scope; firing them again would
+     * mis-propagate against the unrelated new var. Identify them by
+     * the prop_refs[prop_id] != ref check: live props point back to
+     * themselves through prop_refs; dead post-cp props don't. */
+    for (EntailEntry *x = ctx->entail_top; x && x != mark->entail_top; x = x->prev) {
+        Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, x->prop_ref);
+        int is_live = 1;
+        if (ctx->prop_refs && p->prop_id < ctx->n_prop_refs_capacity) {
+            if (ctx->prop_refs[p->prop_id] != x->prop_ref) is_live = 0;
+        }
+        if (is_live) p->flags &= (uint8_t)~PROP_FLAG_ENTAILED;
+    }
+    ctx->entail_top = mark->entail_top;   /* records freed by the pop below */
+
     /* Recover all dynamic-stack memory from this level onward */
     dvs_stack_pop(ctx->dynamic, mark->stack_mark);
 
@@ -212,56 +252,5 @@ void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
     }
     ctx->queue.non_empty_mask = 0;
 
-    /* Clear ENTAILED on all propagators reachable via watcher chains.
-     * Propagators that fired and returned PROP_ENTAILED during the
-     * backtracked levels were dequeued, so the queue walk above did not
-     * reach them.  Their entailment may no longer hold after domain
-     * restoration, so they must be eligible for re-firing.
-     *
-     * Exception: stale post-cp propagators left in watcher chains by
-     * dvs_solver_restore (marked ENTAILED + their prop_refs[] slot NULL'd
-     * but not detached from the chain) MUST stay ENTAILED. Their
-     * underlying var ids may have been rolled back and re-bound to a
-     * new variable in the post-pop scope; firing them again would
-     * mis-propagate against the unrelated new var. Identify them by
-     * the prop_refs[prop_id] != ref check: live props point back to
-     * themselves through prop_refs; dead post-cp props don't. */
-    if (ctx->watcher_heads) {
-        for (uint32_t vi = 0; vi < ctx->n_vars; vi++) {
-            uint32_t ref = ctx->watcher_heads[vi];
-            while (ref != EXPR_NULL) {
-                Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
-                int is_live = 1;
-                if (ctx->prop_refs && p->prop_id < ctx->n_prop_refs_capacity) {
-                    if (ctx->prop_refs[p->prop_id] != ref) is_live = 0;
-                }
-                if (is_live) p->flags &= (uint8_t)~PROP_FLAG_ENTAILED;
-                uint32_t next = EXPR_NULL;
-                if (p->flags & PROP_FLAG_WIDE_WATCH) {
-                    uint32_t *nv_ptr = (uint32_t *)((char *)p + sizeof(Propagator));
-                    uint32_t nv = nv_ptr[0];
-                    uint32_t cap = nv_ptr[1];
-                    uint32_t *vids = nv_ptr + 2;
-                    uint32_t *wnexts = vids + cap;
-                    for (uint32_t i = 0; i < nv; i++) {
-                        if (vids[i] == vi) {
-                            next = wnexts[i];
-                            break;
-                        }
-                    }
-                } else {
-                    PropWatchSect *ws =
-                        (PropWatchSect *)((char *)p + sizeof(Propagator));
-                    for (uint32_t i = 0; i < ws->n_watches; i++) {
-                        if (ws->var_ids[i] == vi) {
-                            next = ws->next_watchers[i];
-                            break;
-                        }
-                    }
-                }
-                ref = next;
-            }
-        }
-    }
 
 }

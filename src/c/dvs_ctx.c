@@ -133,6 +133,7 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->alloc           = grow ? grow : &dvs_malloc_alloc;
     ctx->dynamic         = NULL;
     ctx->trail_top       = NULL;
+    ctx->entail_top      = NULL;
     ctx->level_marks     = NULL;
     ctx->max_depth       = 0;
     ctx->n_props         = 0;

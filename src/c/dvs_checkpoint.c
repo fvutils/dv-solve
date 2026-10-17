@@ -54,6 +54,7 @@ static int _solver_checkpoint(dvs_ctx_t *ctx) {
     m->lcg_pristine   = ctx->lcg ? (uint8_t)lcg_is_pristine((LCGCtx *)ctx->lcg) : 1;
     m->trail_top      = ctx->trail_top;
     m->trail_count    = ctx->trail_count;
+    m->entail_top     = ctx->entail_top;
     /* Phase B.1 step 5 (plumbing slice): SAT-arena top is zero today —
      * dvs_ctx_t does not hold a dvs_sat handle yet. The future step 6
      * wiring will set this to `dvs_sat_arena_save_mark(ctx->sat)`. The
@@ -228,6 +229,7 @@ static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
      * recorded after dvs_solver_checkpoint(). */
     ctx->level_marks[m->decision_level].trail_top   = m->trail_top;
     ctx->level_marks[m->decision_level].trail_count = m->trail_count;
+    ctx->level_marks[m->decision_level].entail_top  = m->entail_top;
     /* The stack mark too: the seal's push stands past every trail entry
      * made between the checkpoint and the solve (its pins, its initial
      * propagation), so popping to it kept their blocks. A context reused

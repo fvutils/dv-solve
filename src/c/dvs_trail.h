@@ -66,6 +66,16 @@ typedef struct TrailEntry {
     uint32_t           flags;         /* 4: TRAIL_FLAG_* bits          */
 } TrailEntry;                         /* 32 bytes                      */
 
+/* EntailEntry — a propagator propagation found entailed, newest first,
+ * allocated in the dynamic stack beside the trail entries. A backtrack
+ * clears PROP_FLAG_ENTAILED on the entries newer than the level's mark:
+ * an entailment found before the mark rests on bounds the backtrack
+ * keeps. */
+typedef struct EntailEntry {
+    struct EntailEntry *prev;
+    uint32_t            prop_ref;
+} EntailEntry;
+
 /* ------------------------------------------------------------------ */
 /* LevelMark — checkpoint recorded at each decision push              */
 /* ------------------------------------------------------------------ */
@@ -73,6 +83,7 @@ typedef struct {
     dvs_stack_mark_t   stack_mark;   /* dynamic-stack checkpoint       */
     TrailEntry        *trail_top;    /* trail_top at time of push      */
     uint64_t           trail_count;  /* trail_count at time of push    */
+    EntailEntry       *entail_top;   /* entail_top at time of push     */
     /* Phase B.1 step 5 (plumbing slice): SAT clause-arena position at
      * the time of the push, expressed in `ward` units (see
      * dvs_sat_arena_mark_t). Zero today — no dvs_ctx_t→dvs_sat handle
@@ -120,6 +131,14 @@ int trail_record_ub(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub);
  * @return 0 on success, -1 on allocation failure.
  */
 int trail_record_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t removed_val);
+
+/**
+ * Mark propagator `prop_ref` entailed (PROP_FLAG_ENTAILED) and record it
+ * for the backtrack that undoes the bounds it was judged on. Leaves the
+ * flag clear when the dynamic stack is full: the propagator then fires
+ * again, which costs time, not soundness.
+ */
+void trail_mark_entailed(dvs_ctx_t *ctx, uint32_t prop_ref);
 
 /**
  * Backtrack to `target_level`.
