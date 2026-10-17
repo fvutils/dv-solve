@@ -127,7 +127,11 @@ endif()
 target_compile_options(cadical_objs PRIVATE -O3 -fPIC -Wno-unused-parameter)
 
 # 2. Partial-link all objects into one relocatable object, then localize every
-#    defined global except the ccadical_* API (-w enables the wildcard).
+#    defined global except the ccadical_* API (-w enables the wildcard) and the
+#    DW.ref.* personality pointers. Those are hidden (never exported) and hold
+#    the same value in every object; a static libstdc++ (dv-solve-smt2 links
+#    one) resolves its own references to them, and a localized copy leaves
+#    them undefined.
 set(CADICAL_MERGED  ${CMAKE_CURRENT_BINARY_DIR}/cadical_merged.o)
 set(CADICAL_LOCALIZED ${CMAKE_CURRENT_BINARY_DIR}/cadical_localized.o)
 if(APPLE)
@@ -166,6 +170,7 @@ else()
         OUTPUT ${CADICAL_LOCALIZED}
         COMMAND ${CMAKE_LINKER} -r $<TARGET_OBJECTS:cadical_objs> -o ${CADICAL_MERGED}
         COMMAND ${CMAKE_OBJCOPY} -w --keep-global-symbol=ccadical_*
+                --keep-global-symbol=DW.ref.*
                 ${CADICAL_MERGED} ${CADICAL_LOCALIZED}
         DEPENDS cadical_objs
         COMMAND_EXPAND_LISTS

@@ -624,6 +624,25 @@ target_link_libraries(dv-solve-smt2 PRIVATE dv_solve_static Threads::Threads)
 if(DVS_WITH_CADICAL)
     # CaDiCaL is C++; link with the C++ driver so libstdc++/libc++ is pulled in.
     set_target_properties(dv-solve-smt2 PROPERTIES LINKER_LANGUAGE CXX)
+    # Link libstdc++ and libgcc statically into the CLI. One process per solve
+    # (one-shot use, benchmark sweeps) otherwise pays the dynamic loader for
+    # libstdc++.so's relocations at every start: ~19% of the user cycles of
+    # 2170 small solves (docs/perf_plan_2026-10-17.md, item 4). The check
+    # program throws, so it links the exception-handling objects the real
+    # link needs (cmake/cadical.cmake keeps the DW.ref.* symbols they use).
+    option(DVS_STATIC_LIBSTDCXX "Link libstdc++/libgcc statically into dv-solve-smt2 (GNU/Linux)" ON)
+    if(DVS_STATIC_LIBSTDCXX AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+            AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        include(CheckCXXSourceCompiles)
+        set(_dvs_throw_src "#include <stdexcept>
+int main() { try { throw std::runtime_error(\"x\"); } catch (...) {} return 0; }")
+        set(CMAKE_REQUIRED_LINK_OPTIONS -static-libstdc++ -static-libgcc)
+        check_cxx_source_compiles("${_dvs_throw_src}" DVS_HAVE_STATIC_LIBSTDCXX)
+        if(DVS_HAVE_STATIC_LIBSTDCXX)
+            target_link_options(dv-solve-smt2 PRIVATE -static-libstdc++ -static-libgcc)
+        endif()
+        unset(CMAKE_REQUIRED_LINK_OPTIONS)
+    endif()
 endif()
 target_include_directories(dv-solve-smt2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/c
