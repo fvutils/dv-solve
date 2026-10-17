@@ -1337,12 +1337,23 @@ static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
 #define DVS_ENUM_FIRES  (1ULL << 17)
 #define DVS_ENUM_MAX    (1u << 18)
 #define DVS_ENUM_REDO   4u
+#define DVS_ENUM_TRIES  256u   /* draws from a covering list before a walk */
 enum { ENUM_UNTRIED = 0, ENUM_ON = 1, ENUM_OFF = 2 };
 
 static int _enum_mode(void) {
     static int cached = -1;
     if (cached < 0) {
         const char *e = getenv("DVS_ENUM");
+        cached = !(e && e[0] == '0');
+    }
+    return cached;
+}
+
+/* DVS_ENUM_REUSE=0: walk again on every new root (see _enum_sample). */
+static int _enum_reuse_mode(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("DVS_ENUM_REUSE");
         cached = !(e && e[0] == '0');
     }
     return cached;
@@ -1581,11 +1592,91 @@ static void _enum_note_failed(uint64_t fk) {
     dvs_mutex_unlock(&_enum_mu);
 }
 
+/* Keep the root the list was made at, for _enum_covers. Not kept when a
+ * var has holes (a later root without them would hold values the list
+ * skipped) or there is no room. */
+static void _enum_keep_root(dvs_ctx_t *ctx) {
+    ctx->enum_root_n = 0;
+    uint32_t n = ctx->n_vars;
+    for (uint32_t i = 0; i < n; i++) {
+        const Variable *v = &ctx->vars[i];
+        if (_count_holes_in_range(ctx, i, var_lo64(ctx, v), var_hi64(ctx, v))) return;
+    }
+    if (n > ctx->enum_root_cap) {
+        int64_t *r = (int64_t *)dvs_ctx_resize(ctx, ctx->enum_root,
+                                               (size_t)ctx->enum_root_cap * 2u * sizeof(int64_t),
+                                               (size_t)n * 2u * sizeof(int64_t));
+        if (!r) return;
+        ctx->enum_root = r;
+        ctx->enum_root_cap = n;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        const Variable *v = &ctx->vars[i];
+        ctx->enum_root[2 * i]     = var_lo64(ctx, v);
+        ctx->enum_root[2 * i + 1] = var_hi64(ctx, v);
+    }
+    ctx->enum_n_props     = ctx->n_props;
+    ctx->enum_n_decl      = ctx->n_decl_vars;
+    ctx->enum_restore_gen = ctx->restore_gen;
+    ctx->enum_root_n      = n;
+}
+
+/* Whether the root now can only have lost solutions against the list's
+ * root: no propagator removed (no restore since, none fewer), the same
+ * declared vars, and every var the list's root had within its bounds then.
+ * Constraints only added and domains only narrowed: the solutions now are
+ * among those listed. Vars added since are the new constraints' own. */
+static int _enum_covers(const dvs_ctx_t *ctx) {
+    if (ctx->enum_root_n == 0 || ctx->restore_gen != ctx->enum_restore_gen
+            || ctx->n_props < ctx->enum_n_props || ctx->n_decl_vars != ctx->enum_n_decl
+            || ctx->n_vars < ctx->enum_root_n)
+        return 0;
+    for (uint32_t i = 0; i < ctx->enum_root_n; i++) {
+        const Variable *v = &ctx->vars[i];
+        if (var_lo64(ctx, v) < ctx->enum_root[2 * i] || var_hi64(ctx, v) > ctx->enum_root[2 * i + 1])
+            return 0;
+        if (_count_holes_in_range(ctx, i, var_lo64(ctx, v), var_hi64(ctx, v))) return 0;
+    }
+    return 1;
+}
+
+/* Pin listed row `r` at a new level and propagate. 1: a solution (every
+ * var fixed, propagation quiet); 0: not, and the trail is back at `base`. */
+static int _enum_pin_row(dvs_ctx_t *ctx, uint32_t base, uint32_t r) {
+    uint32_t nv = ctx->enum_nv;
+    const int64_t *row = ctx->enum_vals + (size_t)r * nv;
+    trail_push_level(ctx);
+    ctx->conflict_prop_ref   = EXPR_NULL;
+    ctx->conflict_clause_idx = EXPR_NULL;
+    PropResult pr = PROP_OK;
+    for (uint32_t j = 0; j < nv && pr == PROP_OK; j++) {
+        pr = ctx_tighten_lb64(ctx, ctx->enum_vars[j], row[j]);
+        if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, ctx->enum_vars[j], row[j]);
+    }
+    if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+    if (pr == PROP_OK && !ctx->prop_aborted && _all_fixed(ctx)) return 1;
+    trail_backtrack(ctx, base);
+    return 0;
+}
+
 /* 1: a listed solution is pinned (the solve is done). 2: the walk found
  * none (UNSAT). 0: search instead. Called at the root, `base`. */
 static int _enum_sample(dvs_ctx_t *ctx, uint32_t base) {
     if (!_enum_mode() || ctx->enum_state == ENUM_OFF) return 0;
     uint64_t key = _enum_key(ctx, base);
+    /* A root that only added constraints to the list's (an assert after a
+     * check-sat: Verilator's XOR-hash asserts, four per randomize): draw
+     * from the list and keep the first row that still holds. Each try is
+     * uniform over the list, so the kept row is uniform over the rows that
+     * hold, which are all the solutions now. A few pins, not a walk. */
+    if (ctx->enum_state == ENUM_ON && key != ctx->enum_key && ctx->enum_nsol
+            && _enum_reuse_mode() && _enum_covers(ctx)) {
+        for (uint32_t t = 0; t < DVS_ENUM_TRIES; t++) {
+            uint32_t r = (uint32_t)_rand_range64(ctx, 0, (int64_t)ctx->enum_nsol - 1);
+            if (_enum_pin_row(ctx, base, r)) return 1;
+            if (ctx->prop_aborted) return 0;
+        }
+    }
     if (ctx->enum_state == ENUM_UNTRIED || key != ctx->enum_key) {
         if (ctx->enum_state == ENUM_UNTRIED) ctx->enum_redo = DVS_ENUM_REDO;
         else if (ctx->enum_redo-- == 0) { ctx->enum_state = ENUM_OFF; return 0; }
@@ -1597,23 +1688,12 @@ static int _enum_sample(dvs_ctx_t *ctx, uint32_t base) {
         }
         ctx->enum_state = ENUM_ON;
         ctx->enum_key = key;
+        _enum_keep_root(ctx);
     }
     if (ctx->enum_nsol == 0) return 2;
-    uint32_t nv = ctx->enum_nv;
-    const int64_t *row = ctx->enum_vals
-                       + (size_t)_rand_range64(ctx, 0, (int64_t)ctx->enum_nsol - 1) * nv;
-    trail_push_level(ctx);
-    ctx->conflict_prop_ref   = EXPR_NULL;
-    ctx->conflict_clause_idx = EXPR_NULL;
-    PropResult pr = PROP_OK;
-    for (uint32_t j = 0; j < nv && pr == PROP_OK; j++) {
-        pr = ctx_tighten_lb64(ctx, ctx->enum_vars[j], row[j]);
-        if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, ctx->enum_vars[j], row[j]);
-    }
-    if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
-    if (pr == PROP_OK && !ctx->prop_aborted && _all_fixed(ctx)) return 1;
+    if (_enum_pin_row(ctx, base, (uint32_t)_rand_range64(ctx, 0, (int64_t)ctx->enum_nsol - 1)))
+        return 1;
     /* A listed solution that no longer holds: the list is stale. */
-    trail_backtrack(ctx, base);
     ctx->enum_state = ENUM_OFF;
     return 0;
 }

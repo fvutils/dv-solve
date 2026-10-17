@@ -230,6 +230,17 @@ typedef struct dvs_ctx_s {
     uint8_t            box_probe_n;   /* tries: an estimate of how many
                                        * solutions there are            */
     uint8_t            enum_redo;     /* rebuilds left on a new root   */
+    /* The list's root, for a later root that can only have lost solutions
+     * (_enum_covers): every var's root bounds [enum_root_n][2], the
+     * propagator count and restore_gen then. enum_root_n == 0: not kept. */
+    int64_t           *enum_root;
+    uint32_t           enum_root_n;
+    uint32_t           enum_root_cap; /* vars enum_root has room for   */
+    uint32_t           enum_n_props;
+    uint32_t           enum_n_decl;
+    uint32_t           enum_restore_gen;
+    uint32_t           restore_gen;   /* dvs_solver_restore calls: each
+                                       * removes propagators            */
     uint32_t           n_decl_vars;   /* vars the problem declared; compile
                                        * adds its own after them         */
     uint8_t           *var_order;     /* [n_decl_vars] solve-order stage

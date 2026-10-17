@@ -198,6 +198,7 @@ void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
 static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
     if (cp >= ctx->n_checkpoints) return;
     ctx->search_sealed = 0;            /* the backtrack below undoes it */
+    ctx->restore_gen++;                /* propagators go: see _enum_covers */
 
     CheckpointMark *m = &ctx->checkpoints[cp];
     uint32_t n_vars_was = ctx->n_vars;
