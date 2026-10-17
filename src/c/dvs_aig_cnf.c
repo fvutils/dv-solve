@@ -20,9 +20,18 @@ struct dvs_aig_cnf_s {
     uint32_t  stack_size;
     uint32_t  stack_cap;
 
-    /* Visit-mark bitmap used during top-level flattening. */
+    /* Visit-mark bitmap used during top-level flattening. It persists
+     * between passes; `touched` lists the bits a pass set, so the pass
+     * clears only those instead of the whole map. */
     uint8_t  *visited;
     uint32_t  visited_cap;
+    uint32_t *touched;
+    uint32_t  touched_size;
+    uint32_t  touched_cap;
+
+    /* Leaves collected by a top-level flatten (reused between passes). */
+    int32_t  *leaves;
+    uint32_t  leaves_cap;
 
     uint64_t num_vars;
     uint64_t num_clauses;
@@ -62,6 +71,18 @@ static int bm_get(const uint8_t *bm, uint32_t bit) {
 }
 static void bm_set(uint8_t *bm, uint32_t bit) {
     bm[bit >> 3] |= (uint8_t)(1u << (bit & 7));
+}
+static void bm_clear(uint8_t *bm, uint32_t bit) {
+    bm[bit >> 3] &= (uint8_t)~(1u << (bit & 7));
+}
+
+/* Grow a 4-byte-element buffer to hold at least `need` elements. */
+static void ensure_u32(dvs_aig_cnf_t *e, void **buf, uint32_t *cap, uint32_t need) {
+    if (need <= *cap) return;
+    uint32_t nc = *cap ? *cap : 16;
+    while (nc < need) nc *= 2;
+    *buf = xrealloc(e->alloc, *buf, (size_t)*cap * 4, (size_t)nc * 4);
+    *cap = nc;
 }
 
 static void ensure_stack(dvs_aig_cnf_t *e, uint32_t need) {
@@ -259,6 +280,8 @@ void dvs_aig_cnf_free(dvs_aig_cnf_t *e) {
     xfree(e->alloc, e->encoded, e->encoded_cap);
     xfree(e->alloc, e->stack,   (size_t)e->stack_cap * sizeof(int32_t));
     xfree(e->alloc, e->visited, e->visited_cap);
+    xfree(e->alloc, e->touched, (size_t)e->touched_cap * sizeof(uint32_t));
+    xfree(e->alloc, e->leaves,  (size_t)e->leaves_cap * sizeof(int32_t));
     xfree(e->alloc, e, sizeof(*e));
 }
 
@@ -272,20 +295,15 @@ void dvs_aig_cnf_encode(dvs_aig_cnf_t *e, dvs_aig_node_t root, int top_level) {
 
     /* Top-level flatten: walk through positive ANDs collecting leaves, then
      * encode each leaf and assert it as a unit clause. */
-    /* reset visited bitmap for this flatten pass */
-    xfree(e->alloc, e->visited, e->visited_cap);
-    e->visited = NULL;
-    e->visited_cap = 0;
-
+    /* The visited bitmap is all clear here: the previous pass cleared the
+     * bits it set. */
     uint32_t leaf_start = e->stack_size;
     /* phase 1: collect leaves into a temporary buffer past the visit stack */
     /* We'll use the same stack: push visit work onto the back, then collect
      * leaves into a side array. */
     stack_push(e, (int32_t)root);
 
-    /* Use a small dynamic leaves buffer */
-    int32_t *leaves = NULL;
-    uint32_t leaves_cap = 0, leaves_size = 0;
+    uint32_t leaves_size = 0;
 
     /* The visited bitmap tracks (id, sign) pairs separately so positive and
      * negative occurrences of the same AIG id don't dedup each other —
@@ -300,6 +318,8 @@ void dvs_aig_cnf_encode(dvs_aig_cnf_t *e, dvs_aig_node_t root, int top_level) {
         ensure_bitmap(e, &e->visited, &e->visited_cap, bit_idx + 1);
         if (bm_get(e->visited, bit_idx)) continue;
         bm_set(e->visited, bit_idx);
+        ensure_u32(e, (void **)&e->touched, &e->touched_cap, e->touched_size + 1);
+        e->touched[e->touched_size++] = bit_idx;
 
         if (cur > 0 && dvs_aig_is_and(e->aig, cur)) {
             dvs_aig_node_t l, r;
@@ -307,28 +327,23 @@ void dvs_aig_cnf_encode(dvs_aig_cnf_t *e, dvs_aig_node_t root, int top_level) {
             stack_push(e, (int32_t)l);
             stack_push(e, (int32_t)r);
         } else {
-            if (leaves_size == leaves_cap) {
-                uint32_t nc = leaves_cap ? leaves_cap * 2 : 16;
-                int32_t *nl = (int32_t *)xrealloc(e->alloc, leaves,
-                                                   (size_t)leaves_cap * sizeof(int32_t),
-                                                   (size_t)nc * sizeof(int32_t));
-                leaves = nl;
-                leaves_cap = nc;
-            }
-            leaves[leaves_size++] = (int32_t)cur;
+            ensure_u32(e, (void **)&e->leaves, &e->leaves_cap, leaves_size + 1);
+            e->leaves[leaves_size++] = (int32_t)cur;
         }
     }
 
+    for (uint32_t i = 0; i < e->touched_size; i++)
+        bm_clear(e->visited, e->touched[i]);
+    e->touched_size = 0;
+
     /* phase 2: encode each leaf subtree and assert it as a unit clause */
     for (uint32_t i = 0; i < leaves_size; i++) {
-        dvs_aig_node_t leaf = leaves[i];
+        dvs_aig_node_t leaf = e->leaves[i];
         encode_subtree(e, leaf);
         dvs_sat_add_unit(e->sat, (dvs_sat_lit_t)leaf);
         e->num_clauses++;
         e->num_literals++;
     }
-
-    xfree(e->alloc, leaves, (size_t)leaves_cap * sizeof(int32_t));
 }
 
 int dvs_aig_cnf_value(dvs_aig_cnf_t *e, dvs_aig_node_t node) {
