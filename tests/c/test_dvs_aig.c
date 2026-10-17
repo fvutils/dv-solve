@@ -69,5 +69,33 @@ int main(void) {
     CHECK(dvs_aig_num_shared(m) >= 1, "hash-consing fired at least once");
 
     dvs_aig_free(m);
+
+    /* Hash-consing across unique-table resizes: build enough ANDs to grow
+     * the table many times, in all four polarity combinations, then rebuild
+     * every one and check each returns its original id. */
+    {
+        enum { N = 3000 };
+        static dvs_aig_node_t in[N], got[N][4];
+        dvs_aig_t *g = dvs_aig_new(NULL);
+        for (int i = 0; i < N; i++) in[i] = dvs_aig_mk_input(g);
+        for (int i = 0; i + 1 < N; i++)
+            for (int p = 0; p < 4; p++)
+                got[i][p] = dvs_aig_mk_and(g, (p & 1) ? -in[i] : in[i],
+                                              (p & 2) ? -in[i + 1] : in[i + 1]);
+        uint64_t ands = dvs_aig_num_ands(g);
+        int distinct = 1, same = 1;
+        for (int i = 0; i + 1 < N; i++)
+            for (int p = 0; p < 4; p++) {
+                for (int q = 0; q < p; q++)
+                    if (got[i][p] == got[i][q]) distinct = 0;
+                if (dvs_aig_mk_and(g, (p & 2) ? -in[i + 1] : in[i + 1],
+                                      (p & 1) ? -in[i] : in[i]) != got[i][p]) same = 0;
+            }
+        CHECK(ands == 4u * (N - 1), "one AND per (pair, polarity)");
+        CHECK(distinct, "polarity variants are distinct nodes");
+        CHECK(same, "rebuilding after resizes returns the same ids");
+        CHECK(dvs_aig_num_ands(g) == ands, "rebuilding creates no nodes");
+        dvs_aig_free(g);
+    }
     return failures ? 1 : 0;
 }
