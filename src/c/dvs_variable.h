@@ -19,6 +19,10 @@ extern "C" {
 #define VAR_AUX     0x20u   /* auxiliary (guard/ITE result): never a search decision */
 #define VAR_DECLARED 0x40u  /* declared by a problem's VarSpec (else made by
                              * the compile, or an unfilled id gap)     */
+#define VAR_COND    0x80u   /* condition variable: a declared var with <=64
+                             * values that a guard/ITE condition reads
+                             * (item 1b); decided before the vars its
+                             * guards gate, and weighted in _pick_value   */
 
 /* Convenience: tier-0 when neither TIER1 nor TIER2 is set (width ≤ 32) */
 #define VAR_IS_TIER0(f)  (((f) & (VAR_TIER1|VAR_TIER2)) == 0)

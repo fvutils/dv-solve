@@ -395,7 +395,14 @@ static void _build_dec_tier(dvs_ctx_t *ctx) {
     int any = 0;
     for (uint32_t i = 0; i < ctx->n_mul_links && !any; i++)
         any = ctx->mul_links[i].a == ctx->mul_links[i].b;
-    if (!any || ctx->n_vars == 0) {
+    /* Item 1b: a condition variable (VAR_COND, marked at compile) also
+     * needs the tier array, so it is decided before the ordinary-tier
+     * variables its guards gate -- same tier as a square's root, since the
+     * two reasons never conflict on one variable's priority in practice. */
+    uint32_t i;
+    for (i = 0; i < ctx->n_vars && !(ctx->vars[i].flags & VAR_COND); i++) {}
+    int any_cond = i < ctx->n_vars;
+    if ((!any && !any_cond) || ctx->n_vars == 0) {
         if (ctx->dec_tier) dvs_ctx_free(ctx, ctx->dec_tier, ctx->dec_tier_n);
         ctx->dec_tier = NULL; ctx->dec_tier_n = 0;
         return;
@@ -407,11 +414,19 @@ static void _build_dec_tier(dvs_ctx_t *ctx) {
         if (!ctx->dec_tier) return;
     }
     memset(ctx->dec_tier, 1, ctx->dec_tier_n);
-    for (uint32_t i = 0; i < ctx->n_mul_links; i++) {
-        const DvsMulLink *ml = &ctx->mul_links[i];
+    for (uint32_t k = 0; k < ctx->n_mul_links; k++) {
+        const DvsMulLink *ml = &ctx->mul_links[k];
         if (ml->a != ml->b || (ctx->vars[ml->a].flags & VAR_SIGNED)) continue;
         uint32_t x = dvs_value_src(ctx, ml->a);
         if (x < ctx->dec_tier_n) ctx->dec_tier[x] = 2;
+    }
+    for (uint32_t k = 0; k < ctx->dec_tier_n; k++)
+        if (ctx->vars[k].flags & VAR_COND) ctx->dec_tier[k] = 2;
+    if (getenv("DVS_COND_DEBUG")) {
+        for (uint32_t k = 0; k < ctx->n_vars; k++)
+            if (ctx->vars[k].flags & VAR_COND)
+                fprintf(stderr, "[cond] var=%u tier=%u\n", k,
+                        (unsigned)ctx->dec_tier[k]);
     }
 }
 

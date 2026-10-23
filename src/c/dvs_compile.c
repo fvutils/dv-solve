@@ -1472,6 +1472,27 @@ static uint32_t _reify_cmp_var_var(dvs_ctx_t *ctx, dvs_binop_t op,
     }
 }
 
+/* Mark `vid` a *condition variable* (item 1b): a declared var with at most
+ * 64 values that a guard/ITE condition reads. `_select_unassigned` decides
+ * these before the variables their guards gate, and `_pick_value` gives
+ * them a solution-count-weighted draw instead of a uniform one, undoing the
+ * skew a uniform draw over a `mode`-like field puts on everything the guard
+ * controls. Aux vars (the guards themselves, reification pins) and wide
+ * domains are left alone: `_pick_value`'s weighted draw pays for one
+ * propagation per domain value, so it is only worth it for a narrow field.
+ * `_bool_to_var` is the single hub every guard and ITE condition compiles
+ * through, so marking from its own leaves (a bare 0/1 var, or the variable
+ * side of a reified comparison) covers every call site. */
+static void _mark_cond_var(dvs_ctx_t *ctx, uint32_t vid) {
+    if (vid >= ctx->n_vars) return;
+    Variable *v = &ctx->vars[vid];
+    if (!(v->flags & VAR_DECLARED) || (v->flags & VAR_AUX)) return;
+    uint64_t lo = (uint64_t)var_lo64(ctx, v);
+    uint64_t hi = (uint64_t)var_hi64(ctx, v);
+    if (hi - lo > 63u) return;   /* more than 64 values */
+    v->flags |= VAR_COND;
+}
+
 static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) {
     if (ref == EXPR_NULL || dvs_stack_low(&ctx->stack_guard)) return EXPR_NULL;
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
@@ -1484,7 +1505,10 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
          * v = 2 made `!v` (1 - g) come out -1 and `!v || a` wrong-unsat
          * (B98). Domains only narrow, so one inside [0,1] now stays there. */
         const Variable *v = &ctx->vars[vid];
-        if (var_lo64(ctx, v) >= 0 && var_hi64(ctx, v) <= 1) return vid;
+        if (var_lo64(ctx, v) >= 0 && var_hi64(ctx, v) <= 1) {
+            _mark_cond_var(ctx, vid);
+            return vid;
+        }
         uint32_t v_w = v->width;
         uint8_t  v_sf = v->flags & VAR_SIGNED;
         if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;      /* may move vars */
@@ -1700,6 +1724,7 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         }
         cmp_vid = _resolve(ctx, cmp_vid);
         uint32_t cv_w = ctx->vars[cmp_vid].width;
+        _mark_cond_var(ctx, cmp_vid);
 
         /* Compile-time fold of an inequality that is trivially true/false at the
          * var's UNSIGNED range boundary [0, 2^w-1]. Critical for `var >= 0`
@@ -1846,6 +1871,8 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
         if (a_id == EXPR_NULL) return EXPR_NULL;
         uint32_t b_id = _value_to_var(ctx, sp, eb->rhs, w);
         if (b_id == EXPR_NULL) return EXPR_NULL;
+        _mark_cond_var(ctx, a_id);
+        _mark_cond_var(ctx, b_id);
         return _reify_cmp_var_var(ctx, eb->op, a_id, b_id);
     }
     default:
