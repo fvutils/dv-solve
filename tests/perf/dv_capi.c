@@ -4,10 +4,13 @@
  *
  *   dv_capi <problem.dvsp> <n_vars> <N> <seed> <models.out>
  *
- * Writes one "M v0 v1 ..." line per draw ("U"/"T" for unsat/timeout) to
- * models.out, and a JSON timing summary line to stdout. Only the solver
- * calls (reset+solve+get_values) are inside the timed region, measured on
- * the calling thread's CPU clock so other load on the box doesn't skew it.
+ * Writes one "<ns> M v0 v1 ..." line per draw ("<ns> U"/"<ns> T" for
+ * unsat/timeout) to models.out -- the leading field is that draw's elapsed
+ * time in nanoseconds, so a caller can rebuild the per-draw timing series
+ * alongside the models without a second output file -- and a JSON timing
+ * summary line to stdout. Only the solver calls (reset+solve+get_values)
+ * are inside the timed region, measured on the calling thread's CPU clock
+ * so other load on the box doesn't skew it.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -81,15 +84,15 @@ int main(int argc, char **argv) {
         total += d;
         if (r == DVS_SOLVE_OK) {
             ok++;
-            fputc('M', out);
+            fprintf(out, "%.0f M", d);
             for (uint32_t k = 0; k < nv; k++) fprintf(out, " %lld", (long long)vals[k]);
             fputc('\n', out);
         } else if (r == DVS_SOLVE_UNSAT) {
             unsat++;
-            fputs("U\n", out);
+            fprintf(out, "%.0f U\n", d);
         } else {
             tmo++;
-            fputs("T\n", out);
+            fprintf(out, "%.0f T\n", d);
         }
     }
     fclose(out);

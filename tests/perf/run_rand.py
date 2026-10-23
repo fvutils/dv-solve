@@ -21,11 +21,13 @@ evaluator; a model that violates them makes the run invalid.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import random
 import resource
 import subprocess
+import tempfile
 import time
 import zlib
 from collections import Counter
@@ -44,7 +46,7 @@ _REPO = Path(__file__).resolve().parents[2]
 @dataclass
 class Arm:
     name: str
-    kind: str                 # uniform | swizzle | api | seed
+    kind: str                 # uniform | swizzle | api | capi | seed
     argv: list = field(default_factory=list)
     env: dict = field(default_factory=dict)
     build: str = "ref"        # head | anchor | ref
@@ -54,6 +56,11 @@ def make_arms(head: Path, anchor: Path | None, tools: dict) -> list:
     lib = {"DVS_SOLVER_PATH": str(Path(head).resolve().parent)}
     arms = [Arm("uniform", "uniform"),
             Arm("dv-api@head", "api", env=lib, build="head"),
+            # Same compiled problem and solver as dv-api@head, but called
+            # from a small C harness (tests/perf/dv_capi.c) instead of
+            # through the Python builder/ctx: isolates the C API's own cost
+            # from the Python call overhead dv-api@head also pays.
+            Arm("dv-capi@head", "capi", [str(head)], env=lib, build="head"),
             Arm("dv-swizzle@head", "swizzle",
                 [str(head), "--interactive", "--mode=verilator"], build="head"),
             # The same build told to skip Verilator's parity asserts: both
@@ -141,6 +148,49 @@ def _api(b: Bench, n: int, seed: int, env: dict) -> dict:
             wall.append(time.perf_counter() - w0)
             models.append(m)
     return {"models": models, "cpu_s": cpu, "wall_s": wall, "checks": n}
+
+
+def _capi(b: Bench, n: int, seed: int, env: dict, head: str) -> dict:
+    """Same compiled problem as `_api`, drawn by the `dv_capi` C harness
+    (tests/perf/dv_capi.c) next to the `head` binary, so the C API's own
+    cost is measured without the Python builder/ctx call overhead."""
+    os.environ.update(env)
+    import sys
+    if str(_REPO / "src") not in sys.path:
+        sys.path.insert(0, str(_REPO / "src"))
+    from dv_solve.builder import SolveProblemBuilder
+    from tests.formal.soundness.doors import _lower
+    ids = {k: i for i, k in enumerate(b.names)}
+    bld = SolveProblemBuilder()
+    for k in b.names:
+        w = b.widths[k]
+        bld.add_var(ids[k], width=w, is_signed=False, lo=0, hi=(1 << w) - 1)
+    for c in b.cons:
+        bld.add_constraint(_lower(bld, c, ids))
+    buf = bld.finalize_bytes()
+    capi_bin = Path(head).resolve().parent / "dv_capi"
+    with tempfile.NamedTemporaryFile(suffix=".dvsp") as pf, \
+         tempfile.NamedTemporaryFile(suffix=".models", mode="r+") as mf:
+        pf.write(buf)
+        pf.flush()
+        p = subprocess.run([str(capi_bin), pf.name, str(len(b.names)), str(n), str(seed), mf.name],
+                           capture_output=True, text=True, check=True)
+        summary = json.loads(p.stdout.strip().splitlines()[-1])
+        if summary["compile_rc"] != 0:
+            raise RuntimeError(f"dv-capi: compile_rc={summary['compile_rc']}")
+        if summary["unsat"] or summary["timeout"]:
+            raise RuntimeError(f"dv-capi: {summary['unsat']} unsat, {summary['timeout']} timeout")
+        mf.seek(0)
+        lines = mf.read().splitlines()
+    # dv_capi's leading field per line is that draw's elapsed CLOCK_THREAD_CPUTIME_ID
+    # ns; with no syscalls between reset/solve/get_values it stands in for both
+    # cpu_s and wall_s here (unlike _api, there is no separate wall clock reading).
+    models, times = [], []
+    for ln in lines:
+        ns, _, rest = ln.partition(" M ")
+        times.append(float(ns) / 1e9)
+        models.append(tuple(int(x) for x in rest.split()))
+    return {"models": models, "cpu_s": times, "wall_s": times, "checks": n}
 
 
 def _swizzle(b: Bench, arm: Arm, n: int, seed: int) -> dict:
@@ -241,6 +291,8 @@ def run_one(job: tuple) -> dict:
             r = _uniform(b, n, seed, space)
         elif arm.kind == "api":
             r = _api(b, n, seed, arm.env)
+        elif arm.kind == "capi":
+            r = _capi(b, n, seed, arm.env, arm.argv[0])
         elif arm.kind == "seed":
             r = _seeded(b, arm, n, seed)
         else:

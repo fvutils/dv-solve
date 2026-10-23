@@ -65,8 +65,8 @@ jobs:
         run: |
           [ -d packages/cadical ] || git clone -q --depth 1 -b rel-3.0.0 \
               https://github.com/arminbiere/cadical.git packages/cadical
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build -j8 --target dv-solve-smt2 dv_solve
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDV_SOLVE_BUILD_TOOLS=ON
+          cmake --build build -j8 --target dv-solve-smt2 dv_solve dv_capi
 
       - name: Swizzle fidelity
         # The Verilator rows of the randomization page mean something only if
