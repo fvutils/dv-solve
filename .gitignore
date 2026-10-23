@@ -241,3 +241,7 @@ perf-out/
 
 # Private working notes (may reference internal tool paths / licensed-tool results); never committed
 docs/notes/
+
+# Local build trees (perf_plan/enhancement_plan steps build these, never commit)
+build-prof/
+.log/

@@ -14,6 +14,13 @@
     {"name": "bit_mask"},
     {"name": "addr_aligned"},
     {"name": "packet"},
-    {"name": "crc_filter"}
+    {"name": "crc_filter"},
+    {"name": "cond_weight"},
+    {"name": "order_chain"},
+    {"name": "linear_sys"},
+    {"name": "mod_crt"},
+    {"name": "xor_split"},
+    {"name": "pop32"},
+    {"name": "align64"}
   ]
 }
