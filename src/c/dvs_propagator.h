@@ -446,6 +446,17 @@ typedef struct {
     uint32_t      _capacity;   /* max var_ids/watcher_nexts entries */
     uint32_t      var_ids[MAX_ALLDIFF_VARS];
     uint32_t      watcher_nexts[MAX_ALLDIFF_VARS];
+    /* Memo of the L[]/H[] bounds (in var_ids[] order) as they stood right
+     * after the Hall-interval sweep last actually ran to its fixed point
+     * (item 2b). Firing re-reads bounds fresh every call regardless, so
+     * this is a pure value memo, not a per-node cache: if the freshly read
+     * bounds exactly match it, nothing has moved since that fixed point
+     * (whether or not a backtrack happened in between), so the O(n^2) sort
+     * + sweep would just re-derive the same (already-applied) tightenings
+     * and can be skipped. hall_valid is 0 until the sweep has run once. */
+    int64_t       hall_lo[MAX_ALLDIFF_VARS];
+    int64_t       hall_hi[MAX_ALLDIFF_VARS];
+    uint8_t       hall_valid;
 } AllDifferent_t;
 
 /**

@@ -4264,60 +4264,147 @@ static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
      * `span >= 0` guard skips the test when the difference wrapped (a domain
      * too wide to ever pigeonhole n <= 16 vars anyway). */
     int64_t span = ghi - glo;
-    if (span >= 0 && span + 1 < (int64_t)n) return PROP_CONFLICT;
-
-    /* --- Hall interval detection via sweep --- */
-    /* Sort variables by lo bound (insertion sort, n <= 16) */
-    uint32_t sorted[MAX_ALLDIFF_VARS];
-    for (uint32_t i = 0; i < n; i++) sorted[i] = i;
-    for (uint32_t i = 1; i < n; i++) {
-        uint32_t key = sorted[i];
-        int64_t key_lo = L[key];
-        uint32_t j = i;
-        while (j > 0 && L[sorted[j - 1]] > key_lo) {
-            sorted[j] = sorted[j - 1];
-            j--;
+    if (span >= 0 && span < 64) {
+        /* Small-span exact pigeonhole (item 2b): n is already <=
+         * MAX_ALLDIFF_VARS == 16, so once every domain fits in one 64-value
+         * window the only extra work is a mask union + popcount -- O(n),
+         * and strictly tighter than the min/max span check below (it also
+         * catches domains that don't actually union to >= n values despite
+         * sharing the same overall span, e.g. two separate clusters with a
+         * gap between them). */
+        uint64_t union_mask = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t width = (uint32_t)(H[i] - L[i] + 1);
+            uint64_t dom_mask = (width >= 64) ? ~0ULL : (((uint64_t)1 << width) - 1);
+            union_mask |= dom_mask << (uint32_t)(L[i] - glo);
         }
-        sorted[j] = key;
+        if (__builtin_popcountll(union_mask) < n) return PROP_CONFLICT;
+    } else if (span >= 0 && span + 1 < (int64_t)n) {
+        return PROP_CONFLICT;
     }
 
-    /* Sweep: for each starting position, count how many domains are
-       fully contained in [start_lo, end_hi].  If count > width, tighten. */
-    for (uint32_t start = 0; start < n; start++) {
-        int64_t lo_s = L[sorted[start]];
-        int64_t max_hi = lo_s;
-        uint32_t count = 0;
-        for (uint32_t end = start; end < n; end++) {
-            uint32_t si = sorted[end];
-            if (L[si] >= lo_s) {
-                if (H[si] > max_hi) max_hi = H[si];
-                count++;
+    /* --- Hall interval detection via sweep --- */
+    /* Two independent, sound reasons to skip the O(n^2) sort + sweep below
+     * (item 2b) -- either is enough on its own:
+     *
+     *   1. Memoized: the sweep is a pure function of L[]/H[]. If every
+     *      bound is exactly what it was the last time the sweep ran to a
+     *      fixed point, re-running it would just repeat the same
+     *      (already-applied) tightenings. Bounds are re-read fresh at the
+     *      top of every call regardless, so this is correct even across
+     *      backtracking: whether the match is because nothing moved, or
+     *      because something moved and later moved back to the same
+     *      values, the sweep's outcome is observationally identical.
+     *
+     *   2. Homogeneous free group: when every not-yet-singleton variable
+     *      shares the exact same [lo,hi] range (perm16's shape: holes
+     *      prune values per B2a without ever narrowing a free variable's
+     *      bounds below the shared range until it is the last one
+     *      standing), no subset of them can form a Hall interval narrower
+     *      than that shared range. A tighter sub-window can only be
+     *      forced by *singleton* values packed into a window smaller than
+     *      their count, which is impossible since singleton values are
+     *      mutually distinct (pigeonhole bounds their count by the window
+     *      width) -- and singleton-exclusion above already pushes any
+     *      other variable off a singleton that sits exactly on its
+     *      boundary, so there is nothing left for a sub-window sweep to
+     *      find among a homogeneous free group. Profiling `dv_capi` on
+     *      perm16 (`perf record -g`, step 17) showed 73% of wall time
+     *      inside this function for exactly this reason: a decision fixes
+     *      one variable every call, which trips reason 1's memo every
+     *      time, but every one of those calls was homogeneous and found
+     *      nothing. 0 or 1 free variables trivially count as homogeneous
+     *      too (nothing for a sub-window to compare against). */
+    int bounds_changed = !ad->hall_valid;
+    if (!bounds_changed) {
+        for (uint32_t i = 0; i < n; i++) {
+            if (L[i] != ad->hall_lo[i] || H[i] != ad->hall_hi[i]) {
+                bounds_changed = 1;
+                break;
             }
-            int64_t width = max_hi - lo_s + 1;
-            if (width < 0) continue;   /* wrapped: too wide to pigeonhole */
-            if ((int64_t)count > width) return PROP_CONFLICT;
-            /* If count == width (Hall interval), variables outside must
-               avoid [lo_s, max_hi] */
-            if ((int64_t)count == width && count >= 2) {
-                for (uint32_t k = 0; k < n; k++) {
-                    uint32_t kid = ad->var_ids[k];
-                    /* Skip variables that are part of this Hall interval */
-                    int in_hall = (L[k] >= lo_s && H[k] <= max_hi);
-                    if (in_hall) continue;
-                    /* If vk overlaps the Hall interval, tighten */
-                    if (L[k] >= lo_s && L[k] <= max_hi) {
-                        if (ctx_tighten_lb64(ctx, kid, max_hi + 1) == PROP_CONFLICT)
-                            return PROP_CONFLICT;
-                        L[k] = var_lo64(ctx, &ctx->vars[kid]);
-                    }
-                    if (H[k] >= lo_s && H[k] <= max_hi) {
-                        if (ctx_tighten_ub64(ctx, kid, lo_s - 1) == PROP_CONFLICT)
-                            return PROP_CONFLICT;
-                        H[k] = var_hi64(ctx, &ctx->vars[kid]);
+        }
+    }
+
+    int homogeneous_free = 1;
+    {
+        int64_t flo = 0, fhi = 0;
+        int have_free = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            if (L[i] == H[i]) continue;   /* singleton: not part of the free group */
+            if (!have_free) { flo = L[i]; fhi = H[i]; have_free = 1; }
+            else if (L[i] != flo || H[i] != fhi) { homogeneous_free = 0; break; }
+        }
+    }
+
+    if (bounds_changed && !homogeneous_free) {
+        /* Sort variables by lo bound (insertion sort, n <= 16) */
+        uint32_t sorted[MAX_ALLDIFF_VARS];
+        for (uint32_t i = 0; i < n; i++) sorted[i] = i;
+        for (uint32_t i = 1; i < n; i++) {
+            uint32_t key = sorted[i];
+            int64_t key_lo = L[key];
+            uint32_t j = i;
+            while (j > 0 && L[sorted[j - 1]] > key_lo) {
+                sorted[j] = sorted[j - 1];
+                j--;
+            }
+            sorted[j] = key;
+        }
+
+        /* Sweep: for each starting position, count how many domains are
+           fully contained in [start_lo, end_hi].  If count > width, tighten. */
+        for (uint32_t start = 0; start < n; start++) {
+            int64_t lo_s = L[sorted[start]];
+            int64_t max_hi = lo_s;
+            uint32_t count = 0;
+            for (uint32_t end = start; end < n; end++) {
+                uint32_t si = sorted[end];
+                if (L[si] >= lo_s) {
+                    if (H[si] > max_hi) max_hi = H[si];
+                    count++;
+                }
+                int64_t width = max_hi - lo_s + 1;
+                if (width < 0) continue;   /* wrapped: too wide to pigeonhole */
+                if ((int64_t)count > width) return PROP_CONFLICT;
+                /* If count == width (Hall interval), variables outside must
+                   avoid [lo_s, max_hi] */
+                if ((int64_t)count == width && count >= 2) {
+                    for (uint32_t k = 0; k < n; k++) {
+                        uint32_t kid = ad->var_ids[k];
+                        /* Skip variables that are part of this Hall interval */
+                        int in_hall = (L[k] >= lo_s && H[k] <= max_hi);
+                        if (in_hall) continue;
+                        /* If vk overlaps the Hall interval, tighten */
+                        if (L[k] >= lo_s && L[k] <= max_hi) {
+                            if (ctx_tighten_lb64(ctx, kid, max_hi + 1) == PROP_CONFLICT)
+                                return PROP_CONFLICT;
+                            L[k] = var_lo64(ctx, &ctx->vars[kid]);
+                        }
+                        if (H[k] >= lo_s && H[k] <= max_hi) {
+                            if (ctx_tighten_ub64(ctx, kid, lo_s - 1) == PROP_CONFLICT)
+                                return PROP_CONFLICT;
+                            H[k] = var_hi64(ctx, &ctx->vars[kid]);
+                        }
                     }
                 }
             }
         }
+
+        for (uint32_t i = 0; i < n; i++) {
+            ad->hall_lo[i] = L[i];
+            ad->hall_hi[i] = H[i];
+        }
+        ad->hall_valid = 1;
+    } else if (bounds_changed) {
+        /* Skipped via reason 2 (homogeneous) while the memo was stale:
+         * refresh it anyway, so a later call that repeats these exact
+         * bounds can take reason 1's cheaper path instead of re-deriving
+         * homogeneity from scratch. */
+        for (uint32_t i = 0; i < n; i++) {
+            ad->hall_lo[i] = L[i];
+            ad->hall_hi[i] = H[i];
+        }
+        ad->hall_valid = 1;
     }
 
     /* --- Entailment check --- */
