@@ -4,6 +4,7 @@
 #include <string.h>
 #include <assert.h>
 #include <time.h>
+#include <math.h>
 #include "dvs_search.h"
 #include "dvs_thread.h"
 #include "dvs_ctx.h"
@@ -740,6 +741,92 @@ static int64_t _pick_mul_divisor(dvs_ctx_t *ctx, uint32_t var_id, int64_t v,
     return v;
 }
 
+/* Propagator-firing budget (ctx->prop_fires) spent probing one condition
+ * variable's values in _pick_value_cond, below -- xezim's EST_BUDGET 200k
+ * analog (enhancement plan Item 1 step 3). Past it, weighting is abandoned
+ * for this decision rather than drawn from a partial, order-biased subset
+ * of the domain. */
+#define DVS_COND_BUDGET 200000ULL
+
+/* Item 1b, step 2/2: weight a condition variable's (VAR_COND) values by how
+ * much of the rest of the problem stays open under each. A uniform draw
+ * over `mode`'s <=64 values is not a uniform draw over solutions when
+ * branches differ in how many ways the guarded fields can then go
+ * (`cond_weight`: mode==0 came up 404/4000 draws, not the ~1000 a uniform
+ * draw over 4356 solutions gives -- state/notes/1a.md). Pin each value,
+ * propagate, and weigh it by w(v) = Sum log2|dom(u)| over the other
+ * declared variables u: 2^w(v) is then the number of ways the rest of the
+ * problem can go under v, so drawing v proportional to 2^w(v) approximates
+ * a uniform draw over solutions. The draw works on w(v) - max(w), always
+ * <= 0, so exp2() never overflows even when the domains' true product
+ * would (a handful of 64-bit variables already exceeds a double's
+ * exponent range). */
+static int64_t _pick_value_cond(dvs_ctx_t *ctx, uint32_t var_id,
+                                 int64_t lo, int64_t hi) {
+    enum { MAX_COND_VALS = 64 };  /* VAR_COND is only set on a <=64-value var */
+    int64_t  vals[MAX_COND_VALS];
+    double   w[MAX_COND_VALS];
+    uint32_t n = 0;
+    double   best_w = 0.0;
+    int      any_ok = 0;
+    uint32_t base = ctx->decision_level;
+    uint64_t fires0 = ctx->prop_fires;
+
+    for (int64_t v = lo; v <= hi; v++) {
+        if (_is_hole(ctx, var_id, v)) continue;
+        if (n >= MAX_COND_VALS) break;
+        if (ctx->prop_fires - fires0 > DVS_COND_BUDGET)
+            return _rand_range64(ctx, lo, hi);   /* past budget: plain uniform */
+
+        trail_push_level(ctx);
+        PropResult pr = ctx_tighten_lb64(ctx, var_id, v);
+        if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, var_id, v);
+        if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+        double wv = -1.0;   /* conflict: this value is excluded (weight 0) */
+        if (pr == PROP_OK) {
+            double sum = 0.0;
+            uint32_t nd = ctx->n_decl_vars < ctx->n_vars ? ctx->n_decl_vars
+                                                          : ctx->n_vars;
+            for (uint32_t i = 0; i < nd; i++) {
+                if (i == var_id) continue;
+                const Variable *u = &ctx->vars[i];
+                if ((u->flags & VAR_AUX)
+                        || (ctx->var_alias && ctx->var_alias[i] != i)) continue;
+                int64_t ulo = var_lo64(ctx, u), uhi = var_hi64(ctx, u);
+                uint64_t cnt = _dom_size(ctx, i, ulo, uhi) + 1u;  /* value count */
+                sum += log2((double)cnt);
+            }
+            wv = sum;
+            if (!any_ok || wv > best_w) best_w = wv;
+            any_ok = 1;
+        }
+        trail_backtrack(ctx, base);
+        vals[n] = v;
+        w[n] = wv;
+        n++;
+        if (ctx->prop_aborted) break;  /* solve is bailing out; the real
+                                         * decision's own propagate call
+                                         * catches it */
+    }
+    if (!any_ok) return _rand_range64(ctx, lo, hi);  /* every probed value
+                                                       * conflicted; let the
+                                                       * ordinary path find it */
+
+    double total = 0.0;
+    double rel[MAX_COND_VALS];
+    for (uint32_t i = 0; i < n; i++) {
+        rel[i] = (w[i] < 0.0) ? 0.0 : exp2(w[i] - best_w);
+        total += rel[i];
+    }
+    double roll = ((double)(_rand64(ctx) >> 11) / 9007199254740992.0) * total;
+    double cum = 0.0;
+    for (uint32_t i = 0; i < n; i++) {
+        cum += rel[i];
+        if (roll < cum) return vals[i];
+    }
+    return vals[n - 1];
+}
+
 enum { KEEP_NONE = 0, KEEP_SET = 1, KEEP_DEAD = 2 };
 
 static int _keep_draws_enabled(void) {
@@ -805,6 +892,15 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
     if (ctx->dist_offsets && var_id < ctx->n_vars_capacity &&
         ctx->dist_offsets[var_id] != 0) {
         v = _pick_value_dist(ctx, var_id, lo, hi);
+    } else if (ctx->fair_pick && (ctx->vars[var_id].flags & VAR_COND)
+               && !(ctx->var_order && var_id < ctx->n_decl_vars
+                    && ctx->var_order[var_id] > 1)) {
+        /* Item 1b, step 2/2. Skipped for a `dist`-constrained var (handled
+         * above) and for a variable `solve...before` puts in a later stage
+         * (stage > 1): its guard partners from the first stage are already
+         * fixed by the time this var is decided, same check as
+         * _select_unassigned's _order_key stage filter. */
+        v = _pick_value_cond(ctx, var_id, lo, hi);
     } else {
         v = _rand_range64(ctx, lo, hi);
         v = _pick_mod_aligned(ctx, var_id, v, lo, hi);
