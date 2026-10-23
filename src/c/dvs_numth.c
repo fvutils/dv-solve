@@ -213,3 +213,61 @@ uint32_t dvs_divisors_upper(const DvsDivisors *d, uint64_t x) {
     }
     return lo;
 }
+
+/* gcd(a, b) and x, y with a*x + b*y = gcd(a, b) (a, b >= 0). */
+static int64_t _ext_gcd(int64_t a, int64_t b, int64_t *x, int64_t *y) {
+    int64_t x0 = 1, y0 = 0, x1 = 0, y1 = 1;
+    while (b != 0) {
+        int64_t q = a / b, r = a % b;
+        a = b; b = r;
+        int64_t xt = x1, yt = y1;
+        x1 = x0 - q * x1; x0 = xt;
+        y1 = y0 - q * y1; y0 = yt;
+    }
+    *x = x0; *y = y0;
+    return a;
+}
+
+int dvs_modinv_u64(uint64_t a, uint64_t m, uint64_t *out_inv) {
+    if (m == 0 || m > (uint64_t)INT64_MAX) return 0;
+    int64_t x, y;
+    int64_t g = _ext_gcd((int64_t)(a % m), (int64_t)m, &x, &y);
+    if (g != 1) return 0;
+    int64_t im = (int64_t)m;
+    x %= im;
+    if (x < 0) x += im;
+    *out_inv = (uint64_t)x;
+    return 1;
+}
+
+int dvs_crt_merge(int64_t r1, uint64_t m1, int64_t r2, uint64_t m2,
+                   int64_t *out_r, uint64_t *out_m) {
+    if (m1 == 0 || m2 == 0) return -1;
+    if (m1 > (uint64_t)INT64_MAX || m2 > (uint64_t)INT64_MAX) return -1;
+    int64_t p, q;
+    int64_t g = _ext_gcd((int64_t)m1, (int64_t)m2, &p, &q);
+    if (g <= 0) return -1;
+    int64_t im1 = (int64_t)m1, im2 = (int64_t)m2;
+    int64_t rr1 = ((r1 % im1) + im1) % im1;
+    int64_t rr2 = ((r2 % im2) + im2) % im2;
+    int64_t diff = rr2 - rr1;
+    if (diff % g != 0) return 0;  /* contradiction: no x satisfies both */
+
+    uint64_t m1g = m1 / (uint64_t)g;
+    uint64_t m2g = m2 / (uint64_t)g;
+    if (m1g != 0 && m2g > UINT64_MAX / m1g) return -1;  /* lcm overflow */
+    uint64_t lcm = m1g * m2;
+
+    int64_t m2g_s = (int64_t)m2g;
+    int64_t dg_mod = (m2g_s == 0) ? 0 : (diff / g) % m2g_s;
+    if (dg_mod < 0) dg_mod += m2g_s;
+    int64_t p_mod = (m2g_s == 0) ? 0 : p % m2g_s;
+    if (p_mod < 0) p_mod += m2g_s;
+    uint64_t k = (m2g_s == 0) ? 0
+        : dvs_mulmod_u64((uint64_t)dg_mod, (uint64_t)p_mod, m2g);
+
+    uint64_t add = dvs_mulmod_u64(m1, k, lcm);
+    *out_r = (int64_t)(((uint64_t)rr1 + add) % lcm);
+    *out_m = lcm;
+    return 1;
+}

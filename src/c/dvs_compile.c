@@ -7,6 +7,7 @@
 #include "dvs_diffcycle.h"
 #include "dvs_propagator.h"
 #include "dvs_problem.h"
+#include "dvs_numth.h"
 #include "dvs_sv.h"
 #include "dvs_i128.h"
 
@@ -4192,6 +4193,104 @@ static int _elab_error_code(int err) {
     }
 }
 
+/*
+ * Per-variable congruence facts (item 3: `x % m == r` with constant m, r),
+ * collected at compile time and CRT-merged so a contradiction between two
+ * `mod` constraints on the same (possibly aliased) variable is caught as
+ * DVS_COMPILE_UNSAT rather than searched for. Carrying a fact across a link
+ * like `y == x + c` is not done here: y's wraparound at 2^width is not a
+ * no-op mod an arbitrary m, so that needs the "fits" guard or case split
+ * item 3b adds; this pass only merges facts already written on one variable.
+ */
+typedef struct {
+    int      has;
+    int64_t  r;
+    uint64_t m;
+} _CongFact;
+
+/* `EQ(MOD(var, CONST m), CONST r)` or the flipped/commuted forms, with
+ * 0 <= r < m. Returns 1 and fills *out_vid/*out_r/*out_m if `ref` matches. */
+static int _match_mod_eq_const(dvs_problem_t *sp, dvs_expr_t ref,
+                                uint32_t *out_vid, int64_t *out_r,
+                                uint64_t *out_m) {
+    if (ref == EXPR_NULL) return 0;
+    if (*(ExprKind *)dvs_pool_ptr(&sp->pool, ref) != EXPR_BINARY) return 0;
+    ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
+    if (e->op != DVS_BIN_EQ) return 0;
+
+    dvs_expr_t mod_side;
+    int64_t rc;
+    if (_is_const(sp, e->rhs, &rc)) mod_side = e->lhs;
+    else if (_is_const(sp, e->lhs, &rc)) mod_side = e->rhs;
+    else return 0;
+    if (mod_side == EXPR_NULL
+        || *(ExprKind *)dvs_pool_ptr(&sp->pool, mod_side) != EXPR_BINARY)
+        return 0;
+    ExprBinary *me = (ExprBinary *)dvs_pool_ptr(&sp->pool, mod_side);
+    if (me->op != DVS_BIN_MOD) return 0;
+
+    uint32_t vid;
+    int64_t mc;
+    if (!_is_var(sp, me->lhs, &vid)) return 0;
+    if (!_is_const(sp, me->rhs, &mc)) return 0;
+    if (mc <= 0 || rc < 0 || rc >= mc) return 0;
+
+    *out_vid = vid; *out_r = rc; *out_m = (uint64_t)mc;
+    return 1;
+}
+
+/* Recursively collect congruence facts from a constraint tree (including
+ * those nested inside DVS_BIN_AND), merging into `facts[]` by resolved
+ * variable id. Returns -1 on a contradiction (compile-time UNSAT), 0
+ * otherwise -- including when a fact could not be merged (kept as-is). */
+static int _collect_congruence(const dvs_ctx_t *ctx, dvs_problem_t *sp,
+                               _CongFact *facts, dvs_expr_t ref) {
+    if (ref == EXPR_NULL
+        || dvs_stack_low((dvs_stack_guard_t *)&ctx->stack_guard)) return 0;
+    if (*(ExprKind *)dvs_pool_ptr(&sp->pool, ref) != EXPR_BINARY) return 0;
+    ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
+    if (e->op == DVS_BIN_AND) {
+        if (_collect_congruence(ctx, sp, facts, e->lhs) < 0) return -1;
+        return _collect_congruence(ctx, sp, facts, e->rhs);
+    }
+
+    uint32_t vid;
+    int64_t r;
+    uint64_t m;
+    if (!_match_mod_eq_const(sp, ref, &vid, &r, &m)) return 0;
+    uint32_t rid = _resolve(ctx, vid);
+    if (rid >= ctx->n_vars || (ctx->vars[rid].flags & VAR_SIGNED)) return 0;
+
+    _CongFact *f = &facts[rid];
+    if (!f->has) { f->has = 1; f->r = r; f->m = m; return 0; }
+    int64_t mr;
+    uint64_t mm;
+    int rc = dvs_crt_merge(f->r, f->m, r, m, &mr, &mm);
+    if (rc == 0) return -1;             /* contradiction: UNSAT */
+    if (rc == 1) { f->r = mr; f->m = mm; }
+    /* rc == -1: m too large to merge losslessly; keep the existing fact. */
+    return 0;
+}
+
+/* Scans every top-level constraint for `x % m == r` facts and CRT-merges
+ * them per variable. Returns -2 (UNSAT) on a contradiction, 0 otherwise. */
+static int _compile_congruence_facts(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    uint32_t n = ctx->n_vars;
+    if (n == 0) return 0;
+    _CongFact *facts = (_CongFact *)DVS_ALLOC(ctx->alloc, n * sizeof(_CongFact));
+    if (!facts) return 0;  /* best-effort: skip detection rather than fail compile */
+    memset(facts, 0, n * sizeof(_CongFact));
+
+    int conflict = 0;
+    for (dvs_expr_t c = sp->constraints_head; c != EXPR_NULL; ) {
+        ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+        if (_collect_congruence(ctx, sp, facts, cs->root) < 0) { conflict = 1; break; }
+        c = cs->next;
+    }
+    DVS_RELEASE(ctx->alloc, facts, n * sizeof(_CongFact));
+    return conflict ? -2 : 0;
+}
+
 /* DV_LOG: name each constraint the compile leaves uncompiled, one line each
  * (`cdcl-uncompiled: <expr>`). The search ignores such a constraint and the
  * model-validation net checks it afterwards. Like the SMT2 driver's
@@ -4416,6 +4515,16 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                 }
             }
         }
+    }
+
+    /* Compile-time congruence facts (item 3a): `x % m == r` for constant
+     * m, r, CRT-merged per (alias-resolved) variable, catching a direct
+     * contradiction like `x%7==3 && x%11==4` as UNSAT here rather than in
+     * search. Must run after the alias block above, since it resolves
+     * through ctx->var_alias. */
+    {
+        int r = _compile_congruence_facts(ctx, sp);
+        if (r < 0) return r;
     }
 
     /* Variables the box-rejection tier need not draw (see _box_sample in
