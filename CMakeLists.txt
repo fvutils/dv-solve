@@ -461,6 +461,11 @@ add_executable(test_public_api tests/c/test_public_api.c)
 target_link_libraries(test_public_api PRIVATE dv_solve)
 add_test(NAME test_public_api COMMAND test_public_api)
 
+# Perf harness: times raw C-API reset/solve/get_values draws on one compiled
+# problem. Not a correctness check, so no add_test().
+add_executable(dv_capi tests/perf/dv_capi.c)
+target_link_libraries(dv_capi PRIVATE dv_solve)
+
 add_executable(test_ctx_dirty_buffer tests/c/test_ctx_dirty_buffer.c)
 target_link_libraries(test_ctx_dirty_buffer PRIVATE dv_solve)
 add_test(NAME test_ctx_dirty_buffer COMMAND test_ctx_dirty_buffer)
