@@ -1,6 +1,7 @@
 #include <string.h>
 #include "dvs_trail.h"
 #include "dvs_ctx.h"
+#include "dvs_search.h"
 
 /* ------------------------------------------------------------------ */
 /* Internal helpers                                                    */
@@ -116,6 +117,15 @@ int trail_record_ub(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub) {
 /* ------------------------------------------------------------------ */
 
 int trail_record_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t removed_val) {
+    /* Apply first, like trail_record_lb/ub: insert into the hole list, then
+     * trail it so trail_backtrack can unlink it again. Already-present (1)
+     * means an older, still-active level already holds this hole -- nothing
+     * to trail, since undoing it here would drop that older entry too.
+     * Alloc failure (-1) is a silent miss, same as a bounds tightening that
+     * never reaches the trail: no hole, no conflict, just a slower draw. */
+    int ir = dvs_search_insert_hole_trailed(ctx, var_id, removed_val);
+    if (ir != 0) return ir;
+
     TrailEntry *e = _alloc_entry(ctx);
     if (!e) return -1;
 
@@ -128,7 +138,6 @@ int trail_record_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t removed_val) {
     e->flags          = ctx->current_trail_flags;
     _push_entry(ctx, e);
     return 0;
-    /* Phase 6 will remove the value from the variable's domain here */
 }
 
 /* ------------------------------------------------------------------ */
@@ -181,7 +190,7 @@ void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
             break;
 
         case TRAIL_HOLE:
-            /* Phase 6: restore removed value to the hole list */
+            dvs_search_remove_hole(ctx, e->var_id, e->old_value);
             break;
         }
 

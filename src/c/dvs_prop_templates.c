@@ -4240,6 +4240,16 @@ static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
                     return PROP_CONFLICT;
                 H[j] = var_hi64(ctx, &ctx->vars[vj_id]);
             }
+            /* val sits in vj's interior (not already moved past by a bound
+             * above): punch it as a hole so value selection draws an unused
+             * value in one step instead of rejecting a draw of val and
+             * retrying (B2a). Never a conflict source -- it only feeds
+             * _pick_avoiding_holes; two variables actually forced to the
+             * same value still conflict above, via the bound checks. Trailed
+             * (not dvs_search_insert_hole() directly) so it is retracted on
+             * backtrack, unlike the permanent randc/disjunction holes. */
+            if (val > L[j] && val < H[j])
+                (void)trail_record_hole(ctx, vj_id, val);
         }
     }
 

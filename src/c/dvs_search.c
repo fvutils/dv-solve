@@ -2709,6 +2709,30 @@ static void _solver_reset(dvs_ctx_t *ctx) {
         }
     }
 
+    /* This path (no open checkpoint) discards the trail directly below
+     * instead of walking it through trail_backtrack(), so a non-permanent
+     * hole (trail_record_hole(), e.g. all_different's per-value exclusions)
+     * never gets the dvs_search_remove_hole() its TRAIL_HOLE entry would
+     * have triggered: left alone, every solve()+reset() cycle accumulates
+     * that solve's holes on top of the last one's instead of returning to
+     * the pristine (permanent-holes-only) list, so a var that is picked
+     * early (and so only ever sees one or two holes within a single solve)
+     * drifts towards an empty domain over many resets and the last values
+     * standing are whatever the per-value exclusion loop reaches last --
+     * observed as a hard bias to the domain's endpoints. Purge them here,
+     * the same thing trail_backtrack(ctx, 0) would have done to each one. */
+    if (ctx->var_holes_head) {
+        for (uint32_t i = 0; i < ctx->n_vars_capacity; i++) {
+            HoleEntry *prev = NULL, *next;
+            for (HoleEntry *he = dvs_hole_first(ctx, i); he; he = next) {
+                next = he->next;
+                if (he->permanent) { prev = he; continue; }
+                if (prev) prev->next = next;
+                else      ctx->var_holes_head[i] = next ? next->self : 0;
+            }
+        }
+    }
+
     /* Reset search state */
     ctx->decision_level = 0;
     ctx->trail_top      = NULL;
@@ -2901,7 +2925,8 @@ static uint32_t _count_holes_in_range(const dvs_ctx_t *ctx, uint32_t var_id,
 
 /* Insert a value into the sorted hole list for a variable.
  * Returns 0 on success, 1 if already present, -1 on alloc failure. */
-static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
+static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value,
+                         int permanent) {
     if (!ctx->var_holes_head) return -1;
 
     /* Find the place (sorted ascending) before allocating. */
@@ -2918,17 +2943,37 @@ static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
                                       (uint32_t)_Alignof(HoleEntry));
     if (he_ref == EXPR_NULL) return -1;
     HoleEntry *he = (HoleEntry *)dvs_spool_ptr(&ctx->pool, he_ref);
-    he->value = value;
-    he->next  = cur;
-    he->self  = he_ref;
-    he->_hpad = 0;
+    he->value     = value;
+    he->next      = cur;
+    he->self      = he_ref;
+    he->permanent = (uint32_t)permanent;
     if (prev) prev->next = he;
     else      ctx->var_holes_head[var_id] = he_ref;
     return 0;
 }
 
 int dvs_search_insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
-    return _insert_hole(ctx, var_id, value);
+    return _insert_hole(ctx, var_id, value, 1);
+}
+
+int dvs_search_insert_hole_trailed(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
+    return _insert_hole(ctx, var_id, value, 0);
+}
+
+int dvs_search_remove_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
+    if (!ctx->var_holes_head) return 0;
+    HoleEntry *prev = NULL, *cur = dvs_hole_first(ctx, var_id);
+    while (cur) {
+        if (cur->value == value) {
+            if (prev) prev->next = cur->next;
+            else ctx->var_holes_head[var_id] = cur->next ? cur->next->self : 0;
+            return 1;
+        }
+        if (cur->value > value) break;  /* sorted ascending, not present */
+        prev = cur;
+        cur = cur->next;
+    }
+    return 0;
 }
 
 static int _solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
@@ -2970,7 +3015,7 @@ static int _solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value)
         return -1;  /* would leave no valid values in the initial domain */
 
     /* Always insert into hole list so exclusion persists across resets */
-    int ir = _insert_hole(ctx, var_id, value);
+    int ir = _insert_hole(ctx, var_id, value, 1);
     if (ir < 0) return -1;
 
     /* Optimisation: if the excluded value is at a current boundary,

@@ -92,12 +92,31 @@ typedef struct HoleEntry {
     int64_t           value;  /* excluded value                        */
     struct HoleEntry *next;   /* next entry, or NULL                   */
     uint32_t          self;   /* its own pool offset (restore uses it) */
-    uint32_t          _hpad;
+    uint32_t          permanent; /* 1 = survives dvs_solver_reset() (randc
+                                   * exclude_value / compile-time disjunction
+                                   * holes, and their checkpoint carry-forward);
+                                   * 0 = a trail_record_hole() entry, undone by
+                                   * trail_backtrack() and (since reset() skips
+                                   * the trail in its no-checkpoint path) also
+                                   * purged directly by dvs_solver_reset().     */
 } HoleEntry;
 
-/* Add `value` to var_id's hole list (allocated in the pool). 0 on success,
- * 1 if already present, -1 on allocation failure. */
+/* Add `value` to var_id's hole list (allocated in the pool), permanent (see
+ * HoleEntry.permanent above). 0 on success, 1 if already present, -1 on
+ * allocation failure. */
 int dvs_search_insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
+
+/* Like dvs_search_insert_hole(), but marks the entry non-permanent: used only
+ * by trail_record_hole() so trail_backtrack()/dvs_solver_reset() retract it. */
+int dvs_search_insert_hole_trailed(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
+
+/* Remove `value` from var_id's hole list, if present. Unlinks the node
+ * without reclaiming its pool memory (the pool is an arena; the node is
+ * reclaimed on the next scope rewind). Used by trail_backtrack to undo a
+ * trail_record_hole() entry -- never call this on a hole installed through
+ * dvs_search_insert_hole() directly (those are permanent, see its callers).
+ * Returns 1 if found and removed, 0 if not present. */
+int dvs_search_remove_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
 
 /* ------------------------------------------------------------------ */
 /* API                                                                 */
