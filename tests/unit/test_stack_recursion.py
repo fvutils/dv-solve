@@ -70,6 +70,7 @@ BOUNDED = {
     ("dvs_compile", "_compile_constraint"): "dvs_stack_low",
     ("dvs_compile", "_value_to_var"): "dvs_stack_low",
     ("dvs_compile", "_collect_eq_aliases"): "dvs_stack_low",
+    ("dvs_compile", "_collect_congruence"): "dvs_stack_low",
     ("dvs_compile", "_cse_hash"): "depth cap CSE_MAX_DEPTH (32)",
     ("dvs_compile", "_cse_same"): "depth cap CSE_MAX_DEPTH (32)",
     ("dvs_compile", "_cse_collect"): "depth cap CSE_MAX_DEPTH (32)",
