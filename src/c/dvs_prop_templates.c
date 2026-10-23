@@ -4223,6 +4223,42 @@ static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
         H[i] = var_hi64(ctx, vi);
     }
 
+    /* Whole-constraint fixed-point memo (item 2b, step 2/2): singleton
+     * exclusion, the pigeonhole check, and the Hall sweep are all pure
+     * functions of L[]/H[] with no side state of their own -- every
+     * tightening/hole they produce is fully determined by the bounds they
+     * read. So if the bounds just read above are byte-identical to what
+     * they were the last time this constraint's propagation ran to a
+     * fixed point (`ad->hall_lo`/`hall_hi`, updated at the bottom of the
+     * `bounds_changed` branch below), every one of those passes is
+     * guaranteed to re-derive exactly what it derived last time: the same
+     * (already-applied, hence no-op) tightenings, and the same holes
+     * (already present, so `_insert_hole` would just walk the list and
+     * bail -- see dvs_search.c). Skipping straight to the entailment
+     * check below avoids all of that redundant walking. This holds
+     * regardless of *why* the bounds matched again (nothing moved, or a
+     * backtrack undid a move and another decision put it right back) --
+     * only the bound values matter, not the path that produced them.
+     * Profiling `dv_capi` on perm16 (`perf record -g`, step 18) showed
+     * singleton exclusion's hole re-insertion (`dvs_search_insert_hole_
+     * trailed`'s list walk) as 23% of wall time and the loop itself as
+     * another ~45%, almost all on calls where the memo already matched:
+     * perm16's shape fires this constraint on every decision across the
+     * whole search, but once a value's holes are punched into every other
+     * free variable they never need to be re-punched while those bounds
+     * hold steady. */
+    int bounds_changed = !ad->hall_valid;
+    if (!bounds_changed) {
+        for (uint32_t i = 0; i < n; i++) {
+            if (L[i] != ad->hall_lo[i] || H[i] != ad->hall_hi[i]) {
+                bounds_changed = 1;
+                break;
+            }
+        }
+    }
+
+    if (!bounds_changed) goto check_entailment;
+
     /* --- Singleton exclusion (most common propagation) --- */
     for (uint32_t i = 0; i < n; i++) {
         if (L[i] != H[i]) continue;
@@ -4284,47 +4320,23 @@ static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
     }
 
     /* --- Hall interval detection via sweep --- */
-    /* Two independent, sound reasons to skip the O(n^2) sort + sweep below
-     * (item 2b) -- either is enough on its own:
-     *
-     *   1. Memoized: the sweep is a pure function of L[]/H[]. If every
-     *      bound is exactly what it was the last time the sweep ran to a
-     *      fixed point, re-running it would just repeat the same
-     *      (already-applied) tightenings. Bounds are re-read fresh at the
-     *      top of every call regardless, so this is correct even across
-     *      backtracking: whether the match is because nothing moved, or
-     *      because something moved and later moved back to the same
-     *      values, the sweep's outcome is observationally identical.
-     *
-     *   2. Homogeneous free group: when every not-yet-singleton variable
-     *      shares the exact same [lo,hi] range (perm16's shape: holes
-     *      prune values per B2a without ever narrowing a free variable's
-     *      bounds below the shared range until it is the last one
-     *      standing), no subset of them can form a Hall interval narrower
-     *      than that shared range. A tighter sub-window can only be
-     *      forced by *singleton* values packed into a window smaller than
-     *      their count, which is impossible since singleton values are
-     *      mutually distinct (pigeonhole bounds their count by the window
-     *      width) -- and singleton-exclusion above already pushes any
-     *      other variable off a singleton that sits exactly on its
-     *      boundary, so there is nothing left for a sub-window sweep to
-     *      find among a homogeneous free group. Profiling `dv_capi` on
-     *      perm16 (`perf record -g`, step 17) showed 73% of wall time
-     *      inside this function for exactly this reason: a decision fixes
-     *      one variable every call, which trips reason 1's memo every
-     *      time, but every one of those calls was homogeneous and found
-     *      nothing. 0 or 1 free variables trivially count as homogeneous
-     *      too (nothing for a sub-window to compare against). */
-    int bounds_changed = !ad->hall_valid;
-    if (!bounds_changed) {
-        for (uint32_t i = 0; i < n; i++) {
-            if (L[i] != ad->hall_lo[i] || H[i] != ad->hall_hi[i]) {
-                bounds_changed = 1;
-                break;
-            }
-        }
-    }
-
+    /* A second, independent reason to skip the O(n^2) sort + sweep below
+     * (item 2b), on top of the whole-constraint memo already checked
+     * above (which is why this point is only reached when bounds_changed
+     * is true): a homogeneous free group. When every not-yet-singleton
+     * variable shares the exact same [lo,hi] range (perm16's shape: holes
+     * prune values per B2a without ever narrowing a free variable's
+     * bounds below the shared range until it is the last one standing),
+     * no subset of them can form a Hall interval narrower than that
+     * shared range. A tighter sub-window can only be forced by
+     * *singleton* values packed into a window smaller than their count,
+     * which is impossible since singleton values are mutually distinct
+     * (pigeonhole bounds their count by the window width) -- and
+     * singleton-exclusion above already pushes any other variable off a
+     * singleton that sits exactly on its boundary, so there is nothing
+     * left for a sub-window sweep to find among a homogeneous free
+     * group. 0 or 1 free variables trivially count as homogeneous too
+     * (nothing for a sub-window to compare against). */
     int homogeneous_free = 1;
     {
         int64_t flo = 0, fhi = 0;
@@ -4336,7 +4348,7 @@ static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
         }
     }
 
-    if (bounds_changed && !homogeneous_free) {
+    if (!homogeneous_free) {
         /* Sort variables by lo bound (insertion sort, n <= 16) */
         uint32_t sorted[MAX_ALLDIFF_VARS];
         for (uint32_t i = 0; i < n; i++) sorted[i] = i;
@@ -4395,10 +4407,10 @@ static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
             ad->hall_hi[i] = H[i];
         }
         ad->hall_valid = 1;
-    } else if (bounds_changed) {
-        /* Skipped via reason 2 (homogeneous) while the memo was stale:
-         * refresh it anyway, so a later call that repeats these exact
-         * bounds can take reason 1's cheaper path instead of re-deriving
+    } else {
+        /* Skipped via the homogeneous-free-group reason: refresh the memo
+         * anyway, so a later call that repeats these exact bounds can
+         * take the top-of-function fast path instead of re-deriving
          * homogeneity from scratch. */
         for (uint32_t i = 0; i < n; i++) {
             ad->hall_lo[i] = L[i];
@@ -4407,6 +4419,7 @@ static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
         ad->hall_valid = 1;
     }
 
+check_entailment:
     /* --- Entailment check --- */
     int all_assigned = 1;
     for (uint32_t i = 0; i < n; i++) {
