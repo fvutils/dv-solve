@@ -195,6 +195,18 @@ typedef struct dvs_ctx_s {
     int64_t           *phase_save;    /* last tried value per var;
                                        * from ctx->alloc, created lazily */
     uint32_t           phase_save_cap;
+    /* Item 3c: each var's compile-time-merged congruence fact
+     * `v % cong_m[v] == cong_r[v]` (0 <= cong_r[v] < cong_m[v]), the same
+     * (R,M) `_compile_congruence_facts` (dvs_compile.c) CRT-merges per var
+     * to catch a contradiction -- persisted here so _pick_value can draw
+     * `R + M*k` directly instead of the per-link fixup (_pick_mod_aligned).
+     * cong_m[v] == 0: no fact for v. Same lazy-alloc/grow pattern as
+     * phase_save (from ctx->alloc, NULL until first use); unlike
+     * dist_offsets/var_holes_head it is not part of the shared var_block
+     * since it is populated once at compile and never touched afterward. */
+    uint64_t          *cong_m;
+    int64_t           *cong_r;
+    uint32_t           cong_cap;
     /* A seeded solve's first draw per var, kept for the rest of the solve
      * (see _pick_value). keep_state: KEEP_NONE / KEEP_SET / KEEP_DEAD. */
     int64_t           *keep_val;
@@ -422,6 +434,11 @@ void dvs_guard_ix_free(dvs_ctx_t *ctx);
 
 /** Allocate ctx->phase_save (uninitialised) from ctx->alloc; 0 or -1. */
 int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx);
+
+/** Allocate ctx->cong_m/cong_r (zeroed: no fact on any var) from ctx->alloc,
+ *  sized to n_vars_capacity; a no-op if already allocated. 0, or -1 on
+ *  allocation failure (ctx->cong_m/cong_r left NULL/untouched). */
+int dvs_ctx_alloc_cong_facts(dvs_ctx_t *ctx);
 
 /**
  * Make every per-variable table hold at least `n` variables, growing them

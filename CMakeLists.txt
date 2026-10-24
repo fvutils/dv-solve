@@ -441,6 +441,11 @@ target_link_libraries(test_growable_tables PRIVATE dv_solve)
 target_include_directories(test_growable_tables PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_growable_tables COMMAND test_growable_tables)
 
+add_executable(test_congruence_persist tests/c/test_congruence_persist.c)
+target_link_libraries(test_congruence_persist PRIVATE dv_solve)
+target_include_directories(test_congruence_persist PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_congruence_persist COMMAND test_congruence_persist)
+
 add_executable(test_clause_arena tests/c/test_clause_arena.c)
 target_link_libraries(test_clause_arena PRIVATE dv_solve)
 target_include_directories(test_clause_arena PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)

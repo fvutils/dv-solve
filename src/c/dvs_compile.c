@@ -4467,6 +4467,21 @@ static int _compile_congruence_facts(dvs_ctx_t *ctx, dvs_problem_t *sp) {
             c = cs->next;
         }
     }
+    /* Item 3c: persist each var's merged fact for _pick_value to draw
+     * `R + M*k` directly (dvs_search.c), instead of discarding facts[]
+     * here as item 3a/3b did. Best-effort: a failed alloc just means no
+     * var gets a persisted fact, same as today -- never a compile failure. */
+    if (!conflict) {
+        int any = 0;
+        for (uint32_t i = 0; i < n; i++) if (facts[i].has) { any = 1; break; }
+        if (any && dvs_ctx_alloc_cong_facts(ctx) == 0) {
+            for (uint32_t i = 0; i < n && i < ctx->cong_cap; i++) {
+                if (!facts[i].has) continue;
+                ctx->cong_m[i] = facts[i].m;
+                ctx->cong_r[i] = facts[i].r;
+            }
+        }
+    }
     DVS_RELEASE(ctx->alloc, facts, n * sizeof(_CongFact));
     return conflict ? -2 : 0;
 }

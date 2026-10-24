@@ -143,6 +143,9 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->n_prop_refs_capacity = 0;
     ctx->decisions       = NULL;
     ctx->phase_save      = NULL;
+    ctx->cong_m          = NULL;
+    ctx->cong_r          = NULL;
+    ctx->cong_cap        = 0;
     ctx->keep_val        = NULL;
     ctx->keep_state      = NULL;
     ctx->keep_cap        = 0;
@@ -334,6 +337,21 @@ int dvs_ctx_reserve_vars(dvs_ctx_t *ctx, uint32_t n) {
         _tbl_free(ctx, b, (size_t)cap * VAR_ROW);
         goto fail;
     }
+    if (ctx->cong_m && ctx->cong_cap < cap) {
+        uint64_t *cm = (uint64_t *)DVS_RESIZE(ctx->alloc, ctx->cong_m,
+                                              ctx->cong_cap * sizeof(uint64_t),
+                                              cap * sizeof(uint64_t));
+        if (!cm) { _tbl_free(ctx, b, (size_t)cap * VAR_ROW); goto fail; }
+        memset(cm + ctx->cong_cap, 0, (cap - ctx->cong_cap) * sizeof(uint64_t));
+        int64_t *cr = (int64_t *)DVS_RESIZE(ctx->alloc, ctx->cong_r,
+                                            ctx->cong_cap * sizeof(int64_t),
+                                            cap * sizeof(int64_t));
+        if (!cr) { ctx->cong_m = cm; _tbl_free(ctx, b, (size_t)cap * VAR_ROW); goto fail; }
+        memset(cr + ctx->cong_cap, 0, (cap - ctx->cong_cap) * sizeof(int64_t));
+        ctx->cong_m = cm;
+        ctx->cong_r = cr;
+        ctx->cong_cap = cap;
+    }
 
     _tbl_free(ctx, ctx->var_block, (size_t)old * VAR_ROW);
     ctx->var_block       = b;
@@ -395,6 +413,21 @@ int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx) {
     if (!ps) return -1;
     ctx->phase_save     = ps;
     ctx->phase_save_cap = n;
+    return 0;
+}
+
+int dvs_ctx_alloc_cong_facts(dvs_ctx_t *ctx) {
+    if (ctx->cong_m) return 0;   /* already allocated */
+    uint32_t n = ctx->n_vars_capacity > 0 ? ctx->n_vars_capacity : ctx->n_vars;
+    uint64_t *cm = (uint64_t *)DVS_ALLOC(ctx->alloc, n * sizeof(uint64_t));
+    if (!cm) return -1;
+    int64_t *cr = (int64_t *)DVS_ALLOC(ctx->alloc, n * sizeof(int64_t));
+    if (!cr) { DVS_RELEASE(ctx->alloc, cm, n * sizeof(uint64_t)); return -1; }
+    memset(cm, 0, n * sizeof(uint64_t));
+    memset(cr, 0, n * sizeof(int64_t));
+    ctx->cong_m   = cm;
+    ctx->cong_r   = cr;
+    ctx->cong_cap = n;
     return 0;
 }
 
@@ -471,6 +504,11 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
         DVS_RELEASE(ctx->alloc, ctx->phase_save,
                     ctx->phase_save_cap * sizeof(int64_t));
     ctx->phase_save = NULL; ctx->phase_save_cap = 0;
+    if (ctx->cong_m)
+        DVS_RELEASE(ctx->alloc, ctx->cong_m, ctx->cong_cap * sizeof(uint64_t));
+    if (ctx->cong_r)
+        DVS_RELEASE(ctx->alloc, ctx->cong_r, ctx->cong_cap * sizeof(int64_t));
+    ctx->cong_m = NULL; ctx->cong_r = NULL; ctx->cong_cap = 0;
     if (ctx->costguided)
         DVS_RELEASE(ctx->alloc, ctx->costguided, sizeof(CostGuidedCtx));
     ctx->costguided = NULL;
