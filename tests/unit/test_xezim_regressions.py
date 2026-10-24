@@ -6,7 +6,8 @@ exercise features outside ``tests/perf/rand_benches.py``'s IR (``dist``,
 exist as regression fixtures before enhancement-plan items 2, 3 and 5
 change the behavior they probe (see enhancement_plan item 0 steps 2-3).
 
-``mod_unsat`` and ``sum_unique`` are xfail today; the rest already pass.
+``sum_unique`` is xfail today; the rest, including ``mod_unsat`` (item 3b),
+already pass.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ dv = pytest.importorskip("dv_solve")
 
 from dv_solve import problem as P
 from dv_solve.builder import SolveProblemBuilder
-from dv_solve.ctx import SOLVE_OK, SOLVE_UNSAT, SolveCtx
+from dv_solve.ctx import SOLVE_OK, SOLVE_UNSAT, CompileUnsatError, SolveCtx
 
 from .dist_harness import assert_gof
 
@@ -57,17 +58,19 @@ def _sample(bld: SolveProblemBuilder, var_ids, width: int, n: int,
     return hist
 
 
-@pytest.mark.xfail(strict=True, reason="dv-solve times out rather than "
-                   "proving UNSAT; item 3 (congruence facts) should fix this")
 def test_mod_unsat_is_unsat():
     """`x%7==3; y==x+1; y%7==5` over 32 bits is infeasible, but not by bounds.
 
-    dv-solve has no congruence reasoning yet, so it searches until the time
-    budget runs out (`SOLVE_TIMEOUT`) instead of proving `SOLVE_UNSAT`. 200ms
-    comfortably covers the 13.6ms/176ms(max) TIMEOUT the enhancement plan
-    measured, confirmed with `.log/0b-mod_unsat-probe.log` (consistent
-    TIMEOUT at 50/100/200/300ms) -- long enough to be a fair probe, short
-    enough that a perpetually-failing test stays fast.
+    Item 3b's congruence link-carry (`dvs_compile.c`'s
+    `_collect_congruence_links`) proves this at compile time: x's fact
+    (3 mod 7) carried across `y==x+1` contradicts y's own fact (5 mod 7) in
+    both the wrapping and non-wrapping case, so construction itself raises
+    `CompileUnsatError` rather than reaching `ctx.solve()`. Before item 3,
+    dv-solve had no congruence reasoning and searched until a 200ms budget
+    ran out (`SOLVE_TIMEOUT`) instead -- confirmed with
+    `.log/0b-mod_unsat-probe.log` (consistent TIMEOUT at 50/100/200/300ms).
+    Accept either outcome (compile-time UNSAT, or a `SOLVE_UNSAT` from
+    search within the same budget), per the enhancement plan's Item 3.
     """
     bld = SolveProblemBuilder()
     bld.add_var(0, width=32, is_signed=False, lo=0, hi=(1 << 32) - 1)
@@ -80,9 +83,12 @@ def test_mod_unsat_is_unsat():
     bld.add_constraint(bld.expr_binary(
         P.BIN_EQ, bld.expr_binary(P.BIN_MOD, y, bld.expr_const(7)), bld.expr_const(5)))
     prob, _ = bld.finalize()
-    with SolveCtx(prob) as ctx:
-        ctx.reset()
-        rc = ctx.solve(seed=1, time_limit_ms=200)
+    try:
+        with SolveCtx(prob) as ctx:
+            ctx.reset()
+            rc = ctx.solve(seed=1, time_limit_ms=200)
+    except CompileUnsatError:
+        return
     assert rc == SOLVE_UNSAT
 
 

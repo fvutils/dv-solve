@@ -4197,10 +4197,18 @@ static int _elab_error_code(int err) {
  * Per-variable congruence facts (item 3: `x % m == r` with constant m, r),
  * collected at compile time and CRT-merged so a contradiction between two
  * `mod` constraints on the same (possibly aliased) variable is caught as
- * DVS_COMPILE_UNSAT rather than searched for. Carrying a fact across a link
- * like `y == x + c` is not done here: y's wraparound at 2^width is not a
- * no-op mod an arbitrary m, so that needs the "fits" guard or case split
- * item 3b adds; this pass only merges facts already written on one variable.
+ * DVS_COMPILE_UNSAT rather than searched for. Item 3b (below) additionally
+ * carries a fact across `y == x + c` / `y == x - c`: x's current bounds
+ * split its domain into a "no-wrap" zone (where the add/sub stays inside
+ * [0, 2^w-1] and the residue shifts by a plain `+-c mod m`) and a "wrap"
+ * zone (the width's wraparound subtracts/adds exactly 2^w, which is not
+ * generally 0 mod m, so the residue shifts differently there). When only
+ * one zone overlaps x's domain, the shifted residue is installed on y like
+ * any other fact. When both do, no single residue is sound for the whole
+ * domain, so nothing is installed -- but if y already has its own fact
+ * (from its own `y % m == r` constraint) that contradicts BOTH zones'
+ * residues, the link still proves compile-time UNSAT, since x's value must
+ * fall in one zone or the other.
  */
 typedef struct {
     int      has;
@@ -4272,8 +4280,162 @@ static int _collect_congruence(const dvs_ctx_t *ctx, dvs_problem_t *sp,
     return 0;
 }
 
+/* `EQ(var_y, ADD(var_x, CONST c))` / `EQ(var_y, SUB(var_x, CONST c))`, in any
+ * EQ/ADD operand order (SUB is not commutative: only `var - const`, since
+ * `const - var` is not a plain shift). Returns 1 and fills the outs if `ref`
+ * matches; `*out_is_sub` is 1 for SUB, 0 for ADD. */
+static int _match_add_link(dvs_problem_t *sp, dvs_expr_t ref,
+                            uint32_t *out_y, uint32_t *out_x, int64_t *out_c,
+                            int *out_is_sub) {
+    if (ref == EXPR_NULL) return 0;
+    if (*(ExprKind *)dvs_pool_ptr(&sp->pool, ref) != EXPR_BINARY) return 0;
+    ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
+    if (e->op != DVS_BIN_EQ) return 0;
+
+    dvs_expr_t expr_side;
+    uint32_t yid;
+    if (_is_var(sp, e->lhs, &yid)) expr_side = e->rhs;
+    else if (_is_var(sp, e->rhs, &yid)) expr_side = e->lhs;
+    else return 0;
+
+    if (expr_side == EXPR_NULL
+        || *(ExprKind *)dvs_pool_ptr(&sp->pool, expr_side) != EXPR_BINARY)
+        return 0;
+    ExprBinary *be = (ExprBinary *)dvs_pool_ptr(&sp->pool, expr_side);
+
+    uint32_t xid;
+    int64_t cv;
+    if (be->op == DVS_BIN_ADD) {
+        if (_is_var(sp, be->lhs, &xid) && _is_const(sp, be->rhs, &cv)) { /* ok */ }
+        else if (_is_const(sp, be->lhs, &cv) && _is_var(sp, be->rhs, &xid)) { /* ok */ }
+        else return 0;
+        *out_is_sub = 0;
+    } else if (be->op == DVS_BIN_SUB) {
+        if (_is_var(sp, be->lhs, &xid) && _is_const(sp, be->rhs, &cv)) { /* ok */ }
+        else return 0;
+        *out_is_sub = 1;
+    } else return 0;
+
+    *out_y = yid; *out_x = xid; *out_c = cv;
+    return 1;
+}
+
+/* (r + add) mod m, add given as a raw (unreduced) uint64_t shift. */
+static int64_t _cong_add(int64_t r, uint64_t m, uint64_t add) {
+    uint64_t rr = (uint64_t)(((r % (int64_t)m) + (int64_t)m) % (int64_t)m);
+    return (int64_t)((rr + add % m) % m);
+}
+
+/* (r - sub) mod m, sub given as a raw (unreduced) uint64_t shift. */
+static int64_t _cong_sub(int64_t r, uint64_t m, uint64_t sub) {
+    uint64_t rr = (uint64_t)(((r % (int64_t)m) + (int64_t)m) % (int64_t)m);
+    uint64_t sm = sub % m;
+    return (int64_t)((rr + m - sm) % m);
+}
+
+/* 2^w mod m, for 1 <= w <= 64 (2^64 does not fit uint64_t, so computed as
+ * (2^64 - 1) mod m, plus one, mod m again). */
+static uint64_t _pow2_mod_u64(uint32_t w, uint64_t m) {
+    if (w >= 64) return (UINT64_MAX % m + 1) % m;
+    return (((uint64_t)1) << w) % m;
+}
+
+/* Try to carry x's congruence fact across `y == x +/- c` into y: install the
+ * shifted residue on y when x's current domain fits in a single no-wrap/wrap
+ * zone, or -- when it spans both -- check both zones' residues against y's
+ * own fact for a case-split contradiction. See the comment above `_CongFact`.
+ * Returns -1 on a contradiction (compile-time UNSAT), 0 otherwise. */
+static int _collect_congruence_links(const dvs_ctx_t *ctx, dvs_problem_t *sp,
+                                     _CongFact *facts, dvs_expr_t ref) {
+    if (ref == EXPR_NULL
+        || dvs_stack_low((dvs_stack_guard_t *)&ctx->stack_guard)) return 0;
+    if (*(ExprKind *)dvs_pool_ptr(&sp->pool, ref) != EXPR_BINARY) return 0;
+    ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
+    if (e->op == DVS_BIN_AND) {
+        if (_collect_congruence_links(ctx, sp, facts, e->lhs) < 0) return -1;
+        return _collect_congruence_links(ctx, sp, facts, e->rhs);
+    }
+
+    uint32_t yid, xid;
+    int64_t c;
+    int is_sub;
+    if (!_match_add_link(sp, ref, &yid, &xid, &c, &is_sub)) return 0;
+    uint32_t ry = _resolve(ctx, yid);
+    uint32_t rx = _resolve(ctx, xid);
+    if (ry >= ctx->n_vars || rx >= ctx->n_vars) return 0;
+    if ((ctx->vars[ry].flags & VAR_SIGNED) || (ctx->vars[rx].flags & VAR_SIGNED))
+        return 0;
+    uint32_t w = ctx->vars[rx].width;
+    if (w == 0 || w > 64 || ctx->vars[ry].width != w) return 0;
+    if (!facts[rx].has) return 0;   /* nothing to carry */
+
+    uint64_t m = facts[rx].m;
+    int64_t  r = facts[rx].r;
+    uint64_t maxv = (w >= 64) ? UINT64_MAX : (((uint64_t)1 << w) - 1);
+    uint64_t C = (w >= 64) ? (uint64_t)c : ((uint64_t)c & maxv);
+
+    uint64_t lo = (uint64_t)var_lo64(ctx, &ctx->vars[rx]);
+    uint64_t hi = (uint64_t)var_hi64(ctx, &ctx->vars[rx]);
+
+    /* The no-wrap zone is the side of x's domain where x +/- C stays inside
+     * [0, maxv]; the wrap zone (width C, possibly empty) is the rest. */
+    uint64_t nw_lo, nw_hi, wr_lo, wr_hi;
+    int have_wrap_zone;
+    if (!is_sub) {
+        if (C == 0) { nw_lo = 0; nw_hi = maxv; have_wrap_zone = 0; wr_lo = wr_hi = 0; }
+        else { nw_lo = 0; nw_hi = maxv - C; wr_lo = maxv - C + 1; wr_hi = maxv; have_wrap_zone = 1; }
+    } else {
+        if (C == 0) { nw_lo = 0; nw_hi = maxv; have_wrap_zone = 0; wr_lo = wr_hi = 0; }
+        else { nw_lo = C; nw_hi = maxv; wr_lo = 0; wr_hi = C - 1; have_wrap_zone = 1; }
+    }
+
+    int has_nowrap = nw_lo <= nw_hi
+        && (lo <= nw_hi && hi >= nw_lo);  /* [lo,hi] intersects [nw_lo,nw_hi] */
+    int has_wrap = have_wrap_zone
+        && (lo <= wr_hi && hi >= wr_lo);  /* [lo,hi] intersects [wr_lo,wr_hi] */
+    if (!has_nowrap && !has_wrap) return 0;  /* unreachable: zones cover [0,maxv] */
+
+    int64_t r_nowrap = !is_sub ? _cong_add(r, m, C) : _cong_sub(r, m, C);
+    int64_t r_wrap = 0;
+    if (has_wrap) {
+        uint64_t p2m = _pow2_mod_u64(w, m);
+        r_wrap = !is_sub ? _cong_sub(r_nowrap, m, p2m) : _cong_add(r_nowrap, m, p2m);
+    }
+
+    if (has_nowrap && !has_wrap) {
+        /* x's domain cannot wrap: the shifted residue holds everywhere, so
+         * install it on y like any other fact. */
+        if (!facts[ry].has) { facts[ry].has = 1; facts[ry].r = r_nowrap; facts[ry].m = m; return 0; }
+        int64_t mr; uint64_t mm;
+        int rc = dvs_crt_merge(facts[ry].r, facts[ry].m, r_nowrap, m, &mr, &mm);
+        if (rc == 0) return -1;
+        if (rc == 1) { facts[ry].r = mr; facts[ry].m = mm; }
+        return 0;
+    }
+    if (has_wrap && !has_nowrap) {
+        if (!facts[ry].has) { facts[ry].has = 1; facts[ry].r = r_wrap; facts[ry].m = m; return 0; }
+        int64_t mr; uint64_t mm;
+        int rc = dvs_crt_merge(facts[ry].r, facts[ry].m, r_wrap, m, &mr, &mm);
+        if (rc == 0) return -1;
+        if (rc == 1) { facts[ry].r = mr; facts[ry].m = mm; }
+        return 0;
+    }
+
+    /* Both zones overlap x's domain: no single residue holds everywhere, so
+     * nothing is installed on y. But if y already has its own fact that is
+     * incompatible with BOTH zones' residues, x must be in one zone or the
+     * other and either way y's fact is violated -- compile-time UNSAT. */
+    if (!facts[ry].has) return 0;
+    int64_t mr; uint64_t mm;
+    int c1 = dvs_crt_merge(facts[ry].r, facts[ry].m, r_nowrap, m, &mr, &mm);
+    int c2 = dvs_crt_merge(facts[ry].r, facts[ry].m, r_wrap, m, &mr, &mm);
+    if (c1 == 0 && c2 == 0) return -1;
+    return 0;
+}
+
 /* Scans every top-level constraint for `x % m == r` facts and CRT-merges
- * them per variable. Returns -2 (UNSAT) on a contradiction, 0 otherwise. */
+ * them per variable, then tries to carry each fact across a `y == x +/- c`
+ * link (item 3b). Returns -2 (UNSAT) on a contradiction, 0 otherwise. */
 static int _compile_congruence_facts(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     uint32_t n = ctx->n_vars;
     if (n == 0) return 0;
@@ -4286,6 +4448,13 @@ static int _compile_congruence_facts(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
         if (_collect_congruence(ctx, sp, facts, cs->root) < 0) { conflict = 1; break; }
         c = cs->next;
+    }
+    if (!conflict) {
+        for (dvs_expr_t c = sp->constraints_head; c != EXPR_NULL; ) {
+            ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+            if (_collect_congruence_links(ctx, sp, facts, cs->root) < 0) { conflict = 1; break; }
+            c = cs->next;
+        }
     }
     DVS_RELEASE(ctx->alloc, facts, n * sizeof(_CongFact));
     return conflict ? -2 : 0;
