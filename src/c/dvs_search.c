@@ -699,6 +699,42 @@ static int64_t _pick_mod_aligned(dvs_ctx_t *ctx, uint32_t var_id, int64_t v,
     return v;
 }
 
+/* R+M*k draw for the merged per-var congruence fact persisted by
+ * _compile_congruence_facts (ctx->cong_m/cong_r, dvs_compile.c:4450). Where
+ * _pick_mod_aligned above moves an already-drawn value to the nearest
+ * feasible remainder one DvsModLink at a time -- paying one rejection-
+ * correction pass per `x%m==r` constraint, sequentially, for every single
+ * draw -- this draws directly from the one CRT-merged fact that closes over
+ * every `x%m==r` constraint (and carried link) on the variable at once, so
+ * mod_crt's three constraints cost one draw instead of three correction
+ * passes. Returns 1 and writes the draw to *out when the fact has at least
+ * one value in [lo,hi]; returns 0 (nothing written, *out untouched) when it
+ * does not, or when M<=1 (a trivial fact: every value already satisfies it,
+ * so there's nothing to narrow). The caller falls back to the ordinary
+ * _rand_range64 + _pick_mod_aligned path either way -- this is a
+ * value-selection heuristic, not a correctness guarantee, so "doesn't apply
+ * here" is never an error. */
+static int _pick_mod_cong(dvs_ctx_t *ctx, uint32_t var_id, int64_t lo,
+                           int64_t hi, int64_t *out) {
+    uint64_t M = ctx->cong_m[var_id];
+    if (M <= 1) return 0;
+    uint64_t R = (uint64_t)ctx->cong_r[var_id];
+    uint64_t ulo = (uint64_t)lo, uhi = (uint64_t)hi;
+    /* Smallest shift d (0 <= d < M) with (ulo + d) % M == R. R and ulo%M
+     * are both already in [0, M), so R + M - ulo%M is always positive and
+     * the final %M lands it back in [0, M) -- no unsigned underflow. */
+    uint64_t diff = (R + M - ulo % M) % M;
+    if (diff > UINT64_MAX - ulo) return 0;   /* v0 would exceed 2^64-1, so > hi too */
+    uint64_t v0 = ulo + diff;
+    if (v0 > uhi) return 0;                  /* no congruent value in this window */
+    /* k_max*M <= uhi-v0 by construction, and M>=2 here, so neither k_max+1
+     * nor v0+M*k below can overflow uint64. */
+    uint64_t k_max = (uhi - v0) / M;
+    uint64_t k = _rand64(ctx) % (k_max + 1);
+    *out = (int64_t)(v0 + M * k);
+    return 1;
+}
+
 /* A drawn value of an operand of a fixed product moved to a divisor of it
  * (DvsMulLink). Once `r == a * b` has r fixed to K, a's feasible values are
  * the divisors of K whose cofactor is in b's domain (_bv_mul_divisors), but
@@ -902,8 +938,16 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
          * _select_unassigned's _order_key stage filter. */
         v = _pick_value_cond(ctx, var_id, lo, hi);
     } else {
-        v = _rand_range64(ctx, lo, hi);
-        v = _pick_mod_aligned(ctx, var_id, v, lo, hi);
+        int64_t cv;
+        if (ctx->cong_m && var_id < ctx->cong_cap && ctx->cong_m[var_id]
+                && !(ctx->vars[var_id].flags & VAR_SIGNED)
+                && _pick_mod_cong(ctx, var_id, lo, hi, &cv)) {
+            v = cv;   /* drawn straight from the merged fact; _pick_mod_aligned
+                       * would just re-derive the same remainder constraints */
+        } else {
+            v = _rand_range64(ctx, lo, hi);
+            v = _pick_mod_aligned(ctx, var_id, v, lo, hi);
+        }
         v = _pick_mul_divisor(ctx, var_id, v, lo, hi);
     }
     v = _pick_avoiding_holes(ctx, var_id, v, lo, hi);
