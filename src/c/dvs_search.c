@@ -840,6 +840,12 @@ static int64_t _pick_mul_divisor(dvs_ctx_t *ctx, uint32_t var_id, int64_t v,
  * of the domain. */
 #define DVS_COND_BUDGET 200000ULL
 
+/* ctx->box_state: whether this solve's box-rejection tier (below) is
+ * drawing uniform solutions directly. Declared here, ahead of its own
+ * code (further down this file), so _pick_value_bucket's dispatch in
+ * _pick_value can gate on BOX_ON without a forward declaration. */
+enum { BOX_UNPROBED = 0, BOX_ON = 1, BOX_OFF = 2 };
+
 /* Item 1b, step 2/2: weight a condition variable's (VAR_COND) values by how
  * much of the rest of the problem stays open under each. A uniform draw
  * over `mode`'s <=64 values is not a uniform draw over solutions when
@@ -917,6 +923,102 @@ static int64_t _pick_value_cond(dvs_ctx_t *ctx, uint32_t var_id,
         if (roll < cum) return vals[i];
     }
     return vals[n - 1];
+}
+
+/* Item 5b: bucketed counting weight, generalizing _pick_value_cond above
+ * to any decision variable's domain, not just a <=64-value VAR_COND one.
+ * `order_chain` (`a[10]` 8-bit, strictly increasing) is biased the same
+ * way `cond_weight` was: a uniform draw of a[0] ignores that a low a[0]
+ * leaves its 9 successors far more room, so a[0] comes out too high
+ * (mean 47 against the true 22.4). Box rejection cannot reach it (10!
+ * orderings) and exact enumeration cannot either (C(256,10) solutions),
+ * so there is no per-value fact to draw from exactly.
+ *
+ * Split [lo,hi] into at most DVS_BUCKET_N equal-width buckets (fewer when
+ * the domain itself has fewer values, degenerating to one value per
+ * "bucket" -- the same exact draw _pick_value_cond does). Pin the
+ * variable to each bucket's range in turn, propagate, and weigh the
+ * bucket exactly as _pick_value_cond weighs a single value: by
+ * Sum log2|dom(u)| over the other declared variables u. For
+ * `order_chain`, pinning a0 to a bucket floor v tightens a1's lower
+ * bound to v+1, a2's to v+2, and so on, so the bucket's weight falls off
+ * like (H-v)^9 -- close to the true C(H-v,9) -- without ever listing an
+ * individual a0 value. Draws a bucket by weight, then uniformly inside
+ * it. */
+#define DVS_BUCKET_N 64u
+
+/* How many real conflicts a solve may have had before _pick_value's
+ * dispatch (below) stops routing a depth<2 decision to
+ * _pick_value_bucket; see that dispatch's comment. */
+#define DVS_BUCKET_CONFLICT_CAP 8u
+
+static int64_t _pick_value_bucket(dvs_ctx_t *ctx, uint32_t var_id,
+                                   int64_t lo, int64_t hi) {
+    uint64_t ulo = (uint64_t)lo, uhi = (uint64_t)hi;
+    uint64_t dom = uhi - ulo + 1;   /* 0 only for a full 64-bit domain */
+    if (dom == 0 || dom < 2) return _rand_range64(ctx, lo, hi);
+    uint32_t nb = dom < DVS_BUCKET_N ? (uint32_t)dom : DVS_BUCKET_N;
+
+    uint64_t b_lo[DVS_BUCKET_N], b_hi[DVS_BUCKET_N];
+    double   w[DVS_BUCKET_N];
+    uint32_t n = 0;
+    double   best_w = 0.0;
+    int      any_ok = 0;
+    uint32_t base = ctx->decision_level;
+    uint64_t fires0 = ctx->prop_fires;
+    uint64_t cur = ulo, q = dom / nb, rem = dom % nb;
+
+    for (uint32_t i = 0; i < nb; i++) {
+        uint64_t size = q + (i < rem ? 1u : 0u);
+        uint64_t bl = cur, bh = cur + size - 1u;
+        cur = bh + 1u;
+        if (ctx->prop_fires - fires0 > DVS_COND_BUDGET)
+            return _rand_range64(ctx, lo, hi);   /* past budget: plain uniform */
+
+        trail_push_level(ctx);
+        PropResult pr = ctx_tighten_lb64(ctx, var_id, (int64_t)bl);
+        if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, var_id, (int64_t)bh);
+        if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+        double wv = -1.0;   /* conflict: this bucket is excluded (weight 0) */
+        if (pr == PROP_OK) {
+            double sum = 0.0;
+            uint32_t nd = ctx->n_decl_vars < ctx->n_vars ? ctx->n_decl_vars
+                                                          : ctx->n_vars;
+            for (uint32_t k = 0; k < nd; k++) {
+                if (k == var_id) continue;
+                const Variable *u = &ctx->vars[k];
+                if ((u->flags & VAR_AUX)
+                        || (ctx->var_alias && ctx->var_alias[k] != k)) continue;
+                int64_t klo = var_lo64(ctx, u), khi = var_hi64(ctx, u);
+                uint64_t cnt = _dom_size(ctx, k, klo, khi) + 1u;
+                sum += log2((double)cnt);
+            }
+            wv = sum;
+            if (!any_ok || wv > best_w) best_w = wv;
+            any_ok = 1;
+        }
+        trail_backtrack(ctx, base);
+        b_lo[n] = bl; b_hi[n] = bh; w[n] = wv;
+        n++;
+        if (ctx->prop_aborted) break;
+    }
+    if (!any_ok) return _rand_range64(ctx, lo, hi);
+
+    double total = 0.0;
+    double rel[DVS_BUCKET_N];
+    for (uint32_t i = 0; i < n; i++) {
+        rel[i] = (w[i] < 0.0) ? 0.0 : exp2(w[i] - best_w);
+        total += rel[i];
+    }
+    double roll = ((double)(_rand64(ctx) >> 11) / 9007199254740992.0) * total;
+    double cum = 0.0;
+    uint32_t pick = n - 1;
+    for (uint32_t i = 0; i < n; i++) {
+        cum += rel[i];
+        if (roll < cum) { pick = i; break; }
+    }
+    uint64_t span = b_hi[pick] - b_lo[pick] + 1u;
+    return (int64_t)(b_lo[pick] + (span == 1 ? 0 : _rand64(ctx) % span));
 }
 
 enum { KEEP_NONE = 0, KEEP_SET = 1, KEEP_DEAD = 2 };
@@ -1004,6 +1106,38 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
                 && _pick_mod_cong(ctx, var_id, lo, hi, &cv)) {
             v = cv;   /* drawn straight from the merged fact; _pick_mod_aligned
                        * would just re-derive the same remainder constraints */
+        } else if (ctx->fair_pick && !(opts && opts->seq_pick)
+                && ctx->decision_level - ctx->search_base < 2
+                && ctx->box_state != BOX_ON
+                && _tier(ctx, var_id) != 2
+                && !(ctx->vars[var_id].flags & (VAR_AUX | VAR_SIGNED))
+                && !_has_holes(ctx, var_id)
+                && ctx->conflict_count < DVS_BUCKET_CONFLICT_CAP
+                && !(ctx->var_order && var_id < ctx->n_decl_vars
+                     && ctx->var_order[var_id] > 1)) {
+            /* Item 5b: bucketed counting weight (_pick_value_bucket above).
+             * Only at the first two decisions of a solve, where the bias
+             * this targets (`order_chain`) sits; only when box rejection
+             * isn't already drawing this solve's decisions uniformly and
+             * `seq_pick` isn't deliberately keeping the plain sequential
+             * (biased) draw (test_box_uniform.py's seq_pick case wants
+             * that bias, same reason box_ok itself excludes seq_pick);
+             * skipped for a tier-2 variable (a square's root -- already
+             * weighted exactly by _mul_count_accept, which this would
+             * otherwise fight, confirmed by test_mul_square_divisor.py)
+             * and for a variable with holes (bound-only pinning here does
+             * not see them, so a bucket's weight could silently include an
+             * excluded sub-range -- out of scope for this item's benches,
+             * none of which have holes). The conflict_count cap bounds
+             * total cost across a solve: a depth<2 decision is re-made on
+             * every restart, and each call can itself run up to
+             * DVS_BUCKET_N full propagate()s, so a thrashing solve
+             * (test_vlt_shapes.py's bvsmod-divisibility shape restarts
+             * ~160 times) multiplies that past DVS_COND_BUDGET's per-call
+             * fire check, which never sees it (each individual call stays
+             * cheap). Past the cap the weighting is not paying for itself
+             * anyway, so fall back to the plain uniform draw. */
+            v = _pick_value_bucket(ctx, var_id, lo, hi);
         } else {
             v = _rand_range64(ctx, lo, hi);
             v = _pick_mod_aligned(ctx, var_id, v, lo, hi);
@@ -1362,7 +1496,9 @@ const char *dvs_solver_bail_reason_str(const dvs_ctx_t *ctx) {
 #define DVS_BOX_TRIES     32u
 #define DVS_BOX_PROBE     64u
 #define DVS_BOX_MIN_RATE  16u
-enum { BOX_UNPROBED = 0, BOX_ON = 1, BOX_OFF = 2 };
+/* BOX_UNPROBED/BOX_ON/BOX_OFF (ctx->box_state) moved up to just before
+ * _pick_value_cond: item 5b's bucketed value picker, dispatched from
+ * _pick_value below, gates on BOX_ON. */
 
 static int _box_mode(void) {
     static int cached = -1;
