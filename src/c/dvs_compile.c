@@ -4207,6 +4207,17 @@ static int _elab_error_code(int err) {
  * any other fact. When both do, no single residue is sound for the whole
  * domain, so nothing is installed -- but if y already has its own fact
  * (from its own `y % m == r` constraint) that contradicts BOTH zones'
+ *
+ * Note: at some narrower widths the ADD/SUB propagator actually compiled
+ * for `y == x +/- c` treats overflow/underflow as infeasible rather than
+ * wrapping (confirmed at width 8; width 32, this pass's main target via
+ * `mod_unsat`, does wrap -- see test_congruence_link_compile.py). That
+ * does not make the "wrap zone" reasoning below unsound: a domain
+ * confined entirely to that zone is then globally UNSAT regardless of any
+ * mod fact (no y value satisfies the link at all), so whatever residue
+ * gets attributed to it is reasoning about an already-dead branch, and
+ * the two-zone case-split (below) only ever requires an extra, needless
+ * check on it -- strictly more conservative, never a false positive.
  * residues, the link still proves compile-time UNSAT, since x's value must
  * fall in one zone or the other.
  */
