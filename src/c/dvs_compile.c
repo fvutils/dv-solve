@@ -4486,6 +4486,245 @@ static int _compile_congruence_facts(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     return conflict ? -2 : 0;
 }
 
+/* Item 4a: exact `$countones`/popcount draw.
+ *
+ * The accept-criteria benches (tests/perf/rand_benches.py `_countones`/
+ * `_pop32`) never build an EXPR_COUNTONES node -- they build `$countones(x)
+ * == k` the way an SMT-LIB-style front end does, as a left-deep chain of
+ * `bvadd`s over `zero_extend(extract(x,i,i), w)` for each tracked bit `i`,
+ * equated to a constant. That elaborates (dvs_compile.c's generic DAG ->
+ * propagator translation, above) into one BitSlice_32 propagator per leaf
+ * plus a chain of BoundsAdd_32 propagators over fresh intermediate
+ * variables, with the final accumulator variable's domain tightened to
+ * [k,k] -- never through prop_add_countones_32/EXPR_COUNTONES, which only a
+ * direct dvs_builder_expr_countones call produces. So this pass matches the
+ * chain's shape directly in the *original* constraint AST (same point
+ * _compile_congruence_facts above reads it, before this function's own
+ * elaboration flattens it), and persists two per-(alias-resolved)-var facts
+ * for _pick_value (dvs_search.c) to draw from instead of drawing the
+ * chain's variable `x` uniformly over [lo,hi] and relying on holes/
+ * rejection to land on a value with exactly the right popcount:
+ *
+ *   - countones_bits[v]/countones_n[v]: the set of bit positions the chain
+ *     sums (as a mask) and the constant popcount they must sum to.
+ *   - known_bits_mask[v]/known_bits_val[v]: bits independently pinned by a
+ *     plain top-level `EQ(EXTRACT(v,hi,lo), CONST)` conjunct (`pop32`'s
+ *     `x[3:0]=='hA`) -- a second, independent fact: nothing about the add
+ *     chain's own AST encodes which of its summed bits are already forced,
+ *     and _pick_value needs that to draw the *remaining* free bits with the
+ *     right count (state/notes/4a.md Finding 2 -- derived from the AST, not
+ *     from the variable's live [lo,hi] interval, which both under- and
+ *     over-states "which bits are forced"; see that note's Finding 3).
+ *
+ * Best-effort throughout, like _compile_congruence_facts: a shape that
+ * doesn't match, a repeated bit index, a target popcount outside
+ * [0,n_leaves], or a failed allocation just means no fact is persisted for
+ * that var -- never a compile failure. Unlike the congruence pass, this one
+ * never proves a compile-time contradiction (a bad shape is simply not
+ * recognised, not reported). */
+typedef struct {
+    int      has;
+    uint64_t bits;
+    uint32_t n;
+} _CountonesFact;
+
+typedef struct {
+    uint64_t mask;
+    uint64_t val;
+} _KnownBitsFact;
+
+/* One leaf of a countones chain: `EXTEND(from_bits=1, sign_extend=0,
+ * EXTRACT(hi_bit==lo_bit, operand))`, where `operand` resolves (through
+ * ctx->var_alias) to the same variable across every leaf of one chain.
+ * Folds the leaf's bit index into `*bits` (OR'd in) and records/checks the
+ * common operand via `*vid`/`*have`. Returns 1 on a match, 0 otherwise
+ * (wrong shape, a repeated bit index, or a leaf on a different variable
+ * than an earlier leaf in the same chain). */
+static int _match_countones_leaf(const dvs_ctx_t *ctx, dvs_problem_t *sp,
+                                  dvs_expr_t ref, uint32_t *vid, int *have,
+                                  uint64_t *bits) {
+    if (ref == EXPR_NULL
+        || *(ExprKind *)dvs_pool_ptr(&sp->pool, ref) != EXPR_EXTEND)
+        return 0;
+    ExprExtend *ee = (ExprExtend *)dvs_pool_ptr(&sp->pool, ref);
+    if (ee->sign_extend || ee->from_bits != 1) return 0;
+    dvs_expr_t operand = ee->operand;
+    if (operand == EXPR_NULL
+        || *(ExprKind *)dvs_pool_ptr(&sp->pool, operand) != EXPR_EXTRACT)
+        return 0;
+    ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, operand);
+    if (ex->hi_bit != ex->lo_bit || ex->hi_bit >= 64) return 0;
+    uint32_t leaf_vid;
+    if (!_is_var(sp, ex->operand, &leaf_vid)) return 0;
+    uint32_t rid = _resolve(ctx, leaf_vid);
+    if (rid >= ctx->n_vars || (ctx->vars[rid].flags & VAR_SIGNED)) return 0;
+    if (*have) {
+        if (rid != *vid) return 0;        /* mixed operands: not one chain */
+    } else {
+        *vid = rid; *have = 1;
+    }
+    uint64_t m = (uint64_t)1 << ex->hi_bit;
+    if (*bits & m) return 0;              /* repeated bit index */
+    *bits |= m;
+    return 1;
+}
+
+/* Walk a left-deep `ADD` tree -- `(((leaf0 + leaf1) + leaf2) + ...)` --
+ * recursing down the left (accumulator) spine and matching each right-hand
+ * leaf and the final left-most leaf with _match_countones_leaf. Returns 1
+ * if every node down to the leaves matched, 0 on any shape mismatch. */
+static int _collect_countones_leaves(const dvs_ctx_t *ctx, dvs_problem_t *sp,
+                                      dvs_expr_t ref, uint32_t *vid, int *have,
+                                      uint64_t *bits) {
+    if (ref == EXPR_NULL
+        || dvs_stack_low((dvs_stack_guard_t *)&ctx->stack_guard)) return 0;
+    ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
+    if (k == EXPR_BINARY) {
+        ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
+        if (e->op == DVS_BIN_ADD) {
+            if (!_collect_countones_leaves(ctx, sp, e->lhs, vid, have, bits))
+                return 0;
+            return _match_countones_leaf(ctx, sp, e->rhs, vid, have, bits);
+        }
+        return 0;
+    }
+    return _match_countones_leaf(ctx, sp, ref, vid, have, bits);
+}
+
+/* Recursively collect `$countones`-chain facts from a constraint tree
+ * (including those nested inside DVS_BIN_AND): `EQ(chain, CONST)` or the
+ * flipped form, merged into `facts[]` by resolved variable id. A var that
+ * already has a fact keeps it (first chain wins; no merge rule for two
+ * independent popcount facts on overlapping bit sets, so, like a shape
+ * mismatch, a second one is simply not recognised). */
+static void _collect_countones_chain(const dvs_ctx_t *ctx, dvs_problem_t *sp,
+                                      _CountonesFact *facts, dvs_expr_t ref) {
+    if (ref == EXPR_NULL
+        || dvs_stack_low((dvs_stack_guard_t *)&ctx->stack_guard)) return;
+    if (*(ExprKind *)dvs_pool_ptr(&sp->pool, ref) != EXPR_BINARY) return;
+    ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
+    if (e->op == DVS_BIN_AND) {
+        _collect_countones_chain(ctx, sp, facts, e->lhs);
+        _collect_countones_chain(ctx, sp, facts, e->rhs);
+        return;
+    }
+    if (e->op != DVS_BIN_EQ) return;
+    dvs_expr_t chain_side;
+    int64_t target;
+    if (_is_const(sp, e->rhs, &target)) chain_side = e->lhs;
+    else if (_is_const(sp, e->lhs, &target)) chain_side = e->rhs;
+    else return;
+
+    uint32_t vid = 0;
+    int have = 0;
+    uint64_t bits = 0;
+    if (!_collect_countones_leaves(ctx, sp, chain_side, &vid, &have, &bits))
+        return;
+    if (!have || bits == 0) return;
+    uint32_t n_leaves = (uint32_t)__builtin_popcountll(bits);
+    if (target < 0 || (uint64_t)target > n_leaves) return;
+    if (vid >= ctx->n_vars || facts[vid].has) return;
+    facts[vid].has  = 1;
+    facts[vid].bits = bits;
+    facts[vid].n    = (uint32_t)target;
+}
+
+/* OR a newly found `[mask]`-bits-equal-`[val]` fact into `*f`, keeping the
+ * existing value on any bit both already cover (never a conflict: each
+ * bit's value is checked to agree before the merge, same best-effort
+ * "skip rather than fail" stance as the rest of this pass; a genuine
+ * disagreement there is a compile-time UNSAT the ordinary EQ/EXTRACT
+ * compile path -- not this heuristic pass -- is responsible for catching). */
+static void _merge_known_bits(_KnownBitsFact *f, uint64_t mask, uint64_t val) {
+    uint64_t overlap = f->mask & mask;
+    if (overlap && (f->val & overlap) != (val & overlap)) return;
+    f->mask |= mask;
+    f->val  |= (val & mask);
+}
+
+/* Recursively collect `EQ(EXTRACT(v,hi,lo), CONST)` (or flipped) facts from
+ * a constraint tree (including those nested inside DVS_BIN_AND), OR'd
+ * together per resolved variable id via _merge_known_bits. */
+static void _collect_known_bits(const dvs_ctx_t *ctx, dvs_problem_t *sp,
+                                 _KnownBitsFact *facts, dvs_expr_t ref) {
+    if (ref == EXPR_NULL
+        || dvs_stack_low((dvs_stack_guard_t *)&ctx->stack_guard)) return;
+    if (*(ExprKind *)dvs_pool_ptr(&sp->pool, ref) != EXPR_BINARY) return;
+    ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
+    if (e->op == DVS_BIN_AND) {
+        _collect_known_bits(ctx, sp, facts, e->lhs);
+        _collect_known_bits(ctx, sp, facts, e->rhs);
+        return;
+    }
+    if (e->op != DVS_BIN_EQ) return;
+    dvs_expr_t extract_side;
+    int64_t cv;
+    if (_is_const(sp, e->rhs, &cv)) extract_side = e->lhs;
+    else if (_is_const(sp, e->lhs, &cv)) extract_side = e->rhs;
+    else return;
+    if (extract_side == EXPR_NULL
+        || *(ExprKind *)dvs_pool_ptr(&sp->pool, extract_side) != EXPR_EXTRACT)
+        return;
+    ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, extract_side);
+    if (ex->hi_bit >= 64 || ex->lo_bit > ex->hi_bit) return;
+    uint32_t vid;
+    if (!_is_var(sp, ex->operand, &vid)) return;
+    uint32_t rid = _resolve(ctx, vid);
+    if (rid >= ctx->n_vars || (ctx->vars[rid].flags & VAR_SIGNED)) return;
+
+    uint32_t width = ex->hi_bit - ex->lo_bit + 1;
+    uint64_t mask = (width >= 64) ? ~(uint64_t)0
+                                  : ((((uint64_t)1 << width) - 1) << ex->lo_bit);
+    uint64_t val = ((uint64_t)cv << ex->lo_bit) & mask;
+    _merge_known_bits(&facts[rid], mask, val);
+}
+
+/* Scans every top-level constraint for a `$countones`-chain fact and an
+ * independent known-bits fact per (alias-resolved) variable (item 4a), and
+ * persists both for _pick_value (dvs_search.c) to draw from. Always
+ * returns 0 (unlike _compile_congruence_facts, never proves a compile-time
+ * contradiction -- see the comment above _CountonesFact). */
+static int _compile_countones_facts(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    uint32_t n = ctx->n_vars;
+    if (n == 0) return 0;
+    _CountonesFact *cof = (_CountonesFact *)DVS_ALLOC(ctx->alloc, n * sizeof(_CountonesFact));
+    if (!cof) return 0;  /* best-effort: skip detection rather than fail compile */
+    memset(cof, 0, n * sizeof(_CountonesFact));
+    _KnownBitsFact *kbf = (_KnownBitsFact *)DVS_ALLOC(ctx->alloc, n * sizeof(_KnownBitsFact));
+    if (!kbf) { DVS_RELEASE(ctx->alloc, cof, n * sizeof(_CountonesFact)); return 0; }
+    memset(kbf, 0, n * sizeof(_KnownBitsFact));
+
+    for (dvs_expr_t c = sp->constraints_head; c != EXPR_NULL; ) {
+        ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+        _collect_countones_chain(ctx, sp, cof, cs->root);
+        _collect_known_bits(ctx, sp, kbf, cs->root);
+        c = cs->next;
+    }
+
+    int any_co = 0, any_kb = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (cof[i].has) any_co = 1;
+        if (kbf[i].mask) any_kb = 1;
+    }
+    if (any_co && dvs_ctx_alloc_countones_facts(ctx) == 0) {
+        for (uint32_t i = 0; i < n && i < ctx->countones_cap; i++) {
+            if (!cof[i].has) continue;
+            ctx->countones_bits[i] = cof[i].bits;
+            ctx->countones_n[i]    = cof[i].n;
+        }
+    }
+    if (any_kb && dvs_ctx_alloc_known_bits_facts(ctx) == 0) {
+        for (uint32_t i = 0; i < n && i < ctx->known_bits_cap; i++) {
+            if (!kbf[i].mask) continue;
+            ctx->known_bits_mask[i] = kbf[i].mask;
+            ctx->known_bits_val[i]  = kbf[i].val;
+        }
+    }
+    DVS_RELEASE(ctx->alloc, cof, n * sizeof(_CountonesFact));
+    DVS_RELEASE(ctx->alloc, kbf, n * sizeof(_KnownBitsFact));
+    return 0;
+}
+
 /* DV_LOG: name each constraint the compile leaves uncompiled, one line each
  * (`cdcl-uncompiled: <expr>`). The search ignores such a constraint and the
  * model-validation net checks it afterwards. Like the SMT2 driver's
@@ -4721,6 +4960,11 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         int r = _compile_congruence_facts(ctx, sp);
         if (r < 0) return r;
     }
+
+    /* Item 4a: compile-time `$countones`-chain + known-bits facts, same
+     * post-alias-block placement as the congruence pass above (it also
+     * resolves through ctx->var_alias). */
+    (void)_compile_countones_facts(ctx, sp);
 
     /* Variables the box-rejection tier need not draw (see _box_sample in
      * dvs_search.c): `v == <expression>` defines v from other variables, so

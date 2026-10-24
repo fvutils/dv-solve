@@ -146,6 +146,12 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->cong_m          = NULL;
     ctx->cong_r          = NULL;
     ctx->cong_cap        = 0;
+    ctx->countones_bits  = NULL;
+    ctx->countones_n     = NULL;
+    ctx->countones_cap   = 0;
+    ctx->known_bits_mask = NULL;
+    ctx->known_bits_val  = NULL;
+    ctx->known_bits_cap  = 0;
     ctx->keep_val        = NULL;
     ctx->keep_state      = NULL;
     ctx->keep_cap        = 0;
@@ -352,6 +358,36 @@ int dvs_ctx_reserve_vars(dvs_ctx_t *ctx, uint32_t n) {
         ctx->cong_r = cr;
         ctx->cong_cap = cap;
     }
+    if (ctx->countones_bits && ctx->countones_cap < cap) {
+        uint64_t *cb = (uint64_t *)DVS_RESIZE(ctx->alloc, ctx->countones_bits,
+                                              ctx->countones_cap * sizeof(uint64_t),
+                                              cap * sizeof(uint64_t));
+        if (!cb) { _tbl_free(ctx, b, (size_t)cap * VAR_ROW); goto fail; }
+        memset(cb + ctx->countones_cap, 0, (cap - ctx->countones_cap) * sizeof(uint64_t));
+        uint32_t *cn = (uint32_t *)DVS_RESIZE(ctx->alloc, ctx->countones_n,
+                                              ctx->countones_cap * sizeof(uint32_t),
+                                              cap * sizeof(uint32_t));
+        if (!cn) { ctx->countones_bits = cb; _tbl_free(ctx, b, (size_t)cap * VAR_ROW); goto fail; }
+        memset(cn + ctx->countones_cap, 0, (cap - ctx->countones_cap) * sizeof(uint32_t));
+        ctx->countones_bits = cb;
+        ctx->countones_n    = cn;
+        ctx->countones_cap  = cap;
+    }
+    if (ctx->known_bits_mask && ctx->known_bits_cap < cap) {
+        uint64_t *km = (uint64_t *)DVS_RESIZE(ctx->alloc, ctx->known_bits_mask,
+                                              ctx->known_bits_cap * sizeof(uint64_t),
+                                              cap * sizeof(uint64_t));
+        if (!km) { _tbl_free(ctx, b, (size_t)cap * VAR_ROW); goto fail; }
+        memset(km + ctx->known_bits_cap, 0, (cap - ctx->known_bits_cap) * sizeof(uint64_t));
+        uint64_t *kv = (uint64_t *)DVS_RESIZE(ctx->alloc, ctx->known_bits_val,
+                                              ctx->known_bits_cap * sizeof(uint64_t),
+                                              cap * sizeof(uint64_t));
+        if (!kv) { ctx->known_bits_mask = km; _tbl_free(ctx, b, (size_t)cap * VAR_ROW); goto fail; }
+        memset(kv + ctx->known_bits_cap, 0, (cap - ctx->known_bits_cap) * sizeof(uint64_t));
+        ctx->known_bits_mask = km;
+        ctx->known_bits_val  = kv;
+        ctx->known_bits_cap  = cap;
+    }
 
     _tbl_free(ctx, ctx->var_block, (size_t)old * VAR_ROW);
     ctx->var_block       = b;
@@ -428,6 +464,36 @@ int dvs_ctx_alloc_cong_facts(dvs_ctx_t *ctx) {
     ctx->cong_m   = cm;
     ctx->cong_r   = cr;
     ctx->cong_cap = n;
+    return 0;
+}
+
+int dvs_ctx_alloc_countones_facts(dvs_ctx_t *ctx) {
+    if (ctx->countones_bits) return 0;   /* already allocated */
+    uint32_t n = ctx->n_vars_capacity > 0 ? ctx->n_vars_capacity : ctx->n_vars;
+    uint64_t *cb = (uint64_t *)DVS_ALLOC(ctx->alloc, n * sizeof(uint64_t));
+    if (!cb) return -1;
+    uint32_t *cn = (uint32_t *)DVS_ALLOC(ctx->alloc, n * sizeof(uint32_t));
+    if (!cn) { DVS_RELEASE(ctx->alloc, cb, n * sizeof(uint64_t)); return -1; }
+    memset(cb, 0, n * sizeof(uint64_t));
+    memset(cn, 0, n * sizeof(uint32_t));
+    ctx->countones_bits = cb;
+    ctx->countones_n    = cn;
+    ctx->countones_cap  = n;
+    return 0;
+}
+
+int dvs_ctx_alloc_known_bits_facts(dvs_ctx_t *ctx) {
+    if (ctx->known_bits_mask) return 0;   /* already allocated */
+    uint32_t n = ctx->n_vars_capacity > 0 ? ctx->n_vars_capacity : ctx->n_vars;
+    uint64_t *km = (uint64_t *)DVS_ALLOC(ctx->alloc, n * sizeof(uint64_t));
+    if (!km) return -1;
+    uint64_t *kv = (uint64_t *)DVS_ALLOC(ctx->alloc, n * sizeof(uint64_t));
+    if (!kv) { DVS_RELEASE(ctx->alloc, km, n * sizeof(uint64_t)); return -1; }
+    memset(km, 0, n * sizeof(uint64_t));
+    memset(kv, 0, n * sizeof(uint64_t));
+    ctx->known_bits_mask = km;
+    ctx->known_bits_val  = kv;
+    ctx->known_bits_cap  = n;
     return 0;
 }
 
@@ -509,6 +575,16 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     if (ctx->cong_r)
         DVS_RELEASE(ctx->alloc, ctx->cong_r, ctx->cong_cap * sizeof(int64_t));
     ctx->cong_m = NULL; ctx->cong_r = NULL; ctx->cong_cap = 0;
+    if (ctx->countones_bits)
+        DVS_RELEASE(ctx->alloc, ctx->countones_bits, ctx->countones_cap * sizeof(uint64_t));
+    if (ctx->countones_n)
+        DVS_RELEASE(ctx->alloc, ctx->countones_n, ctx->countones_cap * sizeof(uint32_t));
+    ctx->countones_bits = NULL; ctx->countones_n = NULL; ctx->countones_cap = 0;
+    if (ctx->known_bits_mask)
+        DVS_RELEASE(ctx->alloc, ctx->known_bits_mask, ctx->known_bits_cap * sizeof(uint64_t));
+    if (ctx->known_bits_val)
+        DVS_RELEASE(ctx->alloc, ctx->known_bits_val, ctx->known_bits_cap * sizeof(uint64_t));
+    ctx->known_bits_mask = NULL; ctx->known_bits_val = NULL; ctx->known_bits_cap = 0;
     if (ctx->costguided)
         DVS_RELEASE(ctx->alloc, ctx->costguided, sizeof(CostGuidedCtx));
     ctx->costguided = NULL;

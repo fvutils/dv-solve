@@ -735,6 +735,62 @@ static int _pick_mod_cong(dvs_ctx_t *ctx, uint32_t var_id, int64_t lo,
     return 1;
 }
 
+/* Exact `$countones`-chain draw for the per-var facts item 4a persists at
+ * compile time (ctx->countones_bits/n, ctx->known_bits_mask/val;
+ * dvs_compile.c's _compile_countones_facts). Where a uniform draw over
+ * [lo,hi] followed by hole-rejection would need, on average, C(w,k)
+ * rejection-retries to land a w-bit variable's exact popcount k by chance,
+ * this draws a uniform k-subset of the chain's *free* tracked bits (those
+ * not already pinned by an independent known-bits fact) directly, same
+ * contract as _pick_mod_cong: returns 0 to mean "doesn't apply, caller
+ * falls back" with *out untouched, or 1 + *out for a usable draw. */
+static int _pick_countones(dvs_ctx_t *ctx, uint32_t var_id, int64_t lo,
+                            int64_t hi, int64_t *out) {
+    uint64_t bits = ctx->countones_bits[var_id];
+    if (!bits) return 0;
+    uint64_t known_mask = (ctx->known_bits_mask && var_id < ctx->known_bits_cap)
+        ? ctx->known_bits_mask[var_id] : 0;
+    uint64_t known_val = (ctx->known_bits_val && var_id < ctx->known_bits_cap)
+        ? ctx->known_bits_val[var_id] : 0;
+    uint64_t known = known_mask & bits;
+    uint32_t p = (uint32_t)__builtin_popcountll(known_val & known);
+    uint32_t f = (uint32_t)__builtin_popcountll(bits & ~known);
+    uint32_t need = ctx->countones_n[var_id];
+    if (need < p) return 0;             /* can't happen if sound; never trust blindly */
+    uint32_t k = need - p;
+    if (k > f) return 0;
+
+    uint32_t free_idx[64], nf = 0;
+    uint64_t free_bits = bits & ~known;
+    while (free_bits) {
+        uint32_t b = (uint32_t)__builtin_ctzll(free_bits);
+        free_idx[nf++] = b;
+        free_bits &= free_bits - 1;
+    }
+    /* Partial Fisher-Yates: draw k of the nf free positions uniformly
+     * (reservoir/swap sampling -- nf can be up to 64, so rejection sampling
+     * over 2^nf subsets is not an option). */
+    uint64_t ones = 0;
+    for (uint32_t i = 0; i < k; i++) {
+        uint32_t j = i + (uint32_t)(_rand64(ctx) % (nf - i));
+        uint32_t t = free_idx[j]; free_idx[j] = free_idx[i]; free_idx[i] = t;
+        ones |= (uint64_t)1 << free_idx[i];
+    }
+    uint64_t value = ones | (known_val & known);
+    /* Bits outside the chain entirely (neither summed nor pinned): fill
+     * uniformly at random. Both benches this targets track every bit of
+     * the variable, so `outside` is 0 for them, but don't assume that in
+     * general -- see state/notes/4a.md. */
+    uint64_t outside = ~bits;
+    if (outside) value |= _rand64(ctx) & outside;
+
+    uint32_t w = ctx->vars[var_id].width;
+    if (w < 64) value &= (((uint64_t)1 << w) - 1);
+    if (value < (uint64_t)lo || value > (uint64_t)hi) return 0;
+    *out = (int64_t)value;
+    return 1;
+}
+
 /* A drawn value of an operand of a fixed product moved to a divisor of it
  * (DvsMulLink). Once `r == a * b` has r fixed to K, a's feasible values are
  * the divisors of K whose cofactor is in b's domain (_bv_mul_divisors), but
@@ -939,7 +995,11 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
         v = _pick_value_cond(ctx, var_id, lo, hi);
     } else {
         int64_t cv;
-        if (ctx->cong_m && var_id < ctx->cong_cap && ctx->cong_m[var_id]
+        if (ctx->countones_bits && var_id < ctx->countones_cap && ctx->countones_bits[var_id]
+                && !(ctx->vars[var_id].flags & VAR_SIGNED)
+                && _pick_countones(ctx, var_id, lo, hi, &cv)) {
+            v = cv;   /* drawn straight from the chain's exact-popcount fact */
+        } else if (ctx->cong_m && var_id < ctx->cong_cap && ctx->cong_m[var_id]
                 && !(ctx->vars[var_id].flags & VAR_SIGNED)
                 && _pick_mod_cong(ctx, var_id, lo, hi, &cv)) {
             v = cv;   /* drawn straight from the merged fact; _pick_mod_aligned

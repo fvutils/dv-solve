@@ -207,6 +207,27 @@ typedef struct dvs_ctx_s {
     uint64_t          *cong_m;
     int64_t           *cong_r;
     uint32_t           cong_cap;
+    /* Item 4a: each var's compile-time `$countones` chain fact -- the set
+     * of bit positions `countones_bits[v]` (mask) a left-deep
+     * extract+zero_extend+add chain sums, equated to a constant popcount
+     * `countones_n[v]`, as `_compile_countones_facts` (dvs_compile.c)
+     * detects from the constraint AST (the accept-criteria benches never
+     * use EXPR_COUNTONES/prop_add_countones_32 -- see that function's
+     * header comment). countones_bits[v] == 0: no fact for v. Same
+     * lazy-alloc/grow pattern as cong_m/cong_r above. */
+    uint64_t          *countones_bits;
+    uint32_t          *countones_n;
+    uint32_t           countones_cap;
+    /* Item 4a: each var's compile-time "which bits are pinned, and to
+     * what" fact from a top-level `EQ(EXTRACT(v,hi,lo), CONST)` conjunct
+     * (independent of countones_bits/n above -- `pop32`'s nibble pin is a
+     * second, separate conjunct, not part of the add chain). Bit `i` of
+     * known_bits_mask[v] set means bit `i` of known_bits_val[v] is that
+     * bit's pinned value; known_bits_mask[v] == 0: no fact for v. Same
+     * lazy-alloc/grow pattern as cong_m/cong_r above. */
+    uint64_t          *known_bits_mask;
+    uint64_t          *known_bits_val;
+    uint32_t           known_bits_cap;
     /* A seeded solve's first draw per var, kept for the rest of the solve
      * (see _pick_value). keep_state: KEEP_NONE / KEEP_SET / KEEP_DEAD. */
     int64_t           *keep_val;
@@ -439,6 +460,16 @@ int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx);
  *  sized to n_vars_capacity; a no-op if already allocated. 0, or -1 on
  *  allocation failure (ctx->cong_m/cong_r left NULL/untouched). */
 int dvs_ctx_alloc_cong_facts(dvs_ctx_t *ctx);
+
+/** Allocate ctx->countones_bits/countones_n (zeroed: no fact on any var)
+ *  from ctx->alloc, sized to n_vars_capacity; a no-op if already allocated.
+ *  0, or -1 on allocation failure (left NULL/untouched). */
+int dvs_ctx_alloc_countones_facts(dvs_ctx_t *ctx);
+
+/** Allocate ctx->known_bits_mask/known_bits_val (zeroed: no fact on any
+ *  var) from ctx->alloc, sized to n_vars_capacity; a no-op if already
+ *  allocated. 0, or -1 on allocation failure (left NULL/untouched). */
+int dvs_ctx_alloc_known_bits_facts(dvs_ctx_t *ctx);
 
 /**
  * Make every per-variable table hold at least `n` variables, growing them
