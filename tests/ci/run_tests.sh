@@ -21,7 +21,7 @@ pip_install() {
 echo "::group::dependencies"
 pip_install --upgrade pip
 pip_install cmake ninja pytest scipy z3-solver
-[ -d packages/cadical ] || git clone -q --depth 1 -b rel-3.0.0 \
+[ -d packages/cadical ] || git clone -q --depth 1 -b rel-3.0.1 \
     https://github.com/arminbiere/cadical.git packages/cadical
 echo "::endgroup::"
 

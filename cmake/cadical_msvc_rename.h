@@ -8,7 +8,7 @@
  * those names a dvs_cdk_ prefix. CaDiCaL's C++ symbols need no renaming: they
  * are mangled inside namespace CaDiCaL and cannot meet kissat's C names.
  *
- * The list is every non-C++ global CaDiCaL rel-3.0.0 defines (nm on a Linux
+ * The list is every non-C++ global CaDiCaL rel-3.0.1 defines (nm on a Linux
  * build) other than ccadical_*. Not hand-maintained in practice: the MSVC
  * build lists cadical.lib's external symbols after building and fails if any
  * C name other than ccadical_* / dvs_cdk_* is left (check_cadical_symbols.cmake),

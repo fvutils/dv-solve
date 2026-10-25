@@ -7,7 +7,7 @@
 # backend.
 #
 # Source comes from <packages>/cadical (fetched by `ivpm update`, pinned to
-# rel-3.0.0 in ivpm.yaml). The packages directory is only ./packages when
+# rel-3.0.1 in ivpm.yaml). The packages directory is only ./packages when
 # dv-solve is the root project; as a dependency inside someone else's
 # workspace it is the *sibling* directory holding dv-solve. See the
 # CADICAL_SRC_ROOT resolution below. We compile the library sources with

@@ -63,7 +63,7 @@ jobs:
       - name: Build dv-solve-smt2 and the library
         if: steps.seen.outputs.measured != 'true'
         run: |
-          [ -d packages/cadical ] || git clone -q --depth 1 -b rel-3.0.0 \
+          [ -d packages/cadical ] || git clone -q --depth 1 -b rel-3.0.1 \
               https://github.com/arminbiere/cadical.git packages/cadical
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j8 --target dv-solve-smt2 dv_solve
