@@ -30,7 +30,19 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 _SITE = _REPO / "docs" / "site"
 _EXAMPLES = _REPO / "docs" / "examples"
-_VERILATOR = _REPO / "packages" / "verilator-bin" / "bin" / "verilator"
+
+
+def _packages_dir() -> Path:
+    """The ivpm packages dir, resolved as CMakeLists.txt resolves PACKAGES_DIR:
+    $PACKAGES_DIR / $IVPM_PACKAGES, else <repo>/packages when dv-solve is the
+    root project, else the directory holding dv-solve (it is a dependency)."""
+    for var in ("PACKAGES_DIR", "IVPM_PACKAGES"):
+        if os.environ.get(var):
+            return Path(os.environ[var])
+    return _REPO / "packages" if (_REPO / "packages").is_dir() else _REPO.parent
+
+
+_VERILATOR = _packages_dir() / "verilator-bin" / "bin" / "verilator"
 
 
 @dataclass

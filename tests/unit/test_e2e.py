@@ -77,7 +77,7 @@ def _make_native_available(lib_path: Path, monkeypatch) -> bool:
 
 
 # ------------------------------------------------------------------ #
-# Fixture: select back-end via DVS_SOLVER_BACKEND env var             #
+# Fixture: select back-end via ZSP_SOLVER_BACKEND env var             #
 # ------------------------------------------------------------------ #
 
 @pytest.fixture(params=["python", "native"])
@@ -88,7 +88,12 @@ def backend(request, monkeypatch, e2e_lib_path):
         if e2e_lib_path is None or not _make_native_available(e2e_lib_path,
                                                               monkeypatch):
             pytest.skip("native solver library not available")
-    monkeypatch.setenv("DVS_SOLVER_BACKEND", name)
+    monkeypatch.setenv("ZSP_SOLVER_BACKEND", name)
+    # zuspec.be.py.solver.api caches the first backend it resolves for the
+    # whole process, so without this every param ran on that one backend.
+    import zuspec.be.py.solver.api as _api
+    monkeypatch.setattr(_api, "_BACKEND_CACHE", None)
+    monkeypatch.setattr(_api, "_cached_backend", None)
     yield name
 
 

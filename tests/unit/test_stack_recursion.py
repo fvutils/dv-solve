@@ -33,7 +33,19 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCES = sorted((ROOT / "src/c").glob("*.c")) + sorted((ROOT / "src/c/smt2").glob("*.c"))
-INCLUDES = ["src/c", "src/c/sat/kissat/src", "packages/cadical/src"]
+
+
+def _packages_dir() -> Path:
+    """The ivpm packages dir, resolved as CMakeLists.txt resolves PACKAGES_DIR:
+    $PACKAGES_DIR / $IVPM_PACKAGES, else <root>/packages when dv-solve is the
+    root project, else the directory holding dv-solve (it is a dependency)."""
+    for var in ("PACKAGES_DIR", "IVPM_PACKAGES"):
+        if os.environ.get(var):
+            return Path(os.environ[var])
+    return ROOT / "packages" if (ROOT / "packages").is_dir() else ROOT.parent
+
+
+INCLUDES = ["src/c", "src/c/sat/kissat/src", str(_packages_dir() / "cadical" / "src")]
 
 # The deepest per-function frame allowed on a recursive cycle. The CDCL
 # compile (_compile_constraint, about 1 KB at -O3) is the largest today.
