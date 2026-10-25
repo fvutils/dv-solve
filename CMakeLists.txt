@@ -624,22 +624,29 @@ target_link_libraries(dv-solve-smt2 PRIVATE dv_solve_static Threads::Threads)
 if(DVS_WITH_CADICAL)
     # CaDiCaL is C++; link with the C++ driver so libstdc++/libc++ is pulled in.
     set_target_properties(dv-solve-smt2 PROPERTIES LINKER_LANGUAGE CXX)
-    # Link libstdc++ and libgcc statically into the CLI. One process per solve
+    # Link libstdc++ statically into the CLI. One process per solve
     # (one-shot use, benchmark sweeps) otherwise pays the dynamic loader for
     # libstdc++.so's relocations at every start: ~19% of the user cycles of
     # 2170 small solves (docs/perf_plan_2026-10-17.md, item 4). The check
     # program throws, so it links the exception-handling objects the real
     # link needs (cmake/cadical.cmake keeps the DW.ref.* symbols they use).
-    option(DVS_STATIC_LIBSTDCXX "Link libstdc++/libgcc statically into dv-solve-smt2 (GNU/Linux)" ON)
+    #
+    # libgcc stays DYNAMIC (no -static-libgcc). The static libgcc_eh unwinder
+    # of newer GCCs calls _dl_find_object, which needs GLIBC_2.35. RHEL 9 /
+    # AlmaLinux 9 backport it into their glibc 2.34, so the link succeeds in
+    # the manylinux_2_34 image, but auditwheel rejects the wheel and the
+    # binary would not load on a stock glibc 2.34. libgcc_s.so.1 is on the
+    # manylinux allow-list and is tiny, so dynamic linking costs nothing.
+    option(DVS_STATIC_LIBSTDCXX "Link libstdc++ statically into dv-solve-smt2 (GNU/Linux)" ON)
     if(DVS_STATIC_LIBSTDCXX AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
             AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         include(CheckCXXSourceCompiles)
         set(_dvs_throw_src "#include <stdexcept>
 int main() { try { throw std::runtime_error(\"x\"); } catch (...) {} return 0; }")
-        set(CMAKE_REQUIRED_LINK_OPTIONS -static-libstdc++ -static-libgcc)
+        set(CMAKE_REQUIRED_LINK_OPTIONS -static-libstdc++)
         check_cxx_source_compiles("${_dvs_throw_src}" DVS_HAVE_STATIC_LIBSTDCXX)
         if(DVS_HAVE_STATIC_LIBSTDCXX)
-            target_link_options(dv-solve-smt2 PRIVATE -static-libstdc++ -static-libgcc)
+            target_link_options(dv-solve-smt2 PRIVATE -static-libstdc++)
         endif()
         unset(CMAKE_REQUIRED_LINK_OPTIONS)
     endif()
