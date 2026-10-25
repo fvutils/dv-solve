@@ -2096,6 +2096,24 @@ static int _prop_cone(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t 
 #define DVS_DIVERSIFY_MAX_NODES 200000u
 /* Distinct candidate inputs up to which the flip loop memoizes validity. */
 #define DVS_DIVERSIFY_MEMO_BITS 16u
+/* Flip sweeps over the candidate bits, each with fresh random targets. The
+ * sampler's XOR planes randomize only the low BB_SAMPLE_BITS_PER_VAR bits of
+ * each variable; the bits above come from the SAT solver's model, and one
+ * sweep moves each bit at most once, so they kept the solver's bias. A 64-bit
+ * mixed-sign a < b drew a negative a 14% of the time instead of 25% under
+ * CaDiCaL 3.0.0; under 3.0.1 it was 25%, by luck of a changed preprocessing
+ * default, while a 128-bit a < b < c gave P(a.msb) = 0.215 instead of 0.125.
+ * Each flip is a Gibbs step that preserves the uniform distribution, so more
+ * sweeps forget the solver's starting model. Every sweep visits ALL the bits:
+ * sweeping only the bits above the planes leaves both shapes exactly as
+ * biased as before, because a top bit can only move once the low bits have.
+ * Sweeps after the first stop once DVS_DIVERSIFY_SWEEP_BUDGET flip visits are
+ * spent, so a large problem pays about one sweep, as before. Only
+ * dvs_bbsolver_sample asks for them; the other paths keep one (_diversify). */
+#ifndef DVS_DIVERSIFY_SWEEPS
+#define DVS_DIVERSIFY_SWEEPS 16u
+#endif
+#define DVS_DIVERSIFY_SWEEP_BUDGET (1u << 18)
 
 /* Recompute every AND node of nv[] from its inputs, ascending id. Returns 1
  * when every assertion in areq holds; with `stop`, returns 0 at the first
@@ -2160,7 +2178,8 @@ static int _diversify_memo(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_no
     return 1;
 }
 
-static void _diversify(dvs_bbsolver_t *S) {
+/* `sweeps` flip sweeps (at least one; see DVS_DIVERSIFY_SWEEPS). */
+static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
     if (S->seed == 0 || !S->aig || S->no_diversify) return;
     uint32_t N = (uint32_t)dvs_aig_num_nodes(S->aig);
     if (N == 0 || N > DVS_DIVERSIFY_MAX_NODES) return;
@@ -2236,10 +2255,11 @@ static void _diversify(dvs_bbsolver_t *S) {
     }
 
     /* The candidate flips, in visit order: each variable bit that is a
-     * primary input, with its seeded target. A constant bit (TRUE, id 1) is
-     * not a candidate: readback takes constants from the literal, never from
-     * nv[1]. Count the distinct inputs on the way (cnt is free again; it
-     * becomes slot[], the input's index + 1). */
+     * primary input, with its seeded target, once per sweep; sweeps after the
+     * first draw fresh targets.
+     * A constant bit (TRUE, id 1) is not a candidate: readback takes constants
+     * from the literal, never from nv[1]. Count the distinct inputs on the way
+     * (cnt is free again; it becomes slot[], the input's index + 1). */
     uint32_t ncand = 0, k = 0;
     for (uint32_t i = 0; i <= N; i++) cnt[i] = 0;
     for (uint32_t vi = 0; vi < S->n_vars; vi++) {
@@ -2253,31 +2273,61 @@ static void _diversify(dvs_bbsolver_t *S) {
             if (!cnt[base]) cnt[base] = ++k;
         }
     }
-    uint32_t *cand = (uint32_t *)malloc(((size_t)ncand + 1) * 2 * sizeof(uint32_t));
+    uint32_t nextra = 0;
+    if (ncand && ncand < DVS_DIVERSIFY_SWEEP_BUDGET) {
+        nextra = (DVS_DIVERSIFY_SWEEP_BUDGET - ncand) / ncand;
+        if (nextra + 1u > sweeps) nextra = sweeps ? sweeps - 1u : 0u;
+    }
+    size_t nvisit = (size_t)ncand * (nextra + 1u);
+    uint32_t *cand = (uint32_t *)malloc((nvisit + 1) * 2 * sizeof(uint32_t));
     uint32_t *inputs = (uint32_t *)malloc(((size_t)k + 1) * sizeof(uint32_t));
     int memo_done = 0;
     if (cand && inputs) {
-        uint32_t c = 0;
-        for (uint32_t vi = 0; vi < S->n_vars; vi++) {
-            bb_var_t *v = &S->vars[vi];
-            if (!v->defined || !v->bv_built) continue;
-            for (uint32_t p = 0; p < v->bv.size; p++) {
-                dvs_aig_node_t lit = v->bv.bits[p];
-                uint32_t base = (uint32_t)(lit < 0 ? -lit : lit);
-                if (base <= 1 || base > N || L[base] != 0) continue;
-                int tgt = (int)(_free_var_fill(S->seed, vi, p) & 1);
-                cand[2 * c] = base;
-                cand[2 * c + 1] = (uint32_t)((lit < 0) ? !tgt : tgt);  /* input-node polarity */
-                c++;
-                inputs[cnt[base] - 1] = base;
+        size_t c = 0;
+        for (uint32_t sw = 0; sw <= nextra; sw++) {
+            /* Sweep 0 keeps the targets the single sweep always used. Later
+             * sweeps hash the sweep index into the seed: adding it would line
+             * up with _free_var_fill's per-variable term and repeat targets. */
+            uint64_t sseed = sw ? _free_var_fill(S->seed ^ 0x5851F42D4C957F2DULL,
+                                                 0xFFFFFFF0u, sw)
+                                : S->seed;
+            for (uint32_t vi = 0; vi < S->n_vars; vi++) {
+                bb_var_t *v = &S->vars[vi];
+                if (!v->defined || !v->bv_built) continue;
+                for (uint32_t p = 0; p < v->bv.size; p++) {
+                    dvs_aig_node_t lit = v->bv.bits[p];
+                    uint32_t base = (uint32_t)(lit < 0 ? -lit : lit);
+                    if (base <= 1 || base > N || L[base] != 0) continue;
+                    int tgt = (int)(_free_var_fill(sseed, vi, p) & 1);
+                    cand[2 * c] = base;
+                    cand[2 * c + 1] = (uint32_t)((lit < 0) ? !tgt : tgt);  /* input-node polarity */
+                    c++;
+                    if (sw == 0) inputs[cnt[base] - 1] = base;
+                }
             }
         }
         for (uint32_t i = 0; i <= N; i++) if (cnt[i]) cnt[i]--;   /* slot = index */
         const char *dm = getenv("DV_DIVERSIFY_MEMO");      /* =0: plain loop (A/B tests) */
-        if (k <= DVS_DIVERSIFY_MEMO_BITS && ((size_t)4 << k) <= ncand && !(dm && *dm == '0'))
-            memo_done = _diversify_memo(nv, L, R, areq, N, cand, ncand, inputs, k, cnt);
+        if (k <= DVS_DIVERSIFY_MEMO_BITS && ((size_t)4 << k) <= nvisit && !(dm && *dm == '0'))
+            memo_done = _diversify_memo(nv, L, R, areq, N, cand, (uint32_t)nvisit,
+                                        inputs, k, cnt);
     }
-    if (!memo_done) {
+    if (!memo_done && cand) {
+        for (size_t c = 0; c < nvisit; c++) {
+            uint32_t base = cand[2 * c], desired = cand[2 * c + 1];
+            if ((uint32_t)nv[base] == desired) continue;
+            if (areq[base] & (desired ? 2u : 1u)) continue;  /* asserted input */
+            uint32_t nt = 0;
+            nv[base] = (int8_t)desired;
+            trail[nt++] = base;
+            if (!_prop_cone(nv, L, R, fo_off, fo_adj, areq, wl, inq, trail, &nt, base)) {
+                /* revert: every touched node was boolean-inverted */
+                for (uint32_t t = 0; t < nt; t++) nv[trail[t]] = (int8_t)!nv[trail[t]];
+            }
+        }
+    } else if (!memo_done) {
+        /* No visit list (allocation failed): one sweep with targets computed
+         * on the fly -- a valid, less diverse model. */
         for (uint32_t vi = 0; vi < S->n_vars; vi++) {
             bb_var_t *v = &S->vars[vi];
             if (!v->defined || !v->bv_built) continue;
@@ -2314,6 +2364,12 @@ static void _diversify(dvs_bbsolver_t *S) {
     free(R);
     S->node_val = nv;
 }
+
+/* One sweep: the plain solve paths (bitblast routes, Verilator diversity
+ * requests) promise a varied model, not a uniform one, and the Verilator
+ * router weighs bitblast against CDCL by time, so they keep the single
+ * sweep's cost. */
+static void _diversify(dvs_bbsolver_t *S) { _diversify_sweeps(S, 1u); }
 
 /* Bit-blast + CNF-encode the whole problem (constraints, kept softs, subst
  * force-builds, variable bounds) WITHOUT solving. Shared by the one-shot
@@ -3419,7 +3475,7 @@ int dvs_bbsolver_sample(dvs_bbsolver_t *S, const uint32_t *vars,
     free(S->node_val);
     S->node_val = NULL;
     S->seed = seed ? seed : 1;
-    _diversify(S);
+    _diversify_sweeps(S, DVS_DIVERSIFY_SWEEPS);  /* the uniformity promise */
     return DVS_BB_SAT;
 }
 

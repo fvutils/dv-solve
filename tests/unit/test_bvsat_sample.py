@@ -176,3 +176,46 @@ def test_stale_once_planes_outweigh_the_problem():
         assert seed > 10
     finally:
         ctx.destroy()
+
+
+def _msb_rate(width, nvars, which, n=400):
+    """Draws of the chain v0 < v1 < ... (unsigned, `width` bits each), one
+    fresh context per draw as pyvsc's sampler opens them, and the fraction
+    with variable `which`'s top bit set. Uniform over the solutions,
+    P(v_i.msb) for a chain of m is the share of sorted m-tuples whose i-th
+    element is in the upper half: 1/4 and 3/4 for a < b; 1/8 and 7/8 for the
+    ends of a < b < c."""
+    def build(b):
+        for i in range(nvars):
+            b.add_var(i, width, False, 0, _FULL)
+        for i in range(nvars - 1):
+            b.add_constraint(b.expr_binary(BIN_LT, b.expr_var(i), b.expr_var(i + 1)))
+    hits = 0
+    for seed in range(1, n + 1):
+        ctx = _ctx(build)
+        try:
+            assert ctx.sample(list(range(nvars)), seed) == BVSAT_SAT
+            vals = [ctx.value_wide(i, width) for i in range(nvars)]
+        finally:
+            ctx.destroy()
+        assert all(vals[i] < vals[i + 1] for i in range(nvars - 1))
+        hits += vals[which] >> (width - 1)
+    return hits / n
+
+
+@needs_cadical
+@pytest.mark.parametrize("width,nvars,which,expect", [
+    (128, 2, 0, 0.25),
+    (128, 3, 0, 0.125),
+    (128, 3, 2, 0.875),
+])
+def test_bits_above_the_planes_are_uniform(width, nvars, which, expect):
+    """The XOR planes cover only the low 16 bits of each variable, so the top
+    bits come from diversification alone. A single flip sweep left them with
+    the SAT solver's bias, which changed with a CaDiCaL point release: 128-bit
+    a < b drew a.msb 13% of the time on CaDiCaL 3.0.0, and a < b < c drew
+    a.msb 21.5% on 3.0.1 (expected 25% and 12.5%). Bounds are about 4 sigma
+    at n = 400."""
+    p = _msb_rate(width, nvars, which)
+    sigma = (expect * (1 - expect) / 400) ** 0.5
+    assert abs(p - expect) < 4 * sigma, (p, expect)
