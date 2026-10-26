@@ -14,7 +14,8 @@
 #              captures the solver session (+verilator+solver+file+), and the
 #              timing comes from replaying that session through dv-solve
 #              in-process (no Verilator, no pipe); see standalone.py.
-#   replay_pass: bench_vlt_replay pass to time (default api-cache)
+#   replay_pass: bench_vlt_replay passes to time, comma list; the fastest is reported
+#                (default api,api-cache: api-cache is slower on construct.range)
 configs:
   # Primary (A): dev Verilator, z3 via SMT-LIB pipe, Verilator's own sampler.
   - id: vlt-z3-default

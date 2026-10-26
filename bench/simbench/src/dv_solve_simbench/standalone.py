@@ -60,15 +60,25 @@ def replay(cfg: Config, sim: RunOutput, session: str, rundir: str,
                        stderr=subprocess.STDOUT, text=True, timeout=timeout)
     with open(os.path.join(rundir, "replay.log"), "w") as fp:
         fp.write(p.stdout)
-    r = parse_replay(p.stdout, cfg.replay_pass) if p.returncode == 0 else None
+    # Several passes may be timed (comma list); report the fastest.
+    r = None
+    if p.returncode == 0:
+        rs = [parse_replay(p.stdout, x.strip()) for x in cfg.replay_pass.split(",")]
+        if rs and all(rs):
+            r = min(rs, key=lambda x: x["us_per_check"])
+            r["pass"] = cfg.replay_pass.split(",")[rs.index(r)].strip()
     if r is None:
         raise RuntimeError("replay failed (rc=%d): %s\n%s"
                            % (p.returncode, " ".join(cmd), p.stdout[-2000:]))
-    # Every randomize() is one check-sat; the session also holds the warm-up
-    # calls and the runtime's start-up check, timed at the same per-check rate.
+    # The session holds the runtime's start-up check, then n + warmup calls of
+    # one or more check-sats each (dist: 2, under push); time per call is the
+    # per-check rate times check-sats per call.
+    calls = sim.result.n + sim.result.warmup
+    per_call = (n_check - 1) / calls if calls and n_check > 1 else 1.0
     res = dc.replace(sim.result,
-                     elapsed_ns=int(round(r["us_per_check"] * 1e3 * sim.result.n)),
+                     elapsed_ns=int(round(r["us_per_check"] * 1e3 * per_call * sim.result.n)),
                      first_call_ns=int(round((r["us_new"] or 0) * 1e3)),
                      failures=sim.result.failures + r["failures"])
-    log = "%s\n# replay (%d check-sats): %s\n%s" % (sim.log, n_check, " ".join(cmd), p.stdout)
+    log = "%s\n# replay (%d check-sats, %.2f per call, fastest pass %s): %s\n%s" % (
+        sim.log, n_check, per_call, r["pass"], " ".join(cmd), p.stdout)
     return RunOutput(cmd=cmd, returncode=p.returncode, log=log, result=res)

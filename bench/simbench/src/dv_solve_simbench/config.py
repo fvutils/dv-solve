@@ -45,7 +45,7 @@ class Config:
     plusargs: List[str] = dc.field(default_factory=list)
     env: Dict[str, str] = dc.field(default_factory=dict)
     replay: Optional[str] = None      # bench_vlt_replay: time the captured session without Verilator
-    replay_pass: str = "api-cache"
+    replay_pass: str = "api,api-cache"
     available: bool = False
     reason: str = ""
 
@@ -109,7 +109,7 @@ def _parse(path: str, environ) -> List[Config]:
             plusargs=[expand(str(p), environ) for p in c.get("plusargs", [])],
             env={k: expand(str(v), environ) for k, v in (c.get("env") or {}).items()},
             replay=expand(str(c["replay"]), environ) if c.get("replay") else None,
-            replay_pass=str(c.get("replay_pass") or "api-cache")))
+            replay_pass=str(c.get("replay_pass") or "api,api-cache")))
     return ret
 
 
