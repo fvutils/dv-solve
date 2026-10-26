@@ -1,0 +1,4 @@
+id: control.soft_relaxation
+tier: standard
+tags: [control, soft]
+fields: [a, b]

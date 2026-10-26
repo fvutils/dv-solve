@@ -1,0 +1,4 @@
+id: control.constraint_mode
+tier: standard
+tags: [control, constraint_mode]
+fields: [a]

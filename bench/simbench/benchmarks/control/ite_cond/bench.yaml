@@ -1,0 +1,4 @@
+id: control.ite_cond
+tier: standard
+tags: [control, if_else]
+fields: [kind, a]
