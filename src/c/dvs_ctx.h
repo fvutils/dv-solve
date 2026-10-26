@@ -216,6 +216,13 @@ typedef struct dvs_ctx_s {
                                        * by the box tier, and decided by the
                                        * search only after every other var */
     uint32_t           box_skip_n;    /* its length                    */
+    /* Linear equalities over two or more declared variables (`a + b + c
+     * == 200`): eq_grp[eq_grp_off[g] .. eq_grp_off[g+1]) are group g's
+     * variables. A domain product counts each such equality's variables
+     * as independent, one dimension too many (_pick_value_weighted). */
+    uint32_t          *eq_grp;
+    uint32_t          *eq_grp_off;    /* [n_eq_grp + 1]                */
+    uint32_t           n_eq_grp;
     /* Enumeration tier (see _enum_sample): every solution of a problem the
      * box tier gives up on, when it has few, so a solve can draw one
      * uniformly. Valid for the root state hashed in enum_key. */
@@ -263,6 +270,8 @@ typedef struct dvs_ctx_s {
                                        * seen (_mul_count_accept); kept
                                        * across solves of the problem    */
     uint8_t            mul_count_probed;
+    uint32_t           wpick_left;    /* bucket probes left in this solve
+                                       * for _pick_value_weighted        */
     CheckpointMark    *checkpoints;   /* array[checkpoints_cap]: from
                                        * the fixed pool, else ctx->alloc */
     uint32_t           n_checkpoints;

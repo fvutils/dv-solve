@@ -727,6 +727,183 @@ static int64_t _pick_mul_divisor(dvs_ctx_t *ctx, uint32_t var_id, int64_t v,
 
 enum { KEEP_NONE = 0, KEEP_SET = 1, KEEP_DEAD = 2 };
 
+/* Count-weighted value choice (docs/accuracy_closure_plan.md A3).
+ *
+ * The search decides one variable at a time. A uniform draw over a
+ * variable's values gives each value the same chance however many
+ * solutions lie under it, so under `a[0] < ... < a[9]` a high a[0], with
+ * few completions, was drawn as often as a low one (mean a[0] 43 against
+ * 22.4), and every later decision compounded it.
+ *
+ * Instead, the domain is cut into at most DVS_WPICK_BUCKETS equal buckets
+ * (one per value when it has fewer). Each is tried at a level of its own:
+ * bound x to it, propagate, and weigh it by the size of the box that is
+ * left, the product of the counted variables' domains. A bucket is drawn
+ * by weight, then a value uniformly inside it. The box overcounts, since
+ * a domain's values do not all extend to solutions, but by far less than
+ * treating every value alike: 16 buckets brought the chain to within
+ * noise in simulation. Counted: the problem's own variables, not aux,
+ * merged or defined (box_skip) ones, which the others fix.
+ *
+ * This changes only which value is tried, never what is excluded, so no
+ * solution is lost. A probe is the box tier's own try: a level pushed and
+ * popped, with no learning. Each solve may spend DVS_WPICK_PROBES bucket
+ * probes; past that, and for a dist, a multiply link (_pick_mul_divisor
+ * draws those) or a seed-0 solve, the draw is uniform as before.
+ * DVS_WPICK=0 turns it off. */
+#define DVS_WPICK_BUCKETS 16u
+#define DVS_WPICK_PROBES  1024u
+
+static int _wpick_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("DVS_WPICK");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
+/* The size of the box left, the product of the counted variables'
+ * domains, as m * 2^(DVS_WPICK_SCALE * e): it overflows a double after
+ * a few dozen wide variables. (No libm: log2/exp2 are not in every
+ * target's link.) */
+#define DVS_WPICK_SCALE 512
+typedef struct { double m; int e; } WBox;
+
+static WBox _wpick_box(const dvs_ctx_t *ctx) {
+    uint32_t n = ctx->n_decl_vars < ctx->n_vars ? ctx->n_decl_vars : ctx->n_vars;
+    WBox b = { 1.0, 0 };
+    for (uint32_t i = 0; i < n; i++) {
+        const Variable *v = &ctx->vars[i];
+        if ((v->flags & VAR_AUX) || (ctx->var_alias && ctx->var_alias[i] != i)
+                || _is_defined(ctx, i)) continue;
+        int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
+        if (lo == hi) continue;
+        b.m *= (double)_dom_size(ctx, i, lo, hi) + 1.0;
+        if (b.m > 0x1p512) { b.m *= 0x1p-512; b.e++; }
+    }
+    /* A linear equality with two or more variables open fixes one of them
+     * given the rest, so its variables are one dimension fewer than their
+     * domains say: `a + b + c == 200` with a decided leaves b and c each
+     * [0, 200-a], a box of (201-a)^2 for 201-a solutions. Take out the
+     * widest open domain of each such group. */
+    for (uint32_t g = 0; g < ctx->n_eq_grp; g++) {
+        uint32_t open = 0;
+        double widest = 0.0;
+        for (uint32_t j = ctx->eq_grp_off[g]; j < ctx->eq_grp_off[g + 1]; j++) {
+            uint32_t i = ctx->eq_grp[j];
+            if (ctx->var_alias) i = ctx->var_alias[i];
+            if (i >= n) continue;
+            const Variable *v = &ctx->vars[i];
+            if ((v->flags & VAR_AUX) || _is_defined(ctx, i)) continue;
+            int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
+            if (lo == hi) continue;
+            uint32_t k;      /* count a merged variable once */
+            for (k = ctx->eq_grp_off[g]; k < j; k++) {
+                uint32_t i2 = ctx->eq_grp[k];
+                if (ctx->var_alias) i2 = ctx->var_alias[i2];
+                if (i2 == i) break;
+            }
+            if (k < j) continue;
+            double d = (double)_dom_size(ctx, i, lo, hi) + 1.0;
+            if (d > widest) widest = d;
+            open++;
+        }
+        if (open >= 2) b.m /= widest;
+    }
+    return b;
+}
+
+/* 1: a value for x is in *out. 0: draw uniformly instead. */
+static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t hi,
+                                int64_t *out) {
+    /* Buckets k = 0..nb-1 over the span+1 values, as offsets from lo in
+     * unsigned arithmetic (the bit patterns of a signed or upper-half
+     * domain still add correctly). span+1 may not fit, so: bucket k
+     * starts at k*q + k*(r+1)/nb, with span = q*nb + r. */
+    const uint64_t span = (uint64_t)hi - (uint64_t)lo;
+    const uint32_t nb = span < DVS_WPICK_BUCKETS - 1u ? (uint32_t)span + 1u
+                                                      : DVS_WPICK_BUCKETS;
+    if (nb < 2 || ctx->wpick_left < nb || ctx->decision_level + 1 >= ctx->max_depth)
+        return 0;
+    /* `solve x before y` asks for x uniform over its feasible values
+     * (IEEE 1800 18.5.10), not by solution count: an ordered variable is
+     * drawn as before. The unordered ones, decided last, are weighted
+     * given the ordered ones. */
+    if (_order_key(ctx, x) != DVS_ORDER_LAST) return 0;
+    /* A variable in a linear equality is not weighted (A4 in the plan):
+     * propagation through a sum narrows only its lower bounds today, so
+     * the weights of `a + b + c == 200` came out flat at the root, and
+     * `sum_unique` paid 11x the time for a small gain. */
+    for (uint32_t g = 0; g < ctx->n_eq_grp; g++)
+        for (uint32_t j = ctx->eq_grp_off[g]; j < ctx->eq_grp_off[g + 1]; j++) {
+            uint32_t i = ctx->eq_grp[j];
+            if (i == x || (ctx->var_alias && ctx->var_alias[i] == x)) return 0;
+        }
+    /* With no other counted variable open, every bucket's weight is just
+     * its feasible size: the uniform draw (and redraw on a conflict) is
+     * already exact, and cheaper. */
+    {
+        uint32_t nd = ctx->n_decl_vars < ctx->n_vars ? ctx->n_decl_vars : ctx->n_vars, i;
+        for (i = 0; i < nd; i++) {
+            const Variable *v = &ctx->vars[i];
+            if (i == x || (v->flags & VAR_AUX) || (ctx->var_alias && ctx->var_alias[i] != i)
+                    || _is_defined(ctx, i)) continue;
+            if (var_lo64(ctx, v) != var_hi64(ctx, v)) break;
+        }
+        if (i == nd) return 0;
+    }
+    ctx->wpick_left -= nb;
+    const uint64_t q = span / nb, r1 = span % nb + 1u;
+    int64_t blo[DVS_WPICK_BUCKETS], bhi[DVS_WPICK_BUCKETS];
+    WBox w[DVS_WPICK_BUCKETS];
+    int ok[DVS_WPICK_BUCKETS], emax = 0, any = 0;
+    const uint32_t level = ctx->decision_level;
+    for (uint32_t k = 0; k < nb; k++) {
+        uint64_t o0 = k * q + (k * r1) / nb;
+        uint64_t o1 = k + 1 == nb ? span : (k + 1) * q + ((k + 1) * r1) / nb - 1u;
+        blo[k] = (int64_t)((uint64_t)lo + o0);
+        bhi[k] = (int64_t)((uint64_t)lo + o1);
+        trail_push_level(ctx);
+        ctx->conflict_prop_ref   = EXPR_NULL;
+        ctx->conflict_clause_idx = EXPR_NULL;
+        PropResult pr = ctx_tighten_lb64(ctx, x, blo[k]);
+        if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, bhi[k]);
+        if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+        ok[k] = pr == PROP_OK && !ctx->prop_aborted;
+        if (ok[k]) {
+            /* Draw inside what propagation left of the bucket: a bucket
+             * across a gap (`x inside {[10:20],[100:150]}`) weighs only
+             * its feasible part, so its value must come from that part. */
+            blo[k] = var_lo64(ctx, &ctx->vars[x]);
+            bhi[k] = var_hi64(ctx, &ctx->vars[x]);
+            w[k] = _wpick_box(ctx);
+            if (!any || w[k].e > emax) emax = w[k].e;
+            any = 1;
+        }
+        trail_backtrack(ctx, level);
+        if (ctx->prop_aborted) break;
+    }
+    ctx->conflict_prop_ref   = EXPR_NULL;
+    ctx->conflict_clause_idx = EXPR_NULL;
+    if (ctx->prop_aborted || !any) return 0;
+    double wt[DVS_WPICK_BUCKETS], tot = 0.0;
+    for (uint32_t k = 0; k < nb; k++) {
+        wt[k] = 0.0;
+        if (!ok[k]) continue;
+        wt[k] = w[k].m;
+        for (int d = w[k].e; d < emax && wt[k] > 0.0; d++) wt[k] *= 0x1p-512;
+        tot += wt[k];
+    }
+    double u = (double)(_rand64(ctx) >> 11) * 0x1p-53 * tot;
+    uint32_t k = 0;
+    while (k + 1 < nb && u >= wt[k]) { u -= wt[k]; k++; }
+    while (wt[k] == 0.0) k--;          /* rounding ran past the last weight */
+    int64_t v = _rand_range64(ctx, blo[k], bhi[k]);
+    *out = _pick_avoiding_holes(ctx, x, v, blo[k], bhi[k]);
+    return 1;
+}
+
 static int _keep_draws_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
@@ -790,6 +967,10 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
     if (ctx->dist_offsets && var_id < ctx->n_vars_capacity &&
         ctx->dist_offsets[var_id] != 0) {
         v = _pick_value_dist(ctx, var_id, lo, hi);
+    } else if (opts && opts->seed != 0 && ctx->fair_pick && !opts->seq_pick
+               && !ctx->n_mul_links && !(ctx->vars[var_id].flags & VAR_AUX)
+               && _wpick_enabled() && _pick_value_weighted(ctx, var_id, lo, hi, &v)) {
+        /* drawn by weight, holes already avoided */
     } else {
         v = _rand_range64(ctx, lo, hi);
         v = _pick_mod_aligned(ctx, var_id, v, lo, hi);
@@ -1833,6 +2014,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
     uint32_t restart_count  = 0;
     uint32_t local_conflicts = 0;
     uint32_t mul_rejects    = 0;   /* _mul_count_accept */
+    ctx->wpick_left = DVS_WPICK_PROBES;
     uint32_t luby_idx       = 1;  /* 1-indexed Luby sequence */
     uint32_t luby_limit     = (max_conflicts > 0)
                               ? _luby(luby_idx) * max_conflicts

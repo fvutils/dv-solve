@@ -154,6 +154,9 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->box_cap         = 0;
     ctx->box_state       = 0;
     ctx->box_skip        = NULL;
+    ctx->eq_grp          = NULL;
+    ctx->eq_grp_off      = NULL;
+    ctx->n_eq_grp        = 0;
     ctx->enum_vars       = NULL;
     ctx->enum_vals       = NULL;
     ctx->enum_nv         = 0;
@@ -448,6 +451,11 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     ctx->box_val = NULL; ctx->box_cap = 0;
     dvs_ctx_free(ctx, ctx->box_skip, ctx->box_skip_n);
     ctx->box_skip = NULL; ctx->box_skip_n = 0;
+    if (ctx->eq_grp_off) {
+        dvs_ctx_free(ctx, ctx->eq_grp, (size_t)ctx->eq_grp_off[ctx->n_eq_grp] * sizeof(uint32_t));
+        dvs_ctx_free(ctx, ctx->eq_grp_off, (size_t)(ctx->n_eq_grp + 1u) * sizeof(uint32_t));
+    }
+    ctx->eq_grp = NULL; ctx->eq_grp_off = NULL; ctx->n_eq_grp = 0;
     dvs_ctx_free(ctx, ctx->enum_vars, (size_t)ctx->enum_nv * sizeof(uint32_t));
     ctx->enum_vars = NULL; ctx->enum_nv = 0;
     dvs_ctx_free(ctx, ctx->enum_vals, (size_t)ctx->enum_cap * sizeof(int64_t));

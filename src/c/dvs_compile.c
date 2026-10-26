@@ -291,6 +291,46 @@ static int _is_var_maybe_extend(dvs_problem_t *sp, dvs_expr_t ref,
     return 0;
 }
 
+/* The variables of a linear expression (constants, variables, extends and
+ * casts, `+`, `-`, and `*` by a constant) into ids[0..*n), each once.
+ * 0: not linear, or more than `cap` variables or DVS_LIN_NODES nodes. No
+ * recursion: an explicit stack, so a deep sum cannot overflow the C stack. */
+#define DVS_LIN_NODES 256u
+static int _lin_collect(dvs_problem_t *sp, dvs_expr_t root,
+                        uint32_t *ids, uint32_t *n, uint32_t cap) {
+    dvs_expr_t st[DVS_LIN_NODES];
+    uint32_t top = 0, seen = 0;
+    int64_t cv;
+    st[top++] = root;
+    while (top) {
+        dvs_expr_t r = st[--top];
+        if (r == EXPR_NULL || ++seen > DVS_LIN_NODES) return 0;
+        ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, r);
+        if (k == EXPR_CONST || k == EXPR_CONST_WIDE) continue;
+        if (k == EXPR_VAR) {
+            uint32_t id = ((ExprVar *)dvs_pool_ptr(&sp->pool, r))->var_id, j;
+            for (j = 0; j < *n && ids[j] != id; j++) ;
+            if (j == *n) { if (*n >= cap) return 0; ids[(*n)++] = id; }
+            continue;
+        }
+        dvs_expr_t a = EXPR_NULL, b = EXPR_NULL;
+        if (k == EXPR_EXTEND) a = ((ExprExtend *)dvs_pool_ptr(&sp->pool, r))->operand;
+        else if (k == EXPR_CAST) a = ((ExprCast *)dvs_pool_ptr(&sp->pool, r))->operand;
+        else if (k == EXPR_SV_CAST) a = ((ExprSvCast *)dvs_pool_ptr(&sp->pool, r))->operand;
+        else if (k == EXPR_BINARY) {
+            ExprBinary *eb = (ExprBinary *)dvs_pool_ptr(&sp->pool, r);
+            if (eb->op == DVS_BIN_ADD || eb->op == DVS_BIN_SUB) { a = eb->lhs; b = eb->rhs; }
+            else if (eb->op == DVS_BIN_MUL && _is_const(sp, eb->lhs, &cv)) a = eb->rhs;
+            else if (eb->op == DVS_BIN_MUL && _is_const(sp, eb->rhs, &cv)) a = eb->lhs;
+            else return 0;
+        } else return 0;
+        if (top + 2 > DVS_LIN_NODES) return 0;
+        st[top++] = a;
+        if (b != EXPR_NULL) st[top++] = b;
+    }
+    return 1;
+}
+
 /* Look up a variable's declaration in the problem. Returns 0 if `vid` has no
  * VarSpec (an aux the compiler minted, which has no declared signedness here). */
 static int _var_decl(dvs_problem_t *sp, uint32_t vid,
@@ -4423,6 +4463,55 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                 }
             }
             c = cs->next;
+        }
+    }
+
+    /* Linear equalities over two or more declared variables, for the
+     * count-weighted value choice (eq_grp in dvs_ctx.h). An equality that
+     * defines a variable (box_skip, above) is left out: the weight already
+     * skips the variable it defines. */
+    {
+        if (ctx->eq_grp_off) {
+            dvs_ctx_free(ctx, ctx->eq_grp, (size_t)ctx->eq_grp_off[ctx->n_eq_grp] * sizeof(uint32_t));
+            dvs_ctx_free(ctx, ctx->eq_grp_off, (size_t)(ctx->n_eq_grp + 1u) * sizeof(uint32_t));
+        }
+        ctx->eq_grp = NULL; ctx->eq_grp_off = NULL; ctx->n_eq_grp = 0;
+        uint32_t nd = ctx->n_decl_vars, ng = 0, nv = 0, ids[64], m;
+        for (int pass = 0; pass < 2; pass++) {
+            ng = nv = 0;
+            for (dvs_expr_t c = sp->constraints_head; c != EXPR_NULL; ) {
+                ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+                c = cs->next;
+                if (*(ExprKind *)dvs_pool_ptr(&sp->pool, cs->root) != EXPR_BINARY) continue;
+                ExprBinary *eb = (ExprBinary *)dvs_pool_ptr(&sp->pool, cs->root);
+                if (eb->op != DVS_BIN_EQ) continue;
+                m = 0;
+                if (!_lin_collect(sp, eb->lhs, ids, &m, 64u)
+                        || !_lin_collect(sp, eb->rhs, ids, &m, 64u)) continue;
+                int skip = m < 2;
+                for (uint32_t j = 0; j < m && !skip; j++)
+                    if (ids[j] >= nd || (ctx->box_skip && ctx->box_skip[ids[j]])) skip = 1;
+                if (skip) continue;
+                if (pass == 1) {
+                    ctx->eq_grp_off[ng] = nv;
+                    memcpy(ctx->eq_grp + nv, ids, m * sizeof(uint32_t));
+                }
+                ng++; nv += m;
+            }
+            if (pass == 0) {
+                if (!ng) break;
+                ctx->eq_grp = (uint32_t *)DVS_ALLOC(ctx->alloc, nv * sizeof(uint32_t));
+                ctx->eq_grp_off = (uint32_t *)DVS_ALLOC(ctx->alloc, (ng + 1u) * sizeof(uint32_t));
+                if (!ctx->eq_grp || !ctx->eq_grp_off) {
+                    if (ctx->eq_grp) dvs_ctx_free(ctx, ctx->eq_grp, nv * sizeof(uint32_t));
+                    if (ctx->eq_grp_off) dvs_ctx_free(ctx, ctx->eq_grp_off, (ng + 1u) * sizeof(uint32_t));
+                    ctx->eq_grp = NULL; ctx->eq_grp_off = NULL;
+                    break;
+                }
+            } else {
+                ctx->eq_grp_off[ng] = nv;
+                ctx->n_eq_grp = ng;
+            }
         }
     }
 
