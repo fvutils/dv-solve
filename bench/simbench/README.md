@@ -11,6 +11,20 @@ Layout:
 - `benchmarks/<category>/<name>/{bench.sv,bench.yaml}` — one benchmark each
 - `tests/` — pytest collection over config x bench x sweep point
 
+## Benchmarks
+
+100 benchmarks in 8 groups. Tier is standard unless marked;
+select a tier with `pytest -m smoke|standard|stress`.
+
+- **arith** (14): add_ovf, alignment, bitslice, countones, mod_align, mul_div_64, pow2, redops, shift_align, shift_width, sysfunc, unsigned_ops, verilator_operators, wide_add_64
+- **array** (16): array_index, array_ordering, array_reduction, array_sum, assoc_basic, cls_arr_member, dyn_size, foreach_basic, queue_basic, sorted_increasing, sum_partition, sum_with, unique_16, unique_32, unique_dyn, unpacked_2d
+- **construct** (15): bool_logic, cmp_web, enum_basic, enum_cond, eq_chain, inside_ranges, inside_set, ne_set, packed_struct, range (smoke), signed_mix, struct_fields, three_unique, width_mix, xor_parity
+- **control** (12): cond_inside, constraint_mode, implication_chain_8, implication_set, inheritance, inline_with, ite_cond, rand_mode, soft_override_with, soft_relaxation, solve_before, solve_before_array
+- **dist** (8): dist_enum, dist_if, dist_mixed, dist_range, dist_weight_div, randc_basic, randc_enum, weighted (smoke)
+- **hard** (7): global_nested, graph_color_8, knapsack_small, magic_square_3, nqueens_8 (stress), sudoku_4x4, unique_64 (stress)
+- **memmap** (8): addr_map_64, mem_partition_knapsack, memmap_tight_32 (stress), nonoverlap_regions_8, page_table_entry, soc_addr_map_32, soc_addr_map_40, soc_mem_map (smoke)
+- **scenario** (20): ahb_burst, apb_xfer, axi4_burst (smoke), bus_transaction (smoke), ddr5_cmd_basic, ddr5_mode_register, ddr5_timing, ddr5_timing_full (stress), dma_desc, ethernet_hdr, fifo_ctrl, i2c_xfer, mem_transaction, pcie_tlp, reset_reuse (smoke), riscv_instr_mem, riscv_instr_rtype, riscv_pmp_cfg, tl_ul_item, usb_pkt
+
 ## Results
 
 `pytest -m smoke --simbench-out=results.jsonl` appends one JSONL record per
