@@ -92,9 +92,8 @@ def _check(name, order=None):
 
 
 # cond_weight, with the condition declared first (as an SV class would) and
-# last. The second passes today, because the tier choice happens to go to
-# enumeration.
-@pytest.mark.xfail(strict=True, reason="A1: box tier falls through to uniform search")
+# last. Before A1 the first was biased: the box tier's probe passed by luck,
+# and the solves its draws missed went to the search.
 def test_cond_weight_condition_first():
     _check("cond_weight", order=["kind", "len"])
 

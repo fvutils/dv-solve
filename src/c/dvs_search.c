@@ -1145,6 +1145,14 @@ const char *dvs_solver_bail_reason_str(const dvs_ctx_t *ctx) {
 /* Returns 1 when a draw was accepted (the solve is done), 0 to search. */
 /* ------------------------------------------------------------------ */
 #define DVS_BOX_TRIES     32u
+/* More draws for a solve the first DVS_BOX_TRIES missed and the enumeration
+ * tier could not take: a rejection draw is uniform however many tries it
+ * took, so only giving up is biased. Searching instead decides one variable
+ * at a time, uniformly over its values, which over-weights a value with few
+ * solutions under it (`cond_weight`, docs/accuracy_closure_plan.md A1): at
+ * the 1-in-16 rate the probe admits, 32 tries miss 13% of the time, and
+ * 32 + 224 miss 7e-8 of the time. */
+#define DVS_BOX_RETRIES  224u
 #define DVS_BOX_PROBE     64u
 #define DVS_BOX_MIN_RATE  16u
 enum { BOX_UNPROBED = 0, BOX_ON = 1, BOX_OFF = 2 };
@@ -1217,8 +1225,9 @@ static void _bx_report(void) {
             (unsigned long long)_bx_probe_on, (unsigned long long)_bx_probe_off,
             (unsigned long long)_bx_acc, (unsigned long long)_bx_fall);
 }
-static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage);
-static int _box_sample(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
+static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage,
+                             uint32_t tries);
+static int _box_sample(dvs_ctx_t *ctx, uint32_t base, int last_stage, uint32_t tries) {
     static int stats = -1;
     if (stats < 0) {
         const char *e = getenv("DVS_BOX_STATS");
@@ -1226,7 +1235,7 @@ static int _box_sample(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
         if (stats) atexit(_bx_report);
     }
     uint8_t st0 = ctx->box_state;
-    int r = _box_sample_inner(ctx, base, last_stage);
+    int r = _box_sample_inner(ctx, base, last_stage, tries);
     if (stats) {
         _bx_calls++;
         if (st0 == BOX_UNPROBED && ctx->box_state == BOX_ON) _bx_probe_on++;
@@ -1240,8 +1249,10 @@ static int _box_sample(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
 
 /* `last_stage`: called mid-search, once a solve order's stages are decided,
  * for the unordered variables (see _solver_solve_core). It never probes:
- * the probe runs at the root, where it depends on the problem only. */
-static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
+ * the probe runs at the root, where it depends on the problem only.
+ * `tries`: draws to make before giving up. */
+static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage,
+                             uint32_t tries) {
     int mode = _box_mode();
     if (mode == 0) return 0;
     if (mode == 1 && ctx->box_state == BOX_OFF) return 0;
@@ -1296,7 +1307,7 @@ static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage) {
      * are chosen first, by the search. */
     if (ctx->var_order && !last_stage) return 0;
 
-    for (uint32_t t = 0; t < DVS_BOX_TRIES; t++) {
+    for (uint32_t t = 0; t < tries; t++) {
         int r = _box_try(ctx, base);
         if (r == 1) return 1;
         if (r < 0) return 0;
@@ -1889,14 +1900,35 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                        && !opts->seq_pick;
     uint32_t box_stage_left = (box_ok && ctx->var_order) ? 4u : 0u;
     if (box_ok) {
-        if (_box_sample(ctx, base, 0)) return DVS_SOLVE_OK;
-        if (ABORTED()) return DVS_SOLVE_TIMEOUT;
-        /* Where the box tier is off, few solutions may be listed instead. */
-        if (!ctx->var_order && ctx->box_state == BOX_OFF) {
+        /* Every tier below is uniform over solutions, so any mix of them
+         * is too; the search after them is not. Order is for speed: a
+         * listed solution is one pin, a box draw 1/rate tries on average.
+         * The probe has run once box_state is not BOX_UNPROBED; before
+         * then, or when the box declined (a dist, one variable), the
+         * enumeration tier is not used either. */
+        const int listed = !ctx->var_order && ctx->box_state != BOX_UNPROBED
+                           && ctx->enum_state == ENUM_ON;
+        if (listed) {
             int er = _enum_sample(ctx, base);
             if (ABORTED()) return DVS_SOLVE_TIMEOUT;
             if (er == 1) return DVS_SOLVE_OK;
             if (er == 2) return DVS_SOLVE_UNSAT;
+        }
+        if (_box_sample(ctx, base, 0, DVS_BOX_TRIES)) return DVS_SOLVE_OK;
+        if (ABORTED()) return DVS_SOLVE_TIMEOUT;
+        /* The box is off, or its draws missed: few solutions may be listed
+         * instead. A miss used to go straight to the search, which made a
+         * solve a mix of an exact draw and a biased one. */
+        if (!listed && !ctx->var_order && ctx->box_state != BOX_UNPROBED) {
+            int er = _enum_sample(ctx, base);
+            if (ABORTED()) return DVS_SOLVE_TIMEOUT;
+            if (er == 1) return DVS_SOLVE_OK;
+            if (er == 2) return DVS_SOLVE_UNSAT;
+        }
+        /* Too many solutions to list: keep drawing from the box. */
+        if (!ctx->var_order && ctx->box_state == BOX_ON) {
+            if (_box_sample(ctx, base, 0, DVS_BOX_RETRIES)) return DVS_SOLVE_OK;
+            if (ABORTED()) return DVS_SOLVE_TIMEOUT;
         }
     }
 
@@ -1942,7 +1974,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (box_stage_left && _order_key(ctx, x_id) == DVS_ORDER_LAST
                 && !(ctx->vars[x_id].flags & VAR_AUX)) {
             box_stage_left--;
-            if (_box_sample(ctx, ctx->decision_level, 1)) return DVS_SOLVE_OK;
+            if (_box_sample(ctx, ctx->decision_level, 1, DVS_BOX_TRIES)) return DVS_SOLVE_OK;
             if (ABORTED()) return DVS_SOLVE_TIMEOUT;
         }
         int64_t v = _pick_value(ctx, x_id, opts);
