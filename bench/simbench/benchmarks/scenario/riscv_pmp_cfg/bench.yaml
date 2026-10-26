@@ -1,0 +1,4 @@
+id: scenario.riscv_pmp_cfg
+tier: standard
+tags: [scenario, protocol, isa]
+fields: [a_mode, r, w, x, l, pmpaddr, napot_g]

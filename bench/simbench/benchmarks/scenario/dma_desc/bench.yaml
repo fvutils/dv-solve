@@ -1,0 +1,4 @@
+id: scenario.dma_desc
+tier: standard
+tags: [scenario, protocol, sum]
+fields: [src, dst, len, width, chain, next]
