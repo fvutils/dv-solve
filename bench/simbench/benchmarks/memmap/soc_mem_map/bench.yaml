@@ -1,0 +1,4 @@
+id: memmap.soc_mem_map
+tier: smoke
+tags: [memmap, address, sum, ordering]
+fields: [r0_base, r0_size, r0_end, r1_base, r1_size, r1_end, r2_base, r2_size, r2_end, r3_base, r3_size, r3_end]

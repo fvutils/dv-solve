@@ -1,0 +1,4 @@
+id: memmap.mem_partition_knapsack
+tier: standard
+tags: [memmap, sum, knapsack]
+fields: [s0, s1, s2, s3, s4, s5, s6, s7, off0, off1, off2, off3, off4, off5, off6, off7, total]

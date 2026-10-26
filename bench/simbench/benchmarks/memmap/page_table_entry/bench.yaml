@@ -1,0 +1,4 @@
+id: memmap.page_table_entry
+tier: standard
+tags: [memmap, implication, bitfield]
+fields: [level, v, r, w, x, u, g, a, d, rsw, ppn]
