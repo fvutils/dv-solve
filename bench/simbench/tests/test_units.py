@@ -43,27 +43,27 @@ def test_expand():
 
 def test_default_configs():
     cfgs = load_configs(environ={}, detect=False)
-    assert list(cfgs) == ["vlt-z3", "vlt-dvs", "vlt-dvs-native", "vlt540-z3"]
-    c = cfgs["vlt-dvs-native"]
+    assert list(cfgs) == ["vlt-z3-default", "vlt-dvs-solver", "vlt-dvs-default", "vlt540-z3"]
+    c = cfgs["vlt-dvs-solver"]
     assert c.run_env()["VERILATOR_SOLVER"].endswith("dv-solve-smt2")
     assert c.run_plusargs() == ["+verilator+rand+sampler+solver"]
     assert cfgs["vlt540-z3"].run_plusargs() == []
-    assert cfgs["vlt-z3"].run_env() == {"VERILATOR_SOLVER": "z3 --in"}
+    assert cfgs["vlt-z3-default"].run_env() == {"VERILATOR_SOLVER": "z3 --in"}
 
 
 def test_missing_tool_unavailable(tmp_path):
     f = tmp_path / "local.yaml"
     f.write_text("configs:\n"
-                 "  - id: vlt-z3\n    tool: /nonexistent/verilator\n    solver: z3 --in\n"
+                 "  - id: vlt-z3-default\n    tool: /nonexistent/verilator\n    solver: z3 --in\n"
                  "  - id: nosolver\n    tool: ${SH}\n    solver: /nonexistent/solver\n"
                  "  - id: ok\n    tool: ${SH}\n    solver: ${SH} -c x\n    sampler: solver\n")
     env = {"SIMBENCH_CONFIGS": str(f), "SH": "/bin/sh"}
     cfgs = load_configs(environ=env)
-    assert not cfgs["vlt-z3"].available and "simulator not found" in cfgs["vlt-z3"].reason
+    assert not cfgs["vlt-z3-default"].available and "simulator not found" in cfgs["vlt-z3-default"].reason
     assert not cfgs["nosolver"].available and "solver not found" in cfgs["nosolver"].reason
     assert cfgs["ok"].available, cfgs["ok"].reason
     # Local file overrides by id but keeps the rest of the defaults
-    assert "vlt-dvs" in cfgs
+    assert "vlt-dvs-default" in cfgs
 
 
 def test_detect_here():
@@ -89,7 +89,7 @@ def test_record_validates(tmp_path):
     from dv_solve_simbench.config import Config
     from dv_solve_simbench.runner import Bench
     schema = _perf_schema()
-    cfg = Config(id="vlt-z3", simulator="verilator", tool="/nonexistent/verilator", solver="z3 --in")
+    cfg = Config(id="vlt-z3-default", simulator="verilator", tool="/nonexistent/verilator", solver="z3 --in")
     bench = Bench(id="construct.range", tier="smoke", path="bench.sv")
     ok = records.make_record(cfg, bench, parse_result(LINE), {"n": 200, "seed": 1}, 0.1)
     bad = records.make_record(cfg, bench, None, {"n": 200, "seed": 1}, 0.1, error="BuildError: x")

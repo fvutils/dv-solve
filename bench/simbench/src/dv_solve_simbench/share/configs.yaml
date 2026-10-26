@@ -10,24 +10,28 @@
 #   plusargs:  extra plusargs for every run
 #   env:       extra environment for every run
 configs:
-  - id: vlt-z3
+  # Primary (A): dev Verilator, z3 via SMT-LIB pipe, Verilator's own sampler.
+  - id: vlt-z3-default
     simulator: verilator
     tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
     solver: z3 --in
     sampler: default
 
-  - id: vlt-dvs
-    simulator: verilator
-    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
-    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
-    sampler: default
-
-  - id: vlt-dvs-native
+  # Primary (B): dev Verilator, dv-solve-smt2, dv-solve does the sampling.
+  - id: vlt-dvs-solver
     simulator: verilator
     tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
     solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
     sampler: solver
 
+  # Secondary: dev Verilator, dv-solve-smt2 as a plain SMT solver, Verilator sampler.
+  - id: vlt-dvs-default
+    simulator: verilator
+    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
+    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    sampler: default
+
+  # Secondary: stock Verilator on PATH with z3 (no sampler control).
   - id: vlt540-z3
     simulator: verilator
     tool: ${SIMBENCH_VERILATOR:-verilator}
