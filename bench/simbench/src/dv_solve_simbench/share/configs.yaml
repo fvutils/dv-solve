@@ -10,6 +10,11 @@
 #   version:   optional; text that must appear in `tool --version` (test fails otherwise)
 #   plusargs:  extra plusargs for every run
 #   env:       extra environment for every run
+#   replay:    optional; bench_vlt_replay executable. The Verilator run then only
+#              captures the solver session (+verilator+solver+file+), and the
+#              timing comes from replaying that session through dv-solve
+#              in-process (no Verilator, no pipe); see standalone.py.
+#   replay_pass: bench_vlt_replay pass to time (default api-cache)
 configs:
   # Primary (A): dev Verilator, z3 via SMT-LIB pipe, Verilator's own sampler.
   - id: vlt-z3-default
@@ -26,6 +31,17 @@ configs:
     version: "5.053 devel"
     solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
     sampler: solver
+
+  # Primary (C): dv-solve alone on the same constraints. B's session (same
+  # n/seed, solver sampler) is captured, then replayed through the dv-solve
+  # builder API with compiled contexts reused; Verilator is not timed.
+  - id: dvs-standalone
+    simulator: verilator
+    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
+    version: "5.053 devel"
+    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    sampler: solver
+    replay: ${SIMBENCH_DVS_REPLAY:-~/projects/verilator/verilator-sampler-control/dv-solve/build/bench_vlt_replay}
 
   # Secondary: dev Verilator, dv-solve-smt2 as a plain SMT solver, Verilator sampler.
   - id: vlt-dvs-default

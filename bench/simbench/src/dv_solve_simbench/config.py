@@ -44,6 +44,8 @@ class Config:
     version: Optional[str] = None     # substring required in `tool --version`
     plusargs: List[str] = dc.field(default_factory=list)
     env: Dict[str, str] = dc.field(default_factory=dict)
+    replay: Optional[str] = None      # bench_vlt_replay: time the captured session without Verilator
+    replay_pass: str = "api-cache"
     available: bool = False
     reason: str = ""
 
@@ -75,6 +77,12 @@ class Config:
             if not words or _which(words[0]) is None:
                 self.available, self.reason = False, "solver not found: %s" % self.solver
                 return self
+        if self.replay:
+            replay = _which(self.replay)
+            if replay is None:
+                self.available, self.reason = False, "replay tool not found: %s" % self.replay
+                return self
+            self.replay = replay
         if self.sampler not in (None, "default", "solver"):
             self.available, self.reason = False, "bad sampler %r" % self.sampler
             return self
@@ -99,7 +107,9 @@ def _parse(path: str, environ) -> List[Config]:
             sampler=c.get("sampler"),
             version=str(c["version"]) if c.get("version") else None,
             plusargs=[expand(str(p), environ) for p in c.get("plusargs", [])],
-            env={k: expand(str(v), environ) for k, v in (c.get("env") or {}).items()}))
+            env={k: expand(str(v), environ) for k, v in (c.get("env") or {}).items()},
+            replay=expand(str(c["replay"]), environ) if c.get("replay") else None,
+            replay_pass=str(c.get("replay_pass") or "api-cache")))
     return ret
 
 

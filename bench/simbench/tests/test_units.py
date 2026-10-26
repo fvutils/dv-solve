@@ -43,7 +43,10 @@ def test_expand():
 
 def test_default_configs():
     cfgs = load_configs(environ={}, detect=False)
-    assert list(cfgs) == ["vlt-z3-default", "vlt-dvs-solver", "vlt-dvs-default", "vlt540-z3"]
+    assert list(cfgs) == ["vlt-z3-default", "vlt-dvs-solver", "dvs-standalone",
+                          "vlt-dvs-default", "vlt540-z3"]
+    assert cfgs["dvs-standalone"].replay.endswith("bench_vlt_replay")
+    assert cfgs["vlt-dvs-solver"].replay is None
     c = cfgs["vlt-dvs-solver"]
     assert c.run_env()["VERILATOR_SOLVER"].endswith("dv-solve-smt2")
     assert c.run_plusargs() == ["+verilator+rand+sampler+solver"]
@@ -107,3 +110,13 @@ def test_dev_configs_want_dev_verilator():
     for cid in ("vlt-z3-default", "vlt-dvs-solver", "vlt-dvs-default"):
         assert cfgs[cid].version == "5.053 devel"
     assert cfgs["vlt540-z3"].version is None
+
+
+def test_parse_replay():
+    from dv_solve_simbench.standalone import parse_replay
+    text = ("api-cache  wall   0.000 s     14.7 us/check-sat   (CPU 0.000 s; 2 distinct, "
+            "29 reused; 0 CDCL answers escalated to bitblast, 0 bitblast failures, 1 unsolved)\n"
+            "             solve+read         0.000 s     13.0 us\n"
+            "               on a reused context: 12.1 us per call; on a new one: 25.9 us\n")
+    assert parse_replay(text, "api-cache") == {"us_per_check": 14.7, "failures": 1, "us_new": 25.9}
+    assert parse_replay(text, "api") is None

@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from dv_solve_simbench import records
+from dv_solve_simbench import records, standalone
 from dv_solve_simbench.config import load_configs
 from dv_solve_simbench.runner import build, find_benches, probe_sampler, run
 
@@ -40,9 +40,14 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
                 raise RuntimeError("%s: %s reports %r; config wants %r"
                                    % (cfg.id, cfg.tool, ver, cfg.version))
         exe = build(cfg, bench, build_cache)
-        out = run(cfg, exe, str(tmp_path),
-                  ["+sb_n=%d" % N, "+sb_seed=%d" % SEED,
-                   "+sb_dump=%s" % (tmp_path / "dump.txt")])
+        plusargs = ["+sb_n=%d" % N, "+sb_seed=%d" % SEED,
+                    "+sb_dump=%s" % (tmp_path / "dump.txt")]
+        session = str(tmp_path / "session.smt2")
+        if cfg.replay:
+            plusargs.append(standalone.session_plusarg(session))
+        out = run(cfg, exe, str(tmp_path), plusargs)
+        if cfg.replay:
+            out = standalone.replay(cfg, out, session, str(tmp_path))
         active = probe_sampler(cfg, exe, str(tmp_path / "probe"))
         if cfg.sampler and active != cfg.sampler:
             raise RuntimeError("%s: image ran sampler %r; config wants %r"
