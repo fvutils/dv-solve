@@ -39,13 +39,16 @@ package simbench_pkg;
       int failures = 0;
       int check_errors = 0;
       int done = 0;
+      process proc;
       longint t0, t1, t_end, first_call_ns, elapsed_ns;
 
       void'($value$plusargs("sb_n=%d", n));
       void'($value$plusargs("sb_warmup=%d", warmup));
       void'($value$plusargs("sb_timeout_ns=%d", timeout_ns));
-      if ($value$plusargs("sb_seed=%d", seed))
-        process::self().srandom(seed);
+      if ($value$plusargs("sb_seed=%d", seed)) begin
+        proc = process::self();
+        proc.srandom(seed);
+      end
       if ($value$plusargs("sb_dump=%s", dump_file)) begin
         fd = $fopen(dump_file, "w");
         if (fd == 0) $display("SIMBENCH_ERROR cannot open dump file %s", dump_file);
