@@ -1,0 +1,4 @@
+id: scenario.pcie_tlp
+tier: standard
+tags: [scenario, protocol, implication]
+fields: [tlp_type, length, address, first_be, last_be, tag, fmt]
