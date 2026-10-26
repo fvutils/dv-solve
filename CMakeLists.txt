@@ -522,6 +522,12 @@ add_executable(bench_inproc
 target_link_libraries(bench_inproc PRIVATE dv_solve)
 target_include_directories(bench_inproc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 
+# The rand-core suite's C-API arm: compile a problem buffer once, then time
+# N x (reset, solve, get values) with no Python in the timed path.
+add_executable(bench_rand_capi tests/c/bench_rand_capi.c)
+target_link_libraries(bench_rand_capi PRIVATE dv_solve)
+target_include_directories(bench_rand_capi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+
 # Replays a captured Verilator session over a pipe, through the in-process
 # SMT-LIB front end, and through the builder API (cold and with a compiled-
 # context cache), to cost each layer of the SMT-LIB integration.

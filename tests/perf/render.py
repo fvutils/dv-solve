@@ -301,6 +301,7 @@ RAND = "rand-core"
 RARMS = {
     "uniform": "true random (ideal)",
     "dv-api@head": "dv-solve API",
+    "dv-capi@head": "dv-solve C API",
     "dv-swizzle@head": "Verilator + dv-solve",
     "dv-swizzle-nohash@head": "Verilator + dv-solve, parity ignored",
     "dv-seed@head": "dv-solve, SMT-LIB2 :random-seed",

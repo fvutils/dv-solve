@@ -21,6 +21,7 @@ evaluator; a model that violates them makes the run invalid.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import random
@@ -44,7 +45,7 @@ _REPO = Path(__file__).resolve().parents[2]
 @dataclass
 class Arm:
     name: str
-    kind: str                 # uniform | swizzle | api | seed
+    kind: str                 # uniform | swizzle | api | capi | seed
     argv: list = field(default_factory=list)
     env: dict = field(default_factory=dict)
     build: str = "ref"        # head | anchor | ref
@@ -54,6 +55,8 @@ def make_arms(head: Path, anchor: Path | None, tools: dict) -> list:
     lib = {"DVS_SOLVER_PATH": str(Path(head).resolve().parent)}
     arms = [Arm("uniform", "uniform"),
             Arm("dv-api@head", "api", env=lib, build="head"),
+            Arm("dv-capi@head", "capi", [str(Path(head).resolve().parent / "bench_rand_capi")],
+                env=lib, build="head"),
             Arm("dv-swizzle@head", "swizzle",
                 [str(head), "--interactive", "--mode=verilator"], build="head"),
             # The same build told to skip Verilator's parity asserts: both
@@ -100,6 +103,8 @@ def _uniform(b: Bench, n: int, seed: int, space: list) -> dict:
     rng = random.Random(seed)
     if b.bins is None:
         models = [rng.choice(space) for _ in range(n)]
+    elif len(b.bins) > 2:                   # the bench's own exact draw
+        models = [tuple(m[k] for k in b.names) for m in (b.bins[2](rng) for _ in range(n))]
     else:                                   # rejection sampling over the bits
         models = []
         while len(models) < n:
@@ -141,6 +146,46 @@ def _api(b: Bench, n: int, seed: int, env: dict) -> dict:
             wall.append(time.perf_counter() - w0)
             models.append(m)
     return {"models": models, "cpu_s": cpu, "wall_s": wall, "checks": n}
+
+
+def _problem_bytes(b: Bench) -> bytes:
+    """The bench as a problem buffer, lowered as the API arm lowers it."""
+    import sys
+    if str(_REPO / "src") not in sys.path:
+        sys.path.insert(0, str(_REPO / "src"))
+    from dv_solve.builder import SolveProblemBuilder
+    from tests.formal.soundness.doors import _lower
+    ids = {k: i for i, k in enumerate(b.names)}
+    bld = SolveProblemBuilder()
+    for k in b.names:
+        w = b.widths[k]
+        bld.add_var(ids[k], width=w, is_signed=False, lo=0, hi=(1 << w) - 1)
+    for c in b.cons:
+        bld.add_constraint(_lower(bld, c, ids))
+    return bld.finalize_bytes()
+
+
+def _capi(b: Bench, arm: Arm, n: int, seed: int) -> dict:
+    """tests/c/bench_rand_capi: the C API with no Python in the timed path.
+    Times are the binary's per-draw thread CPU time, so cpu_s and wall_s are
+    the same list."""
+    import tempfile
+    os.environ.update(arm.env)      # the builder loads this build's library too
+    with tempfile.TemporaryDirectory() as d:
+        pf, mf = Path(d) / "p.dvsp", Path(d) / "m.out"
+        pf.write_bytes(_problem_bytes(b))
+        p = subprocess.run([*arm.argv, str(pf), str(len(b.names)), str(n), str(seed), str(mf)],
+                           capture_output=True, text=True, env={**os.environ, **arm.env})
+        summ = json.loads(p.stdout.strip().splitlines()[-1])
+        if summ.get("compile_rc") or summ.get("ok") != n:
+            raise RuntimeError(f"{arm.name}: {summ}")
+        masks = [(1 << b.widths[k]) - 1 for k in b.names]
+        models, ts = [], []
+        for line in mf.read_text().splitlines():
+            f = line.split()
+            ts.append(float(f[1]) * 1e-9)
+            models.append(tuple(int(v) & mk for v, mk in zip(f[2:], masks)))
+    return {"models": models, "cpu_s": ts, "wall_s": ts, "checks": n}
 
 
 def _swizzle(b: Bench, arm: Arm, n: int, seed: int) -> dict:
@@ -243,6 +288,8 @@ def run_one(job: tuple) -> dict:
             r = _api(b, n, seed, arm.env)
         elif arm.kind == "seed":
             r = _seeded(b, arm, n, seed)
+        elif arm.kind == "capi":
+            r = _capi(b, arm, n, seed)
         else:
             r = _swizzle(b, arm, n, seed)
     except Exception as e:                  # recorded, never fatal to the suite

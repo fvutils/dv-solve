@@ -14,6 +14,13 @@
     {"name": "bit_mask"},
     {"name": "addr_aligned"},
     {"name": "packet"},
-    {"name": "crc_filter"}
+    {"name": "crc_filter"},
+    {"name": "cond_weight"},
+    {"name": "order_chain_a0"},
+    {"name": "order_chain_a5"},
+    {"name": "order_chain_a9"},
+    {"name": "sum_unique"},
+    {"name": "linear_sys"},
+    {"name": "sum3_const"}
   ]
 }
