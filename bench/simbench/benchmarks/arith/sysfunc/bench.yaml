@@ -1,0 +1,4 @@
+id: arith.sysfunc
+tier: standard
+tags: [arith, sysfunc]
+fields: [n, lg]

@@ -1,0 +1,4 @@
+id: arith.alignment
+tier: standard
+tags: [arith, mask]
+fields: [addr, len]
