@@ -814,6 +814,23 @@ static WBox _wpick_box(const dvs_ctx_t *ctx) {
     return b;
 }
 
+/* x is an operand of a product of two open variables, or a square's root:
+ * those are drawn by _pick_mul_divisor and _mul_count_accept. A product
+ * with a fixed operand (`2 * c`) is a scaling, and is weighted. */
+static int _wpick_in_product(const dvs_ctx_t *ctx, uint32_t x) {
+    if (_tier(ctx, x) == 2) return 1;
+    for (uint32_t i = 0; i < ctx->n_mul_links; i++) {
+        const DvsMulLink *ml = &ctx->mul_links[i];
+        int xa = ml->a == x || dvs_value_src(ctx, ml->a) == x;
+        int xb = ml->b == x || dvs_value_src(ctx, ml->b) == x;
+        if (!xa && !xb) continue;
+        uint32_t o = xa ? ml->b : ml->a;
+        if (ml->a == ml->b || var_lo64(ctx, &ctx->vars[o]) != var_hi64(ctx, &ctx->vars[o]))
+            return 1;
+    }
+    return 0;
+}
+
 /* 1: a value for x is in *out. 0: draw uniformly instead. */
 static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t hi,
                                 int64_t *out) {
@@ -831,15 +848,6 @@ static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t 
      * drawn as before. The unordered ones, decided last, are weighted
      * given the ordered ones. */
     if (_order_key(ctx, x) != DVS_ORDER_LAST) return 0;
-    /* A variable in a linear equality is not weighted (A4 in the plan):
-     * propagation through a sum narrows only its lower bounds today, so
-     * the weights of `a + b + c == 200` came out flat at the root, and
-     * `sum_unique` paid 11x the time for a small gain. */
-    for (uint32_t g = 0; g < ctx->n_eq_grp; g++)
-        for (uint32_t j = ctx->eq_grp_off[g]; j < ctx->eq_grp_off[g + 1]; j++) {
-            uint32_t i = ctx->eq_grp[j];
-            if (i == x || (ctx->var_alias && ctx->var_alias[i] == x)) return 0;
-        }
     /* With no other counted variable open, every bucket's weight is just
      * its feasible size: the uniform draw (and redraw on a conflict) is
      * already exact, and cheaper. */
@@ -968,7 +976,7 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
         ctx->dist_offsets[var_id] != 0) {
         v = _pick_value_dist(ctx, var_id, lo, hi);
     } else if (opts && opts->seed != 0 && ctx->fair_pick && !opts->seq_pick
-               && !ctx->n_mul_links && !(ctx->vars[var_id].flags & VAR_AUX)
+               && !_wpick_in_product(ctx, var_id) && !(ctx->vars[var_id].flags & VAR_AUX)
                && _wpick_enabled() && _pick_value_weighted(ctx, var_id, lo, hi, &v)) {
         /* drawn by weight, holes already avoided */
     } else {

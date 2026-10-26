@@ -2100,6 +2100,51 @@ static PropResult _bv_mul_divisors(dvs_ctx_t *ctx, uint32_t rid, uint32_t aid,
     return PROP_OK;
 }
 
+/* r = a + b, unsigned, where a + b cannot carry: r is the integer sum, so
+ * a <= hi(r) - lo(b) and a >= lo(r) - hi(b), and likewise for b. The
+ * modular backward step above cannot see this when r - b wraps as an
+ * interval (r = 200, b in [0,255]: r - b spans 2^w - 55 .. 200), so it
+ * kept a's upper bound, and a sum of extends `zext(a) + zext(b) + zext(c)
+ * == 200` never narrowed an operand's upper bound (A4b in
+ * docs/accuracy_closure_plan.md). The conditions are those under which
+ * _explain_bvsum_lifted explains each bound it sets. */
+static int _bvsum_exact(dvs_ctx_t *ctx, uint32_t X, uint32_t Y, uint32_t Z, uint8_t w) {
+    if (w == 0 || w > 64 || Y == Z || ctx->vars[X].width != w) return 0;
+    const uint32_t ids[3] = { X, Y, Z };
+    for (int i = 0; i < 3; i++) {
+        const Variable *v = &ctx->vars[ids[i]];
+        if ((v->flags & VAR_SIGNED) || v->width == 0 || v->width > w) return 0;
+    }
+    uint64_t s;
+    return !dvs_add_u64_ovf((uint64_t)var_hi64(ctx, &ctx->vars[Y]),
+                            (uint64_t)var_hi64(ctx, &ctx->vars[Z]), &s)
+           && s < _bv_mask(w);
+}
+
+static PropResult _bvsum_exact_back(dvs_ctx_t *ctx, uint32_t X, uint32_t Y, uint32_t Z,
+                                    uint8_t w) {
+    PropResult res;
+    for (int side = 0; side < 2; side++) {
+        if (!_bvsum_exact(ctx, X, Y, Z, w)) return PROP_OK;
+        uint32_t y = side ? Z : Y, o = side ? Y : Z;
+        uint64_t xl = (uint64_t)var_lo64(ctx, &ctx->vars[X]);
+        uint64_t xh = (uint64_t)var_hi64(ctx, &ctx->vars[X]);
+        uint64_t ol = (uint64_t)var_lo64(ctx, &ctx->vars[o]);
+        uint64_t oh = (uint64_t)var_hi64(ctx, &ctx->vars[o]);
+        uint64_t yl = (uint64_t)var_lo64(ctx, &ctx->vars[y]);
+        uint64_t yh = (uint64_t)var_hi64(ctx, &ctx->vars[y]);
+        /* hi(r) < lo(b) is left to the forward step, which then finds
+         * lo(a) + lo(b) > hi(r). */
+        if (xh >= ol && xh - ol < yh
+                && (res = ctx_tighten_ub64(ctx, y, (int64_t)(xh - ol))) != PROP_OK)
+            return res;
+        if (xl > oh && xl - oh > yl
+                && (res = ctx_tighten_lb64(ctx, y, (int64_t)(xl - oh))) != PROP_OK)
+            return res;
+    }
+    return PROP_OK;
+}
+
 static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
@@ -2124,6 +2169,7 @@ static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
         ModIv Ac = _var_modiv(ctx, aid, w);
         ModIv Bnew = _modiv_add(Rc, _modiv_neg(Ac, w), w);
         if ((res = _tighten_to_modiv(ctx, bid, Bnew, w)) != PROP_OK) return res;
+        if ((res = _bvsum_exact_back(ctx, rid, aid, bid, w)) != PROP_OK) return res;
     } else if (op == DVS_BIN_SUB) {
         ModIv R = _modiv_add(A, _modiv_neg(B, w), w);
         if ((res = _tighten_to_modiv(ctx, rid, R, w)) != PROP_OK) return res;
@@ -2281,12 +2327,25 @@ static int _explain_bvsum_lifted(dvs_ctx_t *ctx, uint32_t X, uint32_t Y, uint32_
         if (dvs_add_u64_ovf(B, HI(O), &t) || t > mask || LO(X) < t) return -1;
         LIT(X, 1, t);
         LIT(O, 0, HI(O));
-    } else {                              /* X >= hi(O) (no borrow), X <= B + lo(O) */
-        if (LO(X) < HI(O)) return -1;
+    } else if (LO(X) >= HI(O)) {          /* X >= hi(O) (no borrow), X <= B + lo(O) */
         if (dvs_add_u64_ovf(B, LO(O), &t) || HI(X) > t) return -1;
         LIT(X, 0, t);
         LIT(O, 1, LO(O));
         LIT(X, 1, HI(O));
+        LIT(O, 0, HI(O));
+    } else {                              /* var + O cannot carry, X <= B + lo(O) */
+        /* var <= mask - hi(O) and O <= hi(O) keep var + O below 2^w, so
+         * X == var + O over the integers and var <= hi(X) - lo(O). The
+         * literal on var itself is strictly weaker than `need` (see
+         * _bvsum_exact: hi(var) + hi(O) < mask), so it is no circular
+         * reason. */
+        uint64_t s;
+        if (dvs_add_u64_ovf(HI(var_id), HI(O), &s) || s >= mask) return -1;
+        if (dvs_add_u64_ovf(B, LO(O), &t) || HI(X) > t) return -1;
+        if (mask - HI(O) <= B) return -1;
+        LIT(X, 0, t);
+        LIT(O, 1, LO(O));
+        LIT(var_id, 0, mask - HI(O));
         LIT(O, 0, HI(O));
     }
     return 0;

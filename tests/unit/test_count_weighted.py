@@ -107,8 +107,6 @@ def test_order_chain(k):
     _check(f"order_chain_a{k}")
 
 
-@pytest.mark.xfail(strict=True, reason="A4: propagation through a sum narrows only lower bounds, "
-                                        "so equality variables are not weighted yet")
 @pytest.mark.parametrize("name", ["sum_unique", "linear_sys", "sum3_const"])
 def test_equality_sums(name):
     _check(name)
