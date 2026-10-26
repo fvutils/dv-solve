@@ -95,7 +95,8 @@ def utc_now() -> str:
 
 
 def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dict,
-                loadavg_start: float, error: str = "", utc: Optional[str] = None) -> dict:
+                loadavg_start: float, error: str = "", utc: Optional[str] = None,
+                sampler_active: Optional[str] = None) -> dict:
     """Run record for one run; `result` is None when no SIMBENCH_RESULT was seen."""
     valid = result is not None and result.ok and not error
     rec = {
@@ -104,7 +105,8 @@ def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dic
         "machine": machine(loadavg_start, _loadavg()),
         "tools": {"lock_sha": None, "simulator": cfg.simulator, "simulator_path": cfg.tool,
                   "simulator_version": tool_version(cfg.tool),
-                  "solver": cfg.solver, "sampler": cfg.sampler},
+                  "solver": cfg.solver, "sampler": cfg.sampler,
+                  "sampler_active": sampler_active},
         "calib": {},
         "simbench": {
             "v": SIMBENCH, "config": cfg.id, "bench": bench.id, "tier": bench.tier,

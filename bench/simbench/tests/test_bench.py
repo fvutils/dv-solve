@@ -5,7 +5,7 @@ import pytest
 
 from dv_solve_simbench import records
 from dv_solve_simbench.config import load_configs
-from dv_solve_simbench.runner import build, find_benches, run
+from dv_solve_simbench.runner import build, find_benches, probe_sampler, run
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIGS = load_configs()
@@ -43,6 +43,10 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
         out = run(cfg, exe, str(tmp_path),
                   ["+sb_n=%d" % N, "+sb_seed=%d" % SEED,
                    "+sb_dump=%s" % (tmp_path / "dump.txt")])
+        active = probe_sampler(cfg, exe, str(tmp_path / "probe"))
+        if cfg.sampler and active != cfg.sampler:
+            raise RuntimeError("%s: image ran sampler %r; config wants %r"
+                               % (cfg.id, active, cfg.sampler))
     except Exception as e:
         if simbench_out:
             records.append(simbench_out, records.make_record(
@@ -50,7 +54,7 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
         raise
     if simbench_out:
         records.append(simbench_out, records.make_record(
-            cfg, bench, out.result, params, load0))
+            cfg, bench, out.result, params, load0, sampler_active=active))
     assert out.result is not None, "no SIMBENCH_RESULT (rc=%d):\n%s" % (
         out.returncode, out.log[-4000:])
     assert out.result.ok, "bench failed: %s" % out.result

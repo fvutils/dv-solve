@@ -8,6 +8,7 @@ import dataclasses as dc
 import glob
 import hashlib
 import os
+import re
 import subprocess
 from typing import Dict, List, Optional
 
@@ -87,3 +88,23 @@ def run(cfg: Config, exe: str, rundir: str, plusargs: List[str],
         fp.write(p.stdout)
     return RunOutput(cmd=cmd, returncode=p.returncode, log=p.stdout,
                      result=parse_result(p.stdout))
+
+
+def probe_sampler(cfg: Config, exe: str, rundir: str, timeout: float = 120) -> Optional[str]:
+    """Sampler the image actually used, from a one-call run's solver log.
+
+    The dev Verilator runtime writes '; sampler: <name>' at the head of the
+    +verilator+solver+file+ log; a separate run keeps that log out of timing.
+    """
+    os.makedirs(rundir, exist_ok=True)
+    path = os.path.join(rundir, "probe.smt2")
+    env = dict(os.environ)
+    env.update(cfg.run_env())
+    cmd = [exe] + cfg.run_plusargs() + ["+sb_n=1", "+verilator+solver+file+" + path]
+    subprocess.run(cmd, cwd=rundir, env=env, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=timeout)
+    if not os.path.exists(path):
+        return None
+    with open(path) as fp:
+        m = re.search(r"^\s*; sampler: (\w+)", fp.read(65536), re.M)
+    return m.group(1) if m else None
