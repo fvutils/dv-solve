@@ -7,6 +7,7 @@
 #   tool:      simulator executable (path, or a name looked up on PATH)
 #   solver:    command line put in VERILATOR_SOLVER (its first word must exist)
 #   sampler:   default | solver | null (null: no sampler plusarg; stock Verilator)
+#   version:   optional; text that must appear in `tool --version` (test fails otherwise)
 #   plusargs:  extra plusargs for every run
 #   env:       extra environment for every run
 configs:
@@ -14,6 +15,7 @@ configs:
   - id: vlt-z3-default
     simulator: verilator
     tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
+    version: "5.053 devel"
     solver: z3 --in
     sampler: default
 
@@ -21,6 +23,7 @@ configs:
   - id: vlt-dvs-solver
     simulator: verilator
     tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
+    version: "5.053 devel"
     solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
     sampler: solver
 
@@ -28,6 +31,7 @@ configs:
   - id: vlt-dvs-default
     simulator: verilator
     tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
+    version: "5.053 devel"
     solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
     sampler: default
 

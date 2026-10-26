@@ -34,6 +34,11 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
     params = {"n": N, "seed": SEED}
     load0 = records._loadavg()
     try:
+        if cfg.version:
+            ver = records.tool_version(cfg.tool) or ""
+            if cfg.version not in ver:
+                raise RuntimeError("%s: %s reports %r; config wants %r"
+                                   % (cfg.id, cfg.tool, ver, cfg.version))
         exe = build(cfg, bench, build_cache)
         out = run(cfg, exe, str(tmp_path),
                   ["+sb_n=%d" % N, "+sb_seed=%d" % SEED,

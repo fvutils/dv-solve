@@ -41,6 +41,7 @@ class Config:
     tool: str
     solver: Optional[str] = None
     sampler: Optional[str] = None
+    version: Optional[str] = None     # substring required in `tool --version`
     plusargs: List[str] = dc.field(default_factory=list)
     env: Dict[str, str] = dc.field(default_factory=dict)
     available: bool = False
@@ -96,6 +97,7 @@ def _parse(path: str, environ) -> List[Config]:
             tool=expand(str(c["tool"]), environ),
             solver=expand(str(c["solver"]), environ) if c.get("solver") else None,
             sampler=c.get("sampler"),
+            version=str(c["version"]) if c.get("version") else None,
             plusargs=[expand(str(p), environ) for p in c.get("plusargs", [])],
             env={k: expand(str(v), environ) for k, v in (c.get("env") or {}).items()}))
     return ret

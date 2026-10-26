@@ -102,7 +102,7 @@ def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dic
         "schema": SCHEMA, "valid": valid, "kind": KIND,
         "run": dict(run_info(), utc=utc or utc_now()),
         "machine": machine(loadavg_start, _loadavg()),
-        "tools": {"lock_sha": None, "simulator": cfg.simulator,
+        "tools": {"lock_sha": None, "simulator": cfg.simulator, "simulator_path": cfg.tool,
                   "simulator_version": tool_version(cfg.tool),
                   "solver": cfg.solver, "sampler": cfg.sampler},
         "calib": {},

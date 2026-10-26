@@ -100,3 +100,10 @@ def test_record_validates(tmp_path):
     for rec in records.load(out):
         assert schema.validate(rec) == []
     assert ok["simbench"]["result"]["ns_per_call"] == 445000.0
+
+
+def test_dev_configs_want_dev_verilator():
+    cfgs = load_configs(environ={}, detect=False)
+    for cid in ("vlt-z3-default", "vlt-dvs-solver", "vlt-dvs-default"):
+        assert cfgs[cid].version == "5.053 devel"
+    assert cfgs["vlt540-z3"].version is None
