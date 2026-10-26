@@ -1,0 +1,4 @@
+id: array.array_ordering
+tier: standard
+tags: [array, ordering]
+fields: [a]
