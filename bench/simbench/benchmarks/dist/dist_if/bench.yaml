@@ -1,0 +1,4 @@
+id: dist.dist_if
+tier: standard
+tags: [dist, dist, implication]
+fields: [mode, len]
