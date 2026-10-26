@@ -1,0 +1,35 @@
+# Simbench configurations: simulator + solver + sampler.
+# Values may use ~ and ${VAR} / ${VAR:-default}. Extra configs can be added
+# from a local file named by SIMBENCH_CONFIGS (same format; same id overrides).
+#
+# Fields:
+#   simulator: verilator (only one supported so far)
+#   tool:      simulator executable (path, or a name looked up on PATH)
+#   solver:    command line put in VERILATOR_SOLVER (its first word must exist)
+#   sampler:   default | solver | null (null: no sampler plusarg; stock Verilator)
+#   plusargs:  extra plusargs for every run
+#   env:       extra environment for every run
+configs:
+  - id: vlt-z3
+    simulator: verilator
+    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
+    solver: z3 --in
+    sampler: default
+
+  - id: vlt-dvs
+    simulator: verilator
+    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
+    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    sampler: default
+
+  - id: vlt-dvs-native
+    simulator: verilator
+    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
+    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    sampler: solver
+
+  - id: vlt540-z3
+    simulator: verilator
+    tool: ${SIMBENCH_VERILATOR:-verilator}
+    solver: z3 --in
+    sampler: null
