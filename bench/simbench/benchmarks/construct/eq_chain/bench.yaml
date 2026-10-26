@@ -1,0 +1,4 @@
+id: construct.eq_chain
+tier: standard
+tags: [construct, equality]
+fields: [a, b, c, d]

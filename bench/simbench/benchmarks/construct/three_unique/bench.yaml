@@ -1,0 +1,4 @@
+id: construct.three_unique
+tier: standard
+tags: [construct, unique]
+fields: [a, b, c]

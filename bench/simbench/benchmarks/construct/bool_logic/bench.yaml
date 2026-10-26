@@ -1,0 +1,4 @@
+id: construct.bool_logic
+tier: standard
+tags: [construct, logic]
+fields: [a, b, c, d, e, x]

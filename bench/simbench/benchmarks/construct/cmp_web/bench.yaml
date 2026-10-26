@@ -1,0 +1,4 @@
+id: construct.cmp_web
+tier: standard
+tags: [construct, inequality]
+fields: [a, b, c, d, e, f]

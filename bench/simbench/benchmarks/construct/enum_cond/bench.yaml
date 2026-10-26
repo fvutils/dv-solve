@@ -1,0 +1,4 @@
+id: construct.enum_cond
+tier: standard
+tags: [construct, enum, implication]
+fields: [cmd, len, addr]
