@@ -70,3 +70,33 @@ def test_detect_here():
     """Not an assertion on tools: every config gets a definite status."""
     for c in load_configs().values():
         assert c.available or c.reason
+
+
+def _perf_schema():
+    """dv-solve's tests/perf/schema.py when simbench runs from a dv-solve checkout."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tests", "perf", "schema.py")
+    if not os.path.isfile(path):
+        pytest.skip("tests/perf/schema.py not found")
+    spec = importlib.util.spec_from_file_location("perf_schema", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_record_validates(tmp_path):
+    from dv_solve_simbench import records
+    from dv_solve_simbench.config import Config
+    from dv_solve_simbench.runner import Bench
+    schema = _perf_schema()
+    cfg = Config(id="vlt-z3", simulator="verilator", tool="/nonexistent/verilator", solver="z3 --in")
+    bench = Bench(id="construct.range", tier="smoke", path="bench.sv")
+    ok = records.make_record(cfg, bench, parse_result(LINE), {"n": 200, "seed": 1}, 0.1)
+    bad = records.make_record(cfg, bench, None, {"n": 200, "seed": 1}, 0.1, error="BuildError: x")
+    assert ok["valid"] and not bad["valid"] and bad["reason"]
+    out = str(tmp_path / "r.jsonl")
+    records.append(out, ok)
+    records.append(out, bad)
+    for rec in records.load(out):
+        assert schema.validate(rec) == []
+    assert ok["simbench"]["result"]["ns_per_call"] == 445000.0
