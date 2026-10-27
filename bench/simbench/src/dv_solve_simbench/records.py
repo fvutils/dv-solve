@@ -82,9 +82,9 @@ def run_info() -> dict:
 
 
 @functools.lru_cache(maxsize=None)
-def tool_version(tool: str) -> Optional[str]:
+def tool_version(tool: str, flag: str = "--version") -> Optional[str]:
     try:
-        p = subprocess.run([tool, "--version"], capture_output=True, text=True, timeout=30)
+        p = subprocess.run([tool, flag], capture_output=True, text=True, timeout=30)
         return p.stdout.strip().splitlines()[0] if p.stdout.strip() else None
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -105,7 +105,7 @@ def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dic
         "run": dict(run_info(), utc=utc or utc_now()),
         "machine": machine(loadavg_start, _loadavg()),
         "tools": {"lock_sha": None, "simulator": cfg.simulator, "simulator_path": cfg.tool,
-                  "simulator_version": tool_version(cfg.tool),
+                  "simulator_version": tool_version(cfg.tool, cfg.version_flag),
                   "solver": cfg.solver, "sampler": cfg.sampler,
                   "sampler_active": sampler_active},
         "calib": {},

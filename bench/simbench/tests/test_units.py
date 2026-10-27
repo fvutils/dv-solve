@@ -45,7 +45,8 @@ def test_expand():
 def test_default_configs():
     cfgs = load_configs(environ={}, detect=False)
     assert list(cfgs) == ["vlt-z3-default", "vlt-dvs-solver", "dvs-standalone",
-                          "z3-standalone", "dvs-smt2-standalone", "vlt-dvs-default", "vlt540-z3"]
+                          "z3-standalone", "dvs-smt2-standalone", "vlt-dvs-default", "vlt540-z3",
+                          "vcs", "xcelium", "questa"]
     assert cfgs["dvs-standalone"].replay.endswith("bench_vlt_replay")
     assert cfgs["vlt-dvs-solver"].replay is None
     assert cfgs["z3-standalone"].replay_cmd == "z3 -smt2"
@@ -182,3 +183,61 @@ def test_extract_cmds_joins_wrapped(tmp_path):
     assert extract_cmds(str(log), str(out)) == 1
     assert out.read_text().splitlines() == [
         "(declare-fun w () (_ BitVec 32))", "(assert (= w #x0000001f))", "(check-sat)"]
+
+
+def _bench(tmp_path):
+    from dv_solve_simbench.runner import Bench
+    return Bench(id="g/b", tier="smoke", path=str(tmp_path / "bench.sv"))
+
+
+def test_build_cmds_verilator(tmp_path):
+    from dv_solve_simbench.runner import build_cmds, image_path, run_cmd
+    c = load_configs(environ={}, detect=False)["vlt-z3-default"]
+    c.tool = "/v/bin/verilator"
+    (cmd,) = build_cmds(c, _bench(tmp_path), "/b")
+    assert cmd[:7] == ["/v/bin/verilator", "--binary", "-Wno-fatal", "--top-module",
+                       "simbench_top", "-Mdir", "/b"]
+    assert cmd[7].endswith("simbench_pkg.sv") and cmd[-1].endswith("sb_time.c")
+    assert image_path(c, "/b") == "/b/Vsimbench_top"
+    assert run_cmd(c, "/b/Vsimbench_top", ["+sb_n=5"]) == [
+        "/b/Vsimbench_top", "+verilator+rand+sampler+default", "+sb_n=5"]
+
+
+def test_build_cmds_commercial(tmp_path):
+    from dv_solve_simbench.runner import build_cmds, image_path, run_cmd
+    cfgs = load_configs(environ={}, detect=False)
+    b = _bench(tmp_path)
+    vcs = cfgs["vcs"]
+    (cmd,) = build_cmds(vcs, b, "/b")
+    assert cmd[0] == "vcs" and "-sverilog" in cmd and cmd[-1].endswith("sb_time.c")
+    assert cmd[cmd.index("-o") + 1] == "/b/simv"
+    assert run_cmd(vcs, image_path(vcs, "/b"), ["+sb_n=5"]) == ["/b/simv", "+sb_n=5"]
+    assert vcs.run_env() == {} and vcs.version_flag == "-ID"
+    x = cfgs["xcelium"]
+    (cmd,) = build_cmds(x, b, "/b")
+    assert cmd[0] == "xrun" and "-elaborate" in cmd and cmd[cmd.index("-xmlibdirpath") + 1] == "/b"
+    assert run_cmd(x, image_path(x, "/b"), ["+sb_n=5"]) == [
+        "xrun", "-64bit", "-R", "-xmlibdirpath", "/b", "+sb_n=5"]
+    q = cfgs["questa"]
+    q.tool = "/q/bin/vsim"
+    vlib, vlog = build_cmds(q, b, "/b")
+    assert vlib == ["/q/bin/vlib", "/b/work"]
+    assert vlog[0] == "/q/bin/vlog" and vlog[-1].endswith("sb_time.c")
+    assert run_cmd(q, image_path(q, "/b"), ["+sb_n=5"]) == [
+        "/q/bin/vsim", "-c", "-lib", "/b/work", "simbench_top", "-do", "run -all; quit -f", "+sb_n=5"]
+
+
+def test_simulator_checks(tmp_path):
+    f = tmp_path / "local.yaml"
+    f.write_text("configs:\n"
+                 "  - id: bad\n    simulator: iverilog\n    tool: ${SH}\n"
+                 "  - id: vcs-solver\n    simulator: vcs\n    tool: ${SH}\n    solver: ${SH}\n"
+                 "  - id: vcs-ok\n    simulator: vcs\n    tool: ${SH}\n    build_args: [-cm, line]\n")
+    cfgs = load_configs(environ={"SIMBENCH_CONFIGS": str(f), "SH": "/bin/sh"})
+    assert not cfgs["bad"].available and "unsupported simulator" in cfgs["bad"].reason
+    assert not cfgs["vcs-solver"].available and "Verilator-only" in cfgs["vcs-solver"].reason
+    assert cfgs["vcs-ok"].available and cfgs["vcs-ok"].build_args == ["-cm", "line"]
+    from dv_solve_simbench.runner import BuildError, build_cmds
+    cfgs["bad"].simulator = "iverilog"
+    with pytest.raises(BuildError, match="unknown simulator"):
+        build_cmds(cfgs["bad"], _bench(tmp_path), "/b")

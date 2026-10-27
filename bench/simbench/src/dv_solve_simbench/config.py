@@ -28,6 +28,11 @@ def expand(value: str, environ: Optional[Dict[str, str]] = None) -> str:
                     for w in value.split(" "))
 
 
+# Simulators the runner can drive, and the flag that prints each tool's version.
+# Only Verilator has the solver/sampler controls (VERILATOR_SOLVER, sampler plusarg).
+SIMULATORS = {"verilator": "--version", "vcs": "-ID", "xcelium": "-version", "questa": "-version"}
+
+
 def _which(prog: str) -> Optional[str]:
     if os.sep in prog:
         return prog if os.path.isfile(prog) and os.access(prog, os.X_OK) else None
@@ -43,6 +48,7 @@ class Config:
     sampler: Optional[str] = None
     version: Optional[str] = None     # substring required in `tool --version`
     plusargs: List[str] = dc.field(default_factory=list)
+    build_args: List[str] = dc.field(default_factory=list)   # extra compile/elaborate args
     env: Dict[str, str] = dc.field(default_factory=dict)
     replay: Optional[str] = None      # bench_vlt_replay: time the captured session without Verilator
     replay_pass: str = "api,api-cache"
@@ -51,23 +57,33 @@ class Config:
     available: bool = False
     reason: str = ""
 
+    @property
+    def version_flag(self) -> str:
+        return SIMULATORS.get(self.simulator, "--version")
+
     def run_env(self) -> Dict[str, str]:
         """Environment additions for a simulation run."""
         env = dict(self.env)
-        if self.solver:
+        if self.solver and self.simulator == "verilator":
             env["VERILATOR_SOLVER"] = self.solver
         return env
 
     def run_plusargs(self) -> List[str]:
         args = list(self.plusargs)
-        if self.sampler:
+        if self.sampler and self.simulator == "verilator":
             args.append("+verilator+rand+sampler+%s" % self.sampler)
         return args
 
     def detect(self) -> "Config":
         """Set available/reason from the presence of the tools."""
-        if self.simulator != "verilator":
-            self.available, self.reason = False, "unsupported simulator %s" % self.simulator
+        if self.simulator not in SIMULATORS:
+            self.available, self.reason = False, "unsupported simulator %r (known: %s)" % (
+                self.simulator, ", ".join(SIMULATORS))
+            return self
+        if self.simulator != "verilator" and (self.solver or self.sampler or self.replay
+                                              or self.replay_cmd):
+            self.available, self.reason = False, \
+                "solver/sampler/replay are Verilator-only (simulator %s)" % self.simulator
             return self
         tool = _which(self.tool)
         if tool is None:
@@ -116,6 +132,7 @@ def _parse(path: str, environ) -> List[Config]:
             sampler=c.get("sampler"),
             version=str(c["version"]) if c.get("version") else None,
             plusargs=[expand(str(p), environ) for p in c.get("plusargs", [])],
+            build_args=[expand(str(a), environ) for a in c.get("build_args", [])],
             env={k: expand(str(v), environ) for k, v in (c.get("env") or {}).items()},
             replay=expand(str(c["replay"]), environ) if c.get("replay") else None,
             replay_pass=str(c.get("replay_pass") or "api,api-cache"),

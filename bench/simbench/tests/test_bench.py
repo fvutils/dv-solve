@@ -41,7 +41,7 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
     load0 = records._loadavg()
     try:
         if cfg.version:
-            ver = records.tool_version(cfg.tool) or ""
+            ver = records.tool_version(cfg.tool, cfg.version_flag) or ""
             if cfg.version not in ver:
                 raise RuntimeError("%s: %s reports %r; config wants %r"
                                    % (cfg.id, cfg.tool, ver, cfg.version))

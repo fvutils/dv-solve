@@ -3,14 +3,17 @@
 # from a local file named by SIMBENCH_CONFIGS (same format; same id overrides).
 #
 # Fields:
-#   simulator: verilator (only one supported so far)
-#   tool:      simulator executable (path, or a name looked up on PATH)
-#   solver:    command line put in VERILATOR_SOLVER (its first word must exist)
-#   sampler:   default | solver | null (null: no sampler plusarg; stock Verilator)
-#   version:   optional; text that must appear in `tool --version` (test fails otherwise)
+#   simulator: verilator | vcs | xcelium | questa
+#   tool:      simulator executable (path, or a name looked up on PATH):
+#              verilator, vcs, xrun, or vsim (questa: vlib/vlog are taken from vsim's directory)
+#   solver:    Verilator only: command line put in VERILATOR_SOLVER (its first word must exist)
+#   sampler:   Verilator only: default | solver | null (null: no sampler plusarg; stock Verilator)
+#   version:   optional; text that must appear in the tool's version output (test fails otherwise);
+#              flag: verilator --version, vcs -ID, xrun -version, vsim -version
 #   plusargs:  extra plusargs for every run
+#   build_args: extra compile/elaborate arguments (e.g. vcs ["-cm", "line"])
 #   env:       extra environment for every run
-#   replay:    optional; bench_vlt_replay executable. The Verilator run then only
+#   replay:    optional, Verilator only; bench_vlt_replay executable. The Verilator run then only
 #              captures the solver session (+verilator+solver+file+), and the
 #              timing comes from replaying that session through dv-solve
 #              in-process (no Verilator, no pipe); see standalone.py.
@@ -79,3 +82,17 @@ configs:
     tool: ${SIMBENCH_VERILATOR:-verilator}
     solver: z3 --in
     sampler: null
+
+  # Other simulators: unavailable (skipped) unless the tool is on PATH or the
+  # SIMBENCH_* variable names it. They use their built-in solver and sampler.
+  - id: vcs
+    simulator: vcs
+    tool: ${SIMBENCH_VCS:-vcs}
+
+  - id: xcelium
+    simulator: xcelium
+    tool: ${SIMBENCH_XRUN:-xrun}
+
+  - id: questa
+    simulator: questa
+    tool: ${SIMBENCH_VSIM:-vsim}
