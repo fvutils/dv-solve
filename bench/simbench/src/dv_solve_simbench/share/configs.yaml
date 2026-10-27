@@ -26,11 +26,13 @@ configs:
     sampler: default
 
   # Primary (B): dev Verilator, dv-solve-smt2, dv-solve does the sampling.
+  # --mode=verilator is dv-solve-smt2's VERILATOR_SOLVER mode; without it the
+  # default mode's auto engine bitblasts unique/distinct (~3x slower than A).
   - id: vlt-dvs-solver
     simulator: verilator
     tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
     version: "5.053 devel"
-    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2} --mode=verilator
     sampler: solver
 
   # Primary (C): dv-solve alone on the same constraints. B's session (same
