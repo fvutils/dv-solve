@@ -49,10 +49,12 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
         plusargs = ["+sb_n=%d" % N, "+sb_seed=%d" % SEED,
                     "+sb_dump=%s" % (tmp_path / "dump.txt")]
         session = str(tmp_path / "session.smt2")
-        if cfg.replay:
+        if cfg.replay or cfg.replay_cmd:
             plusargs.append(standalone.session_plusarg(session))
         out = run(cfg, exe, str(tmp_path), plusargs)
-        if cfg.replay:
+        if cfg.replay_cmd:
+            out = standalone.replay_text(cfg, out, session, str(tmp_path))
+        elif cfg.replay:
             out = standalone.replay(cfg, out, session, str(tmp_path))
         active = probe_sampler(cfg, exe, str(tmp_path / "probe"))
         if cfg.sampler and active != cfg.sampler:

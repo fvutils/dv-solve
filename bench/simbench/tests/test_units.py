@@ -45,9 +45,12 @@ def test_expand():
 def test_default_configs():
     cfgs = load_configs(environ={}, detect=False)
     assert list(cfgs) == ["vlt-z3-default", "vlt-dvs-solver", "dvs-standalone",
-                          "vlt-dvs-default", "vlt540-z3"]
+                          "z3-standalone", "dvs-smt2-standalone", "vlt-dvs-default", "vlt540-z3"]
     assert cfgs["dvs-standalone"].replay.endswith("bench_vlt_replay")
     assert cfgs["vlt-dvs-solver"].replay is None
+    assert cfgs["z3-standalone"].replay_cmd == "z3 -smt2"
+    assert cfgs["dvs-smt2-standalone"].replay_cmd.endswith("dv-solve-smt2")
+    assert cfgs["z3-standalone"].replay_reps == 1
     c = cfgs["vlt-dvs-solver"]
     assert c.run_env()["VERILATOR_SOLVER"].endswith("dv-solve-smt2")
     assert c.run_plusargs() == ["+verilator+rand+sampler+solver"]
@@ -162,3 +165,9 @@ def test_record_randomization():
                               randomization=rand)
     assert _perf_schema().validate(rec) == []
     assert rec["simbench"]["result"]["randomization"]["min_distinct"] == 0.5
+
+
+def test_count_answers():
+    from dv_solve_simbench.standalone import count_answers
+    a = count_answers("sat\n((x #x01))\nunsat\nsat\n(error \"bad\")\n")
+    assert a == {"sat": 2, "unsat": 1, "unknown": 0, "error": 1}

@@ -46,6 +46,8 @@ class Config:
     env: Dict[str, str] = dc.field(default_factory=dict)
     replay: Optional[str] = None      # bench_vlt_replay: time the captured session without Verilator
     replay_pass: str = "api,api-cache"
+    replay_cmd: Optional[str] = None  # e.g. "z3 -smt2": time the captured session text as one process
+    replay_reps: int = 1
     available: bool = False
     reason: str = ""
 
@@ -83,6 +85,13 @@ class Config:
                 self.available, self.reason = False, "replay tool not found: %s" % self.replay
                 return self
             self.replay = replay
+        if self.replay_cmd:
+            words = shlex.split(self.replay_cmd)
+            exe = _which(words[0]) if words else None
+            if exe is None:
+                self.available, self.reason = False, "replay command not found: %s" % self.replay_cmd
+                return self
+            self.replay_cmd = " ".join([shlex.quote(exe)] + [shlex.quote(w) for w in words[1:]])
         if self.sampler not in (None, "default", "solver"):
             self.available, self.reason = False, "bad sampler %r" % self.sampler
             return self
@@ -109,7 +118,9 @@ def _parse(path: str, environ) -> List[Config]:
             plusargs=[expand(str(p), environ) for p in c.get("plusargs", [])],
             env={k: expand(str(v), environ) for k, v in (c.get("env") or {}).items()},
             replay=expand(str(c["replay"]), environ) if c.get("replay") else None,
-            replay_pass=str(c.get("replay_pass") or "api,api-cache")))
+            replay_pass=str(c.get("replay_pass") or "api,api-cache"),
+            replay_cmd=expand(str(c["replay_cmd"]), environ) if c.get("replay_cmd") else None,
+            replay_reps=int(c.get("replay_reps") or 1)))
     return ret
 
 

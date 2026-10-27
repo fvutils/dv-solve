@@ -16,6 +16,8 @@
 #              in-process (no Verilator, no pipe); see standalone.py.
 #   replay_pass: bench_vlt_replay passes to time, comma list; the fastest is reported
 #                (default api,api-cache: api-cache is slower on construct.range)
+#   replay_cmd:  instead of `replay`, run `<replay_cmd> session.cmds.smt2` (one process, text
+#                SMT-LIB) replay_reps times (default 1); best wall time / calls is reported.
 configs:
   # Primary (A): dev Verilator, z3 via SMT-LIB pipe, Verilator's own sampler.
   - id: vlt-z3-default
@@ -44,6 +46,24 @@ configs:
     solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
     sampler: solver
     replay: ${SIMBENCH_DVS_REPLAY:-~/projects/verilator/verilator-sampler-control/dv-solve/build/bench_vlt_replay}
+
+  # Standalone text replays of the same captured session (B's, dv-solve sampler):
+  # one solver process reads the whole session file; wall time / calls.
+  - id: z3-standalone
+    simulator: verilator
+    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
+    version: "5.053 devel"
+    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    sampler: solver
+    replay_cmd: z3 -smt2
+
+  - id: dvs-smt2-standalone
+    simulator: verilator
+    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
+    version: "5.053 devel"
+    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    sampler: solver
+    replay_cmd: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
 
   # Secondary: dev Verilator, dv-solve-smt2 as a plain SMT solver, Verilator sampler.
   - id: vlt-dvs-default
