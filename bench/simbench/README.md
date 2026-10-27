@@ -11,6 +11,9 @@ Layout:
 - `benchmarks/<category>/<name>/{bench.sv,bench.yaml}` — one benchmark each
 - `tests/` — pytest collection over config x bench x sweep point
 
+How to install, pick simulators, run the full matrix, and share and compare
+results: [docs/running.md](docs/running.md).
+
 ## Benchmarks
 
 100 benchmarks in 8 groups. Tier is standard unless marked;
