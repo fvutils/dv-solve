@@ -3550,7 +3550,11 @@ static int _cmd_declare_sort(Smt2Frontend *fe, const Sexpr *cmd) {
         _input_error(fe, "unsupported: too many sorts declared");
         return -1;
     }
-    if (_is_known_sort(fe, name_s->sym.str, name_s->sym.len)) return 0;
+    if (_is_known_sort(fe, name_s->sym.str, name_s->sym.len)) {
+        /* SMT-LIB: redeclaring a sort is an error (z3 agrees). */
+        _input_error(fe, "declare-sort: sort already declared");
+        return -1;
+    }
 
     uint32_t copy_len = name_s->sym.len < SMT2_MAX_NAME - 1 ?
                         name_s->sym.len : SMT2_MAX_NAME - 1;
