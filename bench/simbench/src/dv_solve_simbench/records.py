@@ -96,7 +96,8 @@ def utc_now() -> str:
 
 def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dict,
                 loadavg_start: float, error: str = "", utc: Optional[str] = None,
-                sampler_active: Optional[str] = None) -> dict:
+                sampler_active: Optional[str] = None,
+                randomization: Optional[dict] = None) -> dict:
     """Run record for one run; `result` is None when no SIMBENCH_RESULT was seen."""
     valid = result is not None and result.ok and not error
     rec = {
@@ -116,6 +117,8 @@ def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dic
                 "ns_per_call": result.ns_per_call, "calls_per_s": result.calls_per_s},
         },
     }
+    if randomization is not None and rec["simbench"]["result"] is not None:
+        rec["simbench"]["result"]["randomization"] = randomization
     if not valid:
         rec["reason"] = error or ("no SIMBENCH_RESULT" if result is None else
                                   "bench failed (failures=%d check_errors=%d timed_out=%s)"

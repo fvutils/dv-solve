@@ -1,4 +1,5 @@
 """Unit tests for config loading and result parsing (no simulator needed)."""
+import math
 import os
 
 import pytest
@@ -120,3 +121,44 @@ def test_parse_replay():
             "               on a reused context: 12.1 us per call; on a new one: 25.9 us\n")
     assert parse_replay(text, "api-cache") == {"us_per_check": 14.7, "failures": 1, "us_new": 25.9}
     assert parse_replay(text, "api") is None
+
+
+def test_metric_fields():
+    from dv_solve_simbench import metric
+    rows = [[str(i), str(i % 2)] for i in range(100)]
+    m = metric.field_metrics(rows)
+    assert m["n"] == 100
+    assert m["fields"][0] == {"distinct": 1.0, "entropy": 1.0}
+    assert m["fields"][1]["distinct"] == 0.02
+    assert m["min_distinct"] == 0.02
+    assert abs(m["fields"][1]["entropy"] - math.log(2) / math.log(100)) < 1e-3
+
+
+def test_metric_chi2():
+    from dv_solve_simbench import metric
+    same = [["a"], ["b"]] * 50
+    skew = [["a"]] * 90 + [["b"]] * 10
+    assert metric.field_metrics(same, same)["max_chi2"] == 0.0
+    assert metric.field_metrics(skew, same)["max_chi2"] > 20
+    # all-distinct fields have no shared bins: no chi2
+    wide = [[str(i)] for i in range(100)]
+    assert "chi2" not in metric.field_metrics(wide, wide)["fields"][0]
+
+
+def test_metric_first_value_diversity():
+    from dv_solve_simbench import metric
+    assert metric.first_value_diversity([["1"], ["2"], ["1"], ["3"]]) == 0.75
+    assert metric.first_value_diversity([]) == 0.0
+
+
+def test_record_randomization():
+    from dv_solve_simbench import metric, records
+    from dv_solve_simbench.config import Config
+    from dv_solve_simbench.runner import Bench
+    cfg = Config(id="vlt-dvs-solver", simulator="verilator", tool="/nonexistent/verilator", solver="x")
+    bench = Bench(id="construct.range", tier="smoke", path="bench.sv")
+    rand = metric.field_metrics([["1", "2"], ["3", "2"]])
+    rec = records.make_record(cfg, bench, parse_result(LINE), {"n": 200, "seed": 1}, 0.1,
+                              randomization=rand)
+    assert _perf_schema().validate(rec) == []
+    assert rec["simbench"]["result"]["randomization"]["min_distinct"] == 0.5

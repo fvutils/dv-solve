@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from dv_solve_simbench import records, standalone
+from dv_solve_simbench import metric, records, standalone
 from dv_solve_simbench.config import load_configs
 from dv_solve_simbench.runner import build, find_benches, probe_sampler, run
 
@@ -13,6 +13,12 @@ BENCHES = find_benches(os.path.join(ROOT, "benchmarks"))
 
 N = int(os.environ.get("SIMBENCH_N", "200"))
 SEED = int(os.environ.get("SIMBENCH_SEED", "1"))
+# Randomization metric: dumps are kept in SIMBENCH_DUMP_DIR/<cfg>/<bench>.txt when set;
+# SIMBENCH_REF_CONFIG (default vlt-z3-default) names the reference for chi2 there.
+# SIMBENCH_DIVERSITY=1 also runs seeds 1..20 with n=1 for first-value diversity.
+DUMP_DIR = os.environ.get("SIMBENCH_DUMP_DIR")
+REF_CFG = os.environ.get("SIMBENCH_REF_CONFIG", "vlt-z3-default")
+DIVERSITY = os.environ.get("SIMBENCH_DIVERSITY") == "1"
 
 
 def _params():
@@ -57,9 +63,39 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
             records.append(simbench_out, records.make_record(
                 cfg, bench, None, params, load0, error="%s: %s" % (type(e).__name__, e)))
         raise
+    rand = _randomization(cfg, bench, exe, tmp_path)
     if simbench_out:
         records.append(simbench_out, records.make_record(
-            cfg, bench, out.result, params, load0, sampler_active=active))
+            cfg, bench, out.result, params, load0, sampler_active=active,
+            randomization=rand))
     assert out.result is not None, "no SIMBENCH_RESULT (rc=%d):\n%s" % (
         out.returncode, out.log[-4000:])
     assert out.result.ok, "bench failed: %s" % out.result
+
+
+def _dump_path(cfg_id, bench):
+    return os.path.join(DUMP_DIR, cfg_id, bench.id.replace("/", "_") + ".txt")
+
+
+def _randomization(cfg, bench, exe, tmp_path):
+    dump = tmp_path / "dump.txt"
+    if not dump.is_file():
+        return None
+    rows = metric.load_dump(str(dump))
+    ref = None
+    if DUMP_DIR:
+        os.makedirs(os.path.dirname(_dump_path(cfg.id, bench)), exist_ok=True)
+        with open(_dump_path(cfg.id, bench), "w") as fp:
+            fp.write(dump.read_text())
+        if cfg.id != REF_CFG and os.path.isfile(_dump_path(REF_CFG, bench)):
+            ref = metric.load_dump(_dump_path(REF_CFG, bench))
+    rand = metric.field_metrics(rows, ref)
+    if DIVERSITY:
+        first = []
+        for seed in range(1, 21):
+            d = tmp_path / ("first%d.txt" % seed)
+            run(cfg, exe, str(tmp_path), ["+sb_n=1", "+sb_seed=%d" % seed, "+sb_dump=%s" % d])
+            if d.is_file():
+                first += metric.load_dump(str(d))[:1]
+        rand["first_value_diversity"] = metric.first_value_diversity(first)
+    return rand
