@@ -30,13 +30,28 @@ def session_plusarg(path: str) -> str:
 
 
 def extract_cmds(log_path: str, cmds_path: str) -> int:
-    """Solver-log commands ('  (...)' lines) to one-command-per-line; return check-sat count."""
+    """Solver-log commands ('  (...)' lines) to one-command-per-line; return check-sat count.
+    The log wraps long commands: continuation lines also start with '  ' and are joined
+    (with no separator) until the command's parens balance."""
     n = 0
+    cmd, depth = "", 0
     with open(log_path) as fi, open(cmds_path, "w") as fo:
         for ln in fi:
-            if ln.startswith("  ("):
-                fo.write(ln[2:])
+            ln = ln.rstrip("\n")
+            if cmd and ln.startswith("  "):
+                part = ln[2:]
+            elif ln.startswith("  ("):
+                part = ln[2:]
                 n += ln.startswith("  (check-sat")
+            else:
+                continue
+            cmd += part
+            depth += part.count("(") - part.count(")")
+            if depth <= 0:
+                fo.write(cmd + "\n")
+                cmd, depth = "", 0
+        if cmd:
+            fo.write(cmd + "\n")
     return n
 
 

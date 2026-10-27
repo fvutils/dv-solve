@@ -171,3 +171,14 @@ def test_count_answers():
     from dv_solve_simbench.standalone import count_answers
     a = count_answers("sat\n((x #x01))\nunsat\nsat\n(error \"bad\")\n")
     assert a == {"sat": 2, "unsat": 1, "unknown": 0, "error": 1}
+
+
+def test_extract_cmds_joins_wrapped(tmp_path):
+    from dv_solve_simbench.standalone import extract_cmds
+    log = tmp_path / "s.smt2"
+    log.write_text("< sat\n  (declare-fun w () (_ BitVec 32))\n"
+                   "  (assert (= w #x0\n  000001f))\n  (check-sat)\n< sat\n")
+    out = tmp_path / "c.smt2"
+    assert extract_cmds(str(log), str(out)) == 1
+    assert out.read_text().splitlines() == [
+        "(declare-fun w () (_ BitVec 32))", "(assert (= w #x0000001f))", "(check-sat)"]
