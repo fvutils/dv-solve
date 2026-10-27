@@ -59,7 +59,10 @@ def _machine_class() -> dict:
 
 
 def machine(loadavg_start: float, loadavg_end: float) -> dict:
+    """Machine block; env SIMBENCH_HOST adds a free-form label (e.g. "alice-ws") for merged tables."""
     m = dict(_machine_class())
+    if os.environ.get("SIMBENCH_HOST"):
+        m["label"] = os.environ["SIMBENCH_HOST"]
     m.update(loadavg_start=loadavg_start, loadavg_end=loadavg_end,
              noisy=max(loadavg_start, loadavg_end) > m["cores"] / 2)
     return m
@@ -78,7 +81,18 @@ def _git(*args) -> str:
 def run_info() -> dict:
     """The dv-solve checkout simbench runs from."""
     return {"commit": _git("rev-parse", "HEAD") or "unknown",
-            "ref": _git("rev-parse", "--abbrev-ref", "HEAD") or "unknown"}
+            "ref": _git("rev-parse", "--abbrev-ref", "HEAD") or "unknown",
+            "dirty": bool(_git("status", "--porcelain", "--untracked-files=no"))}
+
+
+@functools.lru_cache(maxsize=None)
+def file_sha(path: str) -> Optional[str]:
+    """sha1 of a bench source, so results from different checkouts can be matched."""
+    try:
+        with open(path, "rb") as fp:
+            return hashlib.sha1(fp.read()).hexdigest()
+    except OSError:
+        return None
 
 
 @functools.lru_cache(maxsize=None)
@@ -111,6 +125,7 @@ def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dic
         "calib": {},
         "simbench": {
             "v": SIMBENCH, "config": cfg.id, "bench": bench.id, "tier": bench.tier,
+            "bench_sha": file_sha(bench.path),
             "tags": list(bench.tags), "params": dict(params),
             "result": None if result is None else {
                 **{k: getattr(result, k) for k in result.__dataclass_fields__},

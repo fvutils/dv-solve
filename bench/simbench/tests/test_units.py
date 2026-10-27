@@ -241,3 +241,39 @@ def test_simulator_checks(tmp_path):
     cfgs["bad"].simulator = "iverilog"
     with pytest.raises(BuildError, match="unknown simulator"):
         build_cmds(cfgs["bad"], _bench(tmp_path), "/b")
+
+
+def test_record_sharing_fields(tmp_path, monkeypatch):
+    from dv_solve_simbench import records
+    from dv_solve_simbench.config import Config
+    from dv_solve_simbench.runner import Bench
+    sv = tmp_path / "bench.sv"
+    sv.write_text("module m; endmodule\n")
+    monkeypatch.setenv("SIMBENCH_HOST", "box1")
+    cfg = Config(id="vlt-z3-default", simulator="verilator", tool="/nonexistent/verilator", solver="z3 --in")
+    rec = records.make_record(cfg, Bench(id="construct.range", tier="smoke", path=str(sv)),
+                              parse_result(LINE), {"n": 200, "seed": 1}, 0.1)
+    assert rec["machine"]["label"] == "box1" and rec["machine"]["cpu"]
+    assert len(rec["simbench"]["bench_sha"]) == 40
+    assert "dirty" in rec["run"]
+    assert _perf_schema().validate(rec) == []
+
+
+def _rec(cfg, bench, host, ns, valid=True):
+    return {"valid": valid, "reason": "" if valid else "BuildError: x",
+            "machine": {"id": "m0", "label": host, "cpu": "c", "cores": 1, "mem_gb": 1, "kernel": "6"},
+            "simbench": {"config": cfg, "bench": bench, "result": {"ns_per_call": ns}}}
+
+
+def test_report_table():
+    from dv_solve_simbench.report import table
+    recs = [_rec("A", "b1", "h1", 4000), _rec("B", "b1", "h1", 1000),
+            _rec("A", "b2", "h1", 2000), _rec("B", "b2", "h1", 2000),
+            _rec("B", "b2", "h1", 4000),                      # repeat: last wins
+            _rec("A", "b1", "h2", 8000), _rec("B", "b1", "h2", 1, valid=False)]
+    t = table(recs, ref="A")
+    lines = t.splitlines()
+    assert lines[0] == "| bench | A@h1 | A@h2 | B@h1 | B@h2 |"
+    assert lines[2] == "| b1 | 4.0 | 8.0 | 1.0 (0.25) | FAIL: BuildError: x |"
+    assert lines[3] == "| b2 | 2.0 | - | 4.0 (2.00) | - |"
+    assert "0.707 (n=2)" in lines[4]          # geomean of 0.25 and 2.0
