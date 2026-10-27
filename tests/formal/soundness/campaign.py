@@ -127,7 +127,9 @@ def campaign(seed: int, n: int, which, exe: str, out_dir: Path | None, log=print
             sel = {"smt2": ["smt2"], "smt2-incr": ["incr"], "smt2-steps": ["steps"],
                    "builder": ["builder"], "protocol": ["protocol"]}[door]
             return any(sig(o) == want for o in failing(run_doors(q, sel, exe)))
-        small = shrink(p, still_fails)
+        # A timeout costs a full solver timeout per shrink step, so keep the
+        # problem as found.
+        small = p if first.got == "timeout" else shrink(p, still_fails)
         log("     shrunk: " + small.smt2(get_model=False).replace("\n", " "))
         failures.append((why, small))
         if out_dir is not None:
