@@ -1,0 +1,4 @@
+id: construct.xor_parity
+tier: standard
+tags: [construct, parity]
+fields: [data, p, lo]

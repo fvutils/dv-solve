@@ -1,0 +1,4 @@
+id: hard.nqueens_8
+tier: stress
+tags: [hard, csp, pairwise]
+fields: [q0, q1, q2, q3, q4, q5, q6, q7]

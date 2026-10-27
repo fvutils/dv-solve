@@ -1,0 +1,4 @@
+id: control.inheritance
+tier: standard
+tags: [control, inheritance]
+fields: [a, b]

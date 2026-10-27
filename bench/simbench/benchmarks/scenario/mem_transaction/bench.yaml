@@ -1,0 +1,4 @@
+id: scenario.mem_transaction
+tier: standard
+tags: [scenario, protocol, sum]
+fields: [addr, length, end_addr]

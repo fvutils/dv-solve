@@ -1,0 +1,4 @@
+id: arith.bitslice
+tier: standard
+tags: [arith, slice]
+fields: [w, hi, lo]

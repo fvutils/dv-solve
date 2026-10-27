@@ -1,0 +1,4 @@
+id: scenario.apb_xfer
+tier: standard
+tags: [scenario, protocol, implication]
+fields: [paddr, pwrite, pwdata, pstrb, pprot]

@@ -1,0 +1,4 @@
+id: scenario.ddr5_mode_register
+tier: standard
+tags: [scenario, protocol, implication]
+fields: [mra, op_burst_len, op_cas_lat, op_rfu_7, op_rd_pre, op_rfu_5, op_crc_en]

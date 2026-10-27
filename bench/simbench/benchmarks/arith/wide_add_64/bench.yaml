@@ -1,0 +1,4 @@
+id: arith.wide_add_64
+tier: standard
+tags: [arith, add, wide]
+fields: [a, b, s]

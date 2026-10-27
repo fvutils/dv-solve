@@ -1,0 +1,4 @@
+id: dist.dist_enum
+tier: standard
+tags: [dist, dist, enum]
+fields: [k, n]

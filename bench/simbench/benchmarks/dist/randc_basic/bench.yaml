@@ -1,0 +1,4 @@
+id: dist.randc_basic
+tier: standard
+tags: [dist, randc]
+fields: [a, b, c]

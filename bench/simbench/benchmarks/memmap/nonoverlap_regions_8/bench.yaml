@@ -1,0 +1,4 @@
+id: memmap.nonoverlap_regions_8
+tier: standard
+tags: [memmap, address, unique]
+fields: [base, size]

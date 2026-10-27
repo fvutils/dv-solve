@@ -1,0 +1,4 @@
+id: array.dyn_size
+tier: standard
+tags: [array, dynamic]
+fields: [n, d]

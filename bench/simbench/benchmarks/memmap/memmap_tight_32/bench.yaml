@@ -1,0 +1,4 @@
+id: memmap.memmap_tight_32
+tier: stress
+tags: [memmap, address, sum, ordering]
+fields: [r0_base, r0_size, r0_end, r1_base, r1_size, r1_end, r2_base, r2_size, r2_end, r3_base, r3_size, r3_end, r4_base, r4_size, r4_end, r5_base, r5_size, r5_end, r6_base, r6_size, r6_end, r7_base, r7_size, r7_end, r8_base, r8_size, r8_end, r9_base, r9_size, r9_end, r10_base, r10_size, r10_end, r11_base, r11_size, r11_end, s01, s012, s0123, s01234, s012345, s0to6, s0to7, s0to8, s0to9, s0to10]

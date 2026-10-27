@@ -1,0 +1,4 @@
+id: dist.dist_range
+tier: standard
+tags: [dist, dist]
+fields: [a, b]

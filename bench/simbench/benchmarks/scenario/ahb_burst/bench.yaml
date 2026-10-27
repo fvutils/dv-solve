@@ -1,0 +1,4 @@
+id: scenario.ahb_burst
+tier: standard
+tags: [scenario, protocol, implication, sum]
+fields: [haddr, hsize, hburst, beats, bytes]

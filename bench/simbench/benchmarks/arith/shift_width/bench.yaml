@@ -1,0 +1,4 @@
+id: arith.shift_width
+tier: standard
+tags: [arith, shift]
+fields: [a, k, r]

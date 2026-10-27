@@ -1,0 +1,4 @@
+id: construct.packed_struct
+tier: standard
+tags: [construct, struct]
+fields: [en, mode, div, thr]

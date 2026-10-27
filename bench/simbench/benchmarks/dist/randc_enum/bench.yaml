@@ -1,0 +1,4 @@
+id: dist.randc_enum
+tier: standard
+tags: [dist, randc, enum]
+fields: [col, v]

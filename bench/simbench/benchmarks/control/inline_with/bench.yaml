@@ -1,0 +1,4 @@
+id: control.inline_with
+tier: standard
+tags: [control, inline]
+fields: [a, b]

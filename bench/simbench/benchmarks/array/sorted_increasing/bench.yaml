@@ -1,0 +1,4 @@
+id: array.sorted_increasing
+tier: standard
+tags: [array, ordering, dynamic]
+fields: [d]

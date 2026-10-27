@@ -1,0 +1,4 @@
+id: dist.dist_mixed
+tier: standard
+tags: [dist, dist]
+fields: [addr, sz]

@@ -1,0 +1,4 @@
+id: construct.ne_set
+tier: standard
+tags: [construct, inequality]
+fields: [a, b, c, d]

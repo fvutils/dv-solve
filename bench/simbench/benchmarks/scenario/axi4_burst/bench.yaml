@@ -1,0 +1,5 @@
+id: scenario.axi4_burst
+tier: smoke
+tags: [scenario, implication, arithmetic]
+fields: [addr_word, addr_page, len_m1, burst, end_word]
+source: tests/bench/test_axi4_burst.py

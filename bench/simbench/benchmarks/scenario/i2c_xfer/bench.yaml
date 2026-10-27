@@ -1,0 +1,4 @@
+id: scenario.i2c_xfer
+tier: standard
+tags: [scenario, protocol, implication]
+fields: [addr, ten_bit, rnw, nbytes, reg_off, repeated_start]

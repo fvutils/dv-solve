@@ -1,0 +1,4 @@
+id: control.cond_inside
+tier: standard
+tags: [control, implication, inside]
+fields: [sel, v]

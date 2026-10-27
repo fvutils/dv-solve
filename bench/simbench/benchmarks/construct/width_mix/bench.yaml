@@ -1,0 +1,4 @@
+id: construct.width_mix
+tier: standard
+tags: [construct, width]
+fields: [n, m, w]

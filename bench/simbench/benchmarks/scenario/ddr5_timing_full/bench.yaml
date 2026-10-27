@@ -1,0 +1,4 @@
+id: scenario.ddr5_timing_full
+tier: stress
+tags: [scenario, protocol, implication, sum]
+fields: [cmd_prev, cmd, cancel_prev, rl, max_slack, tccd_base, tccd, valid]

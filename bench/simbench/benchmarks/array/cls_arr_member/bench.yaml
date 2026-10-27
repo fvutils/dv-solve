@@ -1,0 +1,4 @@
+id: array.cls_arr_member
+tier: standard
+tags: [array, object]
+fields: [v0, v1, v2, v3]

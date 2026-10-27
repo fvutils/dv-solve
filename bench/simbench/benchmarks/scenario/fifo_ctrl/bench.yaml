@@ -1,0 +1,4 @@
+id: scenario.fifo_ctrl
+tier: standard
+tags: [scenario, protocol]
+fields: [wr_ptr, rd_ptr, watermark_lo, watermark_hi]

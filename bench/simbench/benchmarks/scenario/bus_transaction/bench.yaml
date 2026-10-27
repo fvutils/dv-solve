@@ -1,0 +1,4 @@
+id: scenario.bus_transaction
+tier: smoke
+tags: [scenario, protocol, sum]
+fields: [word_addr, burst_len, beat_size, end_addr]

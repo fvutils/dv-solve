@@ -1,0 +1,4 @@
+id: arith.redops
+tier: standard
+tags: [arith, reduction]
+fields: [a, b, c]

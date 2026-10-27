@@ -1,0 +1,4 @@
+id: control.soft_override_with
+tier: standard
+tags: [control, soft, inline]
+fields: [a]

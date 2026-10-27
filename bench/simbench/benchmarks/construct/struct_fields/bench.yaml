@@ -1,0 +1,4 @@
+id: construct.struct_fields
+tier: standard
+tags: [construct, struct]
+fields: [kind, len, src, dst, crc]

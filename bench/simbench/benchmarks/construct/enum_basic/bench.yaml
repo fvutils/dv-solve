@@ -1,0 +1,4 @@
+id: construct.enum_basic
+tier: standard
+tags: [construct, enum]
+fields: [op, md]

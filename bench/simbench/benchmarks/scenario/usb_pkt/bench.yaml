@@ -1,0 +1,4 @@
+id: scenario.usb_pkt
+tier: standard
+tags: [scenario, protocol, implication]
+fields: [pid, dev_addr, endp, len, xfer]
