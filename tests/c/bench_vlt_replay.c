@@ -24,10 +24,11 @@
  *            problem is still built every call.
  *
  * Usage: bench_vlt_replay <cmds.smt2> [--solver PATH] [--reps N]
- *        [--passes pipe,text,api,api-cache]
+ *        [--passes pipe,text,api,api-cache] [--quality] [--dump-values FILE]
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <math.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -214,9 +215,13 @@ static void pass_pipe(const char *solver, double *wall, double *child_cpu) {
 /* Pass: text (and problem capture)                                    */
 /* ------------------------------------------------------------------ */
 
-/* --dump-values: one line per answered call of the first rep of each api
- * pass, for the uniformity harness (tests/uniformity). */
+/* --dump-values: one line per answered call of each api pass, for the
+ * uniformity harness (tests/uniformity). --quality: check every model and
+ * report how much each field varies. Both read the models of one extra,
+ * untimed rep of the pass. */
 static FILE *g_dump;
+static int   g_quality;
+static int   g_collect;    /* this rep reads back models (dump and/or quality) */
 
 typedef struct {
     dvs_problem_t *p;
@@ -229,8 +234,10 @@ typedef struct {
                                     * CDCL compile (CDCL answers only) */
     uint32_t       n_aux;
     uint32_t       call;       /* randomize() call (Cmd.call) */
-    uint32_t       n_named;    /* declared vars, for --dump-values */
+    uint32_t       n_named;    /* declared vars, for --dump-values / --quality */
     struct { char *name; uint32_t id; uint16_t width; } *named;
+    int64_t       *vals;       /* the collecting rep's model of them */
+    uint8_t        got;        /* ... when the call was answered sat */
 } Capture;
 
 static Capture *g_cap;
@@ -271,7 +278,9 @@ static void capture(Smt2Frontend *fe, uint32_t call) {
     c->n_aux = 0;
     c->n_named = 0;
     c->named = NULL;
-    if (g_dump) {
+    c->vals = NULL;
+    c->got = 0;
+    if (g_dump || g_quality) {
         c->named = calloc(fe->n_vars ? fe->n_vars : 1, sizeof *c->named);
         for (uint32_t k = 0; k < fe->n_vars; k++) {
             const Smt2Var *v = &fe->vars[k];
@@ -522,6 +531,26 @@ static uint32_t walk(dvs_problem_t *p, dvs_expr_t head, dvs_expr_t **arr, uint32
     return n;
 }
 
+/* --quality's bitblast check: rebuild g_pin's problem with each named
+ * variable == its model value (g_pin_k < 0), or with variable g_pin_k != its
+ * model value. */
+static const Capture *g_pin;
+static int g_pin_k = -1;
+
+static void add_pins(dvs_builder_t *b, const Capture *cp) {
+    for (uint32_t k = 0; k < cp->n_named; k++) {
+        if (g_pin_k >= 0 && k != (uint32_t)g_pin_k) continue;
+        uint16_t w = cp->named[k].width;
+        uint64_t u = (uint64_t)cp->vals[k];
+        if (w < 64) u &= (1ull << w) - 1;
+        /* Same width on both sides: == is bit equality, whatever the signedness. */
+        dvs_expr_t c = dvs_builder_expr_binary(b, g_pin_k < 0 ? DVS_BIN_EQ : DVS_BIN_NEQ,
+                                               dvs_builder_expr_var(b, cp->named[k].id),
+                                               dvs_builder_expr_const_sized(b, (int64_t)u, 0, w));
+        dvs_builder_add_constraint(b, c);
+    }
+}
+
 static dvs_problem_t *rebuild(Rebuild *r, dvs_problem_t *p, size_t *size) {
     dvs_builder_t *b = r->b;
     dvs_builder_reset(b);
@@ -539,6 +568,7 @@ static dvs_problem_t *rebuild(Rebuild *r, dvs_problem_t *p, size_t *size) {
         ConstraintSpec *c = POOL_PTR(p, r->tmp[i]);
         dvs_builder_add_constraint(b, rb(r, c->root));
     }
+    if (g_pin && g_pin->p == p) add_pins(b, g_pin);
     n = walk(p, p->softs_head, &r->tmp, &r->tmp_cap);
     for (uint32_t i = n; i-- > 0;) {
         SoftSpec *s = POOL_PTR(p, r->tmp[i]);
@@ -627,16 +657,23 @@ static int cdcl_open(Cdcl *c, Built *bt) {
 
 static volatile int64_t g_sink;
 
-/* "V <call> <seed> name=#x... ..." with each value masked to its width. */
+/* Keep the model of the call being answered; with --dump-values, also write
+ * "V <call> <seed> name=#x... ..." with each value masked to its width. */
 static void dump_model(dvs_ctx_t *ctx, dvs_bbsolver_t *bb) {
-    const Capture *cp = g_dcap;
-    if (!g_dump || !cp) return;
-    fprintf(g_dump, "V %u %llu", cp->call, (unsigned long long)cp->seed);
+    Capture *cp = (Capture *)g_dcap;
+    if (!g_collect || !cp) return;
+    if (!cp->vals) cp->vals = calloc(cp->n_named ? cp->n_named : 1, sizeof *cp->vals);
     for (uint32_t k = 0; k < cp->n_named; k++) {
         int64_t x = 0;
         if (bb) dvs_bbsolver_value(bb, cp->named[k].id, &x);
         else x = dvs_solver_get_value(ctx, cp->named[k].id);
-        uint64_t u = (uint64_t)x;
+        cp->vals[k] = x;
+    }
+    cp->got = 1;
+    if (!g_dump) return;
+    fprintf(g_dump, "V %u %llu", cp->call, (unsigned long long)cp->seed);
+    for (uint32_t k = 0; k < cp->n_named; k++) {
+        uint64_t u = (uint64_t)cp->vals[k];
         if (cp->named[k].width < 64) u &= (1ull << cp->named[k].width) - 1;
         fprintf(g_dump, " %s=#x%llx", cp->named[k].name, (unsigned long long)u);
     }
@@ -803,6 +840,181 @@ static void pass_api(int cached, ApiStats *st) {
 }
 
 /* ------------------------------------------------------------------ */
+/* --quality: the collecting rep's models                              */
+/* ------------------------------------------------------------------ */
+
+/* A CDCL context of a call's problem, to check models on, independent of the
+ * engine that answered. It compiles the API rebuild, as the api passes do
+ * (the front end's own problem may number its variables sparsely). NULL when
+ * CDCL cannot compile it. */
+static dvs_ctx_t *check_ctx(Rebuild *r, Capture *cp) {
+    dvs_ctx_t *c = dvs_solver_new(NULL);
+    if (!c) return NULL;
+    Built bt;
+    build(r, cp, &bt);
+    int rc = dvs_solver_compile(c, bt.p);
+    for (uint32_t k = 0; rc >= 0 && k < bt.n_aux; k++)
+        rc = dvs_solver_add_constraint(c, bt.aux[k]);
+    built_free(r, &bt);
+    if (rc < 0 || c->pool.overflow) { dvs_solver_free(c); return NULL; }
+    return c;
+}
+
+static dvs_result_t check_solve(dvs_ctx_t *c, uint64_t seed) {
+    dvs_solve_opts_t o;
+    memset(&o, 0, sizeof o);
+    o.seed = seed;
+    o.max_conflicts = 10000;
+    o.max_restarts = 1000;
+    o.use_lcg = 1;
+    o.fair_pick = 1;
+    return dvs_solver_solve(c, &o);
+}
+
+/* Where CDCL cannot compile the problem (it refuses a sparse variable
+ * numbering that bitblast accepts): a fresh bitblast solve of the problem
+ * with the model pinned (k < 0) or field k excluded. Calls with add-ons
+ * reach only CDCL, so they stay unchecked. */
+static dvs_result_t check_bb(Rebuild *r, Capture *cp, int k) {
+    if (cp->n_aux) return DVS_SOLVE_TIMEOUT;
+    g_pin = cp;
+    g_pin_k = k;
+    Built bt;
+    build(r, cp, &bt);
+    g_pin = NULL;
+    g_pin_k = -1;
+    dvs_result_t res = DVS_SOLVE_TIMEOUT;
+    dvs_bbsolver_t *bb = bt.p ? dvs_bbsolver_new(NULL, bt.p) : NULL;
+    if (bb) {
+        int rc = dvs_bbsolver_check(bb, cp->seed);
+        res = rc == DVS_BB_SAT ? DVS_SOLVE_OK : rc == DVS_BB_UNSAT ? DVS_SOLVE_UNSAT : DVS_SOLVE_TIMEOUT;
+        dvs_bbsolver_free(bb);
+    }
+    built_free(r, &bt);
+    return res;
+}
+
+typedef struct { const char *name; uint64_t u; uint32_t cap, k; } QVal;
+
+static int qval_cmp(const void *a, const void *b) {
+    const QVal *x = a, *y = b;
+    int c = strcmp(x->name, y->name);
+    if (c) return c;
+    return x->u < y->u ? -1 : x->u > y->u;
+}
+
+/* Every model is pinned into a CDCL context of its problem (else a bitblast
+ * one): sat means the model satisfies every constraint, whatever its construct. Per field
+ * (variable name, over all calls): distinct values / models, and Shannon
+ * entropy normalized by log(models), as simbench's metric.py computes them.
+ * A field with one value is forced when excluding that value is unsat, and
+ * stuck when it is sat: a sampler that never moves a free field. */
+static void quality(const char *pass) {
+    size_t n_models = 0, checked = 0, invalid = 0, unchecked = 0, n_ent = 0;
+    size_t tab_cap = 1024;
+    while (tab_cap < 2 * g_ncap) tab_cap <<= 1;
+    struct { uint64_t hash; dvs_ctx_t *ctx; int tried; } *tab = calloc(tab_cap, sizeof *tab);
+    Rebuild r;
+    memset(&r, 0, sizeof r);
+    r.b = dvs_builder_create(0, NULL);
+    for (size_t i = 0; i < g_ncap; i++) {
+        Capture *cp = &g_cap[i];
+        if (!cp->got || cp->unsat) continue;
+        n_models++;
+        n_ent += cp->n_named;
+        size_t slot = cp->hash & (tab_cap - 1);
+        while (tab[slot].tried && tab[slot].hash != cp->hash) slot = (slot + 1) & (tab_cap - 1);
+        if (!tab[slot].tried) {
+            tab[slot].tried = 1;
+            tab[slot].hash = cp->hash;
+            tab[slot].ctx = check_ctx(&r, cp);
+        }
+        dvs_ctx_t *c = tab[slot].ctx;
+        dvs_result_t res;
+        if (c) {
+            dvs_solver_reset(c);
+            int pinned = 1;
+            for (uint32_t k = 0; pinned && k < cp->n_named; k++)
+                pinned = dvs_solver_pin_var(c, cp->named[k].id, cp->vals[k]) == 0;
+            res = pinned ? check_solve(c, cp->seed) : DVS_SOLVE_UNSAT;
+        } else {
+            res = check_bb(&r, cp, -1);
+        }
+        if (res == DVS_SOLVE_OK) checked++;
+        else if (res == DVS_SOLVE_UNSAT) {
+            if (invalid++ < 5) fprintf(stderr, "%s: call %u seed %llu: model violates the "
+                                       "constraints\n", pass, cp->call, (unsigned long long)cp->seed);
+        } else unchecked++;
+    }
+    for (size_t j = 0; j < tab_cap; j++) if (tab[j].ctx) dvs_solver_free(tab[j].ctx);
+    free(tab);
+
+    QVal *e = malloc((n_ent ? n_ent : 1) * sizeof *e);
+    size_t ne = 0;
+    for (size_t i = 0; i < g_ncap; i++) {
+        Capture *cp = &g_cap[i];
+        if (!cp->got || cp->unsat) continue;
+        for (uint32_t k = 0; k < cp->n_named; k++) {
+            uint64_t u = (uint64_t)cp->vals[k];
+            if (cp->named[k].width < 64) u &= (1ull << cp->named[k].width) - 1;
+            e[ne++] = (QVal){cp->named[k].name, u, (uint32_t)i, k};
+        }
+    }
+    qsort(e, ne, sizeof *e, qval_cmp);
+    char *lines = NULL;
+    size_t lines_n = 0;
+    FILE *fl = open_memstream(&lines, &lines_n);
+    uint32_t n_fields = 0, n_forced = 0, n_stuck = 0, n_undecided = 0;
+    double min_d = 2, min_h = 2;
+    for (size_t a = 0, b; a < ne; a = b) {
+        size_t distinct = 0;
+        double h = 0;
+        for (b = a; b < ne && !strcmp(e[b].name, e[a].name); ) {
+            size_t c = b;
+            while (c < ne && !strcmp(e[c].name, e[a].name) && e[c].u == e[b].u) c++;
+            distinct++;
+            double p = (double)(c - b);
+            h -= p * log(p);
+            b = c;
+        }
+        size_t n = b - a;
+        h = n > 1 ? (h / n + log((double)n)) / log((double)n) : 0;
+        double d = (double)distinct / (double)n;
+        const char *tag = "";
+        if (distinct == 1 && n > 1) {
+            /* Forced or stuck, decided on the first problem that has it. */
+            Capture *cp = &g_cap[e[a].cap];
+            dvs_ctx_t *c = check_ctx(&r, cp);
+            int rc = c ? dvs_solver_exclude_value(c, cp->named[e[a].k].id, cp->vals[e[a].k]) : 0;
+            dvs_result_t res = !c ? check_bb(&r, cp, (int)e[a].k)
+                             : rc ? DVS_SOLVE_UNSAT : check_solve(c, cp->seed);
+            if (c) dvs_solver_free(c);
+            if (res == DVS_SOLVE_UNSAT) { tag = " forced"; n_forced++; }
+            else if (res == DVS_SOLVE_OK) { tag = " stuck"; n_stuck++; }
+            else { tag = " undecided"; n_undecided++; }
+        }
+        n_fields++;
+        if (strcmp(tag, " forced")) {
+            if (d < min_d) min_d = d;
+            if (h < min_h) min_h = h;
+        }
+        fprintf(fl, "             field %s n %zu distinct %zu ratio %.4f entropy %.4f%s\n",
+                e[a].name, n, distinct, d, h, tag);
+    }
+    fclose(fl);
+    dvs_builder_destroy(r.b);
+    free(r.memo.key); free(r.memo.val); free(r.tmp);
+    printf("%-10s quality %zu models: %zu checked, %zu invalid, %zu unchecked; %u fields: "
+           "%u forced, %u stuck, %u undecided", pass, n_models, checked, invalid, unchecked,
+           n_fields, n_forced, n_stuck, n_undecided);
+    if (min_d <= 1) printf("; min distinct %.4f, min entropy %.4f\n", min_d, min_h);
+    else printf("; min distinct -, min entropy -\n");
+    fputs(lines ? lines : "", stdout);
+    free(lines);
+    free(e);
+}
+
+/* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
 /* Calibration                                                          */
@@ -897,6 +1109,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = argv[++i];
         else if (!strcmp(argv[i], "--warmup") && i + 1 < argc) g_warmup = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--calls") && i + 1 < argc) g_calls = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--quality")) g_quality = 1;
         else if (!strcmp(argv[i], "--dump-values") && i + 1 < argc) {
             if (!(g_dump = fopen(argv[++i], "w"))) { perror(argv[i]); return 2; }
         }
@@ -910,7 +1123,7 @@ int main(int argc, char **argv) {
     if (!path) {
         fprintf(stderr, "usage: %s <cmds.smt2> [--solver PATH] [--reps N] [--passes LIST]\n"
                         "         [--calls N] [--warmup N] [--mode default|verilator]\n"
-                        "         [--dump-values FILE]\n"
+                        "         [--dump-values FILE] [--quality]\n"
                         "       %s --build-info | --calib\n"
                         "  --mode     the front end's mode for the text pass, which also captures\n"
                         "             the problems the api passes replay; use the capture's mode\n"
@@ -919,8 +1132,11 @@ int main(int argc, char **argv) {
                         "             per-call figure\n"
                         "  --calls    randomize() calls in the session, warm-up included (default:\n"
                         "             one per solver session, each starting with (reset))\n"
-                        "  --dump-values  write each api pass's models (first rep): \"V call seed\n"
-                        "             name=#xVAL ...\" per answered call, for tests/uniformity\n"
+                        "  --dump-values  write each api pass's models: \"V call seed name=#xVAL ...\"\n"
+                        "             per answered call, for tests/uniformity\n"
+                        "  --quality  check each api pass's models against the constraints, and\n"
+                        "             report per field: distinct values, entropy, forced or stuck\n"
+                        "             (an extra untimed rep reads the models back)\n"
                         "  --build-info  how the loaded dv-solve library was built, and its file\n"
                         "  --calib    that, then time fixed work (host and library speed)\n",
                 argv[0], argv[0]);
@@ -977,11 +1193,8 @@ int main(int argc, char **argv) {
         if (!has(passes, cached ? "api-cache" : "api")) continue;
         ApiStats best = {0}, s;
         best.wall = 1e30;
-        FILE *dump = g_dump;
-        if (dump) fprintf(dump, "pass %s\n", cached ? "api-cache" : "api");
         for (int k = 0; k < reps; k++) {
             pass_api(cached, &s);
-            g_dump = NULL;   /* first rep only */
             if (s.wall < best.wall) best = s;
         }
         double pc = 1e6 / (double)(g_ncap ? g_ncap : 1);
@@ -998,7 +1211,17 @@ int main(int argc, char **argv) {
             printf("               on a reused context: %.1f us per call; on a new one: %.1f us\n",
                    1e6 * best.hit_solve / best.hits,
                    1e6 * (best.solve - best.hit_solve) / (double)(g_ncap - best.hits));
-        g_dump = dump;
+        if (g_dump || g_quality) {
+            /* The passes are deterministic, so this rep returns the timed reps'
+             * models, without timing their readback. */
+            const char *name = cached ? "api-cache" : "api";
+            if (g_dump) fprintf(g_dump, "pass %s\n", name);
+            for (size_t i = 0; i < g_ncap; i++) g_cap[i].got = 0;
+            g_collect = 1;
+            pass_api(cached, &s);
+            g_collect = 0;
+            if (g_quality) quality(name);
+        }
     }
     if (g_dump) fclose(g_dump);
     return 0;

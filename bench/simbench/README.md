@@ -271,6 +271,19 @@ number that looks wrong, it holds:
   session; its file when kept) and `simbench.replay` (arguments, mode, sessions
   and calls, distinct/reused problems, escalations, failures, build/compile/solve
   split, and reused vs new-context time).
+- replay configs, quality: the timed answers are the replay's, not the Verilator
+  run's, so `simbench.result.randomization` (from `+sb_dump`) is marked
+  `source: "capture"`, and the replay's own quality is in
+  `randomization.replay` (also `simbench.replay.quality`). `bench_vlt_replay
+  --quality` produces it from one extra, untimed rep of the timed pass:
+  - every model is checked against the constraints (pinned into a CDCL context of
+    the call's problem, else a fresh bitblast solve): `checked`, `invalid`,
+    `unchecked`. An invalid model counts as a replay failure;
+  - per field (solver variable): distinct values over models, and entropy
+    normalized by log(models), as for `+sb_dump`;
+  - a field with one value is `forced` when no other value satisfies the
+    constraints, and `stuck` when one does: a sampler that never moves it.
+    `min_distinct` and `min_entropy` leave out forced fields.
 
 ## 10. Troubleshooting
 

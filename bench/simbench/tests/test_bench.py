@@ -77,7 +77,7 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
                 cfg, bench, None, params, load0, error="%s: %s" % (type(e).__name__, e),
                 calib=calib, info=getattr(e, "info", None) or info))
         raise
-    rand = _randomization(cfg, bench, exe, tmp_path)
+    rand = _randomization(cfg, bench, exe, tmp_path, info)
     if simbench_out:
         records.append(simbench_out, records.make_record(
             cfg, bench, out.result, params, load0, sampler_active=active,
@@ -91,7 +91,11 @@ def _dump_path(cfg_id, bench):
     return os.path.join(DUMP_DIR, cfg_id, bench.id.replace("/", "_") + ".txt")
 
 
-def _randomization(cfg, bench, exe, tmp_path):
+def _randomization(cfg, bench, exe, tmp_path, info=None):
+    """Quality of the run's values (+sb_dump). For a replay config the timed
+    answers are the replay's, not the Verilator run's: its own quality
+    (bench_vlt_replay --quality) goes under "replay", and the dump's figures
+    are marked as the capture's."""
     dump = tmp_path / "dump.txt"
     if not dump.is_file():
         return None
@@ -112,4 +116,9 @@ def _randomization(cfg, bench, exe, tmp_path):
             if d.is_file():
                 first += metric.load_dump(str(d))[:1]
         rand["first_value_diversity"] = metric.first_value_diversity(first)
+    if cfg.replay:
+        rand["source"] = "capture"
+        q = ((info or {}).get("replay") or {}).get("quality")
+        if q:
+            rand["replay"] = q
     return rand

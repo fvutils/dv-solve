@@ -83,8 +83,11 @@ def parse_replay(text: str, pass_name: str) -> Optional[dict]:
     m = re.search(_PASS % re.escape(pass_name), text, re.M)
     if m is None:
         return None
+    # A replayed model that violates the constraints (--quality) is a failure.
+    q = provenance.replay_quality(text, pass_name)
     ret = {"us_per_check": float(m.group(1)),
-           "failures": int(m.group(2)) + int(m.group(3)), "us_new": None,
+           "failures": int(m.group(2)) + int(m.group(3)) + (q["invalid"] if q else 0),
+           "us_new": None,
            "us_per_call": None, "timed_calls": None}
     c = re.search(_PER_CALL % re.escape(pass_name), text, re.M)
     if c:
@@ -110,7 +113,7 @@ def replay(cfg: Config, sim: RunOutput, session: str, rundir: str,
     mode = solver_mode(cfg.solver)
     cmd = [cfg.replay, cmds, "--reps", str(reps), "--passes", pass_name,
            "--calls", str(sim.result.n + sim.result.warmup),
-           "--warmup", str(sim.result.warmup), "--mode", mode]
+           "--warmup", str(sim.result.warmup), "--mode", mode, "--quality"]
     p = subprocess.run(cmd, cwd=rundir, stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, text=True, timeout=timeout)
     with open(os.path.join(rundir, "replay.log"), "w") as fp:

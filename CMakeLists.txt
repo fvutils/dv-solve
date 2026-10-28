@@ -560,7 +560,7 @@ add_executable(bench_vlt_replay
     src/c/smt2/smt2_frontend.c
     src/c/smt2/smt2_eval.c
 )
-target_link_libraries(bench_vlt_replay PRIVATE dv_solve)
+target_link_libraries(bench_vlt_replay PRIVATE dv_solve m)
 target_include_directories(bench_vlt_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 
 # ------------------------------------------------------------------ #

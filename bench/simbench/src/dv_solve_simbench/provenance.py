@@ -255,4 +255,39 @@ def replay_details(text: str, pass_name: str) -> dict:
     m = re.search(r"^%s\s+per call\s+([\d.]+) us" % re.escape(pass_name), text, re.M)
     if m:
         d["us_per_call"] = float(m.group(1))
+    q = replay_quality(text, pass_name)
+    if q:
+        d["quality"] = q
     return d
+
+
+_QUALITY = (r"^%s\s+quality (\d+) models: (\d+) checked, (\d+) invalid, (\d+) unchecked; "
+            r"(\d+) fields: (\d+) forced, (\d+) stuck, (\d+) undecided; "
+            r"min distinct ([\d.]+|-), min entropy ([\d.]+|-)$")
+_FIELD = re.compile(r"^\s+field (\S+) n (\d+) distinct (\d+) ratio ([\d.]+) entropy ([\d.]+)"
+                    r"(?: (forced|stuck|undecided))?$")
+
+
+def replay_quality(text: str, pass_name: str) -> Optional[dict]:
+    """bench_vlt_replay --quality for one pass: the replayed models checked
+    against the constraints, and per field (solver variable) its distinct ratio
+    and normalized entropy, as metric.field_metrics computes them. min_* are
+    over the fields that are not forced (one value is all the constraints allow)."""
+    m = re.search(_QUALITY % re.escape(pass_name), text, re.M)
+    if not m:
+        return None
+    g = m.groups()
+    q = dict(zip(("models", "checked", "invalid", "unchecked", "n_fields", "forced", "stuck",
+                  "undecided"), map(int, g[:8])))
+    q["min_distinct"] = None if g[8] == "-" else float(g[8])
+    q["min_entropy"] = None if g[9] == "-" else float(g[9])
+    fields = []
+    for ln in text[m.end():].splitlines()[1:]:
+        f = _FIELD.match(ln)
+        if not f:
+            break
+        fields.append({"name": f.group(1), "n": int(f.group(2)), "distinct": int(f.group(3)),
+                       "ratio": float(f.group(4)), "entropy": float(f.group(5)),
+                       "status": f.group(6) or "varies"})
+    q["fields"] = fields
+    return q

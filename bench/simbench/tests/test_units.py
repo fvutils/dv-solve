@@ -154,6 +154,10 @@ def test_parse_replay():
     assert parse_replay(text, "api-cache") == {"us_per_check": 14.7, "failures": 1, "us_new": 25.9,
                                                "us_per_call": 29.4, "timed_calls": 20}
     assert parse_replay(text, "api") is None
+    # An invalid replayed model (--quality) counts as a failure.
+    text += ("api-cache  quality 30 models: 28 checked, 2 invalid, 0 unchecked; 1 fields: "
+             "0 forced, 0 stuck, 0 undecided; min distinct 0.5000, min entropy 0.9000\n")
+    assert parse_replay(text, "api-cache")["failures"] == 3
 
 
 def test_solver_mode():
@@ -328,6 +332,10 @@ api-cache  per call      56.5 us   (200 timed calls)
              compile/bitblast   0.001 s      1.8 us
              solve+read         0.009 s     22.4 us
                on a reused context: 8.1 us per call; on a new one: 36.7 us
+api-cache  quality 421 models: 420 checked, 0 invalid, 1 unchecked; 3 fields: 1 forced, 1 stuck, 0 undecided; min distinct 0.0048, min entropy 0.0000
+             field a n 420 distinct 1 ratio 0.0024 entropy 0.0000 stuck
+             field b n 420 distinct 300 ratio 0.7143 entropy 0.9500
+             field k n 420 distinct 1 ratio 0.0024 entropy 0.0000 forced
 """
 
 
@@ -342,6 +350,23 @@ def test_replay_details():
     assert d["build_us_per_check"] == 4.0 and d["solve_us_per_check"] == 22.4
     assert (d["us_reused"], d["us_new"], d["us_per_call"]) == (8.1, 36.7, 56.5)
     assert replay_details(_REPLAY_OUT, "api").get("distinct") is None
+
+
+def test_replay_quality():
+    from dv_solve_simbench.provenance import replay_details, replay_quality
+    q = replay_details(_REPLAY_OUT, "api-cache")["quality"]
+    assert (q["models"], q["checked"], q["invalid"], q["unchecked"]) == (421, 420, 0, 1)
+    assert (q["n_fields"], q["forced"], q["stuck"], q["undecided"]) == (3, 1, 1, 0)
+    assert (q["min_distinct"], q["min_entropy"]) == (0.0048, 0.0)
+    assert [(f["name"], f["status"]) for f in q["fields"]] == \
+        [("a", "stuck"), ("b", "varies"), ("k", "forced")]
+    assert q["fields"][1] == {"name": "b", "n": 420, "distinct": 300, "ratio": 0.7143,
+                              "entropy": 0.95, "status": "varies"}
+    assert replay_quality(_REPLAY_OUT, "api") is None
+    none = ("api quality 2 models: 2 checked, 0 invalid, 0 unchecked; 1 fields: 1 forced, "
+            "0 stuck, 0 undecided; min distinct -, min entropy -\n")
+    q = replay_quality(none, "api")
+    assert q["min_distinct"] is None and q["fields"] == []
 
 
 def test_parse_calib_and_build_info():
