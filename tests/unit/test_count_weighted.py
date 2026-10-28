@@ -26,6 +26,9 @@ from collections import Counter
 
 import pytest
 
+# Every test here gates on a chi-square p-value.
+chi2 = pytest.importorskip("scipy.stats").chi2
+
 from dv_solve.builder import SolveProblemBuilder
 from dv_solve.ctx import SolveCtx, SOLVE_OK
 from tests.formal.soundness.doors import _lower
@@ -62,7 +65,6 @@ def _draw(b: Bench, order, sessions=SESSIONS, per=PER_SESSION, base=1):
 
 
 def _pooled_chi2p(hist: Counter, truth: dict, n: int) -> float:
-    from scipy.stats import chi2
     stat, df, po, pe = 0.0, -1, 0, 0.0
     for k, p in truth.items():
         if n * p >= 5:
