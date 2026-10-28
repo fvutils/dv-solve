@@ -76,6 +76,11 @@ typedef struct dvs_sat_vtbl {
      * honors set_terminate directly, so its interrupt is a no-op. */
     void          (*interrupt)(void *impl);
 
+    /* Optional (may be NULL): search work done so far, a deterministic count
+     * that grows with the work (kissat: search ticks; CaDiCaL: polls of its
+     * terminate hook). Units differ by backend. */
+    uint64_t      (*work)(void *impl);
+
     /* Clause-arena observers (kissat-specific telemetry; CaDiCaL returns 0). */
     size_t        (*arena_size_bytes)(void *impl);
     size_t        (*arena_capacity_bytes)(void *impl);

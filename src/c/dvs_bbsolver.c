@@ -213,6 +213,10 @@ struct dvs_bbsolver_s {
      * only adds parity planes, which it assumes rather than asserts). */
     int             sample_ready;
     uint64_t        sample_base_ands;   /* AIG size after that encode */
+    /* Work done outside the SAT solver, in AIG node visits: the diversity
+     * pass and pre-solve simulation. Deterministic, for engine routing
+     * (dvs_bbsolver_work). */
+    uint64_t        aux_work;
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -2148,7 +2152,9 @@ static int _eval_all(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t *
 static int _diversify_memo(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_node_t *R,
                            const uint8_t *areq, uint32_t N,
                            const uint32_t *cand, uint32_t ncand,
-                           const uint32_t *inputs, uint32_t k, const uint32_t *slot) {
+                           const uint32_t *inputs, uint32_t k, const uint32_t *slot,
+                           uint64_t *work) {
+    *work += N;
     if (!_eval_all(nv, L, R, areq, N, /*stop=*/1)) return 0;   /* nv already consistent */
     uint8_t *valid = (uint8_t *)calloc((size_t)1 << k, 1);   /* 0 ?, 1 yes, 2 no */
     if (!valid) return 0;
@@ -2164,6 +2170,7 @@ static int _diversify_memo(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_no
         uint32_t nst = st ^ bit;
         if (!valid[nst]) {
             for (uint32_t i = 0; i < k; i++) nv[inputs[i]] = (int8_t)((nst >> i) & 1u);
+            *work += N;
             int ok = _eval_all(nv, L, R, areq, N, /*stop=*/1);
             valid[nst] = ok ? 1 : 2;
             nv_st = ok ? nst : ~0u;
@@ -2172,6 +2179,7 @@ static int _diversify_memo(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_no
     }
     if (nv_st != st) {
         for (uint32_t i = 0; i < k; i++) nv[inputs[i]] = (int8_t)((st >> i) & 1u);
+        *work += N;
         _eval_all(nv, L, R, areq, N, /*stop=*/0);
     }
     free(valid);
@@ -2191,6 +2199,7 @@ static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
     dvs_aig_node_t *L = (dvs_aig_node_t *)malloc((size_t)(N + 1) * sizeof(dvs_aig_node_t));
     dvs_aig_node_t *R = (dvs_aig_node_t *)malloc((size_t)(N + 1) * sizeof(dvs_aig_node_t));
     if (!nv || !L || !R) { free(nv); free(L); free(R); return; }
+    S->aux_work += N;
     /* The model to start from: a simulation's (node_val), else the SAT solver's. */
     int8_t *base_nv = S->node_val;
     S->node_val = NULL;
@@ -2310,7 +2319,7 @@ static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
         const char *dm = getenv("DV_DIVERSIFY_MEMO");      /* =0: plain loop (A/B tests) */
         if (k <= DVS_DIVERSIFY_MEMO_BITS && ((size_t)4 << k) <= nvisit && !(dm && *dm == '0'))
             memo_done = _diversify_memo(nv, L, R, areq, N, cand, (uint32_t)nvisit,
-                                        inputs, k, cnt);
+                                        inputs, k, cnt, &S->aux_work);
     }
     if (!memo_done && cand) {
         for (size_t c = 0; c < nvisit; c++) {
@@ -2320,7 +2329,9 @@ static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
             uint32_t nt = 0;
             nv[base] = (int8_t)desired;
             trail[nt++] = base;
-            if (!_prop_cone(nv, L, R, fo_off, fo_adj, areq, wl, inq, trail, &nt, base)) {
+            int ok = _prop_cone(nv, L, R, fo_off, fo_adj, areq, wl, inq, trail, &nt, base);
+            S->aux_work += nt;
+            if (!ok) {
                 /* revert: every touched node was boolean-inverted */
                 for (uint32_t t = 0; t < nt; t++) nv[trail[t]] = (int8_t)!nv[trail[t]];
             }
@@ -2343,7 +2354,9 @@ static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
                 uint32_t nt = 0;
                 nv[base] = (int8_t)desired;
                 trail[nt++] = base;
-                if (!_prop_cone(nv, L, R, fo_off, fo_adj, areq, wl, inq, trail, &nt, base)) {
+                int ok = _prop_cone(nv, L, R, fo_off, fo_adj, areq, wl, inq, trail, &nt, base);
+                S->aux_work += nt;
+                if (!ok) {
                     /* revert: every touched node was boolean-inverted */
                     for (uint32_t t = 0; t < nt; t++) nv[trail[t]] = (int8_t)!nv[trail[t]];
                 }
@@ -2935,6 +2948,8 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
         uint64_t blocks = 1000000ull / (per_pass ? per_pass : 1);
         r = dvs_aigsim_random(sim, (uint32_t)(blocks < 8 ? blocks : 8), S->seed);
     }
+    /* Gate evaluations, 64 vectors per word. */
+    S->aux_work += dvs_aigsim_vectors(sim) / 64u * per_pass;
     rc = _sim_result(S, sim, r);
     if (rc != DVS_BB_UNKNOWN) {
         if (log)
@@ -3354,6 +3369,14 @@ static int bb_sample_solve(dvs_bbsolver_t *S, const int32_t *planes, uint32_t k)
     for (uint32_t i = 0; i < k; i++)
         dvs_sat_assume(S->sat, (dvs_sat_lit_t)planes[i]);
     return dvs_sat_solve(S->sat);
+}
+
+void dvs_bbsolver_work(const dvs_bbsolver_t *S, uint64_t *clauses,
+                       uint64_t *sat_work, int *cadical, uint64_t *aux) {
+    *aux      = S ? S->aux_work : 0;
+    *clauses  = S && S->sat ? dvs_sat_num_clauses(S->sat) : 0;
+    *sat_work = S && S->sat ? dvs_sat_work(S->sat) : 0;
+    *cadical  = S && S->sat && dvs_sat_backend(S->sat) == DVS_SAT_BACKEND_CADICAL;
 }
 
 int dvs_bbsolver_sample_stale(const dvs_bbsolver_t *S) {

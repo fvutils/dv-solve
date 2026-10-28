@@ -96,7 +96,7 @@ def test_probe(body, want, budget):
 @pytest.mark.xfail(reason="plan phase 2: the CDCL probe declines this union", strict=True)
 def test_randomize_union_stays_on_cdcl(tmp_path):
     """Verilator mode: t_randomize_union's only constraint is a tautology over
-    a 12-bit slice, yet the CDCL probe runs out of its 50 ms and every later
+    a 12-bit slice, yet the CDCL probe runs out of its budget and every later
     randomize() of the class goes to bit-blasting."""
     src = (_F / "verilator/t_randomize_union.smt2").read_text().rstrip()
     log = tmp_path / "route.log"

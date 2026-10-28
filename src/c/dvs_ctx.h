@@ -364,7 +364,24 @@ typedef struct dvs_ctx_s {
      * stack runs low (dvs_stackinfo.h). A cache; any value is safe. */
     dvs_stack_guard_t  stack_guard;
     dvs_spool_t        pool;          /* offset-addressed, growable    */
+    /* Deterministic budget for one solve, in work units (dvs_ctx_work). The
+     * caller sets work_budget before a dvs_solver_solve; the solve consumes
+     * and clears it. Unlike time_limit_ms, where it stops does not depend on
+     * the machine's load, so a decision made on it (an engine route) is the
+     * same on every run. docs/deterministic_routing_plan.md. */
+    uint64_t           work_budget;
+    uint64_t           work_limit;    /* dvs_ctx_work past which this solve stops */
+    uint8_t            work_hit;      /* this solve reached work_limit            */
 } dvs_ctx_t;
+
+/* Search work so far, in units of one propagator firing: firings plus
+ * DVS_WORK_PER_CONFLICT per conflict (a conflict's analysis and learning
+ * cost about that many firings; tests/perf/route_calib.py). A deterministic
+ * count, for budgets that must not depend on wall-clock time. */
+#define DVS_WORK_PER_CONFLICT 1300u
+static inline uint64_t dvs_ctx_work(const dvs_ctx_t *ctx) {
+    return ctx->prop_fires + (uint64_t)DVS_WORK_PER_CONFLICT * ctx->conflict_count;
+}
 
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */

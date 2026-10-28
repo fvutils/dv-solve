@@ -1302,6 +1302,7 @@ const char *dvs_solver_bail_reason_str(const dvs_ctx_t *ctx) {
     case DVS_BAIL_MAX_RESTARTS:  return "restart budget exhausted";
     case DVS_BAIL_PROPAGATION:   return "propagation ran past the deadline or trail cap";
     case DVS_BAIL_THRASH:        return "work cap after an earlier solve of this problem gave up";
+    case DVS_BAIL_WORK:          return "work budget for this solve";
     default:                     return "no reason recorded";
     }
 }
@@ -2128,6 +2129,11 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
             ctx->bail_reason = DVS_BAIL_DEADLINE;
             return DVS_SOLVE_TIMEOUT;
         }
+        /* Work budget (deterministic; _solver_solve reports it). */
+        if (ctx->work_limit && dvs_ctx_work(ctx) > ctx->work_limit) {
+            ctx->work_hit = 1;
+            return DVS_SOLVE_TIMEOUT;
+        }
 
         /* ── Variable selection ── */
         uint32_t x_id = _select_unassigned(ctx);
@@ -2239,6 +2245,10 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
              * analyses is noise. */
             if (_deadline > 0.0 && (++_tick & 0xF) == 0 && _now_sec() > _deadline) {
                 ctx->bail_reason = DVS_BAIL_DEADLINE_CONF;
+                return DVS_SOLVE_TIMEOUT;
+            }
+            if (ctx->work_limit && dvs_ctx_work(ctx) > ctx->work_limit) {
+                ctx->work_hit = 1;
                 return DVS_SOLVE_TIMEOUT;
             }
 
@@ -2582,17 +2592,22 @@ static void _thrash_store(const dvs_ctx_t *ctx) {
 
 static dvs_result_t _solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     dvs_search_discard(ctx);
+    const uint64_t work_budget = ctx->work_budget;
+    ctx->work_budget = 0;
     const int default_budget = !(opts && (opts->max_conflicts || opts->max_restarts
-                                          || opts->time_limit_ms));
+                                          || opts->time_limit_ms)) && !work_budget;
     const uint64_t f0 = ctx->prop_fires;
     ctx->thrash_hit = 0;
     ctx->thrash_limit = 0;
+    ctx->work_hit = 0;
+    ctx->work_limit = work_budget ? dvs_ctx_work(ctx) + work_budget : 0;
     if (default_budget && ctx->thrashed) {
         uint64_t cap = ctx->ok_fires_max * DVS_THRASH_MULT;
         ctx->thrash_limit = f0 + (cap > DVS_THRASH_FLOOR ? cap : DVS_THRASH_FLOOR);
     }
     dvs_result_t r = _solver_solve_relax(ctx, opts);
     ctx->thrash_limit = 0;
+    ctx->work_limit = 0;
     /* The propagation deadline belongs to this solve only: a later pin or
      * incremental add must not abort on it. */
     ctx->prop_deadline = 0.0;
@@ -2604,6 +2619,11 @@ static dvs_result_t _solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) 
         ctx->thrash_hit = 0;
         r = DVS_SOLVE_TIMEOUT;
         ctx->bail_reason = DVS_BAIL_THRASH;
+    }
+    if (ctx->work_hit) {
+        ctx->work_hit = 0;
+        r = DVS_SOLVE_TIMEOUT;
+        ctx->bail_reason = DVS_BAIL_WORK;
     }
     if (r == DVS_SOLVE_OK || r == DVS_SOLVE_UNSAT) {
         uint64_t used = ctx->prop_fires - f0;

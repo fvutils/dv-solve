@@ -13,6 +13,12 @@
 /* Forward declaration: full definition in dvs_bbsolver.h. Used when
  * DV_ENGINE=bitblast to keep the bit-blast solver alive across check-sat
  * and get-value commands. */
+/* Deterministic bit-blast work (dvs_bbsolver_work), for engine routing:
+ * clauses and SAT work by backend (k: kissat clauses and search ticks; c:
+ * CaDiCaL clauses and terminate polls; their costs differ), and AIG node
+ * visits outside the SAT solver. docs/deterministic_routing_plan.md. */
+typedef struct { uint64_t clk, kw, clc, cw, ax; } Smt2BbWork;
+
 typedef struct dvs_bbsolver_s dvs_bbsolver_t;
 
 #ifdef __cplusplus
@@ -687,7 +693,9 @@ typedef struct {
     uint64_t             cdcl_probe_fp;
     uint8_t              cdcl_route;
 
-    uint32_t             cdcl_ticks;      /* propagator firings of the last CDCL solve */
+    uint64_t             cdcl_ticks;      /* propagator firings of the last CDCL solve */
+    uint64_t             cdcl_confl;      /* conflicts of the last CDCL solve */
+    Smt2BbWork           bb_work_retired; /* of bit-blast solvers already freed (_bb_work_now) */
     uint64_t             shape_fp;        /* hash of the declared names since (reset) */
     void                *shape_tab;       /* Smt2ShapeCost[]: per-shape engine choice, kept across (reset) */
     uint8_t              shape_route;     /* engine the shape routing chose for this check-sat: 1 CDCL, 2 bitblast */

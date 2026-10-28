@@ -5480,7 +5480,28 @@ static int _check_sat_array(Smt2Frontend *fe) {
  * --engine=bitblast CLI flag). The bbsolver is kept alive on fe->bb_solver
  * so that subsequent (get-value) calls can read back model values. */
 /* Free the bit-blast solver and the problem it was built from, if owned. */
+/* Deterministic bit-blast work so far: the live solver's counts plus those
+ * of solvers already freed (dvs_bbsolver_work). */
+static void _bb_work_add(Smt2BbWork *w, const dvs_bbsolver_t *bb) {
+    uint64_t c = 0, s = 0, ax = 0;
+    int cad = 0;
+    dvs_bbsolver_work(bb, &c, &s, &cad, &ax);
+    if (cad) { w->clc += c; w->cw += s; } else { w->clk += c; w->kw += s; }
+    w->ax += ax;
+}
+
+static Smt2BbWork _bb_work_now(const Smt2Frontend *fe) {
+    Smt2BbWork w = fe->bb_work_retired;
+    if (fe->bb_solver) _bb_work_add(&w, fe->bb_solver);
+    return w;
+}
+
+static void _retire_bb_work(Smt2Frontend *fe) {
+    if (fe->bb_solver) _bb_work_add(&fe->bb_work_retired, fe->bb_solver);
+}
+
 static void _free_bb(Smt2Frontend *fe) {
+    _retire_bb_work(fe);
     if (fe->bb_solver)  { dvs_bbsolver_free(fe->bb_solver); fe->bb_solver = NULL; }
     if (fe->bb_problem) { free(fe->bb_problem); fe->bb_problem = NULL; }
     fe->bb_over_problem = 0;
@@ -6034,21 +6055,26 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd);
  * variable names -- is the same on every call, so learn the engine there.
  *
  * Neither engine is uniformly cheaper. riscv_illegal_instr (~6000 search
- * variables from bit-sliced instr_bin) costs CDCL 10-50 ms where bitblast
- * needs ~1 ms; riscv_loop_instr's divisibility test costs CDCL ~2.5 ms where
- * bitblast, building a 32-bit divider, needs ~6 ms. So measure: once CDCL
- * averages over SHAPE_SLOW_US on a shape, send the next SHAPE_TRIALS
+ * variables from bit-sliced instr_bin) costs CDCL ~5 ms where bitblast needs
+ * ~1.5 ms; riscv_loop_instr's divisibility test costs CDCL ~0.05 ms where
+ * bitblast, building a 32-bit divider, needs ~6 ms. So weigh: once CDCL
+ * averages over SHAPE_SLOW_NS on a shape, send the next SHAPE_TRIALS
  * instances to bitblast, and keep bitblast only if it was at least twice as
- * fast; otherwise CDCL is confirmed and the shape is not measured again.
- * Wall time, like the probe's budget, only picks which engine answers; both
- * are exact, so no verdict depends on it. */
+ * cheap; otherwise CDCL is confirmed and the shape is not weighed again.
+ *
+ * The cost is not wall time: it is estimated from deterministic work counts
+ * (_check_sat_cost_ns), so the same input routes the same way on every run
+ * and under any load -- the engine decides how models are sampled (CDCL
+ * near-uniform, bitblast by flipping one model), so a route that followed the
+ * machine's load made a seeded run unrepeatable. Both engines are exact; no
+ * verdict depends on the route. docs/deterministic_routing_plan.md. */
 #define SHAPE_TAB_N    256u
-#define SHAPE_SLOW_US  3000u
+#define SHAPE_SLOW_NS  3000000u
 #define SHAPE_TRIALS   2u
 enum { SHAPE_LEARN = 0, SHAPE_CDCL = 1, SHAPE_BITBLAST = 2 };
 typedef struct {
     uint64_t key;
-    uint64_t cdcl_us, bb_us;
+    uint64_t cdcl_ns, bb_ns;
     uint16_t cdcl_n, bb_n;
     uint8_t  state;
 } Smt2ShapeCost;
@@ -6066,22 +6092,59 @@ static Smt2ShapeCost *_shape_slot(Smt2Frontend *fe) {
 
 /* Route this check-sat to bitblast for its shape: decided, or on trial. */
 static int _shape_wants_bitblast(Smt2Frontend *fe) {
+    const char *ev = getenv("DV_VLT_SHAPE");     /* 0: no shape routing */
+    if (ev && *ev == '0') return 0;
     Smt2ShapeCost *e = _shape_slot(fe);
     if (!e) return 0;
     if (e->state == SHAPE_BITBLAST) return 1;
     return e->state == SHAPE_LEARN && e->cdcl_n >= 2
-        && e->cdcl_us > (uint64_t)SHAPE_SLOW_US * e->cdcl_n && e->bb_n < SHAPE_TRIALS;
+        && e->cdcl_ns > (uint64_t)SHAPE_SLOW_NS * e->cdcl_n && e->bb_n < SHAPE_TRIALS;
 }
 
-/* After a check-sat: account its time to the engine the shape routing chose
+/* After a check-sat: account its cost to the engine the shape routing chose
  * (fe->shape_route: 1 CDCL, 2 bitblast) and settle the shape when it can. */
-static void _shape_record(Smt2Frontend *fe, long us) {
+static void _shape_record(Smt2Frontend *fe, uint64_t ns) {
     Smt2ShapeCost *e = fe->shape_route ? _shape_slot(fe) : NULL;
-    if (!e || e->state != SHAPE_LEARN || us < 0) return;
-    if (fe->shape_route == 1 && e->cdcl_n < 0xFFFF) { e->cdcl_n++; e->cdcl_us += (uint64_t)us; }
-    if (fe->shape_route == 2) { e->bb_n++; e->bb_us += (uint64_t)us; }
+    if (!e || e->state != SHAPE_LEARN) return;
+    if (fe->shape_route == 1 && e->cdcl_n < 0xFFFF) { e->cdcl_n++; e->cdcl_ns += ns; }
+    if (fe->shape_route == 2) { e->bb_n++; e->bb_ns += ns; }
     if (e->bb_n >= SHAPE_TRIALS)
-        e->state = e->bb_us * 2 * e->cdcl_n < e->cdcl_us * e->bb_n ? SHAPE_BITBLAST : SHAPE_CDCL;
+        e->state = e->bb_ns * 2 * e->cdcl_n < e->cdcl_ns * e->bb_n ? SHAPE_BITBLAST : SHAPE_CDCL;
+}
+
+/* A check-sat's cost in estimated nanoseconds, from deterministic counts:
+ * CDCL propagator firings and conflicts, the bit-blaster's clauses and SAT
+ * work by backend and its AIG visits outside SAT, and the problem's size for
+ * each engine that took it. The weights are the reference machine's
+ * (tests/perf/route_calib.py, docs/deterministic_routing_plan.md); only their
+ * ratios matter, so a faster or slower machine routes the same way. */
+#define COST_NS_PER_FIRE        19u
+#define COST_NS_PER_CONFLICT    24730u
+#define COST_NS_PER_BYTE_CDCL   14u     /* problem pool bytes, CDCL compile */
+#define COST_NS_PER_BYTE_BB     3u      /* problem pool bytes, bit-blast    */
+#define COST_NS_PER_CLAUSE_K    15u     /* kissat clauses                   */
+#define COST_NS_PER_TICK_K      8u      /* kissat search ticks              */
+#define COST_NS_PER_CLAUSE_C    160u    /* CaDiCaL clauses                  */
+#define COST_NS_PER_POLL_C      443u    /* CaDiCaL terminate polls          */
+#define COST_NS_PER_AIG_VISIT   27u     /* diversity pass, simulation       */
+
+/* CDCL budgets in work units (dvs_ctx_work: a firing, or 1/1300 of a
+ * conflict; ~19 ns each on the reference machine). */
+#define SMT2_WORK_PER_MS        52600ull     /* 1 ms on the reference machine */
+#define SMT2_PROBE_WORK         2000000ull   /* Verilator CDCL probe: ~50 ms  */
+#define SMT2_QFBV_CDCL_WORK     1050000ull   /* one-shot QF_BV: ~20 ms        */
+static uint64_t _check_sat_cost_ns(const Smt2Frontend *fe, const Smt2BbWork *b0,
+                                   const Smt2BbWork *b1) {
+    uint64_t psz = fe->problem ? fe->problem->pool.used : 0;
+    uint64_t cl_k = b1->clk - b0->clk, kw = b1->kw - b0->kw;
+    uint64_t cl_c = b1->clc - b0->clc, cw = b1->cw - b0->cw, ax = b1->ax - b0->ax;
+    uint64_t ns = COST_NS_PER_FIRE * fe->cdcl_ticks + COST_NS_PER_CONFLICT * fe->cdcl_confl
+                + COST_NS_PER_CLAUSE_K * cl_k + COST_NS_PER_TICK_K * kw
+                + COST_NS_PER_CLAUSE_C * cl_c + COST_NS_PER_POLL_C * cw
+                + COST_NS_PER_AIG_VISIT * ax;
+    if (fe->cdcl_ticks || fe->cdcl_confl) ns += COST_NS_PER_BYTE_CDCL * psz;
+    if (cl_k || kw || cl_c || cw || ax)   ns += COST_NS_PER_BYTE_BB * psz;
+    return ns;
 }
 
 /* DV_LOG in Verilator mode: one `vlt-time <us> <engine>/<why>` line per
@@ -6102,17 +6165,36 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
     fe->vlt_route = "other";
     fe->cdcl_ticks = 0;
+    fe->cdcl_confl = 0;
     fe->shape_route = 0;
     fe->shape_bb = 0;
+    Smt2BbWork b0 = _bb_work_now(fe);
+    /* Test hook: stall each check-sat this long, as a loaded machine would,
+     * to show that no route follows the clock (test_vlt_route_determinism). */
+    const char *stall = getenv("DV_VLT_STALL_US");
+    if (stall && *stall) {
+        long want = atol(stall);
+        struct timespec ts;
+        do clock_gettime(CLOCK_MONOTONIC, &ts);
+        while ((ts.tv_sec - t0.tv_sec) * 1000000L + (ts.tv_nsec - t0.tv_nsec) / 1000 < want);
+    }
     int rc = _cmd_check_sat_body(fe, cmd);
     fe->shape_bb = 0;
+    Smt2BbWork b1 = _bb_work_now(fe);
+    uint64_t cost_ns = _check_sat_cost_ns(fe, &b0, &b1);
+    _shape_record(fe, cost_ns);
+    if (!getenv("DV_LOG")) return rc;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     long us = (long)((t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000);
-    _shape_record(fe, us);
-    if (!getenv("DV_LOG")) return rc;
-    fprintf(fe->err, "vlt-time %ld %s vars=%u props=%u conflicts=%llu ticks=%u\n",
+    fprintf(fe->err, "vlt-time %ld %s vars=%u props=%u conflicts=%llu ticks=%llu"
+            " bbclk=%llu bbkw=%llu bbclc=%llu bbcw=%llu bbax=%llu psz=%u cost=%llu\n",
             us, fe->vlt_route, fe->ctx ? fe->ctx->n_vars : 0u, fe->ctx ? fe->ctx->n_props : 0u,
-            fe->ctx ? (unsigned long long)fe->ctx->conflict_count : 0ull, fe->cdcl_ticks);
+            (unsigned long long)fe->cdcl_confl,
+            (unsigned long long)fe->cdcl_ticks, (unsigned long long)(b1.clk - b0.clk),
+            (unsigned long long)(b1.kw - b0.kw), (unsigned long long)(b1.clc - b0.clc),
+            (unsigned long long)(b1.cw - b0.cw),
+            (unsigned long long)(b1.ax - b0.ax), fe->problem ? fe->problem->pool.used : 0u,
+            (unsigned long long)(cost_ns / 1000u));
     return rc;
 }
 
@@ -6468,28 +6550,33 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
     /* Bound the CDCL-viability probe. Without this the first randomize() of a
      * constraint set CDCL cannot handle would stall for the full 10 s default
      * before escalating. Paid once per constraint set, then the sticky route
-     * sends later calls straight to bitblast. 50 ms is ~25x the time CDCL needs
-     * on every instance it can actually solve (measured 0.8-2 ms across the 37
-     * captured Verilator transcripts), so the bound costs no coverage. */
-    if (cdcl_probing) opts.time_limit_ms = 50;
+     * sends later calls straight to bitblast. The bound is work, not time
+     * (SMT2_PROBE_WORK), so whether a constraint set is declined does not
+     * depend on the machine's load. */
+    uint64_t work_budget = cdcl_probing ? SMT2_PROBE_WORK : 0;
 
     /* One-shot QF_BV (plan piece 3.2): a randomization-shaped problem CDCL
      * cannot finish quickly goes to bitblast, which is decision-complete, after
      * a short budget rather than CDCL's 10 s default. CDCL answers every such
-     * problem it can in under 15 ms (tier1, fwhdl-core). Only where the
-     * escalation below can take the whole problem; otherwise CDCL keeps its
-     * full budget. DV_QFBV_CDCL_MS sets the budget, 0 the old behaviour. */
+     * problem it can within it (tier1, fwhdl-core). Only where the escalation
+     * below can take the whole problem; otherwise CDCL keeps its full budget.
+     * DV_QFBV_CDCL_WORK sets the budget in work units (dvs_ctx_work), 0 the
+     * old behaviour; DV_QFBV_CDCL_MS, its former form, is converted. */
     if (!fe->verilator_mode && !route_cdcl && !getenv("DV_ENGINE") && !getenv("DV_NO_BITBLAST")
             && !getenv("DV_CDCL_TIME_LIMIT")
             && (fe->n_aux_problems == 0 || (fe->cdcl_retained && !fe->has_aux))) {
-        const char *ev = getenv("DV_QFBV_CDCL_MS");
-        uint32_t ms = ev && *ev ? (uint32_t)atoi(ev) : 20;
-        if (ms) opts.time_limit_ms = ms;
+        const char *ev = getenv("DV_QFBV_CDCL_WORK");
+        const char *ms = getenv("DV_QFBV_CDCL_MS");
+        work_budget = ev && *ev ? strtoull(ev, NULL, 10)
+                    : ms && *ms ? strtoull(ms, NULL, 10) * SMT2_WORK_PER_MS
+                    :             SMT2_QFBV_CDCL_WORK;
     }
 
-    uint32_t ticks0 = fe->ctx->prop_ticks;
+    uint64_t fires0 = fe->ctx->prop_fires, confl0 = fe->ctx->conflict_count;
+    fe->ctx->work_budget = work_budget;
     fe->last_result = dvs_solver_solve(fe->ctx, &opts);
-    fe->cdcl_ticks = fe->ctx->prop_ticks - ticks0;
+    fe->cdcl_ticks = fe->ctx->prop_fires - fires0;
+    fe->cdcl_confl = fe->ctx->conflict_count - confl0;
     fe->has_result = 1;
 
     if (opts.use_lcg && getenv("DV_LCG_STATS") && fe->ctx->lcg) {
@@ -8159,6 +8246,7 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     /* The array engine's bb_solver was built over fe->problem, freed below;
      * a session's holds the assertions being reset. */
     if ((fe->bb_over_problem || fe->bb_sess) && fe->bb_solver) {
+        _retire_bb_work(fe);
         dvs_bbsolver_free(fe->bb_solver);
         fe->bb_solver = NULL;
         fe->cache_valid = 0;

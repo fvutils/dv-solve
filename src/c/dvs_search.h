@@ -49,6 +49,8 @@ typedef struct {
 #define DVS_BAIL_THRASH        6   /* an earlier solve of this problem gave
                                     * up, and this one passed the work cap
                                     * that set (ctx->thrash_limit)           */
+#define DVS_BAIL_WORK          7   /* the caller's work budget for this solve
+                                    * (ctx->work_budget) ran out             */
 
 const char *dvs_solver_bail_reason_str(const dvs_ctx_t *ctx);
 

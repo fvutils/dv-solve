@@ -237,6 +237,11 @@ int kissat_set_option (kissat *solver, const char *name, int new_value) {
 #endif
 }
 
+unsigned long long kissat_search_ticks (kissat *solver) {
+  kissat_require_initialized (solver);
+  return solver->statistics.search_ticks;
+}
+
 void kissat_set_decision_limit (kissat *solver, unsigned limit) {
   kissat_require_initialized (solver);
   limits *limits = &solver->limits;

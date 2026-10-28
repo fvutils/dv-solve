@@ -100,7 +100,8 @@ def test_sticky_probe_amortizes() -> None:
     """A CDCL-infeasible instance must pay ONE bounded probe, not one per call.
 
     t_constraint_struct is such an instance. If the probe were re-run per call
-    the 50 ms budget would dominate; amortized over 200 calls it must not.
+    its budget (~50 ms of work) would dominate; amortized over 200 calls it
+    must not.
     """
     _, dt, _ = _loop("t_constraint_struct", 200, {})
     per_call_ms = dt / 200 * 1e3

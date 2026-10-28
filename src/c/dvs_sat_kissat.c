@@ -124,6 +124,11 @@ static size_t ki_arena_save_mark(void *impl) {
     return k && k->kissat ? kissat_arena_size_words(k->kissat) : 0;
 }
 
+static uint64_t ki_work(void *impl) {
+    kissat_impl_t *k = (kissat_impl_t *)impl;
+    return k && k->kissat ? kissat_search_ticks(k->kissat) : 0;
+}
+
 static const dvs_sat_vtbl KISSAT_VTBL = {
     .incremental        = 0,   /* one-shot: dispatcher uses rebuild-on-taint */
     .destroy            = ki_destroy,
@@ -141,6 +146,7 @@ static const dvs_sat_vtbl KISSAT_VTBL = {
     .arena_size_bytes     = ki_arena_size_bytes,
     .arena_capacity_bytes = ki_arena_capacity_bytes,
     .arena_save_mark      = ki_arena_save_mark,
+    .work               = ki_work,
 };
 
 void *dvs_sat_kissat_create(dvs_alloc_t *alloc, const dvs_sat_vtbl **vt_out) {

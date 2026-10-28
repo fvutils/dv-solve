@@ -285,14 +285,18 @@ random bits, re-solving after each, and keeping the last solution (Verilator
 gets a new seed from a counter that survives `(reset)`, or `given seed + 1`
 when the driver set one. Then:
 
-- **CDCL first.** A problem not seen before gets a 50 ms CDCL probe; if CDCL
+- **CDCL first.** A problem not seen before gets a bounded CDCL probe (a
+  fixed amount of search work, about 50 ms on the reference machine); if CDCL
   answers, problems with that fingerprint stay on CDCL. Bit-blast's
   flip-check from a cached witness put half of all draws on one solution of an
   OpenTitan-style range constraint, where CDCL's draws were close to uniform.
   `DV_VERILATOR_CDCL=0` turns this off.
-- **By measured cost.** Per problem shape (the declared names), once CDCL
+- **By estimated cost.** Per problem shape (the declared names), once CDCL
   averages more than 3 ms, the next two calls try bit-blast, and bit-blast is
-  kept only if it is at least twice as fast.
+  kept only if it is at least twice as cheap. The cost is estimated from work
+  counts (propagator firings, conflicts, clauses, SAT search work, problem
+  size), never from the clock, so a route, and the models it gives, are the
+  same on every run and under any machine load.
 - **Bit-blast reuses its model.** When a bit-blast problem is identical to the
   last one, it is not re-solved: the cached model is flip-checked with the new
   seed (`dvs_bbsolver_rediversify`). Every draw is then one Gibbs sweep from

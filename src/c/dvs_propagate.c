@@ -277,6 +277,10 @@ static int _prop_over_budget(dvs_ctx_t *ctx) {
         ctx->thrash_hit = 1;      /* see _solver_solve */
         return 1;
     }
+    if (ctx->work_limit && dvs_ctx_work(ctx) > ctx->work_limit) {
+        ctx->work_hit = 1;        /* see _solver_solve */
+        return 1;
+    }
     if (ctx->prop_deadline > 0.0) {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);

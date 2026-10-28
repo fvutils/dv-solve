@@ -212,6 +212,13 @@ int dvs_bbsolver_sample(dvs_bbsolver_t *bb, const uint32_t *vars,
  *  them, so draws slow down as they pile up: rebuild the solver then. */
 int dvs_bbsolver_sample_stale(const dvs_bbsolver_t *bb);
 
+/* Work this solver has done so far, as deterministic counts: clauses encoded,
+ * SAT search work (dvs_sat_work, whose unit depends on the backend; *cadical
+ * says which) and AIG node visits outside the SAT solver (the diversity pass,
+ * simulation). For engine routing (docs/deterministic_routing_plan.md). */
+void dvs_bbsolver_work(const dvs_bbsolver_t *bb, uint64_t *clauses,
+                       uint64_t *sat_work, int *cadical, uint64_t *aux);
+
 int dvs_bbsolver_prepare(dvs_bbsolver_t *bb, uint64_t seed);
 int dvs_bbsolver_is_incremental(const dvs_bbsolver_t *bb);
 /* Why the last check or solve gave no verdict, for (get-info :reason-unknown).

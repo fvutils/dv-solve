@@ -160,6 +160,11 @@ void dvs_sat_phase(dvs_sat_t *s, dvs_sat_lit_t lit);
 /** Return number of clauses added (units + binary + general). */
 uint64_t dvs_sat_num_clauses(const dvs_sat_t *s);
 
+/** Search work done so far: a deterministic count that grows with the work
+ *  (kissat: search ticks; CaDiCaL: polls of its terminate hook), so its units
+ *  differ by backend (see dvs_sat_backend). 0 when the backend has none. */
+uint64_t dvs_sat_work(const dvs_sat_t *s);
+
 /*
  * Clause-DB recording (cube-and-conquer parallelism substrate).
  *

@@ -50,6 +50,11 @@ void kissat_set_decision_limit (kissat *solver, unsigned);
 
 void kissat_print_statistics (kissat *solver);
 
+/* dv-solve fork: the search's tick count so far (statistics.search_ticks),
+ * a deterministic measure of the work done, for engine routing that must not
+ * depend on wall-clock time (docs/deterministic_routing_plan.md). */
+unsigned long long kissat_search_ticks (kissat *solver);
+
 /* dv-solve fork: clause-arena observation. Lets external machinery
  * (e.g., dv-solve's checkpoint/LevelMark system) measure SAT-layer
  * state without poking at kissat internals. Cheap getters; no side

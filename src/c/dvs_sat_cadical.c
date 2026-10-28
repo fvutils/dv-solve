@@ -22,7 +22,20 @@ typedef struct {
     dvs_alloc_t *alloc;
     CCaDiCaL    *solver;
     int          configured;  /* left CONFIGURING: options are now fatal to set */
+    /* CaDiCaL's C API has no statistics. It polls a terminate hook at fixed
+     * intervals of its own search steps (opts.terminateint), so the number of
+     * polls is a deterministic work count; the hook is always installed and
+     * forwards to the caller's, if any (cd_set_terminate). */
+    uint64_t     polls;
+    void        *term_state;
+    int        (*term_fn)(void *state);
 } cadical_impl_t;
+
+static int cd_poll(void *state) {
+    cadical_impl_t *c = (cadical_impl_t *)state;
+    c->polls++;
+    return c->term_fn ? c->term_fn(c->term_state) : 0;
+}
 
 static void *cd_xalloc(dvs_alloc_t *a, size_t sz) {
     if (a) return DVS_ALLOC(a, sz);
@@ -101,7 +114,14 @@ static void cd_set_decision_limit(void *impl, uint32_t limit) {
 
 static void cd_set_terminate(void *impl, void *state, int (*fn)(void *)) {
     cadical_impl_t *c = (cadical_impl_t *)impl;
-    if (c && c->solver) ccadical_set_terminate(c->solver, state, fn);
+    if (!c) return;
+    c->term_state = state;
+    c->term_fn    = fn;
+}
+
+static uint64_t cd_work(void *impl) {
+    cadical_impl_t *c = (cadical_impl_t *)impl;
+    return c ? c->polls : 0;
 }
 
 /* CaDiCaL polls the set_terminate callback during solve, so a peer merely
@@ -134,6 +154,7 @@ static const dvs_sat_vtbl CADICAL_VTBL = {
     .set_conflict_limit = cd_set_conflict_limit,
     .set_decision_limit = cd_set_decision_limit,
     .set_terminate      = cd_set_terminate,
+    .work               = cd_work,
     .set_sampling       = cd_set_sampling,
     .phase              = cd_phase,
     .arena_size_bytes     = cd_arena_zero,
@@ -146,6 +167,9 @@ void *dvs_sat_cadical_create(dvs_alloc_t *alloc, const dvs_sat_vtbl **vt_out) {
     if (!c) return NULL;
     c->alloc  = alloc;
     c->configured = 0;
+    c->polls = 0;
+    c->term_state = NULL;
+    c->term_fn = NULL;
     c->solver = ccadical_init();
     if (!c->solver) {
         cd_xfree(alloc, c, sizeof(*c));
@@ -163,6 +187,7 @@ void *dvs_sat_cadical_create(dvs_alloc_t *alloc, const dvs_sat_vtbl **vt_out) {
      * lemma) collides with one and CaDiCaL aborts. Every CaDiCaL user here is
      * incremental. */
     ccadical_set_option(c->solver, "factor", 0);
+    ccadical_set_terminate(c->solver, c, cd_poll);
     *vt_out = &CADICAL_VTBL;
     return c;
 }

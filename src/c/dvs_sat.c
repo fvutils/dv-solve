@@ -300,6 +300,10 @@ void dvs_sat_interrupt(dvs_sat_t *s) {
     s->vt->interrupt(s->impl);
 }
 
+uint64_t dvs_sat_work(const dvs_sat_t *s) {
+    return s && s->vt->work ? s->vt->work(s->impl) : 0;
+}
+
 uint64_t dvs_sat_num_clauses(const dvs_sat_t *s) {
     return s->num_clauses;
 }
