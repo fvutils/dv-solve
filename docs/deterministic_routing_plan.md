@@ -117,4 +117,5 @@ bitblast as with the 20 ms budget, and no verdict changes.
 
 - 2026-10-28: plan written.
 - 2026-10-28: A, B, C implemented on `feat/deterministic-routing`,
-  calibrated, verified (above). Not merged.
+  calibrated, verified (above).
+- 2026-10-28: merged to main as 48ceaf1.
