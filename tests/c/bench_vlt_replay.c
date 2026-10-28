@@ -214,6 +214,10 @@ static void pass_pipe(const char *solver, double *wall, double *child_cpu) {
 /* Pass: text (and problem capture)                                    */
 /* ------------------------------------------------------------------ */
 
+/* --dump-values: one line per answered call of the first rep of each api
+ * pass, for the uniformity harness (tests/uniformity). */
+static FILE *g_dump;
+
 typedef struct {
     dvs_problem_t *p;
     size_t         size;
@@ -225,9 +229,12 @@ typedef struct {
                                     * CDCL compile (CDCL answers only) */
     uint32_t       n_aux;
     uint32_t       call;       /* randomize() call (Cmd.call) */
+    uint32_t       n_named;    /* declared vars, for --dump-values */
+    struct { char *name; uint32_t id; uint16_t width; } *named;
 } Capture;
 
 static Capture *g_cap;
+static const Capture *g_dcap;  /* the call being answered, while dumping */
 static dvs_problem_t *g_pre[MAX_AUX];
 static uint32_t g_pre_n;
 static size_t   g_ncap, g_capcap;
@@ -262,6 +269,19 @@ static void capture(Smt2Frontend *fe, uint32_t call) {
     c->unsat = fe->last_result == DVS_SOLVE_UNSAT;
     c->call = call;
     c->n_aux = 0;
+    c->n_named = 0;
+    c->named = NULL;
+    if (g_dump) {
+        c->named = calloc(fe->n_vars ? fe->n_vars : 1, sizeof *c->named);
+        for (uint32_t k = 0; k < fe->n_vars; k++) {
+            const Smt2Var *v = &fe->vars[k];
+            if (v->var_id >= p->n_vars || v->width > 64 || v->name[0] == '\\'
+                || !strncmp(v->name, "__", 2)) continue;
+            c->named[c->n_named].name = strdup(v->name);
+            c->named[c->n_named].id = v->var_id;
+            c->named[c->n_named++].width = v->width;
+        }
+    }
     if (!c->bitblast) {
         c->n_aux = g_pre_n;
         memcpy(c->aux, g_pre, g_pre_n * sizeof(dvs_problem_t *));
@@ -606,6 +626,22 @@ static int cdcl_open(Cdcl *c, Built *bt) {
 }
 
 static volatile int64_t g_sink;
+
+/* "V <call> <seed> name=#x... ..." with each value masked to its width. */
+static void dump_model(dvs_ctx_t *ctx, dvs_bbsolver_t *bb) {
+    const Capture *cp = g_dcap;
+    if (!g_dump || !cp) return;
+    fprintf(g_dump, "V %u %llu", cp->call, (unsigned long long)cp->seed);
+    for (uint32_t k = 0; k < cp->n_named; k++) {
+        int64_t x = 0;
+        if (bb) dvs_bbsolver_value(bb, cp->named[k].id, &x);
+        else x = dvs_solver_get_value(ctx, cp->named[k].id);
+        uint64_t u = (uint64_t)x;
+        if (cp->named[k].width < 64) u &= (1ull << cp->named[k].width) - 1;
+        fprintf(g_dump, " %s=#x%llx", cp->named[k].name, (unsigned long long)u);
+    }
+    fputc('\n', g_dump);
+}
 static int g_want_unsat;   /* the call being replayed was answered unsat */
 
 /* The front end's CDCL solve (smt2_frontend.c, _cmd_check_sat_body): the same
@@ -627,6 +663,7 @@ static int cdcl_solve(Cdcl *c, Built *bt, uint64_t seed) {
     for (uint32_t k = 0; k < bt->n_aux; k++) viol += dvs_solver_validate_model(c->ctx, bt->aux[k], NULL);
     if (viol > 0) return -1;
     for (uint32_t v = 0; v < bt->p->n_vars; v++) g_sink += dvs_solver_get_value(c->ctx, v);
+    dump_model(c->ctx, NULL);
     return 0;
 }
 
@@ -643,6 +680,7 @@ static void bb_read(dvs_bbsolver_t *bb, uint32_t n_vars) {
         dvs_bbsolver_value(bb, v, &x);
         g_sink += x;
     }
+    dump_model(NULL, bb);
 }
 
 typedef struct {
@@ -708,6 +746,7 @@ static void pass_api(int cached, ApiStats *st) {
     for (size_t i = 0; i < g_ncap; i++) {
         Capture *cp = &g_cap[i];
         g_want_unsat = cp->unsat;
+        g_dcap = cp;
         /* Every randomize() builds its problem (Verilator cannot know it is
          * unchanged without doing so); the cache only saves compile. */
         double a = now_s();
@@ -858,6 +897,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = argv[++i];
         else if (!strcmp(argv[i], "--warmup") && i + 1 < argc) g_warmup = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--calls") && i + 1 < argc) g_calls = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dump-values") && i + 1 < argc) {
+            if (!(g_dump = fopen(argv[++i], "w"))) { perror(argv[i]); return 2; }
+        }
         else if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
             const char *m = argv[++i];
             if (!strcmp(m, "verilator")) g_vlt_mode = 1;
@@ -868,6 +910,7 @@ int main(int argc, char **argv) {
     if (!path) {
         fprintf(stderr, "usage: %s <cmds.smt2> [--solver PATH] [--reps N] [--passes LIST]\n"
                         "         [--calls N] [--warmup N] [--mode default|verilator]\n"
+                        "         [--dump-values FILE]\n"
                         "       %s --build-info | --calib\n"
                         "  --mode     the front end's mode for the text pass, which also captures\n"
                         "             the problems the api passes replay; use the capture's mode\n"
@@ -876,6 +919,8 @@ int main(int argc, char **argv) {
                         "             per-call figure\n"
                         "  --calls    randomize() calls in the session, warm-up included (default:\n"
                         "             one per solver session, each starting with (reset))\n"
+                        "  --dump-values  write each api pass's models (first rep): \"V call seed\n"
+                        "             name=#xVAL ...\" per answered call, for tests/uniformity\n"
                         "  --build-info  how the loaded dv-solve library was built, and its file\n"
                         "  --calib    that, then time fixed work (host and library speed)\n",
                 argv[0], argv[0]);
@@ -932,8 +977,11 @@ int main(int argc, char **argv) {
         if (!has(passes, cached ? "api-cache" : "api")) continue;
         ApiStats best = {0}, s;
         best.wall = 1e30;
+        FILE *dump = g_dump;
+        if (dump) fprintf(dump, "pass %s\n", cached ? "api-cache" : "api");
         for (int k = 0; k < reps; k++) {
             pass_api(cached, &s);
+            g_dump = NULL;   /* first rep only */
             if (s.wall < best.wall) best = s;
         }
         double pc = 1e6 / (double)(g_ncap ? g_ncap : 1);
@@ -950,6 +998,8 @@ int main(int argc, char **argv) {
             printf("               on a reused context: %.1f us per call; on a new one: %.1f us\n",
                    1e6 * best.hit_solve / best.hits,
                    1e6 * (best.solve - best.hit_solve) / (double)(g_ncap - best.hits));
+        g_dump = dump;
     }
+    if (g_dump) fclose(g_dump);
     return 0;
 }

@@ -1,0 +1,72 @@
+; corpus for control.solve_before_array from 420 captured calls, 11 distinct problems
+; problem control.solve_before_array#0 calls=210
+; get-value n
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun arr () (Array (_ BitVec 32) (_ BitVec 8)))
+(declare-fun n () (_ BitVec 4))
+(assert (= #b1 (__Vbv (bvuge n #x2))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000000) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000001) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000002) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000003) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000004) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000005) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000006) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000007) ((_ zero_extend 4) n)))))
+; end
+; problem control.solve_before_array#1 calls=75
+; get-value (select arr #x00000000)(select arr #x00000001)(select arr #x00000002)(select arr #x00000003)(select arr #x00000004)(select arr #x00000005)(select arr #x00000006)(select arr #x00000007) n
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun arr () (Array (_ BitVec 32) (_ BitVec 8)))
+(declare-fun n () (_ BitVec 4))
+(assert (= n #b1111))
+(assert (= #b1 (__Vbv (bvuge n #x2))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000000) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000001) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000002) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000003) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000004) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000005) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000006) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000007) ((_ zero_extend 4) n)))))
+; end
+; problem control.solve_before_array#2 calls=45
+; get-value (select arr #x00000000)(select arr #x00000001)(select arr #x00000002)(select arr #x00000003)(select arr #x00000004)(select arr #x00000005)(select arr #x00000006)(select arr #x00000007) n
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun arr () (Array (_ BitVec 32) (_ BitVec 8)))
+(declare-fun n () (_ BitVec 4))
+(assert (= n #b1110))
+(assert (= #b1 (__Vbv (bvuge n #x2))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000000) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000001) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000002) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000003) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000004) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000005) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000006) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000007) ((_ zero_extend 4) n)))))
+; end
+; problem control.solve_before_array#3 calls=36
+; get-value (select arr #x00000000)(select arr #x00000001)(select arr #x00000002)(select arr #x00000003)(select arr #x00000004)(select arr #x00000005)(select arr #x00000006)(select arr #x00000007) n
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun arr () (Array (_ BitVec 32) (_ BitVec 8)))
+(declare-fun n () (_ BitVec 4))
+(assert (= n #b1101))
+(assert (= #b1 (__Vbv (bvuge n #x2))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000000) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000001) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000002) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000003) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000004) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000005) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000006) ((_ zero_extend 4) n)))))
+(assert (= #b1 (__Vbv (bvule (select arr #x00000007) ((_ zero_extend 4) n)))))
+; end

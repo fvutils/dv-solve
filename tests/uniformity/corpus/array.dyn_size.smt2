@@ -1,0 +1,71 @@
+; corpus for array.dyn_size from 420 captured calls, 17 distinct problems
+; problem array.dyn_size#0 calls=111
+; get-value __Vd_size(select d #x00000000) n
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun __Vd_size () (_ BitVec 32))
+(declare-fun d () (Array (_ BitVec 32) (_ BitVec 8)))
+(declare-fun n () (_ BitVec 4))
+(assert (= #b1 (bvand (__Vbv (bvuge ((_ zero_extend 28) n) #x00000001)) (__Vbv (bvule ((_ zero_extend 28) n) #x0000000c)))))
+(assert (= #b1 (__Vbv (= __Vd_size ((_ zero_extend 28) n)))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000000)) #x00000000))))
+(assert (= #b1 (__Vbv (bvsge __Vd_size #x00000000))))
+(assert (= #b1 (__Vbv (= __Vd_size (_ bv1 32)))))
+; end
+; problem array.dyn_size#1 calls=110
+; get-value __Vd_size(select d #x00000000) n
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun __Vd_size () (_ BitVec 32))
+(declare-fun d () (Array (_ BitVec 32) (_ BitVec 8)))
+(declare-fun n () (_ BitVec 4))
+(assert (= #b1 (bvand (__Vbv (bvuge ((_ zero_extend 28) n) #x00000001)) (__Vbv (bvule ((_ zero_extend 28) n) #x0000000c)))))
+(assert (= #b1 (__Vbv (= __Vd_size ((_ zero_extend 28) n)))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000000)) #x00000000))))
+(assert (= #b1 (__Vbv (bvsge __Vd_size #x00000000))))
+; end
+; problem array.dyn_size#2 calls=31
+; get-value __Vd_size(select d #x00000000)(select d #x00000001)(select d #x00000002)(select d #x00000003)(select d #x00000004)(select d #x00000005)(select d #x00000006)(select d #x00000007)(select d #x00000008) n
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun __Vd_size () (_ BitVec 32))
+(declare-fun d () (Array (_ BitVec 32) (_ BitVec 8)))
+(declare-fun n () (_ BitVec 4))
+(assert (= #b1 (bvand (__Vbv (bvuge ((_ zero_extend 28) n) #x00000001)) (__Vbv (bvule ((_ zero_extend 28) n) #x0000000c)))))
+(assert (= #b1 (__Vbv (= __Vd_size ((_ zero_extend 28) n)))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000000)) #x00000000))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000001)) #x00000002))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000002)) #x00000004))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000003)) #x00000006))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000004)) #x00000008))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000005)) #x0000000a))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000006)) #x0000000c))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000007)) #x0000000e))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000008)) #x00000010))))
+(assert (= #b1 (__Vbv (bvsge __Vd_size #x00000000))))
+(assert (= #b1 (__Vbv (= __Vd_size (_ bv9 32)))))
+; end
+; problem array.dyn_size#3 calls=31
+; get-value __Vd_size(select d #x00000000)(select d #x00000001)(select d #x00000002)(select d #x00000003)(select d #x00000004)(select d #x00000005)(select d #x00000006)(select d #x00000007)(select d #x00000008) n
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun __Vd_size () (_ BitVec 32))
+(declare-fun d () (Array (_ BitVec 32) (_ BitVec 8)))
+(declare-fun n () (_ BitVec 4))
+(assert (= #b1 (bvand (__Vbv (bvuge ((_ zero_extend 28) n) #x00000001)) (__Vbv (bvule ((_ zero_extend 28) n) #x0000000c)))))
+(assert (= #b1 (__Vbv (= __Vd_size ((_ zero_extend 28) n)))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000000)) #x00000000))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000001)) #x00000002))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000002)) #x00000004))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000003)) #x00000006))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000004)) #x00000008))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000005)) #x0000000a))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000006)) #x0000000c))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000007)) #x0000000e))))
+(assert (= #b1 (__Vbv (= ((_ zero_extend 24) (select d #x00000008)) #x00000010))))
+(assert (= #b1 (__Vbv (bvsge __Vd_size #x00000000))))
+; end
