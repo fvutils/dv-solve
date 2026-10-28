@@ -352,6 +352,29 @@ def test_replay_details():
     assert replay_details(_REPLAY_OUT, "api").get("distinct") is None
 
 
+_CENSUS_OUT = """census     210 calls, 11 distinct problems (call repeat 0.948); components per call mean 2.00 max 3; 420 component instances, 10 distinct (component repeat 0.976)
+census     calls all closed-form (free/interval) 0.250, all <= small 1.000
+census     class free 0.000 interval 0.500 small 0.500 medium 0.000 large 0.000
+census     construct compare 1.000 logic 1.000 dist 0.100
+             site k vars 2 aux 8 box2 10.0 class small instances 210 keys 10 constructs compare,logic
+             site w vars 1 aux 0 box2 32.0 class free instances 210 keys 1 constructs -
+"""
+
+
+def test_replay_census():
+    from dv_solve_simbench.provenance import replay_census, replay_details
+    c = replay_census(_CENSUS_OUT)
+    assert (c["calls"], c["distinct_problems"], c["components_max"]) == (210, 11, 3)
+    assert (c["call_repeat"], c["component_repeat"]) == (0.948, 0.976)
+    assert (c["calls_closed_form"], c["calls_small"]) == (0.25, 1.0)
+    assert c["classes"]["interval"] == 0.5 and c["constructs"]["dist"] == 0.1
+    assert c["sites"][0] == {"name": "k", "vars": 2, "aux": 8, "box_log2": 10.0, "class": "small",
+                             "instances": 210, "keys": 10, "constructs": ["compare", "logic"]}
+    assert c["sites"][1]["constructs"] == []
+    assert replay_census("nothing\n") is None
+    assert replay_details(_REPLAY_OUT + _CENSUS_OUT, "api-cache")["census"]["calls"] == 210
+
+
 def test_replay_quality():
     from dv_solve_simbench.provenance import replay_details, replay_quality
     q = replay_details(_REPLAY_OUT, "api-cache")["quality"]

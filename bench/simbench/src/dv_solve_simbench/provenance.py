@@ -258,8 +258,47 @@ def replay_details(text: str, pass_name: str) -> dict:
     q = replay_quality(text, pass_name)
     if q:
         d["quality"] = q
+    c = replay_census(text)
+    if c:
+        d["census"] = c
     return d
 
+
+_CENSUS = (r"^census\s+(\d+) calls, (\d+) distinct problems \(call repeat ([\d.]+)\); components per "
+           r"call mean ([\d.]+) max (\d+); (\d+) component instances, (\d+) distinct "
+           r"\(component repeat ([\d.]+)\)$")
+_SITE = re.compile(r"^\s+site (\S+) vars (\d+) aux (\d+) box2 ([\d.]+) class (\w+) instances (\d+) "
+                   r"keys (\d+) constructs (\S+)$", re.M)
+
+
+def replay_census(text: str) -> Optional[dict]:
+    """bench_vlt_replay --census (P0.5): the captured calls split into
+    independent components, their sampler-layer classes and constructs
+    (shares of component instances), and the busiest component sites."""
+    m = re.search(_CENSUS, text, re.M)
+    if not m:
+        return None
+    g = m.groups()
+    c = {"calls": int(g[0]), "distinct_problems": int(g[1]), "call_repeat": float(g[2]),
+         "components_mean": float(g[3]), "components_max": int(g[4]),
+         "instances": int(g[5]), "distinct_instances": int(g[6]),
+         "component_repeat": float(g[7])}
+    m2 = re.search(r"^census\s+calls all closed-form \(free/interval\) ([\d.]+), all <= small "
+                   r"([\d.]+)$", text, re.M)
+    if m2:
+        c["calls_closed_form"] = float(m2.group(1))
+        c["calls_small"] = float(m2.group(2))
+    for key, lab in (("classes", "class"), ("constructs", "construct")):
+        m3 = re.search(r"^census\s+%s((?: \w+ [\d.]+)*)$" % lab, text, re.M)
+        if m3:
+            t = m3.group(1).split()
+            c[key] = {t[i]: float(t[i + 1]) for i in range(0, len(t), 2)}
+    c["sites"] = [{"name": s.group(1), "vars": int(s.group(2)), "aux": int(s.group(3)),
+                   "box_log2": float(s.group(4)), "class": s.group(5),
+                   "instances": int(s.group(6)), "keys": int(s.group(7)),
+                   "constructs": [] if s.group(8) == "-" else s.group(8).split(",")}
+                  for s in _SITE.finditer(text)]
+    return c
 
 _QUALITY = (r"^%s\s+quality (\d+) models: (\d+) checked, (\d+) invalid, (\d+) unchecked; "
             r"(\d+) fields: (\d+) forced, (\d+) stuck, (\d+) undecided; "

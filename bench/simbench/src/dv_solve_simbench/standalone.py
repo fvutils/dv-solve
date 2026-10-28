@@ -113,7 +113,7 @@ def replay(cfg: Config, sim: RunOutput, session: str, rundir: str,
     mode = solver_mode(cfg.solver)
     cmd = [cfg.replay, cmds, "--reps", str(reps), "--passes", pass_name,
            "--calls", str(sim.result.n + sim.result.warmup),
-           "--warmup", str(sim.result.warmup), "--mode", mode, "--quality"]
+           "--warmup", str(sim.result.warmup), "--mode", mode, "--quality", "--census"]
     p = subprocess.run(cmd, cwd=rundir, stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, text=True, timeout=timeout)
     with open(os.path.join(rundir, "replay.log"), "w") as fp:

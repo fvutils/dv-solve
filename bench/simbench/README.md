@@ -284,6 +284,13 @@ number that looks wrong, it holds:
   - a field with one value is `forced` when no other value satisfies the
     constraints, and `stuck` when one does: a sampler that never moves it.
     `min_distinct` and `min_entropy` leave out forced fields.
+- replay configs, census (`simbench.replay.census`, `bench_vlt_replay --census`):
+  each call's captured problem split into independent components after folding
+  `var == const`. It holds the components per call, each component's class
+  (free, interval, small, medium or large, by the sampler layer that could take
+  it), its constructs, and the call and component repeat rates. The busiest
+  component sites are listed with their variables, box size and number of
+  distinct keys.
 
 ## 10. Troubleshooting
 

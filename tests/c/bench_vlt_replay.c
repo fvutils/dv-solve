@@ -24,7 +24,7 @@
  *            problem is still built every call.
  *
  * Usage: bench_vlt_replay <cmds.smt2> [--solver PATH] [--reps N]
- *        [--passes pipe,text,api,api-cache] [--quality] [--dump-values FILE]
+ *        [--passes pipe,text,api,api-cache] [--quality] [--census] [--dump-values FILE]
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -221,6 +221,7 @@ static void pass_pipe(const char *solver, double *wall, double *child_cpu) {
  * untimed rep of the pass. */
 static FILE *g_dump;
 static int   g_quality;
+static int   g_census;     /* --census: names the variables too */
 static int   g_collect;    /* this rep reads back models (dump and/or quality) */
 
 typedef struct {
@@ -254,6 +255,18 @@ static uint64_t fnv(const void *d, size_t n) {
     return h;
 }
 
+/* One past the largest declared variable id. The front end numbers sparsely
+ * (aux variables can sit far above n_vars), so n_vars is not a bound. */
+static uint32_t var_bound(const dvs_problem_t *p) {
+    uint32_t n = p->n_vars;
+    for (dvs_expr_t r = p->vars_head; r != EXPR_NULL; ) {
+        const VarSpec *vs = POOL_PTR((dvs_problem_t *)p, r);
+        if (vs->var_id >= n) n = vs->var_id + 1;
+        r = vs->next;
+    }
+    return n;
+}
+
 static void capture(Smt2Frontend *fe, uint32_t call) {
     dvs_problem_t *p = fe->bb_model_valid && fe->bb_problem ? fe->bb_problem : fe->problem;
     if (!p || fe->last_result == DVS_SOLVE_TIMEOUT) {
@@ -280,11 +293,12 @@ static void capture(Smt2Frontend *fe, uint32_t call) {
     c->named = NULL;
     c->vals = NULL;
     c->got = 0;
-    if (g_dump || g_quality) {
+    if (g_dump || g_quality || g_census) {
+        uint32_t bound = var_bound(p);
         c->named = calloc(fe->n_vars ? fe->n_vars : 1, sizeof *c->named);
         for (uint32_t k = 0; k < fe->n_vars; k++) {
             const Smt2Var *v = &fe->vars[k];
-            if (v->var_id >= p->n_vars || v->width > 64 || v->name[0] == '\\'
+            if (v->var_id >= bound || v->width > 64 || v->name[0] == '\\'
                 || !strncmp(v->name, "__", 2)) continue;
             c->named[c->n_named].name = strdup(v->name);
             c->named[c->n_named].id = v->var_id;
@@ -840,6 +854,506 @@ static void pass_api(int cached, ApiStats *st) {
 }
 
 /* ------------------------------------------------------------------ */
+/* --census: components and constructs of the captured problems (P0.5) */
+/* ------------------------------------------------------------------ */
+
+/* Per randomize() call, the first problem answered sat (before Verilator's
+ * parity asserts) is split into independent components. A variable a
+ * top-level hard `var == const` fixes (a state value, rand_mode(0)) is
+ * folded: it is that constant, and links nothing. The rest are joined by
+ * the constraints, unique and arrays they share. Each component instance
+ * gets a structural hash that includes its constants, so the repeat rate is
+ * what a per-component cache keyed by (state, mode, bucket) would see.
+ *
+ * Classes, the sampler layer that could take the component (see
+ * docs/sampling_techniques_research.md):
+ *   free      no constraint: a uniform draw over the declared range
+ *   interval  one variable (helper aux variables aside) under compares, inside,
+ *             dist, masks and slices only: closed form
+ *   small     box (product of declared ranges) <= 2^16: enumerate and index
+ *   medium    box <= 2^64: size-wise a BDD candidate
+ *   large     the rest
+ * The box is an upper bound on the solution count. Keys hash constants as
+ * written (a constant compare is not evaluated), so the component repeat rate
+ * is a lower bound on what a key of the folded guards would see. Constructs
+ * are those of the captured problem: Verilator's SMT-LIB lowers $countones,
+ * for example, to adds of extracted bits. Calls with no constrained or free
+ * variable (the start-up check) are not counted. */
+
+enum {
+    C_ARITH, C_MUL, C_DIVMOD, C_SHIFT, C_BITWISE, C_CMP, C_LOGIC, C_INSIDE, C_COUNTONES,
+    C_CLOG2, C_SUM, C_ARRAY, C_SLICE, C_SOFT, C_DIST, C_UNIQUE, C_N
+};
+static const char *c_name[C_N] = {
+    "arith", "mul", "divmod", "shift", "bitwise", "compare", "logic", "inside", "countones",
+    "clog2", "sum", "array", "slice", "soft", "dist", "unique"
+};
+enum { K_FREE, K_INTERVAL, K_SMALL, K_MEDIUM, K_LARGE, K_NCLASS };
+static const char *k_class[K_NCLASS] = {"free", "interval", "small", "medium", "large"};
+
+typedef struct {
+    dvs_problem_t *p;
+    uint32_t       nv;
+    uint8_t       *fixed;
+    int64_t       *fixval;
+    uint32_t      *parent;
+    uint32_t      *stamp;     /* per node (ref / 4): generation of the last visit */
+    uint64_t      *hval;      /* per node: structural hash, valid when hstamp is set */
+    uint8_t       *hstamp;
+    uint32_t       gen;
+    uint32_t       mask;      /* constructs of the root being walked */
+    uint32_t      *vars;      /* variables of the root being walked */
+    uint32_t       n_vars, vars_cap;
+} Cen;
+
+static uint32_t uf_find(uint32_t *par, uint32_t x) {
+    while (par[x] != x) x = par[x] = par[par[x]];
+    return x;
+}
+
+static void uf_join(uint32_t *par, uint32_t a, uint32_t b) {
+    a = uf_find(par, a);
+    b = uf_find(par, b);
+    if (a != b) par[a < b ? b : a] = a < b ? a : b;
+}
+
+static uint64_t mix(uint64_t h, uint64_t v) {
+    h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    return h * 0xff51afd7ed558ccdull;
+}
+
+static void cen_var(Cen *c, uint32_t v) {
+    if (v >= c->nv || c->fixed[v]) return;
+    if (c->n_vars == c->vars_cap)
+        c->vars = realloc(c->vars, (c->vars_cap = c->vars_cap ? 2 * c->vars_cap : 64) * sizeof *c->vars);
+    c->vars[c->n_vars++] = v;
+}
+
+/* The construct of a binary operator. */
+static int bin_construct(int op) {
+    switch (op) {
+    case DVS_BIN_ADD: case DVS_BIN_SUB: return C_ARITH;
+    case DVS_BIN_MUL: return C_MUL;
+    case DVS_BIN_DIV: case DVS_BIN_MOD: return C_DIVMOD;
+    case DVS_BIN_LSHIFT: case DVS_BIN_RSHIFT: case DVS_BIN_ASHR: return C_SHIFT;
+    case DVS_BIN_BAND: case DVS_BIN_BOR: case DVS_BIN_BXOR: return C_BITWISE;
+    case DVS_BIN_AND: case DVS_BIN_OR: return C_LOGIC;
+    default: return C_CMP;
+    }
+}
+
+/* Walk one node: collect its variables and constructs (once per root), and
+ * return its structural hash (once per problem). Folded variables hash as
+ * their value. */
+static uint64_t cen_walk(Cen *c, dvs_expr_t ref, int depth) {
+    if (ref == EXPR_NULL) return 0x51;
+    uint32_t ix = ref >> 2;
+    int seen = c->stamp[ix] == c->gen;
+    c->stamp[ix] = c->gen;
+    if (seen && c->hstamp[ix]) return c->hval[ix];
+    if (depth > 20000) return mix(0x77, ref);      /* too deep: hash by position */
+    dvs_problem_t *p = c->p;
+    ExprKind *k = POOL_PTR(p, ref);
+    uint64_t h = mix(0xabc, (uint64_t)*k);
+    switch (*k) {
+    case EXPR_CONST: {
+        ExprConst *n = (ExprConst *)k;
+        h = mix(mix(h, (uint64_t)n->value), n->width);
+        break;
+    }
+    case EXPR_VAR: {
+        uint32_t v = ((ExprVar *)k)->var_id;
+        if (v < c->nv && c->fixed[v]) h = mix(mix(0xc0, (uint64_t)c->fixval[v]), 1);
+        else { h = mix(h, v); cen_var(c, v); }
+        break;
+    }
+    case EXPR_BINARY: {
+        ExprBinary *n = (ExprBinary *)k;
+        c->mask |= 1u << bin_construct(n->op);
+        h = mix(h, n->op);
+        h = mix(h, cen_walk(c, n->lhs, depth + 1));
+        h = mix(h, cen_walk(c, n->rhs, depth + 1));
+        break;
+    }
+    case EXPR_UNARY: {
+        ExprUnary *n = (ExprUnary *)k;
+        c->mask |= 1u << (n->op == DVS_UN_NEG ? C_ARITH : n->op == DVS_UN_NOT ? C_LOGIC : C_BITWISE);
+        h = mix(mix(h, n->op), cen_walk(c, n->operand, depth + 1));
+        break;
+    }
+    case EXPR_ITE: {
+        ExprITE *n = (ExprITE *)k;
+        c->mask |= 1u << C_LOGIC;
+        h = mix(h, cen_walk(c, n->cond, depth + 1));
+        h = mix(h, cen_walk(c, n->then_e, depth + 1));
+        h = mix(h, cen_walk(c, n->else_e, depth + 1));
+        break;
+    }
+    case EXPR_IN_RANGE: {
+        ExprInRange *n = (ExprInRange *)k;
+        c->mask |= 1u << C_INSIDE;
+        h = mix(h, cen_walk(c, n->value, depth + 1));
+        h = mix(h, cen_walk(c, n->lo, depth + 1));
+        h = mix(h, cen_walk(c, n->hi, depth + 1));
+        break;
+    }
+    case EXPR_IN_SET: {
+        ExprInSet *n = (ExprInSet *)k;
+        c->mask |= 1u << C_INSIDE;
+        h = mix(h, cen_walk(c, n->value, depth + 1));
+        dvs_expr_t *el = expr_in_set_elems(p, ref);
+        for (uint32_t i = 0; i < n->n_elems; i++) h = mix(h, cen_walk(c, el[i], depth + 1));
+        break;
+    }
+    case EXPR_IN_RANGES: {
+        ExprInRanges *n = (ExprInRanges *)k;
+        c->mask |= 1u << C_INSIDE;
+        h = mix(h, cen_walk(c, n->value, depth + 1));
+        dvs_expr_t *lo = expr_in_ranges_los(p, ref), *hi = expr_in_ranges_his(p, ref);
+        for (uint32_t i = 0; i < n->n_ranges; i++) {
+            h = mix(h, cen_walk(c, lo[i], depth + 1));
+            h = mix(h, cen_walk(c, hi[i], depth + 1));
+        }
+        break;
+    }
+    case EXPR_EXTEND: {
+        ExprExtend *n = (ExprExtend *)k;
+        c->mask |= 1u << C_SLICE;
+        h = mix(mix(mix(h, n->from_bits), n->to_bits * 2 + n->sign_extend),
+                cen_walk(c, n->operand, depth + 1));
+        break;
+    }
+    case EXPR_SV_CAST: {
+        ExprSvCast *n = (ExprSvCast *)k;
+        h = mix(mix(mix(h, n->from_bits), n->to_bits * 4 + n->sign_extend * 2 + n->dst_signed),
+                cen_walk(c, n->operand, depth + 1));
+        break;
+    }
+    case EXPR_EXTRACT: {
+        ExprExtract *n = (ExprExtract *)k;
+        c->mask |= 1u << C_SLICE;
+        h = mix(mix(h, n->hi_bit * 256 + n->lo_bit), cen_walk(c, n->operand, depth + 1));
+        break;
+    }
+    case EXPR_CONCAT: {
+        ExprConcat *n = (ExprConcat *)k;
+        c->mask |= 1u << C_SLICE;
+        h = mix(h, n->lo_width);
+        h = mix(h, cen_walk(c, n->hi, depth + 1));
+        h = mix(h, cen_walk(c, n->lo, depth + 1));
+        break;
+    }
+    case EXPR_SUM: {
+        ExprSum *n = (ExprSum *)k;
+        c->mask |= 1u << C_SUM;
+        dvs_expr_t *el = (dvs_expr_t *)((char *)n + sizeof(ExprSum));
+        h = mix(h, cen_walk(c, n->result, depth + 1));
+        for (uint32_t i = 0; i < n->n_vars; i++) h = mix(h, cen_walk(c, el[i], depth + 1));
+        break;
+    }
+    case EXPR_COUNTONES: {
+        ExprCountones *n = (ExprCountones *)k;
+        c->mask |= 1u << C_COUNTONES;
+        h = mix(h, cen_walk(c, n->result, depth + 1));
+        h = mix(h, cen_walk(c, n->operand, depth + 1));
+        break;
+    }
+    case EXPR_CLOG2: {
+        ExprClog2 *n = (ExprClog2 *)k;
+        c->mask |= 1u << C_CLOG2;
+        h = mix(h, cen_walk(c, n->result, depth + 1));
+        h = mix(h, cen_walk(c, n->operand, depth + 1));
+        break;
+    }
+    case EXPR_ARRAY_SELECT: {
+        ExprArraySelect *n = (ExprArraySelect *)k;
+        c->mask |= 1u << C_ARRAY;
+        h = mix(mix(h, n->base_var_id), n->n_elems);
+        for (uint32_t i = 0; i < n->n_elems; i++) {
+            uint32_t v = n->base_var_id + i;
+            if (v < c->nv && c->fixed[v]) h = mix(h, (uint64_t)c->fixval[v]);
+            else cen_var(c, v);
+        }
+        h = mix(h, cen_walk(c, n->result, depth + 1));
+        h = mix(h, cen_walk(c, n->index, depth + 1));
+        break;
+    }
+    }
+    c->hval[ix] = h;
+    c->hstamp[ix] = 1;
+    return h;
+}
+
+/* A component site: the same set of variables over the calls of a session. */
+typedef struct {
+    uint64_t  site;           /* hash of the variable set */
+    uint32_t  first_var, n_vars, n_aux;
+    double    box_log2;       /* max over instances */
+    uint32_t  mask;           /* union over instances */
+    uint32_t  cls;            /* worst over instances */
+    size_t    instances;
+    uint64_t *keys;           /* distinct instance hashes */
+    size_t    n_keys, keys_cap;
+} Site;
+
+static int u64_add(uint64_t **k, size_t *n, size_t *cap, uint64_t v) {
+    /* Open addressing, 0 = empty (a hash of 0 is stored as 1). */
+    if (!v) v = 1;
+    if (2 * (*n + 1) > *cap) {
+        size_t oc = *cap, nc = oc ? 2 * oc : 16;
+        uint64_t *old = *k, *nk = calloc(nc, sizeof *nk);
+        for (size_t i = 0; i < oc; i++)
+            if (old[i]) {
+                size_t s = old[i] & (nc - 1);
+                while (nk[s]) s = (s + 1) & (nc - 1);
+                nk[s] = old[i];
+            }
+        free(old);
+        *k = nk;
+        *cap = nc;
+    }
+    size_t s = v & (*cap - 1);
+    for (; (*k)[s]; s = (s + 1) & (*cap - 1))
+        if ((*k)[s] == v) return 0;
+    (*k)[s] = v;
+    (*n)++;
+    return 1;
+}
+
+static const char *var_name(const Capture *cp, uint32_t v) {
+    for (uint32_t k = 0; k < cp->n_named; k++)
+        if (cp->named[k].id == v) return cp->named[k].name;
+    return NULL;
+}
+
+static double var_box_log2(const VarSpec *vs) {
+    double w = vs->width;
+    if (vs->hi > vs->lo) {
+        double r = log2((double)vs->hi - (double)vs->lo + 1.0);
+        if (r < w) w = r;
+    }
+    return w;
+}
+
+static void census(void) {
+    size_t calls = 0, inst = 0, cls_inst[K_NCLASS] = {0}, con_inst[C_N] = {0};
+    size_t calls_closed = 0, calls_small = 0, max_comp = 0;
+    uint64_t *pk = NULL, *ik = NULL;
+    size_t pn = 0, pcap = 0, in = 0, icap = 0;
+    Site *sites = NULL;
+    size_t n_sites = 0, sites_cap = 0;
+    uint32_t last_call = UINT32_MAX;
+    Cen c;
+    memset(&c, 0, sizeof c);
+    dvs_expr_t *tmp = NULL;
+    uint32_t tmp_cap = 0;
+    for (size_t i = 0; i < g_ncap; i++) {
+        Capture *cp = &g_cap[i];
+        if (cp->unsat || cp->call == last_call) continue;
+        last_call = cp->call;
+        dvs_problem_t *p = cp->p;
+        uint32_t nv = var_bound(p);
+        c.p = p;
+        c.nv = nv;
+        c.fixed = calloc(nv + 1, 1);
+        c.fixval = calloc(nv + 1, sizeof *c.fixval);
+        c.parent = malloc((nv + 1) * sizeof *c.parent);
+        for (uint32_t v = 0; v < nv; v++) c.parent[v] = v;
+        size_t nodes = p->pool.used / 4 + 2;
+        c.stamp = calloc(nodes, sizeof *c.stamp);
+        c.hval = malloc(nodes * sizeof *c.hval);
+        c.hstamp = calloc(nodes, 1);
+        c.gen = 0;
+        VarSpec **spec = calloc(nv + 1, sizeof *spec);
+        uint32_t n = walk(p, p->vars_head, &tmp, &tmp_cap);
+        for (uint32_t j = 0; j < n; j++) {
+            VarSpec *vs = POOL_PTR(p, tmp[j]);
+            if (vs->var_id < nv) spec[vs->var_id] = vs;
+        }
+        /* Fold: hard `var == const` at the top level. */
+        n = walk(p, p->constraints_head, &tmp, &tmp_cap);
+        uint8_t *fold_root = calloc(n + 1, 1);
+        for (uint32_t j = 0; j < n; j++) {
+            ConstraintSpec *cs = POOL_PTR(p, tmp[j]);
+            ExprKind *rk = POOL_PTR(p, cs->root);
+            if (*rk != EXPR_BINARY || ((ExprBinary *)rk)->op != DVS_BIN_EQ) continue;
+            ExprBinary *b = (ExprBinary *)rk;
+            ExprKind *l = POOL_PTR(p, b->lhs), *r = POOL_PTR(p, b->rhs);
+            if (*l == EXPR_CONST && *r == EXPR_VAR) { ExprKind *t = l; l = r; r = t; }
+            if (*l != EXPR_VAR || *r != EXPR_CONST) continue;
+            uint32_t v = ((ExprVar *)l)->var_id;
+            if (v >= nv || c.fixed[v]) continue;
+            c.fixed[v] = 1;
+            c.fixval[v] = ((ExprConst *)r)->value;
+            fold_root[j] = 1;
+        }
+        /* Roots: hard constraints, softs; each joins its variables. */
+        uint64_t *rhash = NULL;
+        uint32_t *rcomp = NULL, *rmask = NULL;
+        size_t nr = 0, rcap = 0;
+        uint8_t *used = calloc(nv + 1, 1);
+        uint32_t ncons = n;
+        for (int soft = 0; soft < 2; soft++) {
+            uint32_t m = soft ? walk(p, p->softs_head, &tmp, &tmp_cap) : ncons;
+            if (!soft) walk(p, p->constraints_head, &tmp, &tmp_cap);
+            for (uint32_t j = 0; j < m; j++) {
+                if (!soft && fold_root[j]) continue;
+                dvs_expr_t root = soft ? ((SoftSpec *)POOL_PTR(p, tmp[j]))->root
+                                       : ((ConstraintSpec *)POOL_PTR(p, tmp[j]))->root;
+                c.gen++;
+                c.mask = soft ? 1u << C_SOFT : 0;
+                c.n_vars = 0;
+                uint64_t h = mix(cen_walk(&c, root, 0), soft);
+                if (!c.n_vars) continue;          /* constant after folding */
+                for (uint32_t q = 1; q < c.n_vars; q++) uf_join(c.parent, c.vars[0], c.vars[q]);
+                for (uint32_t q = 0; q < c.n_vars; q++) used[c.vars[q]] = 1;
+                if (nr == rcap) {
+                    rcap = rcap ? 2 * rcap : 64;
+                    rhash = realloc(rhash, rcap * sizeof *rhash);
+                    rcomp = realloc(rcomp, rcap * sizeof *rcomp);
+                    rmask = realloc(rmask, rcap * sizeof *rmask);
+                }
+                rhash[nr] = h;
+                rcomp[nr] = c.vars[0];
+                rmask[nr++] = c.mask;
+            }
+        }
+        uint32_t *vmask = calloc(nv + 1, sizeof *vmask);    /* dist / unique per var */
+        n = walk(p, p->dists_head, &tmp, &tmp_cap);
+        for (uint32_t j = 0; j < n; j++) {
+            DistSpec *d = POOL_PTR(p, tmp[j]);
+            if (d->var_id < nv && !c.fixed[d->var_id]) { vmask[d->var_id] |= 1u << C_DIST; used[d->var_id] = 1; }
+        }
+        n = walk(p, p->allDiff_head, &tmp, &tmp_cap);
+        for (uint32_t j = 0; j < n; j++) {
+            AllDiffSpec *a = POOL_PTR(p, tmp[j]);
+            const uint32_t *av = (const uint32_t *)(a + 1);
+            uint32_t first = UINT32_MAX;
+            for (uint32_t q = 0; q < a->n_vars; q++) {
+                if (av[q] >= nv || c.fixed[av[q]]) continue;
+                vmask[av[q]] |= 1u << C_UNIQUE;
+                used[av[q]] = 1;
+                if (first == UINT32_MAX) first = av[q];
+                else uf_join(c.parent, first, av[q]);
+            }
+        }
+        /* Components: group variables (and roots) by representative. */
+        size_t ncomp = 0;
+        uint32_t *rep_ix = malloc((nv + 1) * sizeof *rep_ix);
+        for (uint32_t v = 0; v < nv; v++) rep_ix[v] = UINT32_MAX;
+        typedef struct { uint64_t site, key; uint32_t first, nvars, naux, mask; double box; } Comp;
+        Comp *comp = calloc(nv + 1, sizeof *comp);
+        for (uint32_t v = 0; v < nv; v++) {
+            if (c.fixed[v] || !spec[v]) continue;
+            if (!used[v] && spec[v]->is_aux) continue;
+            uint32_t r = uf_find(c.parent, v);
+            if (rep_ix[r] == UINT32_MAX) {
+                rep_ix[r] = (uint32_t)ncomp;
+                comp[ncomp].site = 0x5173;
+                comp[ncomp].key = 0x3eed;
+                comp[ncomp++].first = v;
+            }
+            Comp *k = &comp[rep_ix[r]];
+            k->site = mix(k->site, v);          /* v ascending: order-independent */
+            k->mask |= vmask[v];
+            if (spec[v]->is_aux) k->naux++;
+            else { k->nvars++; k->box += var_box_log2(spec[v]); }
+            k->key = mix(k->key, mix(spec[v]->width, (uint64_t)spec[v]->lo ^ ((uint64_t)spec[v]->hi << 1)));
+        }
+        /* Root hashes into their component's key, order-independently (sum). */
+        uint64_t *ksum = calloc(ncomp + 1, sizeof *ksum);
+        for (size_t j = 0; j < nr; j++) {
+            uint32_t ci = rep_ix[uf_find(c.parent, rcomp[j])];
+            if (ci == UINT32_MAX) continue;
+            ksum[ci] += mix(rhash[j], 0x99);
+            comp[ci].mask |= rmask[j];
+        }
+        int all_closed = 1, all_small = 1;
+        size_t user_comp = 0;
+        for (size_t ci = 0; ci < ncomp; ci++) {
+            Comp *k = &comp[ci];
+            if (!k->nvars) continue;            /* aux only */
+            user_comp++;
+            uint64_t key = mix(mix(k->key, ksum[ci]), k->site);
+            /* Constructs a closed-form single-variable sampler covers. */
+            uint32_t closed = (1u << C_CMP) | (1u << C_INSIDE) | (1u << C_LOGIC) | (1u << C_DIST) |
+                              (1u << C_SOFT) | (1u << C_BITWISE) | (1u << C_SLICE);
+            uint32_t cls;
+            int constrained = k->mask != 0 || k->naux;
+            if (!constrained) cls = K_FREE;
+            else if (k->nvars == 1 && !(k->mask & ~closed)) cls = K_INTERVAL;
+            else if (k->box <= 16.0) cls = K_SMALL;
+            else if (k->box <= 64.0) cls = K_MEDIUM;
+            else cls = K_LARGE;
+            if (cls > K_INTERVAL) all_closed = 0;
+            if (cls > K_SMALL) all_small = 0;
+            cls_inst[cls]++;
+            for (int b = 0; b < C_N; b++) if (k->mask & (1u << b)) con_inst[b]++;
+            inst++;
+            u64_add(&ik, &in, &icap, key);
+            Site *s = NULL;
+            for (size_t q = 0; q < n_sites; q++) if (sites[q].site == k->site) { s = &sites[q]; break; }
+            if (!s) {
+                if (n_sites == sites_cap) sites = realloc(sites, (sites_cap = sites_cap ? 2 * sites_cap : 64) * sizeof *sites);
+                s = &sites[n_sites++];
+                memset(s, 0, sizeof *s);
+                s->site = k->site;
+                s->first_var = k->first;
+                s->n_vars = k->nvars;
+                s->n_aux = k->naux;
+            }
+            s->instances++;
+            if (k->box > s->box_log2) s->box_log2 = k->box;
+            if (cls > s->cls) s->cls = cls;
+            s->mask |= k->mask;
+            u64_add(&s->keys, &s->n_keys, &s->keys_cap, key);
+        }
+        if (user_comp) {
+            calls++;
+            u64_add(&pk, &pn, &pcap, cp->hash);
+            if (user_comp > max_comp) max_comp = user_comp;
+            calls_closed += all_closed;
+            calls_small += all_small;
+        }
+        free(ksum); free(comp); free(rep_ix); free(vmask); free(used);
+        free(rhash); free(rcomp); free(rmask); free(fold_root); free(spec);
+        free(c.fixed); free(c.fixval); free(c.parent); free(c.stamp); free(c.hval); free(c.hstamp);
+    }
+    free(tmp);
+    free(c.vars);
+    double dc = calls ? (double)calls : 1, di = inst ? (double)inst : 1;
+    printf("census     %zu calls, %zu distinct problems (call repeat %.3f); components per call "
+           "mean %.2f max %zu; %zu component instances, %zu distinct (component repeat %.3f)\n",
+           calls, pn, calls ? 1.0 - pn / dc : 0.0, inst / dc, max_comp, inst, in,
+           inst ? 1.0 - in / di : 0.0);
+    printf("census     calls all closed-form (free/interval) %.3f, all <= small %.3f\n",
+           calls_closed / dc, calls_small / dc);
+    printf("census     class");
+    for (int k = 0; k < K_NCLASS; k++) printf(" %s %.3f", k_class[k], cls_inst[k] / di);
+    printf("\ncensus     construct");
+    for (int b = 0; b < C_N; b++) if (con_inst[b]) printf(" %s %.3f", c_name[b], con_inst[b] / di);
+    printf("\n");
+    /* Sites, most instances first. */
+    for (size_t a = 0; a < n_sites; a++)
+        for (size_t b = a + 1; b < n_sites; b++)
+            if (sites[b].instances > sites[a].instances) { Site t = sites[a]; sites[a] = sites[b]; sites[b] = t; }
+    for (size_t a = 0; a < n_sites && a < 20; a++) {
+        Site *s = &sites[a];
+        const char *nm = NULL;
+        for (size_t i = 0; i < g_ncap && !nm; i++) nm = var_name(&g_cap[i], s->first_var);
+        printf("             site %s vars %u aux %u box2 %.1f class %s instances %zu keys %zu constructs ",
+               nm ? nm : "?", s->n_vars, s->n_aux, s->box_log2, k_class[s->cls], s->instances, s->n_keys);
+        int any = 0;
+        for (int b = 0; b < C_N; b++)
+            if (s->mask & (1u << b)) printf("%s%s", any++ ? "," : "", c_name[b]);
+        printf("%s\n", any ? "" : "-");
+        free(s->keys);
+    }
+    for (size_t a = 20; a < n_sites; a++) free(sites[a].keys);
+    free(sites); free(pk); free(ik);
+}
+
+/* ------------------------------------------------------------------ */
 /* --quality: the collecting rep's models                              */
 /* ------------------------------------------------------------------ */
 
@@ -1110,6 +1624,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--warmup") && i + 1 < argc) g_warmup = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--calls") && i + 1 < argc) g_calls = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--quality")) g_quality = 1;
+        else if (!strcmp(argv[i], "--census")) g_census = 1;
         else if (!strcmp(argv[i], "--dump-values") && i + 1 < argc) {
             if (!(g_dump = fopen(argv[++i], "w"))) { perror(argv[i]); return 2; }
         }
@@ -1123,7 +1638,7 @@ int main(int argc, char **argv) {
     if (!path) {
         fprintf(stderr, "usage: %s <cmds.smt2> [--solver PATH] [--reps N] [--passes LIST]\n"
                         "         [--calls N] [--warmup N] [--mode default|verilator]\n"
-                        "         [--dump-values FILE] [--quality]\n"
+                        "         [--dump-values FILE] [--quality] [--census]\n"
                         "       %s --build-info | --calib\n"
                         "  --mode     the front end's mode for the text pass, which also captures\n"
                         "             the problems the api passes replay; use the capture's mode\n"
@@ -1137,6 +1652,8 @@ int main(int argc, char **argv) {
                         "  --quality  check each api pass's models against the constraints, and\n"
                         "             report per field: distinct values, entropy, forced or stuck\n"
                         "             (an extra untimed rep reads the models back)\n"
+                        "  --census   split each call's problem into independent components; report\n"
+                        "             their classes, constructs and repeat rate (P0.5)\n"
                         "  --build-info  how the loaded dv-solve library was built, and its file\n"
                         "  --calib    that, then time fixed work (host and library speed)\n",
                 argv[0], argv[0]);
@@ -1188,6 +1705,7 @@ int main(int argc, char **argv) {
     }
     printf("  captured %zu problems (%zu answered on bitblast, %zu with constraints added "
            "under push, %zu unsat), %zu check-sats not captured\n", g_ncap, nbb, naux, nun, g_nocap);
+    if (g_census) census();
 
     for (int cached = 0; cached < 2; cached++) {
         if (!has(passes, cached ? "api-cache" : "api")) continue;
