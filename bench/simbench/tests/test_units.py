@@ -1,4 +1,5 @@
 """Unit tests for config loading and result parsing (no simulator needed)."""
+import dataclasses as dc
 import math
 import os
 
@@ -110,11 +111,37 @@ def test_record_validates(tmp_path):
     assert ok["simbench"]["result"]["ns_per_call"] == 445000.0
 
 
-def test_dev_configs_want_dev_verilator():
+def test_sampler_configs_need_sampler_control(tmp_path):
+    from dv_solve_simbench import config as C
     cfgs = load_configs(environ={}, detect=False)
-    for cid in ("vlt-z3-default", "vlt-dvs-solver", "vlt-dvs-default"):
-        assert cfgs[cid].version == "5.053 devel"
-    assert cfgs["vlt540-z3"].version is None
+    for cid in ("vlt-z3-default", "vlt-dvs-solver", "vlt-dvs-default", "dvs-standalone"):
+        assert cfgs[cid].sampler in ("default", "solver") and cfgs[cid].version is None
+    assert cfgs["vlt540-z3"].sampler is None
+    # A fake Verilator whose --help does / does not list the sampler option.
+    for name, lists in (("with", True), ("without", False)):
+        tool = tmp_path / name
+        tool.write_text("#!/bin/sh\necho 'usage: verilator'\n%s\n"
+                        % ("echo '  +verilator+rand+sampler+<name>  Choose'" if lists else ""))
+        tool.chmod(0o755)
+        c = dc.replace(cfgs["vlt-dvs-solver"], tool=str(tool))
+        if lists:
+            c.check_sampler_control()
+        else:
+            with pytest.raises(RuntimeError, match="no sampler control"):
+                c.check_sampler_control()
+    # No sampler asked for: no check.
+    dc.replace(cfgs["vlt540-z3"], tool=str(tmp_path / "without")).check_sampler_control()
+
+
+def test_dvs_defaults_point_at_this_checkout():
+    from dv_solve_simbench.config import dvs_defaults
+    d = dvs_defaults()
+    assert d["SIMBENCH_DVS_SMT2"].endswith("build/dv-solve-smt2")
+    assert d["SIMBENCH_DVS_REPLAY"].endswith("build/bench_vlt_replay")
+    cfgs = load_configs(environ={"SIMBENCH_VERILATOR_ARGS": "-CFLAGS -std=gnu++20"}, detect=False)
+    assert cfgs["dvs-standalone"].replay == d["SIMBENCH_DVS_REPLAY"]
+    assert cfgs["vlt-dvs-solver"].build_args[-2:] == ["-CFLAGS", "-std=gnu++20"]
+    assert cfgs["vcs"].build_args == []
 
 
 def test_parse_replay():

@@ -21,22 +21,27 @@
 #              randomize() call without the warm-up calls
 #   replay_cmd:  instead of `replay`, run `<replay_cmd> session.cmds.smt2` (one process, text
 #                SMT-LIB) replay_reps times (default 1); best wall time / calls is reported.
+#
+# Configs with a `sampler` need a Verilator with sampler control (upstream master
+# since #8899): its --help must list +verilator+rand+sampler+<name>, or the test
+# fails before building. After the run, the solver log's "; sampler:" line must
+# name the sampler asked for. SIMBENCH_VERILATOR_SC names that Verilator
+# (default: verilator on PATH). dv-solve tools default to this checkout's build/
+# (config.dvs_defaults); SIMBENCH_DVS_SMT2 / SIMBENCH_DVS_REPLAY override.
 configs:
-  # Primary (A): dev Verilator, z3 via SMT-LIB pipe, Verilator's own sampler.
+  # Primary (A): Verilator with sampler control, z3 via SMT-LIB pipe, Verilator's own sampler.
   - id: vlt-z3-default
     simulator: verilator
-    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
-    version: "5.053 devel"
+    tool: ${SIMBENCH_VERILATOR_SC:-verilator}
     solver: z3 --in
     sampler: default
 
-  # Primary (B): dev Verilator, dv-solve-smt2, dv-solve does the sampling.
+  # Primary (B): Verilator with sampler control, dv-solve-smt2, dv-solve does the sampling.
   # No mode flag: dv-solve-smt2 routes seeded (sampling) sessions itself.
   - id: vlt-dvs-solver
     simulator: verilator
-    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
-    version: "5.053 devel"
-    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    tool: ${SIMBENCH_VERILATOR_SC:-verilator}
+    solver: ${SIMBENCH_DVS_SMT2:-dv-solve-smt2}
     sampler: solver
 
   # Primary (C): dv-solve alone on the same constraints. B's session (same
@@ -44,36 +49,32 @@ configs:
   # builder API with compiled contexts reused; Verilator is not timed.
   - id: dvs-standalone
     simulator: verilator
-    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
-    version: "5.053 devel"
-    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    tool: ${SIMBENCH_VERILATOR_SC:-verilator}
+    solver: ${SIMBENCH_DVS_SMT2:-dv-solve-smt2}
     sampler: solver
-    replay: ${SIMBENCH_DVS_REPLAY:-~/projects/verilator/verilator-sampler-control/dv-solve/build/bench_vlt_replay}
+    replay: ${SIMBENCH_DVS_REPLAY:-bench_vlt_replay}
 
   # Standalone text replays of the same captured session (B's, dv-solve sampler):
   # one solver process reads the whole session file; wall time / calls.
   - id: z3-standalone
     simulator: verilator
-    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
-    version: "5.053 devel"
-    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    tool: ${SIMBENCH_VERILATOR_SC:-verilator}
+    solver: ${SIMBENCH_DVS_SMT2:-dv-solve-smt2}
     sampler: solver
     replay_cmd: z3 -smt2
 
   - id: dvs-smt2-standalone
     simulator: verilator
-    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
-    version: "5.053 devel"
-    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    tool: ${SIMBENCH_VERILATOR_SC:-verilator}
+    solver: ${SIMBENCH_DVS_SMT2:-dv-solve-smt2}
     sampler: solver
-    replay_cmd: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    replay_cmd: ${SIMBENCH_DVS_SMT2:-dv-solve-smt2}
 
-  # Secondary: dev Verilator, dv-solve-smt2 as a plain SMT solver, Verilator sampler.
+  # Secondary: Verilator with sampler control, dv-solve-smt2 as a plain SMT solver, Verilator sampler.
   - id: vlt-dvs-default
     simulator: verilator
-    tool: ${SIMBENCH_VERILATOR_SC:-~/projects/verilator/verilator-sampler-control/bin/verilator}
-    version: "5.053 devel"
-    solver: ${SIMBENCH_DVS_SMT2:-~/projects/verilator/verilator-sampler-control/dv-solve/build/dv-solve-smt2}
+    tool: ${SIMBENCH_VERILATOR_SC:-verilator}
+    solver: ${SIMBENCH_DVS_SMT2:-dv-solve-smt2}
     sampler: default
 
   # Secondary: stock Verilator on PATH with z3 (no sampler control).

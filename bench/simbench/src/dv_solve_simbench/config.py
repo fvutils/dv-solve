@@ -1,9 +1,11 @@
 """Load simbench configurations (configs.yaml) and detect their tools."""
 import dataclasses as dc
+import functools
 import os
 import re
 import shlex
 import shutil
+import subprocess
 from typing import Dict, List, Optional
 
 import yaml
@@ -31,6 +33,22 @@ def expand(value: str, environ: Optional[Dict[str, str]] = None) -> str:
 # Simulators the runner can drive, and the flag that prints each tool's version.
 # Only Verilator has the solver/sampler controls (VERILATOR_SOLVER, sampler plusarg).
 SIMULATORS = {"verilator": "--version", "vcs": "-ID", "xcelium": "-version", "questa": "-version"}
+
+
+SAMPLER_OPTION = "+verilator+rand+sampler+"
+
+
+@functools.lru_cache(maxsize=None)
+def sampler_control(tool: str) -> bool:
+    """Whether Verilator `tool` has sampler control: its --help lists the
+    +verilator+rand+sampler+<name> runtime option (upstream since #8899). A
+    Verilator without it ignores the sampler plusarg and runs its own sampler,
+    so a config asking for one would silently measure something else."""
+    try:
+        p = subprocess.run([tool, "--help"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return SAMPLER_OPTION in (p.stdout + p.stderr)
 
 
 def _which(prog: str) -> Optional[str]:
@@ -74,6 +92,15 @@ class Config:
             args.append("+verilator+rand+sampler+%s" % self.sampler)
         return args
 
+    def check_sampler_control(self) -> None:
+        """Raise unless this config's Verilator has the sampler control it needs."""
+        if self.simulator == "verilator" and self.sampler and not sampler_control(self.tool):
+            raise RuntimeError(
+                "%s: %s has no sampler control (%s<name> is not in its --help); "
+                "config wants sampler %r. Use a Verilator that has it (upstream master "
+                "since #8899) via SIMBENCH_VERILATOR_SC." % (self.id, self.tool, SAMPLER_OPTION,
+                                                           self.sampler))
+
     def detect(self) -> "Config":
         """Set available/reason from the presence of the tools."""
         if self.simulator not in SIMULATORS:
@@ -115,6 +142,18 @@ class Config:
         return self
 
 
+def dvs_defaults() -> Dict[str, str]:
+    """When simbench runs from a dv-solve checkout (bench/simbench), default the
+    dv-solve tools to that checkout's build: SIMBENCH_DVS_SMT2 and
+    SIMBENCH_DVS_REPLAY. Benchmarking any other dv-solve needs them set."""
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+    build = os.environ.get("SIMBENCH_DVS_BUILD") or os.path.join(root, "build")
+    if not os.path.exists(os.path.join(root, "src", "c", "dv_solve.h")):
+        return {}
+    return {"SIMBENCH_DVS_SMT2": os.path.join(build, "dv-solve-smt2"),
+            "SIMBENCH_DVS_REPLAY": os.path.join(build, "bench_vlt_replay")}
+
+
 def default_path() -> str:
     return os.path.join(share_dir(), "configs.yaml")
 
@@ -132,7 +171,9 @@ def _parse(path: str, environ) -> List[Config]:
             sampler=c.get("sampler"),
             version=str(c["version"]) if c.get("version") else None,
             plusargs=[expand(str(p), environ) for p in c.get("plusargs", [])],
-            build_args=[expand(str(a), environ) for a in c.get("build_args", [])],
+            build_args=[expand(str(a), environ) for a in c.get("build_args", [])]
+            + (shlex.split(environ.get("SIMBENCH_VERILATOR_ARGS", ""))
+               if c.get("simulator", "verilator") == "verilator" else []),
             env={k: expand(str(v), environ) for k, v in (c.get("env") or {}).items()},
             replay=expand(str(c["replay"]), environ) if c.get("replay") else None,
             replay_pass=str(c.get("replay_pass") or "api-cache"),
@@ -146,7 +187,8 @@ def load_configs(paths: Optional[List[str]] = None,
                  detect: bool = True) -> Dict[str, Config]:
     """Load configs from the default file plus SIMBENCH_CONFIGS (os.pathsep list).
     Later files override earlier ones by id. Order of first appearance is kept."""
-    env = os.environ if environ is None else environ
+    env = dict(os.environ if environ is None else environ)
+    env.update({k: v for k, v in dvs_defaults().items() if not env.get(k)})
     if paths is None:
         paths = [default_path()]
         extra = env.get("SIMBENCH_CONFIGS", "")

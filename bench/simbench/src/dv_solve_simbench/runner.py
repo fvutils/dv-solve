@@ -8,6 +8,7 @@ Only the Verilator commands have been run here; the commercial command lines
 are checked by unit tests only.
 """
 import dataclasses as dc
+import functools
 import glob
 import hashlib
 import os
@@ -107,12 +108,30 @@ def run_cmd(cfg: Config, image: str, plusargs: List[str]) -> List[str]:
     raise ValueError("%s: unknown simulator %r" % (cfg.id, cfg.simulator))
 
 
+@functools.lru_cache(maxsize=None)
+def _tool_id_of(tool: str, flag: str) -> str:
+    try:
+        p = subprocess.run([tool, flag], capture_output=True, text=True, timeout=60)
+        out = p.stdout + p.stderr
+    except (OSError, subprocess.TimeoutExpired):
+        out = ""
+    try:
+        st = os.stat(os.path.realpath(tool))
+        out += "|%d|%d" % (st.st_size, int(st.st_mtime))
+    except OSError:
+        pass
+    return hashlib.sha1(out.encode()).hexdigest()[:12]
+
+
+def _tool_id(cfg: Config) -> str:
+    return _tool_id_of(cfg.tool, cfg.version_flag)
+
+
 def build(cfg: Config, bench: Bench, cache_dir: str) -> str:
     """Build (or reuse) the image for `bench` with `cfg.tool`; return the image path."""
-    if cfg.simulator == "verilator" and not cfg.build_args:
-        key_src = "%s|%s" % (cfg.tool, bench.path)     # keeps existing cache keys
-    else:
-        key_src = "|".join([cfg.simulator, cfg.tool, bench.path] + cfg.build_args)
+    # The tool's version output is in the key, so a tool rebuilt or upgraded in
+    # place does not reuse images from a kept build dir (SIMBENCH_BUILD_DIR).
+    key_src = "|".join([cfg.simulator, cfg.tool, _tool_id(cfg), bench.path] + cfg.build_args)
     key = hashlib.sha1(key_src.encode()).hexdigest()[:12]
     bdir = os.path.join(cache_dir, "%s-%s" % (bench.id, key))
     cmds = build_cmds(cfg, bench, bdir)

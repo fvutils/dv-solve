@@ -32,6 +32,12 @@ def _params():
 
 @pytest.fixture(scope="session")
 def build_cache(tmp_path_factory):
+    """Built images. SIMBENCH_BUILD_DIR keeps them across pytest runs (images are
+    keyed by tool, bench and build args), else a fresh pytest temp dir."""
+    d = os.environ.get("SIMBENCH_BUILD_DIR")
+    if d:
+        os.makedirs(d, exist_ok=True)
+        return os.path.abspath(d)
     return str(tmp_path_factory.mktemp("build"))
 
 
@@ -43,6 +49,7 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
     calib = provenance.calib(cfg.replay)
     info = {}
     try:
+        cfg.check_sampler_control()
         if cfg.version:
             ver = records.tool_version(cfg.tool, cfg.version_flag) or ""
             if cfg.version not in ver:
