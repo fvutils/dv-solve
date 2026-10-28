@@ -52,9 +52,9 @@ TARGETS = [
 PROBES = [
     ("mask_and_bound", """(declare-const z (_ BitVec 32))
 (assert (= (bvand z #x00ff0000) #x00120000))
-(assert (bvugt z #x00ffffff))""", "sat", 0.02, [_phase(2, "known-bits domain")]),
+(assert (bvugt z #x00ffffff))""", "sat", 0.02, []),
     ("mask_or", """(declare-const z (_ BitVec 32))
-(assert (= (bvor z #x0000000f) #x1234567f))""", "sat", 0.02, [_phase(2, "known-bits domain")]),
+(assert (= (bvor z #x0000000f) #x1234567f))""", "sat", 0.02, []),
 ]
 
 

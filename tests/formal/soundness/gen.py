@@ -245,7 +245,15 @@ class Gen:
             r = rng.random()
             if r < 0.3:
                 kind = "set"
-                vals = rng.sample(range(1 << fw), min(1 << fw, rng.randint(2, 5)))
+                k = min(1 << fw, rng.randint(2, 5))
+                if fw < 63:
+                    vals = rng.sample(range(1 << fw), k)
+                else:
+                    # len(range(1 << 63)) overflows ssize_t
+                    vals = set()
+                    while len(vals) < k:
+                        vals.add(rng.getrandbits(fw))
+                    vals = sorted(vals)
                 c = ("or", "bool", *[("=", "bool", f, ("const", v, fw)) for v in vals])
             elif r < 0.45:
                 kind = "exclude"

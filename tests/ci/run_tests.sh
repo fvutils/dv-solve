@@ -44,6 +44,7 @@ echo "::group::step checker"
 # Every learnt clause and explanation on the clause-learning stress problems
 # is checked (docs/soundness_coverage_plan.md, P1).
 cmake -S . -B build-check -G Ninja -DCMAKE_BUILD_TYPE=Release -DDVS_STEP_CHECK=ON
-cmake --build build-check -j"$JOBS" --target dv-solve-smt2
+# nightly.sh points DVS_SOLVER_PATH here, so the library is needed too
+cmake --build build-check -j"$JOBS" --target dv-solve-smt2 dv_solve
 python3 -m pytest -q -p no:cacheprovider tests/formal/soundness/test_lcg_stress.py
 echo "::endgroup::"

@@ -4,8 +4,9 @@
 Each case forces one path to `unknown` and checks the reason: an input error,
 a construct dv-solve does not implement (named), an engine that stopped
 without a verdict (the bit-blast SAT budget, CDCL's search budget, a CDCL
-model that failed validation with no bit-blast to fall back on). None may
-fall back to the bare `incomplete`.
+model that failed validation with no bit-blast to fall back on). None may fall back to the bare
+`incomplete`. The validation path has no case: since the CDCL compile covers
+`bvnot`, no known input reaches it.
 """
 from __future__ import annotations
 
@@ -24,6 +25,11 @@ _HARD = ("(declare-fun x () (_ BitVec 64))(declare-fun y () (_ BitVec 64))"
          "(assert (bvugt x #x0000000000000001))(assert (bvugt y #x0000000000000001))"
          "(assert (bvult x y))(assert (bvult x #x00000000ffffffff))"
          "(assert (bvult y #x00000000ffffffff))")
+# The same product without the 32-bit bounds: CDCL's word-level search stops
+# on a five-conflict budget (with the bounds it now finds the factors).
+_HARD_CDCL = ("(declare-fun x () (_ BitVec 64))(declare-fun y () (_ BitVec 64))"
+              "(assert (= (bvmul x y) #x6b8b4567327b23c7))"
+              "(assert (bvugt x #x0000000000000001))(assert (bvugt y #x0000000000000001))")
 
 
 def _reason(body: str, env: dict | None = None) -> list[str]:
@@ -48,13 +54,8 @@ def _reason(body: str, env: dict | None = None) -> list[str]:
      '"input error: '),
     (_HARD, {"DV_ENGINE": "bitblast", "DV_BB_MAX_CONFLICTS": "1"},
      '"incomplete: the SAT search stopped without a verdict (conflict limit)"'),
-    (_HARD, {"DV_NO_BITBLAST": "1", "DV_MAX_CONFLICTS": "5", "DV_MAX_RESTARTS": "1"},
+    (_HARD_CDCL, {"DV_NO_BITBLAST": "1", "DV_MAX_CONFLICTS": "5", "DV_MAX_RESTARTS": "1"},
      '"incomplete: CDCL search stopped: '),
-    # The CDCL compile leaves (= a (bvnot #xe)) out; validation rejects the
-    # model, and with bit-blasting off nothing else can answer.
-    ("(declare-fun a () (_ BitVec 4))(assert (= a (bvnot #xe)))",
-     {"DV_ENGINE": "cdcl", "DV_NO_BITBLAST": "1"},
-     '"incomplete: the CDCL model failed validation'),
 ])
 def test_reason_unknown(body, env, want):
     out = _reason(body, env)

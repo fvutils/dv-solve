@@ -14,9 +14,14 @@ The problem below is the shrunk failure of the soundness campaign's protocol
 door: x, y 3 bits, z 6 bits, with `y % 3 == 2` and `y / 4 >= x`. It runs in a
 child process, so a crash fails the test rather than the test run.
 """
+import os
 import subprocess
 import sys
 import textwrap
+
+import pytest
+
+pytest.importorskip("dv_solve")
 
 _SCRIPT = textwrap.dedent('''
     from dv_solve.builder import SolveProblemBuilder
@@ -80,7 +85,9 @@ _SCRIPT = textwrap.dedent('''
 
 
 def test_repeated_learning_solves_under_checkpoints():
+    # The child gets the test's sys.path, so it finds the dv_solve we imported.
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
     r = subprocess.run([sys.executable, "-c", _SCRIPT], capture_output=True,
-                       text=True, timeout=300)
+                       text=True, timeout=300, env=env)
     assert r.returncode == 0, "child died (%d): %s" % (r.returncode, r.stderr[-2000:])
     assert "BAD []" in r.stdout, r.stdout[-2000:]

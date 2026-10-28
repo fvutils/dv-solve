@@ -7,6 +7,8 @@ while the failure reproduces. Widths are kept.
 """
 from __future__ import annotations
 
+import time
+
 from .ir import Problem, children, width
 
 
@@ -45,12 +47,17 @@ def _candidates(p: Problem, t):
     return out
 
 
-def shrink(p: Problem, fails, budget: int = 400) -> Problem:
+def shrink(p: Problem, fails, budget: int = 400, seconds: float = 120.0) -> Problem:
     calls = 0
+    deadline = time.time() + seconds
 
     def still(q: Problem) -> bool:
         nonlocal calls
         calls += 1
+        if time.time() > deadline:
+            # Out of time: stop the search and keep what we have.
+            calls = budget
+            return False
         try:
             return fails(q)
         except Exception:
