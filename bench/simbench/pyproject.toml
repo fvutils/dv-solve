@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dv-solve-simbench"
+version = "0.0.1"
+description = "Simulator-neutral SystemVerilog randomization benchmarks"
+requires-python = ">=3.9"
+dependencies = ["pyyaml", "dv-flow-mgr", "dv-flow-libhdlsim", "pytest", "pytest-dfm"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dv_solve_simbench = ["share/**/*"]

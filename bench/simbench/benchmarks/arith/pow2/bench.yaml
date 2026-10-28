@@ -1,0 +1,4 @@
+id: arith.pow2
+tier: standard
+tags: [arith, pow2]
+fields: [v, k]

@@ -1,0 +1,4 @@
+id: array.array_index
+tier: standard
+tags: [array, index]
+fields: [idx, a]

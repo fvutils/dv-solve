@@ -1,0 +1,4 @@
+id: control.rand_mode
+tier: standard
+tags: [control, rand_mode]
+fields: [a, b]

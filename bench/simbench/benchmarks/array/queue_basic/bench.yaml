@@ -1,0 +1,4 @@
+id: array.queue_basic
+tier: standard
+tags: [array, queue]
+fields: [q]

@@ -1,0 +1,4 @@
+id: scenario.riscv_instr_mem
+tier: standard
+tags: [scenario, protocol, isa, sum]
+fields: [funct3, is_store, rs1, rd, imm, base, ea]

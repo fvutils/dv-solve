@@ -1,0 +1,4 @@
+id: hard.global_nested
+tier: standard
+tags: [hard, nested, global]
+fields: [m0.l.v, m0.w, m1.l.v, m1.w, x]

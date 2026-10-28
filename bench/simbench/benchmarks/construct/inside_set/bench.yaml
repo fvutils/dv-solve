@@ -1,0 +1,4 @@
+id: construct.inside_set
+tier: standard
+tags: [construct, inside]
+fields: [a, b, c]

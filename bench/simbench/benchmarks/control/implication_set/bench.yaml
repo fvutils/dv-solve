@@ -1,0 +1,4 @@
+id: control.implication_set
+tier: standard
+tags: [control, implication]
+fields: [mode, len]

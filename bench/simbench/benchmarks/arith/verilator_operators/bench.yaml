@@ -1,0 +1,4 @@
+id: arith.verilator_operators
+tier: standard
+tags: [arith, operators]
+fields: [a, b, c, d, e]

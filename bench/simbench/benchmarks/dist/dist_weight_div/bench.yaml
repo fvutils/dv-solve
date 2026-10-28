@@ -1,0 +1,4 @@
+id: dist.dist_weight_div
+tier: standard
+tags: [dist, dist]
+fields: [a, k]

@@ -1,0 +1,4 @@
+id: scenario.ddr5_cmd_basic
+tier: standard
+tags: [scenario, protocol, implication]
+fields: [cmd, ba, bg, cid, row_hi, row_lo, col, ap]

@@ -1,0 +1,4 @@
+id: hard.magic_square_3
+tier: standard
+tags: [hard, csp, sum, pairwise]
+fields: [m0, m1, m2, m3, m4, m5, m6, m7, m8]

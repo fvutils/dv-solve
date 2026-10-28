@@ -1,0 +1,4 @@
+id: arith.countones
+tier: standard
+tags: [arith, sysfunc]
+fields: [v, w]

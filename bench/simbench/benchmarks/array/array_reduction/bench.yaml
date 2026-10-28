@@ -1,0 +1,4 @@
+id: array.array_reduction
+tier: standard
+tags: [array, reduction]
+fields: [a]

@@ -1,0 +1,4 @@
+id: array.array_sum
+tier: standard
+tags: [array, sum]
+fields: [a]

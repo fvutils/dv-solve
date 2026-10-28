@@ -1,0 +1,4 @@
+id: control.solve_before_array
+tier: standard
+tags: [control, solve_before, array]
+fields: [n, a0, a1, a2, a3, a4, a5, a6, a7]

@@ -1,0 +1,4 @@
+id: scenario.ddr5_timing
+tier: standard
+tags: [scenario, protocol, implication, sum]
+fields: [cmd_prev, cmd, ap_prev, cancel_prev, max_tccd, tccd, tccd_base]

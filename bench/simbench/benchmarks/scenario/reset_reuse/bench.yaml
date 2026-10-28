@@ -1,0 +1,4 @@
+id: scenario.reset_reuse
+tier: smoke
+tags: [scenario, sum]
+fields: [x, y, s]

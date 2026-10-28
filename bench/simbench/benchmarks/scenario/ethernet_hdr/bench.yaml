@@ -1,0 +1,4 @@
+id: scenario.ethernet_hdr
+tier: standard
+tags: [scenario, protocol, ordering]
+fields: [src_port, dst_port, length]

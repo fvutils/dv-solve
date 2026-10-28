@@ -1,0 +1,4 @@
+id: arith.mul_div_64
+tier: standard
+tags: [arith, mul, div, wide]
+fields: [a, b, p]

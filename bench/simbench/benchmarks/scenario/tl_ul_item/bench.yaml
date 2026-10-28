@@ -1,0 +1,4 @@
+id: scenario.tl_ul_item
+tier: standard
+tags: [scenario, protocol, implication]
+fields: [a_opcode, a_size, a_address, a_mask, a_source, a_data]

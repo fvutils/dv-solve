@@ -1,0 +1,8 @@
+id: dist.weighted
+tier: smoke
+tags: [dist]
+fields: [v, r]
+# Expected weights (checked from the dump, not in check()):
+dist:
+  v: {"0": 1, "1": 2, "2": 4, "3": 8}
+  r: {"0-9": 1, "10-19": 3}

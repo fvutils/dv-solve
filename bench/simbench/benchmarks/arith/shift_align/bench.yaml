@@ -1,0 +1,4 @@
+id: arith.shift_align
+tier: standard
+tags: [arith, shift]
+fields: [addr, sz]

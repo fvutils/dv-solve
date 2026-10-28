@@ -1,0 +1,4 @@
+id: scenario.riscv_instr_rtype
+tier: standard
+tags: [scenario, protocol, isa]
+fields: [opcode, rd, funct3, rs1, rs2, funct7]

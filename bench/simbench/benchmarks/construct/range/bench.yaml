@@ -1,0 +1,4 @@
+id: construct.range
+tier: smoke
+tags: [construct, relational, range]
+fields: [a, b, c, d]
