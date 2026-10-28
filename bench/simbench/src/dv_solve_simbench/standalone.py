@@ -4,7 +4,9 @@ The Verilator run captures every command it sends the solver
 (+verilator+solver+file+). bench_vlt_replay then replays that session through
 dv-solve in-process (builder API; `api-cache` reuses compiled contexts), so the
 time is dv-solve's alone on exactly the constraints, seeds and call count the
-simulator used.
+simulator used. The replay runs the front end in the capture's mode (from the
+config's solver command) and times one named pass per randomize() call,
+excluding the warm-up calls, as the simulator loop does.
 
 A config with `replay_cmd` instead runs `<replay_cmd> session.cmds.smt2` (e.g.
 z3 -smt2, dv-solve-smt2): one process reads the session text, and the wall time
@@ -23,6 +25,15 @@ from .result import Result
 from .runner import RunOutput
 
 _PASS = r"^%s\s+wall\s+[\d.]+ s\s+([\d.]+) us/check-sat.*?(\d+) bitblast failures, (\d+) unsolved"
+_PER_CALL = r"^%s\s+per call\s+([\d.]+) us\s+\((\d+) timed calls\)"
+
+
+def solver_mode(solver: Optional[str]) -> str:
+    """The dv-solve-smt2 mode the capture ran in: --mode=verilator or the default."""
+    for a in shlex.split(solver or ""):
+        if a.startswith("--mode="):
+            return "verilator" if a[7:] == "verilator" else "default"
+    return "default"
 
 
 def session_plusarg(path: str) -> str:
@@ -61,7 +72,12 @@ def parse_replay(text: str, pass_name: str) -> Optional[dict]:
     if m is None:
         return None
     ret = {"us_per_check": float(m.group(1)),
-           "failures": int(m.group(2)) + int(m.group(3)), "us_new": None}
+           "failures": int(m.group(2)) + int(m.group(3)), "us_new": None,
+           "us_per_call": None, "timed_calls": None}
+    c = re.search(_PER_CALL % re.escape(pass_name), text, re.M)
+    if c:
+        ret["us_per_call"] = float(c.group(1))
+        ret["timed_calls"] = int(c.group(2))
     n = re.search(r"on a new one: ([\d.]+) us", text[m.end():])
     if n:
         ret["us_new"] = float(n.group(1))
@@ -76,32 +92,33 @@ def replay(cfg: Config, sim: RunOutput, session: str, rundir: str,
         return sim
     cmds = os.path.join(rundir, "session.cmds.smt2")
     n_check = extract_cmds(session, cmds)
-    cmd = [cfg.replay, cmds, "--reps", str(reps), "--passes", cfg.replay_pass]
+    pass_name = cfg.replay_pass.strip()
+    if "," in pass_name:
+        raise RuntimeError("replay_pass names one pass, not a list: %r" % cfg.replay_pass)
+    mode = solver_mode(cfg.solver)
+    cmd = [cfg.replay, cmds, "--reps", str(reps), "--passes", pass_name,
+           "--calls", str(sim.result.n + sim.result.warmup),
+           "--warmup", str(sim.result.warmup), "--mode", mode]
     p = subprocess.run(cmd, cwd=rundir, stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, text=True, timeout=timeout)
     with open(os.path.join(rundir, "replay.log"), "w") as fp:
         fp.write(p.stdout)
-    # Several passes may be timed (comma list); report the fastest.
-    r = None
-    if p.returncode == 0:
-        rs = [parse_replay(p.stdout, x.strip()) for x in cfg.replay_pass.split(",")]
-        if rs and all(rs):
-            r = min(rs, key=lambda x: x["us_per_check"])
-            r["pass"] = cfg.replay_pass.split(",")[rs.index(r)].strip()
-    if r is None:
+    r = parse_replay(p.stdout, pass_name) if p.returncode == 0 else None
+    if r is None or r["us_per_call"] is None:
         raise RuntimeError("replay failed (rc=%d): %s\n%s"
                            % (p.returncode, " ".join(cmd), p.stdout[-2000:]))
-    # The session holds the runtime's start-up check, then n + warmup calls of
-    # one or more check-sats each (dist: 2, under push); time per call is the
-    # per-check rate times check-sats per call.
-    calls = sim.result.n + sim.result.warmup
-    per_call = (n_check - 1) / calls if calls and n_check > 1 else 1.0
+    # The replay times the randomize() calls after the start-up check and the
+    # warm-up; when sessions per call vary (randc retries) it cannot separate
+    # the warm-up, and averages over all calls.
+    if r["timed_calls"] not in (sim.result.n, sim.result.n + sim.result.warmup):
+        raise RuntimeError("replay timed %d calls, the run made %d (+%d warm-up): %s"
+                           % (r["timed_calls"], sim.result.n, sim.result.warmup, " ".join(cmd)))
     res = dc.replace(sim.result,
-                     elapsed_ns=int(round(r["us_per_check"] * 1e3 * per_call * sim.result.n)),
+                     elapsed_ns=int(round(r["us_per_call"] * 1e3 * sim.result.n)),
                      first_call_ns=int(round((r["us_new"] or 0) * 1e3)),
                      failures=sim.result.failures + r["failures"])
-    log = "%s\n# replay (%d check-sats, %.2f per call, fastest pass %s): %s\n%s" % (
-        sim.log, n_check, per_call, r["pass"], " ".join(cmd), p.stdout)
+    log = "%s\n# replay (%d check-sats, mode %s, pass %s, %.1f us/call): %s\n%s" % (
+        sim.log, n_check, mode, pass_name, r["us_per_call"], " ".join(cmd), p.stdout)
     return RunOutput(cmd=cmd, returncode=p.returncode, log=log, result=res)
 
 

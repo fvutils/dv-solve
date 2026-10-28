@@ -121,10 +121,20 @@ def test_parse_replay():
     from dv_solve_simbench.standalone import parse_replay
     text = ("api-cache  wall   0.000 s     14.7 us/check-sat   (CPU 0.000 s; 2 distinct, "
             "29 reused; 0 CDCL answers escalated to bitblast, 0 bitblast failures, 1 unsolved)\n"
+            "api-cache  per call      29.4 us   (20 timed calls)\n"
             "             solve+read         0.000 s     13.0 us\n"
             "               on a reused context: 12.1 us per call; on a new one: 25.9 us\n")
-    assert parse_replay(text, "api-cache") == {"us_per_check": 14.7, "failures": 1, "us_new": 25.9}
+    assert parse_replay(text, "api-cache") == {"us_per_check": 14.7, "failures": 1, "us_new": 25.9,
+                                               "us_per_call": 29.4, "timed_calls": 20}
     assert parse_replay(text, "api") is None
+
+
+def test_solver_mode():
+    from dv_solve_simbench.standalone import solver_mode
+    assert solver_mode("/x/dv-solve-smt2") == "default"
+    assert solver_mode("/x/dv-solve-smt2 --mode=verilator") == "verilator"
+    assert solver_mode("/x/dv-solve-smt2 --mode=smt") == "default"
+    assert solver_mode(None) == "default"
 
 
 def test_metric_fields():

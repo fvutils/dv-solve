@@ -72,10 +72,35 @@ typedef struct {
     uint32_t    len;
     uint8_t     kind;
     uint8_t     replies;   /* the solver answers this command */
+    uint32_t    call;      /* solver session: each starts with (reset); 0 is
+                            * the runtime's start-up check before the first */
 } Cmd;
 
 static Cmd   *g_cmd;
 static size_t g_ncmd;
+static uint32_t g_ncalls;   /* solver sessions after the start-up check */
+static uint32_t g_calls;    /* randomize() calls the run made (--calls; 0: one per session) */
+static uint32_t g_warmup;   /* of which the first g_warmup are not timed (--warmup) */
+static uint32_t g_skip;     /* sessions 1..g_skip are warm-up */
+static int      g_warm_in;  /* warm-up could not be separated: it is in the average */
+static int      g_vlt_mode; /* --mode verilator: the front end's Verilator mode */
+
+/* A command or captured problem of session `call` counts toward per-call
+ * time: not the start-up check, nor the warm-up calls (as the commercial
+ * loop). A randomize() may take several sessions (solve-before phases, sizing
+ * then elements); when every call takes the same number, the warm-up is its
+ * first g_warmup calls' sessions. Otherwise (randc retries) the sessions
+ * cannot be split by call, and the average includes the warm-up. */
+static void split_calls(void) {
+    uint32_t calls = g_calls ? g_calls : g_ncalls;
+    g_warm_in = calls == 0 || g_ncalls % calls != 0;
+    g_skip = g_warm_in ? 0 : g_ncalls / calls * g_warmup;
+}
+static int timed(uint32_t call) { return call > g_skip; }
+static uint32_t n_timed(void) {
+    uint32_t calls = g_calls ? g_calls : g_ncalls;
+    return g_warm_in ? calls : calls > g_warmup ? calls - g_warmup : 0;
+}
 
 static uint8_t _kind(const char *s) {
     if (!strncmp(s, "(check-sat", 10)) return K_CHECK;
@@ -107,6 +132,8 @@ static void load(const char *path) {
             c->txt = p;
             c->len = (uint32_t)(e - p);
             c->kind = _kind(p);
+            if (!strncmp(p, "(reset)", 7)) g_ncalls++;
+            c->call = g_ncalls;
             c->replies = c->kind == K_CHECK || c->kind == K_GETVAL
                          || !strncmp(p, "(get-", 5);
         }
@@ -114,6 +141,10 @@ static void load(const char *path) {
         *e = 0;
         p = e + 1;
     }
+    /* Calls are the (reset)s that a check-sat follows: the session ends with one. */
+    g_ncalls = 0;
+    for (size_t i = 0; i < g_ncmd; i++)
+        if (g_cmd[i].kind == K_CHECK && g_cmd[i].call > g_ncalls) g_ncalls = g_cmd[i].call;
 }
 
 /* ------------------------------------------------------------------ */
@@ -193,6 +224,7 @@ typedef struct {
     dvs_problem_t *aux[MAX_AUX];   /* constraints added under (push) after the
                                     * CDCL compile (CDCL answers only) */
     uint32_t       n_aux;
+    uint32_t       call;       /* randomize() call (Cmd.call) */
 } Capture;
 
 static Capture *g_cap;
@@ -208,7 +240,7 @@ static uint64_t fnv(const void *d, size_t n) {
     return h;
 }
 
-static void capture(Smt2Frontend *fe) {
+static void capture(Smt2Frontend *fe, uint32_t call) {
     dvs_problem_t *p = fe->bb_model_valid && fe->bb_problem ? fe->bb_problem : fe->problem;
     if (!p || fe->last_result == DVS_SOLVE_TIMEOUT) {
         g_nocap++;
@@ -228,6 +260,7 @@ static void capture(Smt2Frontend *fe) {
     c->hash = fnv(p, sizeof(dvs_problem_t) + p->pool.used);
     c->bitblast = fe->bb_model_valid;
     c->unsat = fe->last_result == DVS_SOLVE_UNSAT;
+    c->call = call;
     c->n_aux = 0;
     if (!c->bitblast) {
         c->n_aux = g_pre_n;
@@ -240,41 +273,54 @@ static void capture(Smt2Frontend *fe) {
     g_pre_n = 0;
 }
 
+static void pre_add(const dvs_problem_t *a) {
+    if (g_pre_n == MAX_AUX) { fprintf(stderr, "too many add-on problems\n"); exit(2); }
+    g_pre[g_pre_n] = malloc(sizeof(dvs_problem_t) + a->pool.capacity);
+    memcpy(g_pre[g_pre_n++], a, sizeof(dvs_problem_t) + a->pool.used);
+}
+
 /* Before a check-sat on a compiled CDCL context: the constraints it already
  * holds as add-ons, and those asserted since (under push) that the check-sat
  * is about to add. Copied now, since the front end may find the latter unsat
- * as it adds them, and never record them. */
+ * as it adds them, and never record them. Mirrors the front end's own
+ * _validate_all: hand-off copies (an entry is NULL while the hand-off's items
+ * live in the retained builder), the frozen vbase, and the retained builder
+ * since the compile. */
 static void capture_pre(Smt2Frontend *fe) {
     g_pre_n = 0;
     if (!fe->compiled || !fe->ctx) return;
-    for (uint32_t k = 0; k < fe->n_aux_problems; k++) {
-        dvs_problem_t *a = fe->aux_problems[k];
-        g_pre[g_pre_n] = malloc(sizeof(dvs_problem_t) + a->pool.capacity);
-        memcpy(g_pre[g_pre_n++], a, sizeof(dvs_problem_t) + a->pool.used);
+    for (uint32_t k = 0; k < fe->n_aux_problems; k++)
+        if (fe->aux_problems[k]) pre_add(fe->aux_problems[k]);
+    if (fe->vbase) {
+        dvs_problem_cut_t cut;
+        if (dvs_problem_cut_since(fe->vbase, &fe->retain_mark, &cut) == 0) {
+            if (fe->vbase->n_constraints || fe->vbase->n_vars)
+                pre_add(fe->vbase);
+            dvs_problem_uncut(fe->vbase, &cut);
+        }
     }
     if (fe->cdcl_retained) {
         size_t sz;
-        dvs_problem_t *a = dvs_builder_finalize_since(fe->builder, &fe->aux_mark, &sz);
+        dvs_problem_t *a = dvs_builder_finalize_since(fe->builder, &fe->retain_mark, &sz);
         if (a && (a->n_constraints || a->n_vars)) {
-            if (g_pre_n == MAX_AUX) { fprintf(stderr, "too many add-on problems\n"); exit(2); }
             a->flags |= DVS_PROBLEM_F_EXPLICIT;
-            g_pre[g_pre_n] = malloc(sizeof(dvs_problem_t) + a->pool.capacity);
-            memcpy(g_pre[g_pre_n++], a, sizeof(dvs_problem_t) + a->pool.used);
+            pre_add(a);
         }
         if (a) dvs_builder_free_problem(fe->builder, a, sz);
     }
 }
 
 static void pass_text(int do_capture, double t[K_N], double *t_parse, double *wall,
-                      double *cpu) {
+                      double *cpu, double *timed_wall) {
     FILE *out = fopen("/dev/null", "w");
     Smt2Frontend fe;
     smt2_frontend_init(&fe, out, out);
-    fe.verilator_mode = 1;
+    fe.verilator_mode = g_vlt_mode;
     SexprArena arena;
     sexpr_arena_init(&arena, 8192);
     memset(t, 0, K_N * sizeof(double));
     *t_parse = 0;
+    *timed_wall = 0;
     double c0 = cpu_s(), w0 = now_s();
     for (size_t i = 0; i < g_ncmd; i++) {
         Cmd *c = &g_cmd[i];
@@ -289,7 +335,8 @@ static void pass_text(int do_capture, double t[K_N], double *t_parse, double *wa
         double e = now_s();
         *t_parse += b - a;
         t[c->kind] += e - b;
-        if (do_capture && c->kind == K_CHECK) capture(&fe);
+        if (timed(c->call)) *timed_wall += e - a;
+        if (do_capture && c->kind == K_CHECK) capture(&fe, c->call);
     }
     *wall = now_s() - w0;
     *cpu = cpu_s() - c0;
@@ -600,6 +647,7 @@ static void bb_read(dvs_bbsolver_t *bb, uint32_t n_vars) {
 
 typedef struct {
     double build, compile, solve, hit_solve, wall, cpu;
+    double timed_wall;   /* build + compile + solve of the timed calls */
     size_t fails, bb_fails, escalated, hits, distinct;
 } ApiStats;
 
@@ -699,6 +747,7 @@ static void pass_api(int cached, ApiStats *st) {
         st->compile += tc;
         st->solve += e - b - tc;
         if (hit) { st->hits++; st->hit_solve += e - b - tc; }
+        if (timed(cp->call)) st->timed_wall += e - a;
     }
     st->wall = now_s() - w0;
     st->cpu = cpu_s() - c0;
@@ -730,10 +779,25 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--solver") && i + 1 < argc) solver = argv[++i];
         else if (!strcmp(argv[i], "--reps") && i + 1 < argc) reps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = argv[++i];
+        else if (!strcmp(argv[i], "--warmup") && i + 1 < argc) g_warmup = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--calls") && i + 1 < argc) g_calls = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (!strcmp(m, "verilator")) g_vlt_mode = 1;
+            else if (strcmp(m, "default")) { fprintf(stderr, "--mode: default or verilator\n"); return 2; }
+        }
         else path = argv[i];
     }
     if (!path) {
-        fprintf(stderr, "usage: %s <cmds.smt2> [--solver PATH] [--reps N] [--passes LIST]\n", argv[0]);
+        fprintf(stderr, "usage: %s <cmds.smt2> [--solver PATH] [--reps N] [--passes LIST]\n"
+                        "         [--calls N] [--warmup N] [--mode default|verilator]\n"
+                        "  --mode     the front end's mode for the text pass, which also captures\n"
+                        "             the problems the api passes replay; use the capture's mode\n"
+                        "             (default: default, as dv-solve-smt2 without --mode)\n"
+                        "  --warmup   randomize() calls after the start-up check not timed in the\n"
+                        "             per-call figure\n"
+                        "  --calls    randomize() calls in the session, warm-up included (default:\n"
+                        "             one per solver session, each starting with (reset))\n", argv[0]);
         return 2;
     }
     load(path);
@@ -741,6 +805,12 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < g_ncmd; i++) { n_check += g_cmd[i].kind == K_CHECK; n_bytes += g_cmd[i].len + 1; }
     printf("session %s\n  %zu commands, %zu check-sats, %.1f MB of SMT-LIB\n", path, g_ncmd,
            n_check, n_bytes / 1e6);
+    split_calls();
+    printf("  mode %s; %u solver sessions, %u randomize() calls, %u warm-up, %u timed%s\n",
+           g_vlt_mode ? "verilator" : "default", g_ncalls, g_calls ? g_calls : g_ncalls,
+           g_warmup, n_timed(),
+           g_warm_in ? " (sessions per call vary: warm-up included in the average)" : "");
+    double pcall = 1e6 / (double)(n_timed() ? n_timed() : 1);
     double per = 1e6 / (double)(n_check ? n_check : 1);
 
     if (has(passes, "pipe")) {
@@ -755,13 +825,14 @@ int main(int argc, char **argv) {
     }
 
     /* The text pass always runs once, to capture the problems. */
-    double t[K_N], tp, w, c, bt[K_N], btp = 0, bw = 1e30, bc = 0;
+    double t[K_N], tp, w, c, tw, bt[K_N], btp = 0, bw = 1e30, bc = 0, btw = 0;
     for (int k = 0; k < (has(passes, "text") ? reps : 1); k++) {
-        pass_text(k == 0, t, &tp, &w, &c);
-        if (w < bw) { bw = w; bc = c; btp = tp; memcpy(bt, t, sizeof t); }
+        pass_text(k == 0, t, &tp, &w, &c, &tw);
+        if (w < bw) { bw = w; bc = c; btp = tp; btw = tw; memcpy(bt, t, sizeof t); }
     }
     if (has(passes, "text")) {
         printf("text       wall %7.3f s  %7.1f us/check-sat   (CPU %.3f s)\n", bw, bw * per, bc);
+        printf("text       per call %9.1f us   (%u timed calls)\n", btw * pcall, n_timed());
         printf("             lex+parse        %7.3f s  %7.1f us\n", btp, btp * per);
         for (int k = 0; k < K_N; k++)
             if (bt[k] > 0) printf("             %-16s %7.3f s  %7.1f us\n", k_name[k], bt[k], bt[k] * per);
@@ -788,6 +859,8 @@ int main(int argc, char **argv) {
                "%zu CDCL answers escalated to bitblast, %zu bitblast failures, %zu unsolved)\n",
                cached ? "api-cache" : "api", best.wall, best.wall * pc, best.cpu, best.distinct,
                best.hits, best.escalated, best.bb_fails, best.fails);
+        printf("%-10s per call %9.1f us   (%u timed calls)\n", cached ? "api-cache" : "api",
+               best.timed_wall * pcall, n_timed());
         printf("             build (builder)  %7.3f s  %7.1f us\n", best.build, best.build * pc);
         printf("             compile/bitblast %7.3f s  %7.1f us\n", best.compile, best.compile * pc);
         printf("             solve+read       %7.3f s  %7.1f us\n", best.solve, best.solve * pc);

@@ -51,7 +51,7 @@ class Config:
     build_args: List[str] = dc.field(default_factory=list)   # extra compile/elaborate args
     env: Dict[str, str] = dc.field(default_factory=dict)
     replay: Optional[str] = None      # bench_vlt_replay: time the captured session without Verilator
-    replay_pass: str = "api,api-cache"
+    replay_pass: str = "api-cache"   # the one bench_vlt_replay pass timed
     replay_cmd: Optional[str] = None  # e.g. "z3 -smt2": time the captured session text as one process
     replay_reps: int = 1
     available: bool = False
@@ -135,7 +135,7 @@ def _parse(path: str, environ) -> List[Config]:
             build_args=[expand(str(a), environ) for a in c.get("build_args", [])],
             env={k: expand(str(v), environ) for k, v in (c.get("env") or {}).items()},
             replay=expand(str(c["replay"]), environ) if c.get("replay") else None,
-            replay_pass=str(c.get("replay_pass") or "api,api-cache"),
+            replay_pass=str(c.get("replay_pass") or "api-cache"),
             replay_cmd=expand(str(c["replay_cmd"]), environ) if c.get("replay_cmd") else None,
             replay_reps=int(c.get("replay_reps") or 1)))
     return ret
