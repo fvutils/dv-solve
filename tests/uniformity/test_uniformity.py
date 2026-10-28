@@ -92,6 +92,20 @@ def test_arm_sound(arm):
     assert not bad, bad
 
 
+@pytest.mark.skipif(not _HAVE_TOOLS, reason="needs build/dv-solve-smt2 and bench_vlt_replay")
+@pytest.mark.parametrize("name", ["fam.dep_range", "fam.sum_eq", "fam.xor_parity"])
+def test_api_cache_moves(name):
+    """A reused compiled context gives a new sample per seed (resample), not
+    re-flips of one cached model: in 0.3 these hit 1-9 distinct solutions of
+    hundreds over 200 calls."""
+    p = next(f for f in FAMILIES if f.name == name)
+    sp = U.enumerate_solutions(p, 4096)
+    samples, _ = U.draw("api-cache", p, 200, 5, _TOOLS, sp)
+    r = U.score(samples, sp, p.names, 1e-3)
+    assert r["verdict"] not in ("UNSOUND", "UNANSWERED"), r
+    assert len(set(samples)) >= min(len(sp), 200) // 3, (name, len(set(samples)), len(sp))
+
+
 def test_corpus_roundtrip(tmp_path):
     sess = tmp_path / "s.smt2"
     sess.write_text("(set-logic QF_BV)\n(check-sat)\n"

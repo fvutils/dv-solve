@@ -19,7 +19,8 @@
  *            variable read back. Nothing is reused between randomize() calls.
  *   api-cache  as api, but when the built problem is byte-identical to an
  *            earlier one, the earlier compiled context is reused (CDCL: reset
- *            + solve; bitblast: re-diversify with the new seed), as the
+ *            + solve; bitblast: dvs_bbsolver_resample with the new seed, or
+ *            with --reuse rediversify the 0.3 re-flip of one model), as the
  *            lifecycle in docs/verilator_integration.md prescribes. The
  *            problem is still built every call.
  *
@@ -222,6 +223,7 @@ static void pass_pipe(const char *solver, double *wall, double *child_cpu) {
 static FILE *g_dump;
 static int   g_quality;
 static int   g_census;     /* --census: names the variables too */
+static int   g_rediversify;/* --reuse rediversify: the 0.3 cache hit (re-flip one model) */
 static int   g_collect;    /* this rep reads back models (dump and/or quality) */
 
 typedef struct {
@@ -718,8 +720,16 @@ static int cdcl_solve(Cdcl *c, Built *bt, uint64_t seed) {
     return 0;
 }
 
+/* The front end's seeded check (smt2_frontend.c) simulates before SAT except
+ * in Verilator mode; DV_SIM=0 turns it off. Set it the same way. */
+static void bb_presim(dvs_bbsolver_t *bb) {
+    const char *sim = getenv("DV_SIM");
+    if (bb && !g_vlt_mode) dvs_bbsolver_set_presim(bb, !(sim && *sim == '0'));
+}
+
 static int bb_check(dvs_bbsolver_t *bb, uint64_t seed) {
     if (!bb) return -1;
+    bb_presim(bb);
     int rc = dvs_bbsolver_check(bb, seed);
     return rc == (g_want_unsat ? DVS_BB_UNSAT : DVS_BB_SAT) ? 0 : -1;
 }
@@ -738,6 +748,7 @@ typedef struct {
     double build, compile, solve, hit_solve, wall, cpu;
     double timed_wall;   /* build + compile + solve of the timed calls */
     size_t fails, bb_fails, escalated, hits, distinct;
+    int    reusing;      /* api-cache: contexts are kept for later calls */
 } ApiStats;
 
 /* A CDCL answer the front end would not accept: escalate to a fresh bitblast
@@ -758,12 +769,16 @@ static void answer(ApiStats *st, Capture *cp, Built *bt, Cdcl *cd, dvs_bbsolver_
     if (cp->bitblast) {
         if (*bb) {
             double t1 = now_s();
-            if (dvs_bbsolver_rediversify(*bb, cp->seed) != 0) st->bb_fails++;
+            int rc = g_rediversify ? dvs_bbsolver_rediversify(*bb, cp->seed)
+                                   : dvs_bbsolver_resample(*bb, cp->seed);
+            if (rc != 0) st->bb_fails++;
             else bb_read(*bb, bt->p->n_vars);
             *t_compile = t1 - t0;
             return;
         }
         *bb = dvs_bbsolver_new(NULL, bt->p);
+        /* A context kept for reuse records its clauses, for resample. */
+        if (*bb && st->reusing && !g_rediversify) dvs_bbsolver_set_resample(*bb, 1);
         *t_compile = now_s() - t0;
         if (bb_check(*bb, cp->seed)) st->bb_fails++;
         else bb_read(*bb, bt->p->n_vars);
@@ -786,6 +801,7 @@ typedef struct {
 
 static void pass_api(int cached, ApiStats *st) {
     memset(st, 0, sizeof *st);
+    st->reusing = cached;
     Rebuild r;
     memset(&r, 0, sizeof r);
     r.b = dvs_builder_create(0, NULL);
@@ -1625,6 +1641,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--calls") && i + 1 < argc) g_calls = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--quality")) g_quality = 1;
         else if (!strcmp(argv[i], "--census")) g_census = 1;
+        else if (!strcmp(argv[i], "--reuse") && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (!strcmp(m, "rediversify")) g_rediversify = 1;
+            else if (strcmp(m, "resample")) { fprintf(stderr, "--reuse: resample or rediversify\n"); return 2; }
+        }
         else if (!strcmp(argv[i], "--dump-values") && i + 1 < argc) {
             if (!(g_dump = fopen(argv[++i], "w"))) { perror(argv[i]); return 2; }
         }
@@ -1639,6 +1660,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: %s <cmds.smt2> [--solver PATH] [--reps N] [--passes LIST]\n"
                         "         [--calls N] [--warmup N] [--mode default|verilator]\n"
                         "         [--dump-values FILE] [--quality] [--census]\n"
+                        "         [--reuse resample|rediversify]\n"
                         "       %s --build-info | --calib\n"
                         "  --mode     the front end's mode for the text pass, which also captures\n"
                         "             the problems the api passes replay; use the capture's mode\n"
@@ -1652,6 +1674,9 @@ int main(int argc, char **argv) {
                         "  --quality  check each api pass's models against the constraints, and\n"
                         "             report per field: distinct values, entropy, forced or stuck\n"
                         "             (an extra untimed rep reads the models back)\n"
+                        "  --reuse    api-cache on a reused bitblast context: resample (a new\n"
+                        "             seeded base model, the default) or rediversify (re-flip\n"
+                        "             the cached model, as 0.3 did)\n"
                         "  --census   split each call's problem into independent components; report\n"
                         "             their classes, constructs and repeat rate (P0.5)\n"
                         "  --build-info  how the loaded dv-solve library was built, and its file\n"

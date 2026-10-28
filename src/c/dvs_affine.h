@@ -53,9 +53,11 @@ typedef struct {
 /** Run the analysis on the cone of `asserts`. `max_work` bounds the 64-bit
  *  word operations (form storage and elimination; 0 = default 4e7). On
  *  DVS_AFFINE_SAT, *model_out (if non-NULL) receives a malloc'd valuation of
- *  every node (indexed by id, 0..num_nodes) like dvs_aigsim_model(). */
+ *  every node (indexed by id, 0..num_nodes) like dvs_aigsim_model().
+ *  `seed` picks the model: free input bits are drawn from it (0 = all 0), so
+ *  a system of XOR constraints alone is sampled uniformly. */
 int dvs_affine_check(const dvs_aig_t *m, const dvs_aig_node_t *asserts,
-                     uint32_t n_asserts, uint64_t max_work,
+                     uint32_t n_asserts, uint64_t max_work, uint64_t seed,
                      int8_t **model_out, dvs_affine_stats_t *st);
 
 #ifdef __cplusplus

@@ -181,6 +181,10 @@ struct dvs_bbsolver_s {
     int             no_diversify;
     /* Simulate before SAT (dvs_bbsolver_set_presim). */
     int             presim;
+    /* Record the clauses for dvs_bbsolver_resample (dvs_bbsolver_set_resample). */
+    int             resample;
+    /* The last check's model came from simulation (exhaustive or random). */
+    int             base_sim;
     /* The last SAT verdict's model is the assignment of S->sat. Clear when it
      * came from simulation, the affine check or a portfolio/cube worker: then
      * node_val is the model and S->sat's assignment is stale or absent. */
@@ -2886,6 +2890,7 @@ static int _sim_result(dvs_bbsolver_t *S, dvs_aigsim_t *sim, int r) {
     free(S->node_val);
     S->node_val = nv;
     S->model_in_sat = 0;
+    S->base_sim = 1;
     return DVS_BB_SAT;
 }
 
@@ -2919,7 +2924,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
         dvs_affine_stats_t ast;
         int8_t *nv = NULL;
         int ar = dvs_affine_check(S->aig, S->assert_nodes, S->n_asserts,
-                                  _env_u64("DV_AFFINE_MAX_WORK", 0), &nv, &ast);
+                                  _env_u64("DV_AFFINE_MAX_WORK", 0), S->seed, &nv, &ast);
         if (log)
             fprintf(stderr, "bb-affine: gates=%u tables=%u inputs=%u opaque=%u eqs=%u clauses=%u "
                     "rank=%u -> %s (%s) in %.2f ms\n", ast.xors, ast.tables, ast.inputs, ast.opaque,
@@ -2928,7 +2933,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
                     ast.why, _ms_since(&t0));
         if (ar != DVS_AFFINE_UNDECIDED) {
             int rc = ar == DVS_AFFINE_UNSAT ? DVS_BB_UNSAT : DVS_BB_SAT;
-            if (nv) { free(S->node_val); S->node_val = nv; S->model_in_sat = 0; }
+            if (nv) { free(S->node_val); S->node_val = nv; S->model_in_sat = 0; S->base_sim = 1; }
             _sim_check(S, rc);
             return rc;
         }
@@ -3004,6 +3009,10 @@ void dvs_bbsolver_set_presim(dvs_bbsolver_t *S, int on) {
     if (S) S->presim = on;
 }
 
+void dvs_bbsolver_set_resample(dvs_bbsolver_t *S, int on) {
+    if (S) S->resample = on;
+}
+
 int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || !S->problem) return DVS_BB_ERROR;
 
@@ -3016,7 +3025,8 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
      * BEFORE encoding so the exact literal stream can be replayed into the
      * worker instances; the recorder is a no-op otherwise. */
     uint32_t n_port = bb_portfolio_workers();
-    if (n_port >= 2) dvs_bbsolver_record_clauses(S);
+    if (n_port >= 2 || S->resample) dvs_bbsolver_record_clauses(S);
+    S->base_sim = 0;
 
     int stats_enabled = getenv("DV_BB_STATS") != NULL;
     struct timespec t0, t1, t2;
@@ -3557,6 +3567,81 @@ int dvs_bbsolver_rediversify(dvs_bbsolver_t *S, uint64_t seed) {
         return -1;
     }
     S->seed = seed;
+    _diversify(S);
+    return 0;
+}
+
+/* The seeded steps _solve_with_sim runs before SAT, without the SAT race: the
+ * affine check, then one simulation pass (exhaustive when small enough, else
+ * budgeted random). */
+static int _sim_once(dvs_bbsolver_t *S) {
+    const char *aff_env = getenv("DV_AFFINE");
+    if (!aff_env || strcmp(aff_env, "0") != 0) {
+        dvs_affine_stats_t ast;
+        int8_t *nv = NULL;
+        int ar = dvs_affine_check(S->aig, S->assert_nodes, S->n_asserts,
+                                  _env_u64("DV_AFFINE_MAX_WORK", 0), S->seed, &nv, &ast);
+        if (ar == DVS_AFFINE_SAT && nv) {
+            free(S->node_val);
+            S->node_val = nv;
+            S->model_in_sat = 0;
+            return DVS_BB_SAT;
+        }
+        free(nv);
+        if (ar == DVS_AFFINE_UNSAT) return DVS_BB_UNKNOWN;   /* never trust it over the last verdict */
+    }
+    dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
+    if (!sim) return DVS_BB_UNKNOWN;
+    uint64_t work = dvs_aigsim_exhaustive_work(sim);
+    uint64_t per_pass = (uint64_t)dvs_aigsim_gates(sim) + S->n_asserts;
+    int r;
+    if (work <= _env_u64("DV_SIM_MAX_WORK", 1500000ull)) {
+        r = dvs_aigsim_exhaustive(sim, NULL, S->seed);
+    } else {
+        uint64_t blocks = 1000000ull / (per_pass ? per_pass : 1);
+        r = dvs_aigsim_random(sim, (uint32_t)(blocks < 8 ? blocks : 8), S->seed);
+    }
+    S->aux_work += dvs_aigsim_vectors(sim) / 64u * per_pass;
+    int rc = _sim_result(S, sim, r);
+    dvs_aigsim_free(sim);
+    return rc;
+}
+
+/* A new seeded SAT search over the recorded clauses, on a fresh instance of
+ * this instance's backend (seeded before any clause: CaDiCaL honours the seed
+ * only then). Its model is installed as node_val. */
+static int _sat_fresh(dvs_bbsolver_t *S) {
+    size_t n = 0;
+    int32_t max_var = 0;
+    const int32_t *db = dvs_bbsolver_clause_db(S, &n, &max_var);
+    if (!db || !n) return DVS_BB_UNKNOWN;
+    dvs_sat_t *w = dvs_sat_new_backend(NULL, dvs_sat_backend(S->sat));
+    if (!w) return DVS_BB_UNKNOWN;
+    dvs_sat_set_seed(w, S->seed);
+    dvs_sat_reserve(w, (dvs_sat_var_t)max_var);
+    for (size_t i = 0; i < n; i++) dvs_sat_add(w, (dvs_sat_lit_t)db[i]);
+    const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
+    uint64_t thresh = mcl && *mcl ? strtoull(mcl, NULL, 10) : 2000000;
+    dvs_sat_set_light_search(w, dvs_aig_cnf_num_clauses(S->cnf) < thresh);
+    int rc = dvs_sat_solve(w);
+    if (rc == DVS_BB_SAT && dvs_bbsolver_install_worker_model(S, w) != 0) rc = DVS_BB_UNKNOWN;
+    dvs_sat_free(w);
+    return rc;
+}
+
+int dvs_bbsolver_resample(dvs_bbsolver_t *S, uint64_t seed) {
+    if (!S || S->last_result != DVS_BB_SAT) return -1;
+    if (S->n_frames || !seed) return dvs_bbsolver_rediversify(S, seed);
+    S->seed = seed;
+    int rc = DVS_BB_UNKNOWN;
+    if (S->base_sim && !S->asserts_lost) rc = _sim_once(S);
+    if (rc != DVS_BB_SAT && S->resample) rc = _sat_fresh(S);
+    if (rc != DVS_BB_SAT) {
+        /* UNSAT here would contradict the last verdict: never trust it over
+         * the cached model, which is still valid. */
+        return dvs_bbsolver_rediversify(S, seed);
+    }
+    S->last_result = DVS_BB_SAT;
     _diversify(S);
     return 0;
 }

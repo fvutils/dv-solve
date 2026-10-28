@@ -86,6 +86,29 @@ int dvs_bbsolver_check(dvs_bbsolver_t *bb, uint64_t seed);
 int dvs_bbsolver_rediversify(dvs_bbsolver_t *bb, uint64_t seed);
 
 /**
+ * A new sample of an already-solved instance, for a repeated randomize() of an
+ * identical problem: a fresh seeded base model, then the diversity pass.
+ * dvs_bbsolver_rediversify only re-flips the one cached model, so on tightly
+ * coupled problems (no single-bit flip keeps the constraints) it returns the
+ * same model on every call; a new base model is what a fresh solve would give,
+ * without bit-blasting again.
+ *
+ * The base model comes from re-running the seeded simulation when that is how
+ * the last check decided, else from a new SAT instance of the same backend
+ * loaded with this instance's clauses. That needs the clause log, so call
+ * dvs_bbsolver_set_resample(bb, 1) before the first check. Without it, inside
+ * a session scope, or when no new model is found within the solver's limits,
+ * it falls back to dvs_bbsolver_rediversify. Returns 0 on success, -1 if the
+ * instance is not SAT.
+ */
+int dvs_bbsolver_resample(dvs_bbsolver_t *bb, uint64_t seed);
+
+/** Record the instance's clauses during the next check so that
+ *  dvs_bbsolver_resample can load them into a new SAT instance. Call before
+ *  dvs_bbsolver_check; costs a copy of each clause literal. */
+void dvs_bbsolver_set_resample(dvs_bbsolver_t *bb, int on);
+
+/**
  * Incremental extension: keep one live instance across solves.
  *
  * dvs_bbsolver_assert bit-blasts and asserts one more predicate (an dvs_expr_t

@@ -287,6 +287,45 @@ static int _add_eq(aff_t *a, gauss_t *g, uint64_t *bits, uint8_t rhs) {
     return 0;
 }
 
+/* A copy of the system, to redo the clause choice from. */
+typedef struct {
+    uint32_t  n_rows;
+    uint64_t *rows, *pmask;
+    uint8_t  *rhs;
+    int32_t  *pcol, *prow;
+} gsnap_t;
+
+static int _gsnap(const aff_t *a, const gauss_t *g, gsnap_t *s) {
+    size_t nc = (size_t)a->n_cols + 1;
+    s->n_rows = g->n_rows;
+    s->rows = (uint64_t *)malloc(nc * g->W * sizeof(uint64_t));
+    s->pmask = (uint64_t *)malloc(g->W * sizeof(uint64_t));
+    s->rhs = (uint8_t *)malloc(nc);
+    s->pcol = (int32_t *)malloc(nc * sizeof(int32_t));
+    s->prow = (int32_t *)malloc(nc * sizeof(int32_t));
+    if (!s->rows || !s->pmask || !s->rhs || !s->pcol || !s->prow) return -1;
+    memcpy(s->rows, g->rows, (size_t)g->n_rows * g->W * sizeof(uint64_t));
+    memcpy(s->pmask, g->pmask, g->W * sizeof(uint64_t));
+    memcpy(s->rhs, g->rhs, g->n_rows);
+    memcpy(s->pcol, g->pcol, (size_t)g->n_rows * sizeof(int32_t));
+    memcpy(s->prow, g->prow, nc * sizeof(int32_t));
+    return 0;
+}
+
+static void _grestore(const aff_t *a, gauss_t *g, const gsnap_t *s) {
+    size_t nc = (size_t)a->n_cols + 1;
+    g->n_rows = s->n_rows;
+    memcpy(g->rows, s->rows, (size_t)s->n_rows * g->W * sizeof(uint64_t));
+    memcpy(g->pmask, s->pmask, g->W * sizeof(uint64_t));
+    memcpy(g->rhs, s->rhs, s->n_rows);
+    memcpy(g->pcol, s->pcol, (size_t)s->n_rows * sizeof(int32_t));
+    memcpy(g->prow, s->prow, nc * sizeof(int32_t));
+}
+
+static void _gsnap_free(gsnap_t *s) {
+    free(s->rows); free(s->pmask); free(s->rhs); free(s->pcol); free(s->prow);
+}
+
 /* Literal (bits, c) under the system: 0 or 1 when forced, -1 when free. */
 static int _lit_value(aff_t *a, gauss_t *g, dvs_aig_node_t lit, uint64_t *bits) {
     memset(bits, 0, a->W * sizeof(uint64_t));
@@ -354,8 +393,91 @@ static int _find_tables(aff_t *a, const dvs_aig_node_t *asserts, uint32_t n_asse
     return 0;
 }
 
+/* Make one literal of each clause 1, adding its equation. With seed 0 the
+ * literals are taken in order, the first already 1 or free deciding (the
+ * original choice). With a seed, a clause that already holds adds nothing,
+ * and otherwise the literals are tried from a start drawn from the seed.
+ * Returns 0, or -1 when a clause cannot be made 1. */
+static int _settle(aff_t *a, gauss_t *g, uint32_t n_cl, const uint32_t *cl_start,
+                   const dvs_aig_node_t *cl_lits, uint64_t *bits, uint64_t seed) {
+    uint64_t cs = seed;
+    for (uint32_t i = 0; i < n_cl; i++) {
+        uint32_t n_l = cl_start[i + 1] - cl_start[i], j0 = 0;
+        int done_cl = 0;
+        for (uint32_t j = cl_start[i]; seed && j < cl_start[i + 1] && !done_cl; j++)
+            done_cl = _lit_value(a, g, cl_lits[j], bits) == 1;
+        if (seed && n_l > 1) {
+            cs += 0x9e3779b97f4a7c15ull;      /* splitmix64 */
+            uint64_t z = cs;
+            z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+            z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+            j0 = (uint32_t)((z ^ (z >> 31)) % n_l);
+        }
+        for (uint32_t t = 0; t < n_l && !done_cl; t++) {
+            uint32_t j = cl_start[i] + (j0 + t) % n_l;
+            int v = _lit_value(a, g, cl_lits[j], bits);
+            if (v == 1) done_cl = 1;
+            else if (v < 0) {
+                uint8_t c = 0;
+                memset(bits, 0, a->W * sizeof(uint64_t));
+                _add_lit(a, cl_lits[j], bits, &c);
+                done_cl = _add_eq(a, g, bits, (uint8_t)(1 ^ c)) == 0;
+            }
+        }
+        if (!done_cl) return -1;
+    }
+    return 0;
+}
+
+/* The model of the system: free input columns take bits drawn from `seed`
+ * (0: all 0), the other free columns 0, and a pivot column its row's
+ * right-hand side plus the free columns its row still holds; over a pure XOR
+ * system a seed draws uniformly from the solutions. The gates are evaluated
+ * on the real AIG. Returns the node valuation, or NULL when it violates an
+ * assertion (or memory runs out). */
+static int8_t *_model(const aff_t *a, const gauss_t *g, uint64_t seed,
+                      const dvs_aig_node_t *asserts, uint32_t n_asserts, size_t n1) {
+    int8_t *nv = (int8_t *)calloc(n1, 1);
+    uint64_t *fv = (uint64_t *)calloc(a->W ? a->W : 1, sizeof(uint64_t));
+    if (!nv || !fv) { free(nv); free(fv); return NULL; }
+    if (a->N >= 1) nv[1] = 1;
+    uint64_t rs = seed;
+    for (uint32_t k = 0; seed && k < a->n_cols; k++) {
+        uint32_t id = a->col_node[k];
+        if (a->L[id] || (g->pmask[k / 64] >> (k % 64) & 1)) continue;
+        rs += 0x9e3779b97f4a7c15ull;      /* splitmix64 */
+        uint64_t z = rs;
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+        if ((z ^ (z >> 31)) & 1) {
+            fv[k / 64] |= 1ull << (k % 64);
+            nv[id] = 1;
+        }
+    }
+    for (uint32_t r = 0; r < g->n_rows; r++) {
+        uint32_t id = a->col_node[g->pcol[r]];
+        if (a->L[id]) continue;
+        const uint64_t *p = g->rows + (size_t)r * g->W;
+        uint32_t par = 0;
+        for (uint32_t w = 0; w < g->W; w++) par ^= (uint32_t)__builtin_parityll(p[w] & fv[w]);
+        nv[id] = (int8_t)(g->rhs[r] ^ par);
+    }
+    free(fv);
+    for (uint32_t id = 2; id <= a->N; id++) {
+        if (!a->L[id]) continue;
+        dvs_aig_node_t l = a->L[id], r = a->R[id];
+        int lv = l < 0 ? !nv[-l] : nv[l], rv = r < 0 ? !nv[-r] : nv[r];
+        nv[id] = (int8_t)(lv & rv);
+    }
+    for (uint32_t i = 0; i < n_asserts; i++) {
+        dvs_aig_node_t lit = asserts[i];
+        if (!(lit < 0 ? !nv[-lit] : nv[lit])) { free(nv); return NULL; }
+    }
+    return nv;
+}
+
 static int _check(const dvs_aig_t *m, const dvs_aig_node_t *asserts,
-                  uint32_t n_asserts, uint64_t max_work, int tables,
+                  uint32_t n_asserts, uint64_t max_work, int tables, uint64_t seed,
                   int8_t **model_out, dvs_affine_stats_t *st) {
     dvs_affine_stats_t dummy;
     if (!st) st = &dummy;
@@ -525,52 +647,44 @@ static int _check(const dvs_aig_t *m, const dvs_aig_node_t *asserts,
         if (a.work > a.max_work) { st->why = "elimination too large"; goto done; }
     }
 
-    /* A candidate model: one literal per clause made 1, greedily. */
-    for (uint32_t i = 0; i < n_cl; i++) {
-        int done_cl = 0;
-        for (uint32_t j = cl_start[i]; j < cl_start[i + 1] && !done_cl; j++) {
-            int v = _lit_value(&a, &g, cl_lits[j], bits);
-            if (v == 1) done_cl = 1;
-            else if (v < 0) {
-                uint8_t c = 0;
-                memset(bits, 0, a.W * sizeof(uint64_t));
-                _add_lit(&a, cl_lits[j], bits, &c);
-                done_cl = _add_eq(&a, &g, bits, (uint8_t)(1 ^ c)) == 0;
-            }
-        }
-        if (!done_cl) { st->why = "greedy clause choice failed"; goto done; }
-    }
-    st->rank = g.n_rows;
-
-    /* Free columns 0; a pivot column takes its row's right-hand side. Check
-     * the input values on the real AIG. */
+    /* A candidate model: one literal per clause made 1, greedily, first
+     * literal first, and free columns 0. Whether that model holds on the real
+     * AIG decides whether the analysis answers, independently of the seed:
+     * when it does not, simulation or SAT decide as before. With a seed, the
+     * returned model is then redrawn: each clause's literals tried from a
+     * seeded start, free input bits drawn from the seed. If the redrawn model
+     * does not hold, the first one stands. */
     {
-        int8_t *nv = (int8_t *)calloc(n1, 1);
-        if (!nv) goto done;
-        if (a.N >= 1) nv[1] = 1;
-        for (uint32_t r = 0; r < g.n_rows; r++) {
-            uint32_t id = a.col_node[g.pcol[r]];
-            if (!a.L[id]) nv[id] = (int8_t)g.rhs[r];
+        gsnap_t snap;
+        memset(&snap, 0, sizeof snap);
+        int redo = seed && n_cl && _gsnap(&a, &g, &snap) == 0;
+        if (_settle(&a, &g, n_cl, cl_start, cl_lits, bits, 0) != 0) {
+            _gsnap_free(&snap);
+            st->why = "greedy clause choice failed";
+            goto done;
         }
-        for (uint32_t id = 2; id <= a.N; id++) {
-            if (!a.L[id]) continue;
-            dvs_aig_node_t l = a.L[id], r = a.R[id];
-            int lv = l < 0 ? !nv[-l] : nv[l], rv = r < 0 ? !nv[-r] : nv[r];
-            nv[id] = (int8_t)(lv & rv);
-        }
-        int ok = 1;
-        for (uint32_t i = 0; i < n_asserts && ok; i++) {
-            dvs_aig_node_t lit = asserts[i];
-            ok = lit < 0 ? !nv[-lit] : nv[lit];
-        }
-        if (ok) {
-            verdict = DVS_AFFINE_SAT;
-            st->why = "model";
-            if (model_out) *model_out = nv; else free(nv);
-        } else {
+        st->rank = g.n_rows;
+        int8_t *nv = _model(&a, &g, 0, asserts, n_asserts, n1);
+        if (!nv) {
+            _gsnap_free(&snap);
             st->why = "model fails on the AIG";
-            free(nv);
+            goto done;
         }
+        if (seed) {
+            if (redo) {
+                _grestore(&a, &g, &snap);
+                if (_settle(&a, &g, n_cl, cl_start, cl_lits, bits, seed) != 0) {
+                    _grestore(&a, &g, &snap);
+                    _settle(&a, &g, n_cl, cl_start, cl_lits, bits, 0);
+                }
+            }
+            int8_t *sv = _model(&a, &g, seed, asserts, n_asserts, n1);
+            if (sv) { free(nv); nv = sv; }
+        }
+        _gsnap_free(&snap);
+        verdict = DVS_AFFINE_SAT;
+        st->why = "model";
+        if (model_out) *model_out = nv; else free(nv);
     }
 
 done:
@@ -584,13 +698,13 @@ done:
 }
 
 int dvs_affine_check(const dvs_aig_t *m, const dvs_aig_node_t *asserts,
-                     uint32_t n_asserts, uint64_t max_work,
+                     uint32_t n_asserts, uint64_t max_work, uint64_t seed,
                      int8_t **model_out, dvs_affine_stats_t *st) {
     /* XORs alone first; tables cost a pass over the cone, so look for them
      * only when gates the XOR pass could not read are left over. */
     dvs_affine_stats_t local;
     if (!st) st = &local;
-    int r = _check(m, asserts, n_asserts, max_work, 0, model_out, st);
+    int r = _check(m, asserts, n_asserts, max_work, 0, seed, model_out, st);
     if (r != DVS_AFFINE_UNDECIDED || !st->opaque || !st->xors) return r;
-    return _check(m, asserts, n_asserts, max_work, 1, model_out, st);
+    return _check(m, asserts, n_asserts, max_work, 1, seed, model_out, st);
 }

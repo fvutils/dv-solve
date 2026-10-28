@@ -174,6 +174,65 @@ def test_affine_agrees_with_z3(seed: int, tmp_path: Path) -> None:
         _stats["opaque"] += int(m.group(2)) > 0
 
 
+_N_SEEDED = int(os.environ.get("AFFINE_SEEDED_N", str(max(1, _N // 4))))
+
+
+@pytest.mark.parametrize("seed", range(_FIRST, _FIRST + _N_SEEDED))
+def test_affine_seeded_models_hold(seed: int, tmp_path: Path) -> None:
+    """A seeded check draws the affine model's free bits and settles its
+    clauses from the seed: every such model must satisfy the problem (z3
+    checks the values), whatever the seed."""
+    if not _EXE.is_file():
+        pytest.skip("dv-solve-smt2 not built")
+    if not _Z3.is_available():
+        pytest.skip("z3 not available")
+    g = _Gen(seed)
+    smt2 = g.problem()
+    for rs in (1, 0x9e3779b9 + seed):
+        f = tmp_path / f"affine_seeded_{seed}_{rs}.smt2"
+        f.write_text(f"(set-option :random-seed {rs})\n" + smt2
+                     + f"(get-value ({' '.join(g.vars)}))\n")
+        env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+        env.update({"DV_ENGINE": "bitblast", "DV_LOG": "1"})
+        p = subprocess.run([str(_EXE), str(f)], capture_output=True, text=True,
+                           timeout=120, env=env)
+        if "sat" not in p.stdout.split():
+            continue
+        vals = re.findall(r"\((\w+) (#[xb][0-9a-fA-F]+)\)", p.stdout)
+        assert vals, p.stdout
+        chk = tmp_path / f"affine_check_{seed}_{rs}.smt2"
+        chk.write_text(smt2.replace("(check-sat)\n", "")
+                       + "".join(f"(assert (= {n} {v}))\n" for n, v in vals) + "(check-sat)\n")
+        got = _Z3.solve(chk, timeout_s=60).result
+        assert got == "sat", f"seed {seed} rs {rs}: model {vals} violates\n{smt2}"
+
+
+def test_affine_xor_system_varies_with_seed(tmp_path: Path) -> None:
+    """XOR constraints alone are sampled from all their solutions: 3 parity
+    constraints on 8 bits leave 32, and 400 seeds must hit every one."""
+    if not _EXE.is_file():
+        pytest.skip("dv-solve-smt2 not built")
+    seen = set()
+    for rs in range(1, 401):
+        f = tmp_path / "xor.smt2"
+        f.write_text(f"(set-option :random-seed {rs})\n(set-logic QF_BV)\n"
+                     "(declare-const x (_ BitVec 8))\n"
+                     "(assert (= (bvxor ((_ extract 0 0) x) ((_ extract 1 1) x)) #b1))\n"
+                     "(assert (= (bvxor ((_ extract 2 2) x) ((_ extract 5 5) x)) #b0))\n"
+                     "(assert (= (bvxor ((_ extract 3 3) x) ((_ extract 7 7) x)) #b1))\n"
+                     "(check-sat)\n(get-value (x))\n")
+        env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+        env.update({"DV_ENGINE": "bitblast"})
+        out = subprocess.run([str(_EXE), str(f)], capture_output=True, text=True,
+                             timeout=60, env=env).stdout
+        m = re.search(r"\(x #([xb])([0-9a-fA-F]+)\)", out)
+        assert m, out
+        v = int(m.group(2), 16 if m.group(1) == "x" else 2)
+        assert (v ^ v >> 1) & 1 == 1 and (v >> 2 ^ v >> 5) & 1 == 0 and (v >> 3 ^ v >> 7) & 1 == 1
+        seen.add(v)
+    assert len(seen) == 32, sorted(seen)
+
+
 def test_zz_affine_coverage() -> None:
     """The analysis must decide problems both ways, with opaque gates in some
     and tables in some, or the fuzzer above tests nothing."""
