@@ -5,7 +5,7 @@ Tracking plan: `docs/dynamic_pool_plan.md`.
 
 ## 1. Summary
 
-The backgrounder (`docs/dv_solve_internals_backgrounder.md` §4.1) says the
+The backgrounder (`docs/notes/dv_solve_internals_backgrounder.md` §4.1, private) says the
 solver context lives in "a single buffer that the caller supplies (1 MiB for
 Python, 2 MiB for DPI, grown on demand by the SMT-LIB2 tool)". The code bears
 that out, and it is worse than the sentence suggests:
