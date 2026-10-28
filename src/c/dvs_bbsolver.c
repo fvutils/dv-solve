@@ -1254,7 +1254,7 @@ static dvs_bv_t bb_word_eq(dvs_bbsolver_t *S, dvs_expr_t lref, dvs_expr_t rref,
     enum { MAX_CUTS = 64 };
     uint32_t cuts[2 * MAX_CUTS + 2], n = 0;
     bb_concat_cuts(S, lref, 0, cuts, &n, MAX_CUTS, 0);
-    bb_concat_cuts(S, rref, 0, cuts + n, &n, n + MAX_CUTS, 0);
+    bb_concat_cuts(S, rref, 0, cuts, &n, n + MAX_CUTS, 0);
     if (n == 0) return dvs_bbword_eq(S->word, S->bb, l, r);
     qsort(cuts, n, sizeof(uint32_t), bb_cut_cmp);
     uint64_t before = dvs_bbword_num_decided(S->word) + dvs_bbword_num_peeled(S->word);
