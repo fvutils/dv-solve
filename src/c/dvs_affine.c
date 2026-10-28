@@ -459,7 +459,7 @@ static int8_t *_model(const aff_t *a, const gauss_t *g, uint64_t seed,
         if (a->L[id]) continue;
         const uint64_t *p = g->rows + (size_t)r * g->W;
         uint32_t par = 0;
-        for (uint32_t w = 0; w < g->W; w++) par ^= (uint32_t)__builtin_parityll(p[w] & fv[w]);
+        for (uint32_t w = 0; w < g->W; w++) par ^= (uint32_t)__builtin_popcountll(p[w] & fv[w]) & 1u;
         nv[id] = (int8_t)(g->rhs[r] ^ par);
     }
     free(fv);
