@@ -48,6 +48,7 @@ class RunOutput:
     returncode: int
     log: str
     result: Optional[Result]
+    info: dict = dc.field(default_factory=dict)   # for the record: replay/session details
 
 
 class BuildError(Exception):

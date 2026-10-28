@@ -20,6 +20,7 @@ import subprocess
 import time
 from typing import Optional
 
+from . import provenance
 from .config import Config
 from .result import Result
 from .runner import RunOutput
@@ -34,6 +35,17 @@ def solver_mode(solver: Optional[str]) -> str:
         if a.startswith("--mode="):
             return "verilator" if a[7:] == "verilator" else "default"
     return "default"
+
+
+class ReplayError(RuntimeError):
+    """A replay that could not be scored; `info` still goes in the run record."""
+    def __init__(self, info: dict, msg: str):
+        super().__init__(msg)
+        self.info = info
+
+
+def sim_bench(sim: RunOutput) -> str:
+    return sim.result.bench if sim.result is not None else "unknown"
 
 
 def session_plusarg(path: str) -> str:
@@ -103,15 +115,18 @@ def replay(cfg: Config, sim: RunOutput, session: str, rundir: str,
                        stderr=subprocess.STDOUT, text=True, timeout=timeout)
     with open(os.path.join(rundir, "replay.log"), "w") as fp:
         fp.write(p.stdout)
+    info = {"session": provenance.session_info(cmds, n_check, cfg.id, sim_bench(sim)),
+            "replay": dict(provenance.replay_details(p.stdout, pass_name),
+                           args=cmd[2:], returncode=p.returncode)}
     r = parse_replay(p.stdout, pass_name) if p.returncode == 0 else None
     if r is None or r["us_per_call"] is None:
-        raise RuntimeError("replay failed (rc=%d): %s\n%s"
+        raise ReplayError(info, "replay failed (rc=%d): %s\n%s"
                            % (p.returncode, " ".join(cmd), p.stdout[-2000:]))
     # The replay times the randomize() calls after the start-up check and the
     # warm-up; when sessions per call vary (randc retries) it cannot separate
     # the warm-up, and averages over all calls.
     if r["timed_calls"] not in (sim.result.n, sim.result.n + sim.result.warmup):
-        raise RuntimeError("replay timed %d calls, the run made %d (+%d warm-up): %s"
+        raise ReplayError(info, "replay timed %d calls, the run made %d (+%d warm-up): %s"
                            % (r["timed_calls"], sim.result.n, sim.result.warmup, " ".join(cmd)))
     res = dc.replace(sim.result,
                      elapsed_ns=int(round(r["us_per_call"] * 1e3 * sim.result.n)),
@@ -119,7 +134,7 @@ def replay(cfg: Config, sim: RunOutput, session: str, rundir: str,
                      failures=sim.result.failures + r["failures"])
     log = "%s\n# replay (%d check-sats, mode %s, pass %s, %.1f us/call): %s\n%s" % (
         sim.log, n_check, mode, pass_name, r["us_per_call"], " ".join(cmd), p.stdout)
-    return RunOutput(cmd=cmd, returncode=p.returncode, log=log, result=res)
+    return RunOutput(cmd=cmd, returncode=p.returncode, log=log, result=res, info=info)
 
 
 def count_answers(text: str) -> dict:
@@ -155,8 +170,11 @@ def replay_text(cfg: Config, sim: RunOutput, session: str, rundir: str,
     # dv-solve-smt2 may exit non-zero on a (reset)-terminated file with every
     # answer given, so the answers decide, not the exit status.
     a = count_answers(p.stdout)
+    info = {"session": provenance.session_info(cmds, n_check, cfg.id, sim_bench(sim)),
+            "replay": {"args": cmd, "returncode": p.returncode, "reps": max(1, cfg.replay_reps),
+                       "best_wall_s": best, "answers": a}}
     if a["sat"] + a["unsat"] != n_check or a["unknown"] or a["error"]:
-        raise RuntimeError("replay failed (rc=%d, %d check-sats, answers %s): %s\n%s"
+        raise ReplayError(info, "replay failed (rc=%d, %d check-sats, answers %s): %s\n%s"
                            % (p.returncode, n_check, a, " ".join(cmd), p.stdout[-2000:]))
     # The session holds the runtime's start-up check, then n + warmup calls;
     # the start-up check and process start are charged to the calls.
@@ -167,4 +185,4 @@ def replay_text(cfg: Config, sim: RunOutput, session: str, rundir: str,
     log = "%s\n# replay_text (%d check-sats, best of %d: %.3f s, rc=%d): %s\n%s" % (
         sim.log, n_check, max(1, cfg.replay_reps), best, p.returncode, " ".join(cmd),
         p.stdout[-2000:])
-    return RunOutput(cmd=cmd, returncode=p.returncode, log=log, result=res)
+    return RunOutput(cmd=cmd, returncode=p.returncode, log=log, result=res, info=info)

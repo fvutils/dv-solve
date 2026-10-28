@@ -572,6 +572,22 @@ const char *dvs_oracle_run_dir(const dvs_oracle_t *o);
  */
 int dvs_problem_write_smt2(const dvs_problem_t *p, FILE *out);
 
+/**
+ * How this copy of the library was built, as one line of key=value pairs:
+ * commit, dirty (tracked files modified at build time), build_type,
+ * optimized (compiled with optimisation), asan, ndebug, cc. Benchmark records
+ * carry it, so a result can be traced to the build that produced it.
+ */
+const char *dvs_build_info(void);
+
+/**
+ * The file this library's code was loaded from: the shared library actually
+ * resolved at run time (LD_LIBRARY_PATH takes precedence over a binary's
+ * RUNPATH), or the executable when linked statically. "unknown" where the
+ * platform cannot tell.
+ */
+const char *dvs_build_library_path(void);
+
 #ifdef __cplusplus
 }
 #endif

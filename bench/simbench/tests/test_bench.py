@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from dv_solve_simbench import metric, records, standalone
+from dv_solve_simbench import metric, provenance, records, standalone
 from dv_solve_simbench.config import load_configs
 from dv_solve_simbench.runner import build, find_benches, probe_sampler, run
 
@@ -39,6 +39,9 @@ def build_cache(tmp_path_factory):
 def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
     params = {"n": N, "seed": SEED}
     load0 = records._loadavg()
+    # Fixed work timed just before the run: a host-speed reading per record.
+    calib = provenance.calib(cfg.replay)
+    info = {}
     try:
         if cfg.version:
             ver = records.tool_version(cfg.tool, cfg.version_flag) or ""
@@ -56,6 +59,7 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
             out = standalone.replay_text(cfg, out, session, str(tmp_path))
         elif cfg.replay:
             out = standalone.replay(cfg, out, session, str(tmp_path))
+        info = out.info
         active = probe_sampler(cfg, exe, str(tmp_path / "probe"))
         if cfg.sampler and active != cfg.sampler:
             raise RuntimeError("%s: image ran sampler %r; config wants %r"
@@ -63,13 +67,14 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
     except Exception as e:
         if simbench_out:
             records.append(simbench_out, records.make_record(
-                cfg, bench, None, params, load0, error="%s: %s" % (type(e).__name__, e)))
+                cfg, bench, None, params, load0, error="%s: %s" % (type(e).__name__, e),
+                calib=calib, info=getattr(e, "info", None) or info))
         raise
     rand = _randomization(cfg, bench, exe, tmp_path)
     if simbench_out:
         records.append(simbench_out, records.make_record(
             cfg, bench, out.result, params, load0, sampler_active=active,
-            randomization=rand))
+            randomization=rand, calib=calib, info=info))
     assert out.result is not None, "no SIMBENCH_RESULT (rc=%d):\n%s" % (
         out.returncode, out.log[-4000:])
     assert out.result.ok, "bench failed: %s" % out.result

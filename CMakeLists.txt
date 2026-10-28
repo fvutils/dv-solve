@@ -155,6 +155,15 @@ set(DVS_CONTRA_SOURCES
     src/c/dvs_contradiction.c
 )
 
+# Without a build type, single-config generators compile with no
+# optimisation: a benchmark build from a plain `cmake ..` then runs several
+# times slower. Default to Release; give a build type to choose another.
+get_property(_dvs_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT _dvs_multi_config AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (default Release)" FORCE)
+    message(STATUS "dv-solve: no CMAKE_BUILD_TYPE given; using Release")
+endif()
+
 # ------------------------------------------------------------------ #
 # Version                                                             #
 # ------------------------------------------------------------------ #
@@ -180,6 +189,18 @@ endif()
 set_source_files_properties(src/c/dvs_oracle_core.c
     PROPERTIES COMPILE_DEFINITIONS
     "DVS_VERSION=\"${DVS_VERSION}\";DVS_GIT_COMMIT=\"${DVS_GIT_COMMIT}\"")
+# dvs_build_info(): commit and dirty state regenerated on every build (a
+# configure-time commit goes stale), plus the build type.
+set(DVS_GIT_INFO_H ${CMAKE_CURRENT_BINARY_DIR}/generated/dvs_git_info.h)
+add_custom_target(dvs_git_info ALL
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${DVS_GIT_INFO_H}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/dvs_git_info.cmake
+    BYPRODUCTS ${DVS_GIT_INFO_H}
+    COMMENT "dv-solve: build info")
+set_source_files_properties(src/c/dvs_build_info.c PROPERTIES
+    COMPILE_DEFINITIONS "DVS_BI_BUILD_TYPE=\"$<CONFIG>\""
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_BINARY_DIR}/generated
+    OBJECT_DEPENDS ${DVS_GIT_INFO_H})
 
 # ------------------------------------------------------------------ #
 # Source list                                                          #
@@ -187,6 +208,7 @@ set_source_files_properties(src/c/dvs_oracle_core.c
 
 set(DVS_SOURCES
     src/c/dvs_block_alloc.c
+    src/c/dvs_build_info.c
     src/c/dvs_builder.c
     src/c/dvs_compile.c
     src/c/dvs_conflict.c
@@ -695,3 +717,11 @@ endif()
 install(TARGETS dv-solve-smt2 RUNTIME DESTINATION bin)
 
 endif()  # DVS_BUILD_SMT2
+
+# Every target that compiles dvs_build_info.c needs the generated header first.
+foreach(_dvs_t dv_solve dv_solve_debug dv_solve_dpi dv_solve_static)
+    if(TARGET ${_dvs_t})
+        add_dependencies(${_dvs_t} dvs_git_info)
+        target_link_libraries(${_dvs_t} PRIVATE ${CMAKE_DL_LIBS})   # dladdr
+    endif()
+endforeach()

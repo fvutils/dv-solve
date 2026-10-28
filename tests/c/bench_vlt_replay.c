@@ -765,6 +765,74 @@ static void pass_api(int cached, ApiStats *st) {
 
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Calibration                                                          */
+/* ------------------------------------------------------------------ */
+
+/* Fixed work, timed, so records from different hosts (or a loaded host) can
+ * be put on one scale: a plain integer loop (host speed alone) and a fixed
+ * small problem solved on a reused context and compiled afresh (host speed
+ * times this library's build). Best of 3 of each. */
+static void calib(void) {
+    const uint64_t n_iter = 50 * 1000 * 1000;
+    double best_cpu = 1e30, best_solve = 1e30, best_compile = 1e30;
+    for (int rep = 0; rep < 3; rep++) {
+        uint64_t x = 88172645463325252ull;
+        double a = now_s();
+        for (uint64_t i = 0; i < n_iter; i++) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; }
+        double e = now_s() - a;
+        g_sink += (int64_t)x;
+        if (e < best_cpu) best_cpu = e;
+    }
+    /* a + b == c, a < b, c < 50000, d != a, d < 1000: 16-bit, CDCL. */
+    dvs_builder_t *b = dvs_builder_create(0, NULL);
+    for (uint32_t v = 0; v < 4; v++) dvs_builder_add_var(b, v, 16, 0, 0, 65535);
+    dvs_expr_t va = dvs_builder_expr_var(b, 0), vb = dvs_builder_expr_var(b, 1);
+    dvs_expr_t vc = dvs_builder_expr_var(b, 2), vd = dvs_builder_expr_var(b, 3);
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ,
+        dvs_builder_expr_binary(b, DVS_BIN_ADD, va, vb), vc));
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_LT, va, vb));
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_LT, vc,
+        dvs_builder_expr_const(b, 50000, 0)));
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_NEQ, vd, va));
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_LT, vd,
+        dvs_builder_expr_const(b, 1000, 0)));
+    size_t sz;
+    dvs_problem_t *p = dvs_builder_finalize(b, &sz);
+    dvs_solve_opts_t o;
+    memset(&o, 0, sizeof o);
+    o.fair_pick = 1;
+    const int n_solve = 20000, n_compile = 2000;
+    int bad = 0;
+    for (int rep = 0; rep < 3; rep++) {
+        dvs_ctx_t *ctx = dvs_solver_new(NULL);
+        if (!ctx || dvs_solver_compile(ctx, p) != 0) { bad = 1; break; }
+        double a = now_s();
+        for (int i = 0; i < n_solve; i++) {
+            dvs_solver_reset(ctx);
+            o.seed = (uint64_t)i + 1;
+            if (dvs_solver_solve(ctx, &o) != DVS_SOLVE_OK) bad = 1;
+            g_sink += dvs_solver_get_value(ctx, 2);
+        }
+        double e = (now_s() - a) / n_solve;
+        dvs_solver_free(ctx);
+        if (e < best_solve) best_solve = e;
+        a = now_s();
+        for (int i = 0; i < n_compile; i++) {
+            ctx = dvs_solver_new(NULL);
+            if (!ctx || dvs_solver_compile(ctx, p) != 0) bad = 1;
+            if (ctx) dvs_solver_free(ctx);
+        }
+        e = (now_s() - a) / n_compile;
+        if (e < best_compile) best_compile = e;
+    }
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
+    printf("calib cpu_ns_per_iter %.4f dvs_solve_us %.3f dvs_compile_us %.3f%s\n",
+           best_cpu * 1e9 / (double)n_iter, best_solve * 1e6, best_compile * 1e6,
+           bad ? " (solve failed)" : "");
+}
+
 static int has(const char *list, const char *w) {
     size_t n = strlen(w);
     for (const char *p = list; (p = strstr(p, w)); p += n)
@@ -776,6 +844,15 @@ int main(int argc, char **argv) {
     const char *path = NULL, *solver = NULL, *passes = "pipe,text,api,api-cache";
     int reps = 3;
     for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--build-info")) {
+            printf("build-info %s\nlibrary %s\n", dvs_build_info(), dvs_build_library_path());
+            return 0;
+        }
+        if (!strcmp(argv[i], "--calib")) {
+            printf("build-info %s\nlibrary %s\n", dvs_build_info(), dvs_build_library_path());
+            calib();
+            return 0;
+        }
         if (!strcmp(argv[i], "--solver") && i + 1 < argc) solver = argv[++i];
         else if (!strcmp(argv[i], "--reps") && i + 1 < argc) reps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = argv[++i];
@@ -791,15 +868,20 @@ int main(int argc, char **argv) {
     if (!path) {
         fprintf(stderr, "usage: %s <cmds.smt2> [--solver PATH] [--reps N] [--passes LIST]\n"
                         "         [--calls N] [--warmup N] [--mode default|verilator]\n"
+                        "       %s --build-info | --calib\n"
                         "  --mode     the front end's mode for the text pass, which also captures\n"
                         "             the problems the api passes replay; use the capture's mode\n"
                         "             (default: default, as dv-solve-smt2 without --mode)\n"
                         "  --warmup   randomize() calls after the start-up check not timed in the\n"
                         "             per-call figure\n"
                         "  --calls    randomize() calls in the session, warm-up included (default:\n"
-                        "             one per solver session, each starting with (reset))\n", argv[0]);
+                        "             one per solver session, each starting with (reset))\n"
+                        "  --build-info  how the loaded dv-solve library was built, and its file\n"
+                        "  --calib    that, then time fixed work (host and library speed)\n",
+                argv[0], argv[0]);
         return 2;
     }
+    printf("build-info %s\nlibrary %s\n", dvs_build_info(), dvs_build_library_path());
     load(path);
     size_t n_check = 0, n_bytes = 0;
     for (size_t i = 0; i < g_ncmd; i++) { n_check += g_cmd[i].kind == K_CHECK; n_bytes += g_cmd[i].len + 1; }

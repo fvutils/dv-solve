@@ -14,6 +14,7 @@ import subprocess
 import time
 from typing import Optional
 
+from . import provenance
 from .config import Config
 from .result import Result
 from .runner import Bench
@@ -65,6 +66,7 @@ def machine(loadavg_start: float, loadavg_end: float) -> dict:
         m["label"] = os.environ["SIMBENCH_HOST"]
     m.update(loadavg_start=loadavg_start, loadavg_end=loadavg_end,
              noisy=max(loadavg_start, loadavg_end) > m["cores"] / 2)
+    m.update(provenance.host_state())
     return m
 
 
@@ -111,8 +113,11 @@ def utc_now() -> str:
 def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dict,
                 loadavg_start: float, error: str = "", utc: Optional[str] = None,
                 sampler_active: Optional[str] = None,
-                randomization: Optional[dict] = None) -> dict:
-    """Run record for one run; `result` is None when no SIMBENCH_RESULT was seen."""
+                randomization: Optional[dict] = None,
+                calib: Optional[dict] = None, info: Optional[dict] = None) -> dict:
+    """Run record for one run; `result` is None when no SIMBENCH_RESULT was seen.
+    `calib` is fixed work timed before the run (provenance.calib); `info` holds
+    the replay's and the captured session's details (RunOutput.info)."""
     valid = result is not None and result.ok and not error
     rec = {
         "schema": SCHEMA, "valid": valid, "kind": KIND,
@@ -121,8 +126,13 @@ def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dic
         "tools": {"lock_sha": None, "simulator": cfg.simulator, "simulator_path": cfg.tool,
                   "simulator_version": tool_version(cfg.tool, cfg.version_flag),
                   "solver": cfg.solver, "sampler": cfg.sampler,
-                  "sampler_active": sampler_active},
-        "calib": {},
+                  "sampler_active": sampler_active,
+                  # The dv-solve builds behind the solver and the replay, and the
+                  # library each really loads, under the environment they run in.
+                  "solver_build": provenance.build_info(cfg.solver, cfg.run_env()),
+                  "replay_build": provenance.build_info(cfg.replay or cfg.replay_cmd),
+                  "env": provenance.env_info(cfg.run_env())},
+        "calib": dict(calib or {}),
         "simbench": {
             "v": SIMBENCH, "config": cfg.id, "bench": bench.id, "tier": bench.tier,
             "bench_sha": file_sha(bench.path),
@@ -132,6 +142,9 @@ def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dic
                 "ns_per_call": result.ns_per_call, "calls_per_s": result.calls_per_s},
         },
     }
+    for k in ("replay", "session"):
+        if info and info.get(k) is not None:
+            rec["simbench"][k] = info[k]
     if randomization is not None and rec["simbench"]["result"] is not None:
         rec["simbench"]["result"]["randomization"] = randomization
     if not valid:

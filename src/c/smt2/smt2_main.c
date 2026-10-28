@@ -22,6 +22,7 @@
 #include "smt2/smt2_frontend.h"
 #include "smt2/smt2_oracle.h"
 #include "dvs_thread.h"
+#include "dv_solve.h"
 
 /* DVS_VERSION comes from src/dv_solve/__version__.py, through CMake. */
 #ifndef DVS_VERSION
@@ -36,6 +37,7 @@ static void _usage(FILE *f) {
         "Options:\n"
         "  --help            Show this help\n"
         "  --version         Print version\n"
+        "  --build-info      Print how the solver library was built, and its file\n"
         "  --stats           Print statistics to stderr\n"
         "  -v, --verbose     Print warnings and diagnostics to stderr\n"
         "  --interactive     Force interactive (per-command) stdin mode\n"
@@ -482,6 +484,10 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--version") == 0) {
             printf("%s\n", VERSION_STRING);
+            return 0;
+        }
+        if (strcmp(argv[i], "--build-info") == 0) {
+            printf("build-info %s\nlibrary %s\n", dvs_build_info(), dvs_build_library_path());
             return 0;
         }
         if (strcmp(argv[i], "--stats") == 0) { show_stats = 1; continue; }

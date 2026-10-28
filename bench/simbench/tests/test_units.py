@@ -287,3 +287,64 @@ def test_report_table():
     assert lines[2] == "| b1 | 4.0 | 8.0 | 1.0 (0.25) | FAIL: BuildError: x |"
     assert lines[3] == "| b2 | 2.0 | - | 4.0 (2.00) | - |"
     assert "0.707 (n=2)" in lines[4]          # geomean of 0.25 and 2.0
+
+
+_REPLAY_OUT = """build-info commit=0123abcd dirty=0 build_type=Release optimized=1 asan=0 ndebug=1 cc="gcc 13.3.0"
+library /x/build/lib/libdv_solve.so
+session s.cmds.smt2
+  3363 commands, 421 check-sats, 0.3 MB of SMT-LIB
+  mode default; 420 solver sessions, 210 randomize() calls, 10 warm-up, 200 timed
+  captured 421 problems (421 answered on bitblast, 0 with constraints added under push, 0 unsat), 0 check-sats not captured
+api-cache  wall   0.012 s     28.3 us/check-sat   (CPU 0.012 s; 210 distinct, 211 reused; 0 CDCL answers escalated to bitblast, 0 bitblast failures, 0 unsolved)
+api-cache  per call      56.5 us   (200 timed calls)
+             build (builder)    0.002 s      4.0 us
+             compile/bitblast   0.001 s      1.8 us
+             solve+read         0.009 s     22.4 us
+               on a reused context: 8.1 us per call; on a new one: 36.7 us
+"""
+
+
+def test_replay_details():
+    from dv_solve_simbench.provenance import replay_details
+    d = replay_details(_REPLAY_OUT, "api-cache")
+    assert d["commit"] == "0123abcd" and d["optimized"] == 1 and d["asan"] == 0
+    assert d["cc"] == "gcc 13.3.0" and d["library"] == "/x/build/lib/libdv_solve.so"
+    assert (d["sessions"], d["calls"], d["warmup"], d["timed_calls"]) == (420, 210, 10, 200)
+    assert d["warmup_in_average"] is False
+    assert d["captured_bitblast"] == 421 and d["distinct"] == 210 and d["reused"] == 211
+    assert d["build_us_per_check"] == 4.0 and d["solve_us_per_check"] == 22.4
+    assert (d["us_reused"], d["us_new"], d["us_per_call"]) == (8.1, 36.7, 56.5)
+    assert replay_details(_REPLAY_OUT, "api").get("distinct") is None
+
+
+def test_parse_calib_and_build_info():
+    from dv_solve_simbench.provenance import parse_build_info, parse_calib
+    assert parse_calib("calib cpu_ns_per_iter 1.17 dvs_solve_us 0.75 dvs_compile_us 4.3\n") == \
+        {"cpu_ns_per_iter": 1.17, "dvs_solve_us": 0.75, "dvs_compile_us": 4.3}
+    assert parse_calib("usage: ...") == {}
+    b = parse_build_info('build-info commit=1234567 dirty=1 build_type= optimized=0 asan=1 '
+                         'ndebug=0 cc="gcc 12.2.0"\nlibrary /a/libdv_solve.so\n')
+    assert b["commit"] == "1234567" and b["dirty"] == 1 and b["asan"] == 1
+    assert b["build_type"] == "" and b["library"] == "/a/libdv_solve.so"
+
+
+def test_env_info(monkeypatch):
+    from dv_solve_simbench.provenance import env_info
+    monkeypatch.setenv("DV_ENGINE", "cdcl")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/stray/lib")
+    monkeypatch.setenv("HOME_UNRELATED_X", "1")
+    e = env_info({"VERILATOR_SOLVER": "dv-solve-smt2"})
+    assert e["DV_ENGINE"] == "cdcl" and e["LD_LIBRARY_PATH"] == "/stray/lib"
+    assert e["VERILATOR_SOLVER"] == "dv-solve-smt2" and "HOME_UNRELATED_X" not in e
+
+
+def test_session_info_keeps(tmp_path, monkeypatch):
+    import gzip
+    from dv_solve_simbench.provenance import session_info
+    s = tmp_path / "session.cmds.smt2"
+    s.write_text("(check-sat)\n")
+    monkeypatch.setenv("SIMBENCH_SESSION_DIR", str(tmp_path / "keep"))
+    i = session_info(str(s), 1, "dvs-standalone", "construct.range")
+    assert i["bytes"] == 12 and i["n_check"] == 1 and len(i["sha256"]) == 64
+    with gzip.open(i["kept"], "rt") as fp:
+        assert fp.read() == "(check-sat)\n"
