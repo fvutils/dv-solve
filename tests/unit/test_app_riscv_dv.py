@@ -125,6 +125,8 @@ def _parent(rusage_bin, out, kill_wrapper):
         """)
 
 
+@pytest.mark.skipif(sys.platform != "linux",
+                    reason="a child subreaper is Linux prctl(PR_SET_CHILD_SUBREAPER)")
 @pytest.mark.parametrize("kill_wrapper", [False, True])
 def test_solver_cpu_survives_a_killed_wrapper(tmp_path, rusage_bin, kill_wrapper):
     run._become_subreaper()

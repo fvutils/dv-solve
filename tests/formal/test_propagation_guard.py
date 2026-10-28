@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import resource
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,10 @@ _EXE = Path(__file__).resolve().parents[2] / "build" / "dv-solve-smt2"
 
 
 def _limit():
-    resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))   # 2 GiB
+    # macOS rejects RLIMIT_AS (and would not enforce it); there the run's
+    # timeout is the only bound.
+    if sys.platform != "darwin":
+        resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))   # 2 GiB
 
 
 @pytest.mark.parametrize("width", [31, 32, 63, 64])

@@ -463,7 +463,9 @@ def test_packaging_link_line(shell_env: dict, tmp_path: Path) -> None:
     libdirs = subprocess.run(
         [sys.executable, "-c", "import dv_solve, os; print(os.pathsep.join(dv_solve.get_libdirs()))"],
         env=shell_env, capture_output=True, text=True, timeout=60).stdout.strip()
-    r = subprocess.run([str(tmp_path / "a.out")], env=dict(shell_env, LD_LIBRARY_PATH=libdirs),
+    # The page's runtime search path: DYLD_LIBRARY_PATH on macOS.
+    var = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+    r = subprocess.run([str(tmp_path / "a.out")], env={**shell_env, var: libdirs},
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and len(_packets(r.stdout)) == 5, r.stdout + r.stderr
 

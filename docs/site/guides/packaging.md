@@ -24,4 +24,4 @@ print(" ".join(["-I"+p for p in d.get_incdirs()] + ["-L"+p for p in d.get_libdir
 
 The program must also find the library when it runs: add
 `-Wl,-rpath,<dir>` for each directory from `get_libdirs()`, or put those
-directories on `LD_LIBRARY_PATH`.
+directories on `LD_LIBRARY_PATH` (`DYLD_LIBRARY_PATH` on macOS).

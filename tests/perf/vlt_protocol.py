@@ -43,7 +43,10 @@ STACK_BYTES = 64 << 20
 
 
 def _limits():
-    resource.setrlimit(resource.RLIMIT_STACK, (STACK_BYTES, STACK_BYTES))
+    # macOS caps the stack hard limit just under 64 MiB; stay inside it.
+    hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
+    n = STACK_BYTES if hard == resource.RLIM_INFINITY else min(STACK_BYTES, hard)
+    resource.setrlimit(resource.RLIMIT_STACK, (n, n))
 
 
 _PRELUDE = ("(set-option :produce-models true)\n"

@@ -61,7 +61,10 @@ def make_arms(head: Path, anchor: Path, tools: dict, refs=REFERENCES) -> list:
 
 
 def _limits():
-    resource.setrlimit(resource.RLIMIT_STACK, (STACK_BYTES, STACK_BYTES))
+    # macOS caps the stack hard limit just under 64 MiB; stay inside it.
+    hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
+    n = STACK_BYTES if hard == resource.RLIM_INFINITY else min(STACK_BYTES, hard)
+    resource.setrlimit(resource.RLIMIT_STACK, (n, n))
 
 
 def run_once(argv: list, env: dict, budget_s: float) -> tuple:

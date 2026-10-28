@@ -11,6 +11,7 @@ against another, and the ABI mismatch surfaces as a crash inside
 ``dvs_solver_compile`` with nothing pointing back at the cause.
 """
 import os
+import platform
 import re
 
 import pytest
@@ -32,6 +33,14 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     if os.name == "nt":
         monkeypatch.setenv("PATH", "")
+
+
+def _versioned_name(stem="dv_solve", ver=".1"):
+    """The platform's versioned library name: ``libdv_solve.so.1`` on Linux,
+    ``libdv_solve.1.dylib`` on macOS (the forms _resolve accepts)."""
+    if platform.system() == "Darwin":
+        return "lib%s%s.dylib" % (stem, ver)
+    return _resolve.lib_filename(stem) + ver
 
 
 def _lib(d, stem="dv_solve", suffix=""):
@@ -230,7 +239,7 @@ def test_versioned_soname_loadable_but_not_linkable(tmp_path, monkeypatch):
     pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
     _install(monkeypatch, pkg, root)
     os.makedirs(pkg, exist_ok=True)
-    open(pkg / (_resolve.lib_filename("dv_solve") + ".1"), "wb").close()
+    open(pkg / _versioned_name(), "wb").close()
     assert _resolve.find_library("dv_solve") is not None
     assert _resolve.find_library("dv_solve", linkable=True) is None
 
@@ -240,7 +249,7 @@ def test_unversioned_preferred_over_versioned(tmp_path, monkeypatch):
     pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
     _install(monkeypatch, pkg, root)
     _lib(str(pkg))
-    open(pkg / (_resolve.lib_filename("dv_solve") + ".1"), "wb").close()
+    open(pkg / _versioned_name(), "wb").close()
     assert _resolve.find_library("dv_solve").endswith(
         _resolve.lib_filename("dv_solve"))
 
@@ -306,7 +315,7 @@ def test_loader_and_link_dirs_agree_on_the_real_installation():
 
 def _versioned(d, stem="dv_solve", ver=".1"):
     os.makedirs(d, exist_ok=True)
-    p = os.path.join(d, _resolve.lib_filename(stem) + ver)
+    p = os.path.join(d, _versioned_name(stem, ver))
     open(p, "wb").close()
     return p
 
@@ -332,7 +341,7 @@ def test_override_versioned_only_is_not_linked_from_the_package(
         dv_solve.get_libdirs()
     msg = str(ei.value)
     assert "DVS_SOLVER_PATH=%s" % override in msg
-    assert "libdv_solve.so.1" in msg and "ln -s" in msg
+    assert _versioned_name() in msg and "ln -s" in msg
     assert str(pkg) not in msg.split("Fixes:")[0]
 
 
@@ -452,7 +461,7 @@ def test_directory_named_like_the_library_is_not_a_library(
     pkg, root = tmp_path / "site" / "dv_solve", tmp_path / "checkout"
     _install(monkeypatch, pkg, root)
     os.makedirs(pkg / _resolve.lib_filename("dv_solve"))
-    os.makedirs(pkg / (_resolve.lib_filename("dv_solve") + ".1"))
+    os.makedirs(pkg / _versioned_name())
     real = _lib(str(root / "build" / "lib"))
     assert os.path.dirname(_resolve.find_library("dv_solve")) == real
     assert os.path.dirname(
