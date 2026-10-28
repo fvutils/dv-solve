@@ -62,15 +62,14 @@ def make_arms(head: Path, anchor: Path, tools: dict, refs=REFERENCES) -> list:
 
 
 def _limits():
-    # macOS refuses a stack limit over 65520 KiB, even with the hard limit
-    # unlimited; stay inside that and the hard limit.
-    n = STACK_BYTES
-    if sys.platform == "darwin":
-        n = min(n, 65520 << 10)
-    hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
-    if hard != resource.RLIM_INFINITY:
-        n = min(n, hard)
-    resource.setrlimit(resource.RLIMIT_STACK, (n, n))
+    try:
+        resource.setrlimit(resource.RLIMIT_STACK, (STACK_BYTES, STACK_BYTES))
+    except ValueError:
+        # macOS only lets a running process lower its stack limit (measured
+        # on the GitHub runner: 8 MiB soft, any raise refused), so the
+        # solver keeps the default stack there.
+        if sys.platform != "darwin":
+            raise
 
 
 def run_once(argv: list, env: dict, budget_s: float) -> tuple:
