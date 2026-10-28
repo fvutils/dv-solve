@@ -29,6 +29,7 @@ import random
 import re
 import resource
 import subprocess
+import sys
 import threading
 import time
 
@@ -43,9 +44,14 @@ STACK_BYTES = 64 << 20
 
 
 def _limits():
-    # macOS caps the stack hard limit just under 64 MiB; stay inside it.
+    # macOS refuses a stack limit over 65520 KiB, even with the hard limit
+    # unlimited; stay inside that and the hard limit.
+    n = STACK_BYTES
+    if sys.platform == "darwin":
+        n = min(n, 65520 << 10)
     hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
-    n = STACK_BYTES if hard == resource.RLIM_INFINITY else min(STACK_BYTES, hard)
+    if hard != resource.RLIM_INFINITY:
+        n = min(n, hard)
     resource.setrlimit(resource.RLIMIT_STACK, (n, n))
 
 
