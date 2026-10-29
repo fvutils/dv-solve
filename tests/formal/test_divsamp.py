@@ -307,3 +307,26 @@ def test_box_declines(case):
     for m in models:
         assert bool(pred(**m)), m
     assert len({m["x"] for m in models}) > 100
+
+
+# x - y <u C and y - x <u C, y a box var drawn first (arith.unsigned_ops):
+# x = y - t / y + t, t uniform in [0, C - 1]; the box draw alone misses.
+_W = 32
+
+
+@pytest.mark.parametrize("sub", ["y_minus_x", "x_minus_y"])
+def test_cov_sub_box_base(sub):
+    d = "(bvsub y x)" if sub == "y_minus_x" else "(bvsub x y)"
+    asserts = [f"(bvugt y {_bv(1 << 31, _W)})",
+               "(bvult x y)" if sub == "y_minus_x" else "(bvugt x y)",
+               f"(bvult {d} {_bv(1000, _W)})"]
+    text = "".join(_session({"x": _W, "y": _W}, asserts, 6000 + i) for i in range(200))
+    verdicts, models, err = _run(text)
+    assert verdicts == ["sat"] * 200
+    for m in models:
+        x, y = m["x"], m["y"]
+        dd = (y - x if sub == "y_minus_x" else x - y) % (1 << _W)
+        assert y > (1 << 31) and (x < y if sub == "y_minus_x" else x > y) and dd < 1000, m
+    assert len({m["x"] for m in models}) > 190
+    tries = [int(t) for t in re.findall(r"\[bb-divsamp\].*cov=1 .*tries=(\d+) -> sat", err)]
+    assert len(tries) == 200 and max(tries) <= 8, err[-2000:]

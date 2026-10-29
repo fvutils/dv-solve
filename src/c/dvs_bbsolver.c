@@ -6927,6 +6927,21 @@ static int _ds_enum_only(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t **vs, size_t 
     return 1;
 }
 
+/* Every var of e is free, and enumerated or a box var other than v drawn
+ * before v (not a pk 2 one): e of a pk 2 proposal for v. A var that is
+ * already the base of another pk 2 proposal may not become one (cbase). */
+static int _ds_cov_base(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t **vs, size_t s0,
+                        size_t *cap, const uint8_t *role, const uint32_t *dn,
+                        const uint8_t *pk, const uint8_t *cbase, uint32_t v) {
+    size_t n2 = s0;
+    if (cbase[v] || !_ds_vars(S, e, vs, s0, &n2, cap, 0)) return 0;
+    for (size_t j = s0; j < n2; j++) {
+        uint32_t u = (*vs)[j];
+        if (role[u] != 2 || u == v || (!dn[u] && pk[u] == 2)) return 0;
+    }
+    return 1;
+}
+
 /* Values of a w-bit key with the bits of fm fixed to fv (fm != 0), in
  * order: the j-th is _ds_dep(j). _ds_rank(y) counts those <= y. */
 static uint64_t _ds_rank(uint64_t y, uint64_t fm, uint64_t fv, uint32_t w) {
@@ -7093,12 +7108,14 @@ static int _divsamp(dvs_bbsolver_t *S) {
     uint32_t *pw = (uint32_t *)calloc(nv, sizeof(uint32_t));
     uint32_t *roff = (uint32_t *)calloc(nv, sizeof(uint32_t));
     uint32_t *pn = (uint32_t *)calloc(nv, sizeof(uint32_t));
+    uint8_t *pdir = (uint8_t *)calloc(nv, 1);     /* pk 2: 0 x = t - pe, 1 x = t + pe, 2 x = pe - t */
+    uint8_t *cbase = (uint8_t *)calloc(nv, 1);    /* a box var a pk 2 proposal reads */
     dvs_expr_t *rK = NULL, *rE = NULL, *rC = NULL;
     uint64_t *ivl = NULL, *ivh = NULL;     /* pk 3: interval union, roff/pn, nmx values */
     size_t n_iv = 0, cap_iv = 0, cap_ivh = 0;
     uint32_t *rW = NULL;
     uint8_t *rT = NULL;
-    if (!pk || !pc || !nmx || !pe || !pw || !roff || !pn) goto out;
+    if (!pk || !pc || !nmx || !pe || !pw || !roff || !pn || !pdir || !cbase) goto out;
     if (!dvoff || !dvn || !stk || !seen || !def || !defl || !uhead || !order || !dn || !doff || !kl || !kh || !bias ||
         !lo || !hi || !fmask || !fval || !vval || !role || !nmark || !val) goto out;
     for (uint32_t v = 0; v < nv; v++) {
@@ -7359,6 +7376,7 @@ static int _divsamp(dvs_bbsolver_t *S) {
         uint64_t best = kh[v] - kl[v], cc = UINT64_MAX;
         dvs_expr_t ce = EXPR_NULL;
         uint32_t ccw = 0, r0 = nr;
+        uint8_t cdir = 0;
         {
             /* Interval union: the unary leaves' intervals, intersected, when
              * they hold fewer values than the hull (inside a..b, c..d). */
@@ -7459,17 +7477,20 @@ static int _divsamp(dvs_bbsolver_t *S) {
                 continue;
             dvs_expr_t a = _ss_strip(S, t);
             const ExprKind *ak = (const ExprKind *)POOL_PTR(S->problem, a);
-            if (!ak || *ak != EXPR_BINARY || ((const ExprBinary *)ak)->op != DVS_BIN_ADD ||
-                bb_self_width(S, a, 0) != cw)
+            if (!ak || *ak != EXPR_BINARY || bb_self_width(S, a, 0) != cw)
                 continue;
             const ExprBinary *ab = (const ExprBinary *)ak;
+            if (ab->op != DVS_BIN_ADD && ab->op != DVS_BIN_SUB) continue;
             for (int side = 0; side < 2; side++) {
                 dvs_expr_t sd = side ? ab->rhs : ab->lhs, o = side ? ab->lhs : ab->rhs;
                 if (_ds_bare(S, sd, 0) != (int64_t)v || bb_self_width(S, sd, 0) != cw ||
                     bb_self_width(S, o, 0) > cw ||
-                    !_ds_enum_only(S, o, &vs, n_vs, &cap_vs, role, dn))
+                    !_ds_cov_base(S, o, &vs, n_vs, &cap_vs, role, dn, pk, cbase, v))
                     continue;
-                if (c < cc) { cc = c; ce = o; ccw = cw; }
+                if (c < cc) {
+                    cc = c; ce = o; ccw = cw;
+                    cdir = ab->op == DVS_BIN_ADD ? 0 : side ? 2 : 1;
+                }
                 break;
             }
         }
@@ -7510,13 +7531,19 @@ static int _divsamp(dvs_bbsolver_t *S) {
                 n_res++;
             } else nr = r0;
         }
-        if (ce != EXPR_NULL && cc < best) {
+        if (ce != EXPR_NULL && cc < best && !cbase[v]) {
+            if (pk[v] == 1) n_res--;
             pk[v] = 2;
             pc[v] = cc;
-            if (pk[v] == 1) n_res--;
             pe[v] = ce;
             pw[v] = ccw;
+            pdir[v] = cdir;
             n_cov++;
+            /* Its box vars are drawn before v, so none may become cov. */
+            size_t n2 = n_vs;
+            if (_ds_vars(S, ce, &vs, n_vs, &n2, &cap_vs, 0))
+                for (size_t j = n_vs; j < n2; j++)
+                    if (!dn[vs[j]]) cbase[vs[j]] = 1;
         }
     }
 
@@ -7549,9 +7576,12 @@ static int _divsamp(dvs_bbsolver_t *S) {
             uint64_t x, t;
             int ok = 1;
             /* The enumerated vars first: the box proposals read them. */
-            for (uint32_t it = 0; ok && it < 2 * nv; it++) {
-                v = it < nv ? it : it - nv;
-                if (role[v] != 2 || (it < nv) != (dn[v] != 0)) continue;
+            /* Then the box vars, the pk 2 ones last: their pe reads the others. */
+            for (uint32_t it = 0; ok && it < 3 * nv; it++) {
+                v = it % nv;
+                if (role[v] != 2 || (it < nv) != (dn[v] != 0) ||
+                    (it >= nv && (it >= 2 * nv) != (pk[v] == 2)))
+                    continue;
                 if (dn[v]) x = (kl[v] + dom_all[doff[v] + _ps_below(&st, dn[v])]) ^ bias[v];
                 else if (pk[v] == 1) {
                     uint64_t f, L, cnt;
@@ -7570,7 +7600,9 @@ static int _divsamp(dvs_bbsolver_t *S) {
                 } else if (pk[v] == 2) {
                     uint64_t y;
                     if (!bb_eval(S, pe[v], pw[v], vval, &y)) { why = "eval"; goto out; }
-                    x = (_ps_below(&st, pc[v] + 1) - y) & bb_eval_mask(pw[v]);
+                    uint64_t t0 = _ps_below(&st, pc[v] + 1);
+                    x = (pdir[v] == 0 ? t0 - y : pdir[v] == 1 ? t0 + y : y - t0) &
+                        bb_eval_mask(pw[v]);
                     ok = (x & fmask[v]) == fval[v];
                 } else if (fmask[v]) {
                     /* Draw over the keys with the pinned bits set. */
@@ -7629,7 +7661,7 @@ out:
     free(kl); free(kh); free(bias); free(lo); free(hi); free(fmask); free(fval);
     free(vval); free(role); free(nmark); free(val);
     free(dvoff); free(dvn); free(stk); free(seen);
-    free(pk); free(pc); free(nmx); free(pe); free(pw); free(roff); free(pn);
+    free(pk); free(pc); free(nmx); free(pe); free(pw); free(roff); free(pn); free(pdir); free(cbase);
     free(rK); free(rE); free(rW); free(rC); free(rT); free(ivl); free(ivh);
     return rc;
 }
