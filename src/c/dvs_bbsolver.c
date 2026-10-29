@@ -5264,9 +5264,9 @@ static uint64_t _ps_below(uint64_t *st, uint64_t n) {
     }
 }
 
-static int _ps_cmp_u32(const void *a, const void *b) {
-    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
-    return x < y ? -1 : x > y;
+static inline uint64_t _lit_word(const uint64_t *wv, dvs_aig_node_t lit) {
+    uint64_t w = wv[lit < 0 ? -lit : lit];
+    return lit < 0 ? ~w : w;
 }
 
 /* The R vars of component C and their LSB literals, as one cache key. */
@@ -5366,7 +5366,7 @@ static uint32_t _ps_expr_comp(const dvs_bbsolver_t *S, dvs_expr_t root,
  * left zeroed), wl and cone have N + 2 entries. */
 static void _ps_classify(dvs_bbsolver_t *S, uint32_t N, dvs_aig_node_t lit,
                          dvs_expr_t root, const bb_ps_comp *comp, uint32_t nc,
-                         int8_t *val, uint8_t *mark, dvs_aig_node_t *wl,
+                         uint64_t *wv, uint8_t *mark, dvs_aig_node_t *wl,
                          uint32_t *cone, struct bb_psk *e) {
     dvs_aig_t *m = S->aig;
     uint32_t top = 0, ncone = 0, n_and = 0;
@@ -5401,35 +5401,40 @@ static void _ps_classify(dvs_bbsolver_t *S, uint32_t N, dvs_aig_node_t lit,
         wl[top++] = a;
         wl[top++] = b;
     }
+    /* The cone's ANDs in ascending id (topological) order: scan the id range
+     * the cone spans; it is no wider than the cone's top id. */
+    uint32_t lo = UINT32_MAX, hi = 0;
     for (uint32_t i = 0; i < ncone; i++) {
-        uint32_t id = cone[i];
-        if (mark[id] == 1) cone[n_and++] = id;
+        if (cone[i] < lo) lo = cone[i];
+        if (cone[i] > hi) hi = cone[i];
+    }
+    for (uint32_t id = lo; ncone && id <= hi; id++) {
+        if (mark[id] == 1 && ok) cone[n_and++] = id;
         mark[id] = 0;
     }
     if (!ok) return;
-    qsort(cone, n_and, sizeof(uint32_t), _ps_cmp_u32);   /* topological */
     uint32_t ones = 0, nvar = 0;
     for (uint32_t p = 0; p < C->n; p++) {
         if (C->xb[p] == DVS_AIG_TRUE) ones++;
         else if (C->xb[p] != DVS_AIG_FALSE) nvar++;
     }
-    val[0] = 0;
-    val[1] = 1;
-    for (uint32_t k = ones; k <= ones + nvar; k++) {
-        uint32_t set = 0;   /* the lowest k - ones variable bits are 1 */
-        for (uint32_t p = 0; p < C->n; p++) {
-            dvs_aig_node_t b = C->xb[p];
-            if (b == DVS_AIG_TRUE || b == DVS_AIG_FALSE) continue;
-            val[b] = (int8_t)(set < k - ones);
-            set++;
-        }
-        for (uint32_t i = 0; i < n_and; i++) {
-            dvs_aig_node_t a, b;
-            dvs_aig_get_children(m, (dvs_aig_node_t)cone[i], &a, &b);
-            val[cone[i]] = (int8_t)(_lit_val(val, a) & _lit_val(val, b));
-        }
-        if (_lit_val(val, lit)) e->kmask |= 1ull << k;
+    /* All weights at once: bit j of a node's word is its value at the X whose
+     * lowest j variable bits are 1 (k = ones + j; nvar <= 63). */
+    wv[1] = ~0ull;
+    uint32_t set = 0;
+    for (uint32_t p = 0; p < C->n; p++) {
+        dvs_aig_node_t b = C->xb[p];
+        if (b == DVS_AIG_TRUE || b == DVS_AIG_FALSE) continue;
+        wv[b] = set < 63 ? ~0ull << (set + 1) : 0;   /* 1 where j > set */
+        set++;
     }
+    for (uint32_t i = 0; i < n_and; i++) {
+        dvs_aig_node_t a, b;
+        dvs_aig_get_children(m, (dvs_aig_node_t)cone[i], &a, &b);
+        wv[cone[i]] = _lit_word(wv, a) & _lit_word(wv, b);
+    }
+    uint64_t js = nvar >= 63 ? ~0ull : (1ull << (nvar + 1)) - 1;
+    e->kmask = (_lit_word(wv, lit) & js) << ones;
     e->rvar = C->rvar;
     e->rsig = _ps_sig(S, C);
 }
@@ -5490,9 +5495,10 @@ static int _popsamp(dvs_bbsolver_t *S) {
     uint8_t *mark = (uint8_t *)calloc((size_t)N + 2, 1);
     dvs_aig_node_t *wl = (dvs_aig_node_t *)malloc(((size_t)N + 2) * sizeof(dvs_aig_node_t));
     uint32_t *cone = (uint32_t *)malloc(((size_t)N + 2) * sizeof(uint32_t));
+    uint64_t *wv = (uint64_t *)calloc((size_t)N + 2, sizeof(uint64_t));
     int rc = DVS_BB_UNKNOWN;
     uint32_t forced = 0, draws = 0;
-    if (!fv || !val || !mark || !wl || !cone) goto out;
+    if (!fv || !val || !mark || !wl || !cone || !wv) goto out;
     if (_forced_inputs(S, N, fv, mark, wl, &forced) != 1) goto out;
     memset(mark, 0, (size_t)N + 2);
 
@@ -5521,7 +5527,7 @@ static int _popsamp(dvs_bbsolver_t *S) {
                 e = &S->psk[S->n_psk++];
             }
             _ps_classify(S, N, lit, S->assert_roots ? S->assert_roots[a] : EXPR_NULL,
-                         comp, nc, val, mark, wl, cone, e);
+                         comp, nc, wv, mark, wl, cone, e);
         }
         if (e->rvar == UINT32_MAX) continue;
         for (uint32_t c = 0; c < nc; c++)
@@ -5622,7 +5628,7 @@ out:
     if (getenv("DV_BB_STATS"))
         fprintf(stderr, "[bb-popsamp] comps=%u forced=%u draws=%u -> %s\n", nc, forced,
                 draws, rc == DVS_BB_SAT ? "sat" : "miss");
-    free(fv); free(val); free(mark); free(wl); free(cone);
+    free(fv); free(val); free(mark); free(wl); free(cone); free(wv);
     return rc;
 }
 
