@@ -5050,11 +5050,104 @@ int dvs_bbsolver_sess_add(dvs_bbsolver_t *S, const dvs_expr_t *roots, uint32_t n
     return 0;
 }
 
+/* Pinned-constant fast path (DV_PINFAST=0 off). The input bits a live assert
+ * forces through its top-level conjunction are fixed; the rest are unknown.
+ * If a three-valued evaluation makes every live assert true whatever the
+ * unknown bits are, any fill is a model: the unknown inputs get a seeded fill
+ * and the model is installed as node_val, with no simulation, SAT or
+ * diversify. Returns DVS_BB_SAT, else DVS_BB_UNKNOWN (take the normal path). */
+static int _pinfast(dvs_bbsolver_t *S) {
+    if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig) return DVS_BB_UNKNOWN;
+    const char *pf = getenv("DV_PINFAST");
+    if (pf && strcmp(pf, "0") == 0) return DVS_BB_UNKNOWN;
+    dvs_aig_t *m = S->aig;
+    uint32_t N = (uint32_t)dvs_aig_num_nodes(m);
+    if (N == 0) return DVS_BB_UNKNOWN;
+    S->aux_work += N;
+    /* tv: 0 / 1 / 2 = unknown. seen: the positive literal was walked. */
+    int8_t *tv = (int8_t *)malloc((size_t)N + 1);
+    uint8_t *seen = (uint8_t *)calloc((size_t)N + 1, 1);
+    dvs_aig_node_t *wl = (dvs_aig_node_t *)malloc(((size_t)N + 2) * sizeof(dvs_aig_node_t));
+    int rc = DVS_BB_UNKNOWN;
+    uint32_t forced = 0;
+    if (!tv || !seen || !wl) goto out;
+    memset(tv, 2, (size_t)N + 1);
+    tv[0] = 0;
+    tv[1] = 1;
+    for (uint32_t a = 0; a < S->n_asserts; a++) {
+        uint32_t top = 0;
+        wl[top++] = S->assert_nodes[a];
+        while (top) {
+            dvs_aig_node_t lit = wl[--top];
+            if (lit == DVS_AIG_TRUE) continue;
+            if (lit == DVS_AIG_FALSE || lit == 0) goto out;
+            uint32_t id = (uint32_t)(lit < 0 ? -lit : lit);
+            if (id > N) goto out;
+            if (dvs_aig_is_input(m, (dvs_aig_node_t)id)) {
+                int8_t want = lit > 0 ? 1 : 0;
+                if (tv[id] == 2) { tv[id] = want; forced++; }
+                else if (tv[id] != want) goto out;   /* conflict: SAT decides */
+            } else if (lit > 0 && !seen[id] && dvs_aig_is_and(m, lit)) {
+                dvs_aig_node_t l, r;
+                seen[id] = 1;   /* each AND pushes once: top <= N + 1 */
+                dvs_aig_get_children(m, lit, &l, &r);
+                wl[top++] = l;
+                wl[top++] = r;
+            }
+        }
+    }
+    /* Three-valued pass in topological (ascending id) order. */
+    for (uint32_t id = 2; id <= N; id++) {
+        if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
+        dvs_aig_node_t l, r;
+        dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
+        int8_t lv = tv[l < 0 ? -l : l], rv = tv[r < 0 ? -r : r];
+        if (lv != 2 && l < 0) lv = !lv;
+        if (rv != 2 && r < 0) rv = !rv;
+        tv[id] = (lv == 0 || rv == 0) ? 0 : (lv == 1 && rv == 1) ? 1 : 2;
+    }
+    for (uint32_t a = 0; a < S->n_asserts; a++) {
+        dvs_aig_node_t lit = S->assert_nodes[a];
+        int8_t v = tv[lit < 0 ? -lit : lit];
+        if (v == 2 || (lit < 0 ? !v : v) != 1) goto out;
+    }
+    /* Every assert holds for any fill of the unknown inputs: fill and evaluate. */
+    for (uint32_t id = 2; id <= N; id++) {
+        if (dvs_aig_is_input(m, (dvs_aig_node_t)id)) {
+            if (tv[id] == 2)
+                tv[id] = S->seed ? (int8_t)(_free_var_fill(S->seed, id, 0x50494e46u) & 1) : 0;
+        } else if (dvs_aig_is_and(m, (dvs_aig_node_t)id)) {
+            dvs_aig_node_t l, r;
+            dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
+            tv[id] = (int8_t)(_lit_val(tv, l) & _lit_val(tv, r));
+        }
+    }
+    free(S->node_val);
+    S->node_val = tv;
+    tv = NULL;
+    S->model_in_sat = 0;
+    S->base_sim = 1;
+    rc = DVS_BB_SAT;
+out:
+    if (getenv("DV_BB_STATS"))
+        fprintf(stderr, "[bb-pinfast] pinfast=%d forced=%u nodes=%u asserts=%u\n",
+                rc == DVS_BB_SAT, forced, N, S->n_asserts);
+    free(tv); free(seen); free(wl);
+    return rc;
+}
+
 int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || !S->sess) return DVS_BB_ERROR;
     if (S->had_error)       return DVS_BB_ERROR;
     if (S->had_unsupported) return DVS_BB_UNKNOWN;
     S->seed = seed;
+    free(S->node_val);
+    S->node_val = NULL;
+    if (_pinfast(S) == DVS_BB_SAT) {
+        _sim_check(S, DVS_BB_SAT);
+        S->last_result = DVS_BB_SAT;
+        return DVS_BB_SAT;
+    }
     dvs_sat_set_seed(S->sat, seed);
     {
         const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
