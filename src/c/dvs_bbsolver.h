@@ -163,6 +163,10 @@ void dvs_bbsolver_set_presim(dvs_bbsolver_t *bb, int on);
  *  the solver blasts an SV-elaborated private copy (rebuild instead). */
 int dvs_bbsolver_rebase(dvs_bbsolver_t *bb, dvs_problem_t *problem);
 
+/** Drop memoized blasts of pool nodes at offset >= pool_off: after a reset
+ *  rebuilds the problem past that offset, those offsets hold new nodes. */
+int dvs_bbsolver_forget_from(dvs_bbsolver_t *bb, uint32_t pool_off);
+
 /**
  * Session mode (docs/fw_hdl_implementation_plan.md, piece 6.1): one instance
  * serves every check-sat of an SMT-LIB session, scopes included.

@@ -4816,6 +4816,14 @@ int dvs_bbsolver_rebase(dvs_bbsolver_t *S, dvs_problem_t *problem) {
     return 0;
 }
 
+int dvs_bbsolver_forget_from(dvs_bbsolver_t *S, uint32_t pool_off) {
+    if (!S) return -1;
+    if (S->cache && pool_off < S->cache_cap)
+        memset(S->cache + pool_off, 0,
+               (S->cache_cap - pool_off) * sizeof(bb_cache_entry_t));
+    return 0;
+}
+
 int dvs_bbsolver_assert(dvs_bbsolver_t *S, dvs_expr_t pred_ref) {
     if (!S || !S->problem || pred_ref == EXPR_NULL) return DVS_BB_ERROR;
     /* Blasting an SV-elaborated private copy: bring it up to date with the

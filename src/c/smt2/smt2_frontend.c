@@ -5510,6 +5510,28 @@ static void _free_bb(Smt2Frontend *fe) {
     fe->bb_sess_assume = 0;
 }
 
+static void _free_bb_park(Smt2Frontend *fe) {
+    if (fe->bb_park)         { dvs_bbsolver_free(fe->bb_park); fe->bb_park = NULL; }
+    if (fe->bb_park_problem) { free(fe->bb_park_problem); fe->bb_park_problem = NULL; }
+    fe->bb_park_ncons = 0;
+}
+
+/* DV_BB_PARK=0 turns off keeping a session across (reset). */
+static int _session_park_ok(void) {
+    const char *env = getenv("DV_BB_PARK");
+    return !(env && *env == '0');
+}
+
+/* Same base: the first `pool0` pool bytes (declarations and assertions
+ * before the first push; offsets are pool-relative, so equal bytes are equal
+ * expressions). */
+static int _problem_base_same(const dvs_problem_t *a, const dvs_problem_t *b,
+                              uint32_t pool0) {
+    if (a->pool.used < pool0 || b->pool.used < pool0) return 0;
+    return memcmp((const char *)&a->pool + sizeof(dvs_pool_t),
+                  (const char *)&b->pool + sizeof(dvs_pool_t), pool0) == 0;
+}
+
 /* Solve `p` with the bit-blast engine. `owned`, if non-NULL, is `p` handed
  * over by the caller: it becomes fe->bb_problem when a new bb_solver is built
  * from it, and is freed otherwise. */
@@ -5768,8 +5790,28 @@ static int _session_sync(Smt2Frontend *fe) {
     if (fe->bb_sess) {
         fe->bb_problem = np;                  /* realloc'd (or not) from it */
         if (dvs_bbsolver_rebase(fe->bb_solver, np) != 0) { _free_bb(fe); return -1; }
+    } else if (fe->bb_park && fe->push_depth >= 1
+               && fe->bb_park_ncons == fe->push[0].bmark.n_constraints
+               && fe->bb_park_nvars == fe->push[0].bmark.n_vars
+               && fe->bb_park_pool0 == fe->push[0].pool_used
+               && _problem_base_same(np, fe->bb_park_problem, fe->bb_park_pool0)) {
+        /* (reset) then the same declarations and base assertions: the parked
+         * session (at depth 0) already holds them; the loop below adds the
+         * pushed ones. */
+        _free_bb(fe);
+        fe->bb_solver = fe->bb_park;
+        fe->bb_park = NULL;
+        fe->bb_problem = np;
+        fe->bb_sess = 1;
+        fe->bb_sess_ncons = fe->bb_park_ncons;
+        dvs_bbsolver_forget_from(fe->bb_solver, fe->bb_park_pool0);
+        int rb = dvs_bbsolver_rebase(fe->bb_solver, np);
+        _free_bb_park(fe);
+        if (rb != 0) { _free_bb(fe); return -1; }
+        if (getenv("DV_BB_STATS")) fprintf(stderr, "[bb-park] reused ncons=%u\n", fe->bb_sess_ncons);
     } else {
         _free_bb(fe);
+        _free_bb_park(fe);
         fe->bb_problem = np;
         fe->bb_solver = dvs_bbsolver_new_backend(NULL, np, /*prefer_cadical=*/1);
         if (!fe->bb_solver || !dvs_bbsolver_is_incremental(fe->bb_solver)
@@ -7529,6 +7571,7 @@ static void _push_frame(Smt2Frontend *fe, uint32_t cp) {
     f->vbase_ncons    = fe->cdcl_retained ? fe->builder->n_constraints : UINT32_MAX;
     _abs_push_frame(fe, d);
     f->bmark          = dvs_builder_mark(fe->builder);
+    f->pool_used      = dvs_builder_virtual_used(fe->builder);
 }
 
 /* Record the abstract-array state a pop of frame `d` returns to: translation
@@ -8188,6 +8231,7 @@ void smt2_frontend_destroy(Smt2Frontend *fe) {
     free(fe->named);
     free(fe->core_hist);   /* the copies themselves live in persistent_arena */
     _free_bb(fe);
+    _free_bb_park(fe);
     if (fe->problem)     free(fe->problem);
     for (uint32_t i = 0; i < fe->n_aux_problems; i++) {
         free(fe->aux_problems[i]);
@@ -8250,6 +8294,30 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     uint32_t reseed_period = fe->reseed_period;
     /* The array engine's bb_solver was built over fe->problem, freed below;
      * a session's holds the assertions being reset. */
+    if (fe->bb_sess && fe->bb_solver && !fe->bb_sess_assume
+            && _session_park_ok()) {
+        int ok = 1;
+        while (ok && dvs_bbsolver_sess_depth(fe->bb_solver) > 0)
+            ok = dvs_bbsolver_sess_pop(fe->bb_solver) == 0;
+        _retire_bb_work(fe);
+        _free_bb_park(fe);
+        fe->bb_park = fe->bb_solver;
+        fe->bb_park_problem = fe->bb_problem;
+        if (fe->push_depth > 0) {
+            fe->bb_park_ncons = fe->push[0].bmark.n_constraints;
+            fe->bb_park_nvars = fe->push[0].bmark.n_vars;
+            fe->bb_park_pool0 = fe->push[0].pool_used;
+        } else {
+            fe->bb_park_ncons = fe->bb_sess_ncons;
+            fe->bb_park_nvars = fe->builder->n_vars;
+            fe->bb_park_pool0 = dvs_builder_virtual_used(fe->builder);
+        }
+        if (!ok || fe->bb_park_ncons > fe->bb_sess_ncons) _free_bb_park(fe);
+        fe->bb_solver = NULL;
+        fe->bb_problem = NULL;
+        fe->bb_sess = 0;
+        fe->cache_valid = 0;
+    }
     if ((fe->bb_over_problem || fe->bb_sess) && fe->bb_solver) {
         _retire_bb_work(fe);
         dvs_bbsolver_free(fe->bb_solver);
@@ -8258,6 +8326,11 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     }
     dvs_bbsolver_t *bb = fe->bb_solver;
     dvs_problem_t   *bb_problem = fe->bb_problem;   /* backs bb; carried with it */
+    dvs_bbsolver_t *bb_park = fe->bb_park;
+    dvs_problem_t  *bb_park_problem = fe->bb_park_problem;
+    uint32_t        bb_park_ncons = fe->bb_park_ncons;
+    uint32_t        bb_park_nvars = fe->bb_park_nvars;
+    uint32_t        bb_park_pool0 = fe->bb_park_pool0;
     uint64_t cached_fp = fe->cached_fp;
     int      cache_valid = fe->cache_valid, cached_result = fe->cached_result;
     int      verilator_cdcl = fe->verilator_cdcl;
@@ -8330,6 +8403,11 @@ static void smt2_frontend_soft_reset(Smt2Frontend *fe) {
     fe->reseed_period = reseed_period;
     fe->bb_solver = bb;
     fe->bb_problem = bb_problem;
+    fe->bb_park = bb_park;
+    fe->bb_park_problem = bb_park_problem;
+    fe->bb_park_ncons = bb_park_ncons;
+    fe->bb_park_nvars = bb_park_nvars;
+    fe->bb_park_pool0 = bb_park_pool0;
     fe->cached_fp = cached_fp;
     fe->cache_valid = cache_valid;
     fe->cached_result = cached_result;

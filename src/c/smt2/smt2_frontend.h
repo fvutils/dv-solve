@@ -319,6 +319,7 @@ typedef struct {
     uint32_t             vbase_ncons;     /* builder constraints at the push
                                            * if retained then, else UINT32_MAX */
     dvs_builder_mark_t   bmark;           /* builder position at the push */
+    uint32_t             pool_used;       /* builder pool bytes at the push */
 } Smt2PushFrame;
 
 typedef struct {
@@ -734,6 +735,14 @@ typedef struct {
     int                  bb_sess;
     int                  bb_sess_assume;   /* a check-sat-assuming scope is open */
     uint32_t             bb_sess_ncons;
+    /* A session parked by (reset), popped to depth 0: taken up again by the
+     * next session whose base (everything before the first push) is
+     * byte-identical, so a repeated randomize keeps its SAT instance. */
+    dvs_bbsolver_t      *bb_park;
+    dvs_problem_t       *bb_park_problem;
+    uint32_t             bb_park_ncons;
+    uint32_t             bb_park_nvars;
+    uint32_t             bb_park_pool0;
     uint32_t             bb_checks;
     Smt2ArrayValue     **anodes;
     uint32_t             n_anodes, anodes_cap;
