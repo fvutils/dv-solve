@@ -805,7 +805,83 @@ static dvs_expr_t forced_ite_cond(dvs_bbsolver_t *S, dvs_expr_t vref, dvs_expr_t
  * 1 iff every sub-assert under this root was consumed (the whole root
  * can be skipped); 0 if any sub-assert remained (root must still be
  * encoded). */
+/* `ref` is a constant, possibly through extract, extend and concat
+ * (depth-capped; deeper counts as not constant). */
+static int is_const_tree(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
+    if (depth > 16) return 0;
+    ExprKind *k = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!k) return 0;
+    switch (*k) {
+    case EXPR_CONST: return 1;
+    case EXPR_EXTRACT: return is_const_tree(S, ((ExprExtract *)k)->operand, depth + 1);
+    case EXPR_EXTEND:  return is_const_tree(S, ((ExprExtend *)k)->operand, depth + 1);
+    case EXPR_CONCAT:
+        return is_const_tree(S, ((ExprConcat *)k)->hi, depth + 1)
+            && is_const_tree(S, ((ExprConcat *)k)->lo, depth + 1);
+    default: return 0;
+    }
+}
+
+/* `ref` is wiring: variables and constants through extract, extend and
+ * concat (depth-capped). */
+static int is_wiring_tree(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
+    if (depth > 16) return 0;
+    ExprKind *k = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!k) return 0;
+    switch (*k) {
+    case EXPR_CONST: case EXPR_VAR: return 1;
+    case EXPR_EXTRACT: return is_wiring_tree(S, ((ExprExtract *)k)->operand, depth + 1);
+    case EXPR_EXTEND:  return is_wiring_tree(S, ((ExprExtend *)k)->operand, depth + 1);
+    case EXPR_CONCAT:
+        return is_wiring_tree(S, ((ExprConcat *)k)->hi, depth + 1)
+            && is_wiring_tree(S, ((ExprConcat *)k)->lo, depth + 1);
+    default: return 0;
+    }
+}
+
+/* Variable `t` is defined by a top-level `t == e` whose e is not wiring. */
+static int var_def_is_arith(dvs_bbsolver_t *S, uint32_t t) {
+    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL; ) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        ExprKind *rk = (ExprKind *)POOL_PTR(S->problem, cs->root);
+        if (rk && *rk == EXPR_BINARY && ((ExprBinary *)rk)->op == DVS_BIN_EQ) {
+            ExprBinary *b = (ExprBinary *)rk;
+            for (int s = 0; s < 2; s++) {
+                ExprKind *a = (ExprKind *)POOL_PTR(S->problem, s ? b->rhs : b->lhs);
+                if (a && *a == EXPR_VAR && ((ExprVar *)a)->var_id == t
+                        && !is_wiring_tree(S, s ? b->lhs : b->rhs, 0))
+                    return 1;
+            }
+        }
+        cur = cs->next;
+    }
+    return 0;
+}
+
+/* Under a forced condition only constants and wiring aliases are
+ * substituted. Aliasing a variable to one defined by arithmetic (arit6:
+ * v := t, t == 1 << k) makes v's other uses share that circuit and slows
+ * the solve ~1.2x; substituting arithmetic itself does the same. */
+static int try_record_forced(dvs_bbsolver_t *S, dvs_expr_t vref, dvs_expr_t eref) {
+    ExprKind *ek = (ExprKind *)POOL_PTR(S->problem, eref);
+    if (ek && *ek == EXPR_VAR) {
+        if (var_def_is_arith(S, ((ExprVar *)ek)->var_id)) return 0;
+        return try_record_subst(S, vref, eref);
+    }
+    return is_const_tree(S, eref, 0) && try_record_subst(S, vref, eref);
+}
+
+static int collect_substs_from_m(dvs_bbsolver_t *S, dvs_expr_t root, int forced);
+
 static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
+    return collect_substs_from_m(S, root, 0);
+}
+
+/* forced: root is a forced condition (see forced_ite_cond). Its equalities
+ * are recorded only through try_record_forced; forced conditions met at the
+ * top level are deferred to a second pass, so recording order for the
+ * ordinary leaves is unchanged. */
+static int collect_substs_from_m(dvs_bbsolver_t *S, dvs_expr_t root, int forced) {
     /* Flatten the DVS_BIN_AND spine ITERATIVELY. A deep conjunction of equalities
      * (large graph-colouring / sudoku instances) would otherwise recurse one
      * C-stack frame per conjunct and overflow the stack (was crash B10, subst
@@ -821,6 +897,8 @@ static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
     dvs_expr_t *stk = local;
     size_t n = 0, cap = sizeof local / sizeof local[0];
     int all_consumed = 1;
+    dvs_expr_t fc[8];   /* forced conditions, for the second pass */
+    size_t n_fc = 0;
     #define CS_PUSH(R) do {                                                 \
         if (n == cap) { size_t nc = cap * 2;                                \
             dvs_expr_t *t = (dvs_expr_t *)malloc(nc * sizeof(dvs_expr_t));  \
@@ -844,19 +922,30 @@ static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
                 continue;
             }
             if (b->op == DVS_BIN_EQ) {
-                if (try_record_subst(S, b->lhs, b->rhs)) continue;  /* consumed */
-                if (try_record_subst(S, b->rhs, b->lhs)) continue;  /* consumed */
-                if (try_record_slice(S, b->lhs, b->rhs)) continue;  /* consumed */
-                if (try_record_slice(S, b->rhs, b->lhs)) continue;  /* consumed */
+                if (forced) {
+                    if (try_record_forced(S, b->lhs, b->rhs)) continue;
+                    if (try_record_forced(S, b->rhs, b->lhs)) continue;
+                    if (is_const_tree(S, b->rhs, 0) && try_record_slice(S, b->lhs, b->rhs)) continue;
+                    if (is_const_tree(S, b->lhs, 0) && try_record_slice(S, b->rhs, b->lhs)) continue;
+                } else {
+                    if (try_record_subst(S, b->lhs, b->rhs)) continue;  /* consumed */
+                    if (try_record_subst(S, b->rhs, b->lhs)) continue;  /* consumed */
+                    if (try_record_slice(S, b->lhs, b->rhs)) continue;  /* consumed */
+                    if (try_record_slice(S, b->rhs, b->lhs)) continue;  /* consumed */
+                }
                 dvs_expr_t c = forced_ite_cond(S, b->lhs, b->rhs);
                 if (c == EXPR_NULL) c = forced_ite_cond(S, b->rhs, b->lhs);
-                if (c != EXPR_NULL) CS_PUSH(c);
+                if (c != EXPR_NULL) {
+                    if (forced) CS_PUSH(c);
+                    else if (n_fc < sizeof fc / sizeof fc[0]) fc[n_fc++] = c;
+                }
             }
         }
         all_consumed = 0;   /* this leaf was not consumable as a substitution */
     }
     #undef CS_PUSH
     if (stk != local) free(stk);
+    for (size_t i = 0; i < n_fc; i++) (void)collect_substs_from_m(S, fc[i], 1);
     return all_consumed;
 }
 
