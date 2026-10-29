@@ -228,6 +228,13 @@ struct dvs_bbsolver_s {
     uint32_t        ss_tries, ss_hits;
     /* Div/mul sampler (_divsamp): tries and hits, as for _popsamp. */
     uint32_t        ds_tries, ds_hits;
+    /* Its free-var domains for the assert set ds_key (_en_key): per var
+     * ds_dbox 1 drawn from the hull, else ds_dn values at ds_doff in ds_dom. */
+    uint64_t        ds_key;
+    int             ds_dok;
+    uint32_t        ds_dnv, *ds_dom, *ds_dn;
+    size_t          ds_n_dom, *ds_doff;
+    uint8_t        *ds_dbox;
     /* Enumeration sampler (_enumsamp): the solutions of the leaves over
      * en_vars (en_n_sol rows of en_n_vars values), valid while en_key
      * matches the assert set; en_state 1 built, 2 declined for that key. */
@@ -2487,6 +2494,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     free(S->node_val);
     free(S->psk);
     free(S->en_vars); free(S->en_sol);
+    free(S->ds_dom); free(S->ds_dn); free(S->ds_doff); free(S->ds_dbox);
     free(S->div_L); free(S->div_R); free(S->div_fo_off); free(S->div_fo_adj);
     xfree(S->alloc, S, sizeof(*S));
 }
@@ -4121,6 +4129,7 @@ static int _popsamp(dvs_bbsolver_t *S);
 static int _uniqsamp(dvs_bbsolver_t *S);
 static int _sortsamp(dvs_bbsolver_t *S);
 static int _divsamp(dvs_bbsolver_t *S);
+static uint64_t _en_key(const dvs_bbsolver_t *S);
 static int _enumsamp(dvs_bbsolver_t *S, int fresh);
 
 /* Simulation, then SAT. Returns the DVS_BB_* verdict. */
@@ -6762,6 +6771,9 @@ static int _ds_reaches(dvs_bbsolver_t *S, const uint32_t *vs, size_t s0, size_t 
 #define DVS_DS_TRIES 64
 #define DVS_DS_TUPLES 4096u
 #define DVS_DS_DVARS 16
+#define DVS_DS_PROBE 4096u      /* hulls this wide are probed before enumerating */
+#define DVS_DS_PROBES 64u
+#define DVS_DS_DENSE 48u        /* probes that must pass for a box draw */
 
 /* Every var of e is free and drawn from an enumerated domain. */
 static int _ds_enum_only(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t **vs, size_t s0,
@@ -7072,8 +7084,16 @@ static int _divsamp(dvs_bbsolver_t *S) {
     /* Free-var proposals: the domain when the hull is small, else the box. */
     why = "domain";
     {
-        uint64_t work = 0;
+        uint64_t work = 0, dkey = _en_key(S);
         size_t cap_d = 0, n_d = 0;
+        /* The domains depend only on the assert set: reuse the last ones. */
+        int cached = S->ds_dok && S->ds_key == dkey && S->ds_dnv == nv;
+        if (cached && S->ds_n_dom) {
+            dom_all = (uint32_t *)malloc(S->ds_n_dom * sizeof(*dom_all));
+            if (!dom_all) goto out;
+            memcpy(dom_all, S->ds_dom, S->ds_n_dom * sizeof(*dom_all));
+            cap_d = n_d = S->ds_n_dom;
+        }
         for (uint32_t v = 0; v < nv; v++) {
             if (role[v] != 2) continue;
             int have = 0;
@@ -7087,7 +7107,37 @@ static int _divsamp(dvs_bbsolver_t *S) {
                 if (hi[v] < kh[v]) kh[v] = hi[v];
             }
             if (kl[v] > kh[v]) goto out;       /* empty: the normal path decides */
-            if (kh[v] - kl[v] >= DVS_SS_HULL) {
+            if (cached) {
+                if (S->ds_dbox[v]) {
+                    for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u]) ck[n_ck++] = u;
+                } else {
+                    doff[v] = S->ds_doff[v];
+                    dn[v] = S->ds_dn[v];
+                }
+                continue;
+            }
+            int dense = kh[v] - kl[v] >= DVS_SS_HULL;
+            if (!dense && kh[v] - kl[v] >= DVS_DS_PROBE) {
+                /* A hull its unary leaves mostly pass is drawn from and
+                 * checked, not enumerated. The probe stream is fixed, so the
+                 * choice does not depend on the seed. */
+                uint64_t ps = 0x50524F4245ull ^ v, span = kh[v] - kl[v] + 1;
+                uint32_t pass = 0;
+                for (uint32_t p = 0; p < DVS_DS_PROBES; p++) {
+                    uint64_t x = (kl[v] + _ps_below(&ps, span)) ^ bias[v];
+                    int ok = 1;
+                    x = (x & ~fmask[v]) | fval[v];
+                    vval[v] = x;
+                    for (uint32_t u = uhead[v]; ok && u != UINT32_MAX; u = unext[u]) {
+                        if (!bb_eval_pred(S, lf[u], vval, &t)) goto out;
+                        ok = t != 0;
+                    }
+                    pass += (uint32_t)ok;
+                }
+                vval[v] = 0;
+                dense = pass >= DVS_DS_DENSE;
+            }
+            if (dense) {
                 for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u]) ck[n_ck++] = u;
                 continue;
             }
@@ -7116,6 +7166,26 @@ static int _divsamp(dvs_bbsolver_t *S) {
             vval[v] = 0;
             dn[v] = (uint32_t)(n_d - doff[v]);
             if (!dn[v]) { why = "small"; goto out; }
+        }
+        if (!cached) {
+            uint32_t *cd = (uint32_t *)realloc(S->ds_dom, (n_d ? n_d : 1) * sizeof(*cd));
+            if (cd) S->ds_dom = cd;
+            uint32_t *cn = (uint32_t *)realloc(S->ds_dn, nv * sizeof(*cn));
+            if (cn) S->ds_dn = cn;
+            size_t *co = (size_t *)realloc(S->ds_doff, nv * sizeof(*co));
+            if (co) S->ds_doff = co;
+            uint8_t *cb = (uint8_t *)realloc(S->ds_dbox, nv);
+            if (cb) S->ds_dbox = cb;
+            S->ds_dok = cd && cn && co && cb;
+            if (S->ds_dok) {
+                if (n_d) memcpy(S->ds_dom, dom_all, n_d * sizeof(*dom_all));
+                memcpy(S->ds_dn, dn, nv * sizeof(*dn));
+                memcpy(S->ds_doff, doff, nv * sizeof(*doff));
+                for (uint32_t v = 0; v < nv; v++) S->ds_dbox[v] = role[v] == 2 && !dn[v];
+                S->ds_n_dom = n_d;
+                S->ds_key = dkey;
+                S->ds_dnv = nv;
+            }
         }
     }
     /* Box-var proposals over the enumerated vars, each exact:
