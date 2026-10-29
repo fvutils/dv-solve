@@ -208,6 +208,12 @@ struct dvs_bbsolver_s {
     /* An assertion could not be recorded in assert_nodes (out of memory), so
      * the list is not the whole problem: no simulation verdicts. */
     int             asserts_lost;
+    /* Popcount sampler (_popsamp): per-assert R-only k masks, and its tries
+     * and hits over the instance's life (it turns itself off when it rarely
+     * answers). */
+    struct bb_psk  *psk;
+    uint32_t        n_psk, cap_psk;
+    uint32_t        ps_tries, ps_hits;
 
     /* Session mode (dvs_bbsolver_sess_*): constraints arrive in batches, each
      * at the depth of its scope, and the instance outlives check-sats. */
@@ -229,6 +235,11 @@ struct dvs_bbsolver_s {
     uint32_t        assert_frame;
     uint32_t       *assert_tags;
     uint32_t        tags_cap;
+    /* The source expression of each assert_nodes entry (EXPR_NULL: none
+     * known), for _popsamp; NULL once it could not grow. */
+    dvs_expr_t     *assert_roots;
+    uint32_t        roots_cap;
+    int             roots_lost;
     /* dvs_bbsolver_sample has encoded the problem (it encodes once and then
      * only adds parity planes, which it assumes rather than asserts). */
     int             sample_ready;
@@ -250,7 +261,14 @@ static void xfree(dvs_alloc_t *a, void *p, size_t sz) {
 
 /* Encode `node` as a hard top-level assertion AND remember it, so the diversity
  * flip-check can re-verify every assertion after a tentative bit flip. */
+static void assert_top_r(dvs_bbsolver_t *S, dvs_aig_node_t node, dvs_expr_t root);
+
 static void assert_top(dvs_bbsolver_t *S, dvs_aig_node_t node) {
+    assert_top_r(S, node, EXPR_NULL);
+}
+
+/* assert_top of the predicate of expression `root`. */
+static void assert_top_r(dvs_bbsolver_t *S, dvs_aig_node_t node, dvs_expr_t root) {
     if (S->assert_frame) {
         /* Inside a session scope: the clause (-sel | node), live while sel is
          * assumed. Encoding TRUE first gives FALSE its variable. */
@@ -283,6 +301,13 @@ static void assert_top(dvs_bbsolver_t *S, dvs_aig_node_t node) {
         S->assert_nodes = na;
         S->asserts_cap = nc;
     }
+    if (!S->roots_lost && S->n_asserts == S->roots_cap) {
+        uint32_t nc = S->roots_cap ? 2 * S->roots_cap : 64;
+        dvs_expr_t *t = (dvs_expr_t *)realloc(S->assert_roots, nc * sizeof(*t));
+        if (t) { S->assert_roots = t; S->roots_cap = nc; }
+        else   { free(S->assert_roots); S->assert_roots = NULL; S->roots_lost = 1; }
+    }
+    if (!S->roots_lost) S->assert_roots[S->n_asserts] = root;
     S->assert_nodes[S->n_asserts++] = node;
 }
 
@@ -2376,7 +2401,9 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     dvs_components_free(&S->comps);
     free(S->cons_comp);
     xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(dvs_aig_node_t));
+    free(S->assert_roots);
     free(S->node_val);
+    free(S->psk);
     free(S->div_L); free(S->div_R); free(S->div_fo_off); free(S->div_fo_adj);
     xfree(S->alloc, S, sizeof(*S));
 }
@@ -3571,7 +3598,7 @@ static int _bb_encode(dvs_bbsolver_t *S) {
         dvs_bv_t pred = bb_predicate(S, cs->root);
         if (S->had_error) { S->last_result = DVS_BB_ERROR; return DVS_BB_ERROR; }
         if (S->had_unsupported) { S->last_result = DVS_BB_UNKNOWN; return DVS_BB_UNKNOWN; }
-        assert_top(S, pred.bits[0]);
+        assert_top_r(S, pred.bits[0], cs->root);
         cur = cs->next;
     }
 
@@ -3966,6 +3993,8 @@ static int _sim_split(dvs_bbsolver_t *S) {
     return DVS_BB_SAT;
 }
 
+static int _popsamp(dvs_bbsolver_t *S);
+
 /* Simulation, then SAT. Returns the DVS_BB_* verdict. */
 static int _solve_with_sim(dvs_bbsolver_t *S) {
     if (!S->presim || S->asserts_lost || !S->n_asserts) return bb_sat_solve(S);
@@ -4194,7 +4223,10 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     /* A model the simulation finds is installed as node_val. */
     free(S->node_val);
     S->node_val = NULL;
-    int rc = _solve_with_sim(S);
+    int rc = _popsamp(S);
+    int sampled = rc != DVS_BB_UNKNOWN;
+    if (sampled) _sim_check(S, rc);
+    else rc = _solve_with_sim(S);
     if (stats_enabled) {
         clock_gettime(CLOCK_MONOTONIC, &t2);
         double bb_ms = (t1.tv_sec - t0.tv_sec) * 1000.0
@@ -4213,7 +4245,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     /* On SAT, diversify the don't-care bits toward seeded-random targets (no-op
      * for seed 0). Sound: only flips that keep every assertion true are kept.
      * It starts from the simulation's model when that is the one found. */
-    if (rc == DVS_BB_SAT) _diversify(S);
+    if (rc == DVS_BB_SAT && !sampled) _diversify(S);
     if (stats_enabled && rc == DVS_BB_SAT) bb_eval_model_check(S);
     return rc;
 }
@@ -4945,7 +4977,7 @@ int dvs_bbsolver_assert(dvs_bbsolver_t *S, dvs_expr_t pred_ref) {
     dvs_bv_t pred = bb_predicate(S, pred_ref);
     if (S->had_error)       { S->last_result = DVS_BB_ERROR;   return DVS_BB_ERROR; }
     if (S->had_unsupported) { S->last_result = DVS_BB_UNKNOWN; return DVS_BB_UNKNOWN; }
-    assert_top(S, pred.bits[0]);
+    assert_top_r(S, pred.bits[0], pred_ref);
 
     /* Bound any variable this predicate caused to be built for the first time.
      * bounds_asserted keeps this idempotent across calls and vs. the base
@@ -5071,6 +5103,7 @@ int dvs_bbsolver_sess_pop(dvs_bbsolver_t *S) {
         for (uint32_t i = f->n_asserts; i < S->n_asserts; i++)
             if (S->assert_tags[i] < depth) {
                 S->assert_nodes[k] = S->assert_nodes[i];
+                if (S->assert_roots) S->assert_roots[k] = S->assert_roots[i];
                 S->assert_tags[k++] = S->assert_tags[i];
             }
         S->n_asserts = k;
@@ -5122,7 +5155,7 @@ int dvs_bbsolver_sess_add(dvs_bbsolver_t *S, const dvs_expr_t *roots, uint32_t n
         if (skip[i]) continue;
         dvs_bv_t pred = bb_predicate(S, roots[i]);
         if (S->had_error || S->had_unsupported) break;
-        assert_top(S, pred.bits[0]);
+        assert_top_r(S, pred.bits[0], roots[i]);
     }
     free(skip);
     /* A substituted variable's bits are gates: encode them so the model
@@ -5144,6 +5177,453 @@ int dvs_bbsolver_sess_add(dvs_bbsolver_t *S, const dvs_expr_t *roots, uint32_t n
     if (S->had_error)       { S->last_result = DVS_BB_ERROR;   return DVS_BB_ERROR; }
     if (S->had_unsupported) { S->last_result = DVS_BB_UNKNOWN; return DVS_BB_UNKNOWN; }
     return 0;
+}
+
+/* The input bits the live asserts force through their top-level conjunctions:
+ * tv[id] = 0 / 1, or 2 when not forced (tv has N + 1 entries, seen is zeroed,
+ * wl has N + 2). Returns 1, DVS_BB_UNSAT on a contradiction, or 0 (give up). */
+static int _forced_inputs(dvs_bbsolver_t *S, uint32_t N, int8_t *tv, uint8_t *seen,
+                          dvs_aig_node_t *wl, uint32_t *n_forced) {
+    dvs_aig_t *m = S->aig;
+    memset(tv, 2, (size_t)N + 1);
+    tv[0] = 0;
+    tv[1] = 1;
+    for (uint32_t a = 0; a < S->n_asserts; a++) {
+        uint32_t top = 0;
+        wl[top++] = S->assert_nodes[a];
+        while (top) {
+            dvs_aig_node_t lit = wl[--top];
+            if (lit == DVS_AIG_TRUE) continue;
+            if (lit == DVS_AIG_FALSE) return DVS_BB_UNSAT;
+            if (lit == 0) return 0;
+            uint32_t id = (uint32_t)(lit < 0 ? -lit : lit);
+            if (id > N) return 0;
+            if (dvs_aig_is_input(m, (dvs_aig_node_t)id)) {
+                int8_t want = lit > 0 ? 1 : 0;
+                if (tv[id] == 2) { tv[id] = want; (*n_forced)++; }
+                else if (tv[id] != want) return DVS_BB_UNSAT;
+            } else if (lit > 0 && !seen[id] && dvs_aig_is_and(m, lit)) {
+                dvs_aig_node_t l, r;
+                seen[id] = 1;   /* each AND pushes once: top <= N + 1 */
+                dvs_aig_get_children(m, lit, &l, &r);
+                wl[top++] = l;
+                wl[top++] = r;
+            }
+        }
+    }
+    return 1;
+}
+
+/* Popcount sampler (DV_POPSAMP=0 off). A component is a variable R that
+ * try_record_popcount defined as popcount(X), X a plain variable of n <= 63
+ * bits whose bits are AIG inputs or constants. K is the set of k at which
+ * every assert reading only R's bits holds. A draw takes X uniformly from
+ * {x : x has the forced input bits, popcount(x) in K} (k weighted by the
+ * number of such x, then a uniform subset of the free bits) and every other
+ * input a uniform bit unless forced. Every assert is then evaluated on the
+ * AIG: the first draw that satisfies them all is the model, else after
+ * DVS_PS_DRAWS draws the normal path runs. The proposal is uniform over a
+ * superset of the models, so an accepted draw is uniform over the models,
+ * and it satisfies every assert, so it is sound. */
+#define DVS_PS_MAX_RS    4
+
+struct bb_psk {                 /* one assert's R-only mask, cached */
+    dvs_aig_node_t lit;
+    uint32_t       rvar;        /* R, or UINT32_MAX: the assert is not R-only */
+    uint64_t       rsig;        /* _ps_sig of R's component the mask was computed for */
+    uint64_t       kmask;       /* bit k: the assert holds at R == k */
+};
+
+typedef struct {
+    uint32_t       rvar, n;     /* rvar = rvars[0]; n = width of X */
+    uint32_t       xvar, nr;
+    uint32_t       rvars[DVS_PS_MAX_RS];   /* every R defined as popcount(X) */
+    dvs_aig_node_t xb[64];      /* X bit p (p = 0 the LSB) */
+    uint64_t       kmask;
+    uint32_t       free_pos[64], nfree, ones;
+    uint64_t       w[65], total;
+} bb_ps_comp;
+
+#define DVS_PS_MAX_COMPS 8
+#define DVS_PS_DRAWS     16
+
+static uint64_t _ps_next(uint64_t *st) {
+    uint64_t x = (*st += 0x9E3779B97F4A7C15ULL);
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+/* Uniform in [0, n), n >= 1. */
+static uint64_t _ps_below(uint64_t *st, uint64_t n) {
+    uint64_t m = n - 1;
+    m |= m >> 1; m |= m >> 2; m |= m >> 4; m |= m >> 8; m |= m >> 16; m |= m >> 32;
+    for (;;) {
+        uint64_t r = _ps_next(st) & m;
+        if (r < n) return r;
+    }
+}
+
+static int _ps_cmp_u32(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* The R vars of component C and their LSB literals, as one cache key. */
+static uint64_t _ps_sig(const dvs_bbsolver_t *S, const bb_ps_comp *C) {
+    uint64_t h = C->nr;
+    for (uint32_t i = 0; i < C->nr; i++) {
+        const bb_var_t *rv = &S->vars[C->rvars[i]];
+        uint64_t b = rv->bv_built ? (uint64_t)(uint32_t)rv->bv.bits[rv->bv.size - 1] : 0;
+        h = (h ^ C->rvars[i] ^ (b << 32)) * 0x9E3779B97F4A7C15ULL;
+    }
+    return h;
+}
+
+/* The component whose R vars are the only variables expression `root` reads
+ * (through the operators listed; substitutions are not followed), or
+ * UINT32_MAX. */
+static uint32_t _ps_expr_comp(const dvs_bbsolver_t *S, dvs_expr_t root,
+                              const bb_ps_comp *comp, uint32_t nc) {
+    enum { CAP = 1024 };
+    dvs_expr_t stk[CAP];
+    uint32_t n = 0, ci = UINT32_MAX, budget = 4096;
+#define PS_PUSH(e) do { if (n == CAP) return UINT32_MAX; stk[n++] = (e); } while (0)
+    if (root == EXPR_NULL) return UINT32_MAX;
+    PS_PUSH(root);
+    while (n) {
+        dvs_expr_t r = stk[--n];
+        if (!budget--) return UINT32_MAX;
+        const ExprKind *kp = (const ExprKind *)POOL_PTR(S->problem, r);
+        if (!kp) return UINT32_MAX;
+        switch (*kp) {
+        case EXPR_CONST:
+        case EXPR_CONST_WIDE: break;
+        case EXPR_VAR: {
+            uint32_t v = ((const ExprVar *)kp)->var_id, hit = UINT32_MAX;
+            for (uint32_t c = 0; c < nc && hit == UINT32_MAX; c++)
+                for (uint32_t i = 0; i < comp[c].nr; i++)
+                    if (comp[c].rvars[i] == v) { hit = c; break; }
+            if (hit == UINT32_MAX && v < S->n_vars && S->subst[v] != EXPR_NULL
+                    && !popcount_def((dvs_bbsolver_t *)S, v)) {
+                PS_PUSH(S->subst[v]);   /* v is defined by an expression: read it */
+                break;
+            }
+            if (hit == UINT32_MAX || (ci != UINT32_MAX && ci != hit)) return UINT32_MAX;
+            ci = hit;
+            break;
+        }
+        case EXPR_BINARY:
+            PS_PUSH(((const ExprBinary *)kp)->lhs);
+            PS_PUSH(((const ExprBinary *)kp)->rhs);
+            break;
+        case EXPR_UNARY:   PS_PUSH(((const ExprUnary *)kp)->operand); break;
+        case EXPR_EXTEND:  PS_PUSH(((const ExprExtend *)kp)->operand); break;
+        case EXPR_SV_CAST: PS_PUSH(((const ExprSvCast *)kp)->operand); break;
+        case EXPR_EXTRACT: PS_PUSH(((const ExprExtract *)kp)->operand); break;
+        case EXPR_CONCAT:
+            PS_PUSH(((const ExprConcat *)kp)->hi);
+            PS_PUSH(((const ExprConcat *)kp)->lo);
+            break;
+        case EXPR_ITE:
+            PS_PUSH(((const ExprITE *)kp)->cond);
+            PS_PUSH(((const ExprITE *)kp)->then_e);
+            PS_PUSH(((const ExprITE *)kp)->else_e);
+            break;
+        case EXPR_IN_RANGE:
+            PS_PUSH(((const ExprInRange *)kp)->value);
+            PS_PUSH(((const ExprInRange *)kp)->lo);
+            PS_PUSH(((const ExprInRange *)kp)->hi);
+            break;
+        case EXPR_IN_SET: {
+            const ExprInSet *iset = (const ExprInSet *)kp;
+            PS_PUSH(iset->value);
+            dvs_expr_t *el = expr_in_set_elems(S->problem, r);
+            for (uint32_t i = 0; i < iset->n_elems; i++) PS_PUSH(el[i]);
+            break;
+        }
+        case EXPR_IN_RANGES: {
+            const ExprInRanges *irs = (const ExprInRanges *)kp;
+            PS_PUSH(irs->value);
+            dvs_expr_t *los = expr_in_ranges_los(S->problem, r);
+            dvs_expr_t *his = expr_in_ranges_his(S->problem, r);
+            for (uint32_t i = 0; i < irs->n_ranges; i++) { PS_PUSH(los[i]); PS_PUSH(his[i]); }
+            break;
+        }
+        default:
+            return UINT32_MAX;
+        }
+    }
+#undef PS_PUSH
+    return ci;
+}
+
+/* Classify assert `lit` (of source expression `root`) into *e: R-only for a
+ * component, with its k mask, or not. R-only means `root` reads only that
+ * component's R vars, so `lit` is a function of popcount(X); its AIG cone
+ * (which the AND rewrites may route around R's bits) must then read only X's
+ * bits, and it is evaluated at one X of each weight k. val, mark (zeroed,
+ * left zeroed), wl and cone have N + 2 entries. */
+static void _ps_classify(dvs_bbsolver_t *S, uint32_t N, dvs_aig_node_t lit,
+                         dvs_expr_t root, const bb_ps_comp *comp, uint32_t nc,
+                         int8_t *val, uint8_t *mark, dvs_aig_node_t *wl,
+                         uint32_t *cone, struct bb_psk *e) {
+    dvs_aig_t *m = S->aig;
+    uint32_t top = 0, ncone = 0, n_and = 0;
+    int ok = 1;
+    e->lit = lit;
+    e->rvar = UINT32_MAX;
+    e->rsig = 0;
+    e->kmask = 0;
+    uint32_t ci = _ps_expr_comp(S, root, comp, nc);
+    if (ci == UINT32_MAX) return;
+    const bb_ps_comp *C = &comp[ci];
+    wl[top++] = lit;
+    while (top && ok) {
+        dvs_aig_node_t l = wl[--top];
+        if (l == DVS_AIG_TRUE || l == DVS_AIG_FALSE) continue;
+        uint32_t id = (uint32_t)(l < 0 ? -l : l);
+        if (id < 2 || id > N) { ok = 0; break; }
+        if (mark[id]) continue;
+        mark[id] = 1;
+        cone[ncone++] = id;
+        if (dvs_aig_is_input(m, (dvs_aig_node_t)id)) {
+            int isx = 0;
+            for (uint32_t p = 0; p < C->n && !isx; p++)
+                if (C->xb[p] == (dvs_aig_node_t)id) isx = 1;
+            if (!isx) { ok = 0; break; }
+            mark[id] = 2;
+            continue;
+        }
+        if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) { ok = 0; break; }
+        dvs_aig_node_t a, b;
+        dvs_aig_get_children(m, (dvs_aig_node_t)id, &a, &b);
+        wl[top++] = a;
+        wl[top++] = b;
+    }
+    for (uint32_t i = 0; i < ncone; i++) {
+        uint32_t id = cone[i];
+        if (mark[id] == 1) cone[n_and++] = id;
+        mark[id] = 0;
+    }
+    if (!ok) return;
+    qsort(cone, n_and, sizeof(uint32_t), _ps_cmp_u32);   /* topological */
+    uint32_t ones = 0, nvar = 0;
+    for (uint32_t p = 0; p < C->n; p++) {
+        if (C->xb[p] == DVS_AIG_TRUE) ones++;
+        else if (C->xb[p] != DVS_AIG_FALSE) nvar++;
+    }
+    val[0] = 0;
+    val[1] = 1;
+    for (uint32_t k = ones; k <= ones + nvar; k++) {
+        uint32_t set = 0;   /* the lowest k - ones variable bits are 1 */
+        for (uint32_t p = 0; p < C->n; p++) {
+            dvs_aig_node_t b = C->xb[p];
+            if (b == DVS_AIG_TRUE || b == DVS_AIG_FALSE) continue;
+            val[b] = (int8_t)(set < k - ones);
+            set++;
+        }
+        for (uint32_t i = 0; i < n_and; i++) {
+            dvs_aig_node_t a, b;
+            dvs_aig_get_children(m, (dvs_aig_node_t)cone[i], &a, &b);
+            val[cone[i]] = (int8_t)(_lit_val(val, a) & _lit_val(val, b));
+        }
+        if (_lit_val(val, lit)) e->kmask |= 1ull << k;
+    }
+    e->rvar = C->rvar;
+    e->rsig = _ps_sig(S, C);
+}
+
+static int _popsamp(dvs_bbsolver_t *S) {
+    if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig || !S->subst)
+        return DVS_BB_UNKNOWN;
+    const char *env = getenv("DV_POPSAMP");
+    if (env && strcmp(env, "0") == 0) return DVS_BB_UNKNOWN;
+    if (S->ps_tries >= 8 && S->ps_hits * 4 < S->ps_tries) return DVS_BB_UNKNOWN;
+    dvs_aig_t *m = S->aig;
+    bb_ps_comp comp[DVS_PS_MAX_COMPS];
+    uint32_t nc = 0;
+    for (uint32_t r = 0; r < S->n_vars; r++) {
+        if (S->subst[r] == EXPR_NULL) continue;
+        const ExprCountones *pc = popcount_def(S, r);
+        if (!pc) continue;
+        const ExprKind *xk = (const ExprKind *)POOL_PTR(S->problem, pc->operand);
+        if (!xk || *xk != EXPR_VAR) return DVS_BB_UNKNOWN;
+        uint32_t x = ((const ExprVar *)xk)->var_id;
+        if (x >= S->n_vars || !S->vars[x].bv_built) return DVS_BB_UNKNOWN;
+        uint32_t same = UINT32_MAX;          /* another R over the same X */
+        for (uint32_t o = 0; o < nc; o++)
+            if (comp[o].xvar == x) same = o;
+        if (same != UINT32_MAX) {
+            if (comp[same].nr == DVS_PS_MAX_RS) return DVS_BB_UNKNOWN;
+            comp[same].rvars[comp[same].nr++] = r;
+            continue;
+        }
+        const dvs_bv_t *xb = &S->vars[x].bv;
+        if (xb->size == 0 || xb->size > 63 || nc == DVS_PS_MAX_COMPS) return DVS_BB_UNKNOWN;
+        bb_ps_comp *c = &comp[nc];
+        c->rvar = r;
+        c->rvars[0] = r;
+        c->nr = 1;
+        c->xvar = x;
+        c->n = xb->size;
+        for (uint32_t p = 0; p < c->n; p++) {
+            dvs_aig_node_t b = xb->bits[c->n - 1 - p];
+            if (b != DVS_AIG_TRUE && b != DVS_AIG_FALSE
+                    && (b < 0 || !dvs_aig_is_input(m, b)))
+                return DVS_BB_UNKNOWN;
+            for (uint32_t o = 0; o < nc; o++)       /* X bits in two components */
+                for (uint32_t q = 0; q < comp[o].n; q++)
+                    if (b != DVS_AIG_TRUE && b != DVS_AIG_FALSE && comp[o].xb[q] == b)
+                        return DVS_BB_UNKNOWN;
+            c->xb[p] = b;
+        }
+        c->kmask = (c->n >= 63) ? ~0ull : ((1ull << (c->n + 1)) - 1);
+        nc++;
+    }
+    if (!nc) return DVS_BB_UNKNOWN;
+    uint32_t N = (uint32_t)dvs_aig_num_nodes(m);
+    if (N < 2) return DVS_BB_UNKNOWN;
+    S->ps_tries++;
+    int8_t *fv = (int8_t *)malloc((size_t)N + 2);
+    int8_t *val = (int8_t *)malloc((size_t)N + 2);
+    uint8_t *mark = (uint8_t *)calloc((size_t)N + 2, 1);
+    dvs_aig_node_t *wl = (dvs_aig_node_t *)malloc(((size_t)N + 2) * sizeof(dvs_aig_node_t));
+    uint32_t *cone = (uint32_t *)malloc(((size_t)N + 2) * sizeof(uint32_t));
+    int rc = DVS_BB_UNKNOWN;
+    uint32_t forced = 0, draws = 0;
+    if (!fv || !val || !mark || !wl || !cone) goto out;
+    if (_forced_inputs(S, N, fv, mark, wl, &forced) != 1) goto out;
+    memset(mark, 0, (size_t)N + 2);
+
+    /* K: the R-only asserts' masks (cached per assert literal). */
+    for (uint32_t a = 0; a < S->n_asserts; a++) {
+        dvs_aig_node_t lit = S->assert_nodes[a];
+        struct bb_psk *e = NULL;
+        for (uint32_t i = 0; i < S->n_psk; i++)
+            if (S->psk[i].lit == lit) { e = &S->psk[i]; break; }
+        int fresh = !e;
+        if (e && e->rvar != UINT32_MAX) {
+            fresh = 1;   /* valid only while R is the same component */
+            for (uint32_t c = 0; c < nc; c++)
+                if (comp[c].rvar == e->rvar && _ps_sig(S, &comp[c]) == e->rsig)
+                    fresh = 0;
+        }
+        if (fresh) {
+            if (!e) {
+                if (S->n_psk == S->cap_psk) {
+                    uint32_t cap = S->cap_psk ? 2 * S->cap_psk : 16;
+                    struct bb_psk *t = (struct bb_psk *)realloc(S->psk, cap * sizeof(*t));
+                    if (!t) goto out;
+                    S->psk = t;
+                    S->cap_psk = cap;
+                }
+                e = &S->psk[S->n_psk++];
+            }
+            _ps_classify(S, N, lit, S->assert_roots ? S->assert_roots[a] : EXPR_NULL,
+                         comp, nc, val, mark, wl, cone, e);
+        }
+        if (e->rvar == UINT32_MAX) continue;
+        for (uint32_t c = 0; c < nc; c++)
+            if (comp[c].rvar == e->rvar) comp[c].kmask &= e->kmask;
+    }
+
+    /* No R-only assert narrowed any K: the draws are plain uniform guesses,
+     * which rarely pass, and a fresh instance per randomize never learns
+     * that from ps_hits. */
+    {
+        int narrowed = 0;
+        for (uint32_t c = 0; c < nc; c++) {
+            uint64_t full = (comp[c].n >= 63) ? ~0ull : ((1ull << (comp[c].n + 1)) - 1);
+            if (comp[c].kmask != full) narrowed = 1;
+        }
+        if (!narrowed) goto out;
+    }
+
+    /* Per component: fixed ones, free positions, the k weights. */
+    {
+        uint64_t binom[64][64];   /* C(f, j), f <= 63: C(63, 31) < 2^63 */
+        for (uint32_t f = 0; f < 64; f++) {
+            binom[f][0] = 1;
+            for (uint32_t j = 1; j < 64; j++)
+                binom[f][j] = j > f ? 0 : (j == f ? 1 : binom[f - 1][j - 1] + binom[f - 1][j]);
+        }
+        for (uint32_t c = 0; c < nc; c++) {
+            bb_ps_comp *C = &comp[c];
+            C->nfree = C->ones = 0;
+            for (uint32_t p = 0; p < C->n; p++) {
+                dvs_aig_node_t b = C->xb[p];
+                if (b == DVS_AIG_TRUE) C->ones++;
+                else if (b == DVS_AIG_FALSE) continue;
+                else if (fv[b] == 1) C->ones++;
+                else if (fv[b] == 2) C->free_pos[C->nfree++] = p;
+            }
+            C->total = 0;
+            for (uint32_t k = 0; k <= C->n; k++) {
+                C->w[k] = 0;
+                if (!((C->kmask >> k) & 1) || k < C->ones || k - C->ones > C->nfree) continue;
+                C->w[k] = binom[C->nfree][k - C->ones];
+                C->total += C->w[k];
+            }
+            if (C->total == 0) goto out;   /* K empty here: the normal path decides */
+        }
+    }
+
+    uint64_t st = S->seed ^ 0x504F5053414D50ull;
+    for (draws = 1; draws <= DVS_PS_DRAWS; draws++) {
+        uint64_t bits = 0;
+        uint32_t nb = 0;
+        val[0] = 0;
+        val[1] = 1;
+        for (uint32_t id = 2; id <= N; id++) {
+            if (!dvs_aig_is_input(m, (dvs_aig_node_t)id)) continue;
+            if (fv[id] != 2) { val[id] = fv[id]; continue; }
+            if (!nb) { bits = _ps_next(&st); nb = 64; }
+            val[id] = (int8_t)(bits & 1);
+            bits >>= 1;
+            nb--;
+        }
+        for (uint32_t c = 0; c < nc; c++) {
+            bb_ps_comp *C = &comp[c];
+            uint64_t r = _ps_below(&st, C->total);
+            uint32_t k = 0;
+            while (r >= C->w[k]) r -= C->w[k++];
+            uint32_t j = k - C->ones;
+            uint8_t chosen[64];
+            memset(chosen, 0, sizeof chosen);
+            for (uint32_t i = C->nfree - j; i < C->nfree; i++) {   /* Floyd */
+                uint32_t t = (uint32_t)_ps_below(&st, (uint64_t)i + 1);
+                if (chosen[t]) chosen[i] = 1; else chosen[t] = 1;
+            }
+            for (uint32_t q = 0; q < C->nfree; q++)
+                val[C->xb[C->free_pos[q]]] = (int8_t)chosen[q];
+        }
+        for (uint32_t id = 2; id <= N; id++) {
+            if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
+            dvs_aig_node_t l, r;
+            dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
+            val[id] = (int8_t)(_lit_val(val, l) & _lit_val(val, r));
+        }
+        S->aux_work += N;
+        uint32_t a = 0;
+        while (a < S->n_asserts && _lit_val(val, S->assert_nodes[a])) a++;
+        if (a == S->n_asserts) {
+            free(S->node_val);
+            S->node_val = val;
+            val = NULL;
+            S->model_in_sat = 0;
+            S->base_sim = 1;
+            S->ps_hits++;
+            rc = DVS_BB_SAT;
+            break;
+        }
+    }
+out:
+    if (getenv("DV_BB_STATS"))
+        fprintf(stderr, "[bb-popsamp] comps=%u forced=%u draws=%u -> %s\n", nc, forced,
+                draws, rc == DVS_BB_SAT ? "sat" : "miss");
+    free(fv); free(val); free(mark); free(wl); free(cone);
+    return rc;
 }
 
 /* Pinned-constant fast path (DV_PINFAST=0 off). The input bits a live assert
@@ -5170,31 +5650,9 @@ static int _pinfast(dvs_bbsolver_t *S) {
     int rc = DVS_BB_UNKNOWN;
     uint32_t forced = 0;
     if (!tv || !seen || !wl) goto out;
-    memset(tv, 2, (size_t)N + 1);
-    tv[0] = 0;
-    tv[1] = 1;
-    for (uint32_t a = 0; a < S->n_asserts; a++) {
-        uint32_t top = 0;
-        wl[top++] = S->assert_nodes[a];
-        while (top) {
-            dvs_aig_node_t lit = wl[--top];
-            if (lit == DVS_AIG_TRUE) continue;
-            if (lit == DVS_AIG_FALSE) { rc = DVS_BB_UNSAT; goto out; }
-            if (lit == 0) goto out;
-            uint32_t id = (uint32_t)(lit < 0 ? -lit : lit);
-            if (id > N) goto out;
-            if (dvs_aig_is_input(m, (dvs_aig_node_t)id)) {
-                int8_t want = lit > 0 ? 1 : 0;
-                if (tv[id] == 2) { tv[id] = want; forced++; }
-                else if (tv[id] != want) { rc = DVS_BB_UNSAT; goto out; }
-            } else if (lit > 0 && !seen[id] && dvs_aig_is_and(m, lit)) {
-                dvs_aig_node_t l, r;
-                seen[id] = 1;   /* each AND pushes once: top <= N + 1 */
-                dvs_aig_get_children(m, lit, &l, &r);
-                wl[top++] = l;
-                wl[top++] = r;
-            }
-        }
+    {
+        int fr = _forced_inputs(S, N, tv, seen, wl, &forced);
+        if (fr != 1) { rc = fr == DVS_BB_UNSAT ? DVS_BB_UNSAT : DVS_BB_UNKNOWN; goto out; }
     }
     /* Three-valued pass in topological (ascending id) order. */
     for (uint32_t id = 2; id <= N; id++) {
@@ -5248,7 +5706,8 @@ int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
     S->seed = seed;
     free(S->node_val);
     S->node_val = NULL;
-    int pf = _pinfast(S);
+    int pf = _popsamp(S);
+    if (pf == DVS_BB_UNKNOWN) pf = _pinfast(S);
     if (pf != DVS_BB_UNKNOWN) {
         _sim_check(S, pf);
         S->last_result = pf;
