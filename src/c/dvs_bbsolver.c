@@ -3459,7 +3459,9 @@ static int _bb_encode(dvs_bbsolver_t *S) {
     /* Pins ignore softs/dist/alldiff (bb_eval checks only constraints), so
      * the ladder stays off for any problem with them; and off in a session
      * frame, where later frames may constrain the pinned vars. */
-    int ladder = getenv("DV_BB_LADDER") != NULL && !S->assert_frame
+    const char *ladder_env = getenv("DV_BB_LADDER");
+    int ladder = ladder_env && *ladder_env && strcmp(ladder_env, "0") != 0
+        && !S->assert_frame
         && S->problem->softs_head == EXPR_NULL
         && S->problem->dists_head == EXPR_NULL
         && S->problem->allDiff_head == EXPR_NULL;
