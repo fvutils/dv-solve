@@ -6669,16 +6669,33 @@ static uint64_t _ds_inv(uint64_t a, uint64_t n) {
 
 /* The residue leaves (K[i], e[i], width w[i]) of a var x: x mod K == e
  * for each. CRT-combines them under val into x = f + j*L, j < *cnt, within
- * [kl, kh]. Returns 0 to decline (zero modulus, modulus over 2^32). */
+ * [kl, kh]. A guarded leaf ite(C, x, x mod K) == e whose C takes the bare
+ * branch pins x = e. Returns 0 to decline (zero modulus, modulus over 2^32). */
 static int _ds_crt(dvs_bbsolver_t *S, const dvs_expr_t *K, const dvs_expr_t *E,
                    const uint32_t *W, const dvs_expr_t *C, const uint8_t *T, uint32_t n, const uint64_t *val, uint64_t kl,
                    uint64_t kh, uint64_t *f, uint64_t *L, uint64_t *cnt) {
-    uint64_t R = 0, M = 1;
+    uint64_t R = 0, M = 1, pin = 0;
+    int pinned = 0;
     *cnt = 0;
     for (uint32_t i = 0; i < n; i++) {
+        uint64_t c, e;
+        if (C[i] == EXPR_NULL) continue;
+        if (!bb_eval_pred(S, C[i], val, &c)) return 0;
+        if (!c == !T[i]) continue;
+        if (!bb_eval(S, E[i], W[i], val, &e)) return 0;
+        if (pinned && e != pin) return 1;
+        pin = e;
+        pinned = 1;
+    }
+    for (uint32_t i = 0; i < n; i++) {
         uint64_t k, e, c;
-        if (C[i] != EXPR_NULL && (!bb_eval_pred(S, C[i], val, &c) || !c != !T[i])) return 0;
+        if (C[i] != EXPR_NULL && (bb_eval_pred(S, C[i], val, &c), !c != !T[i])) continue;
         if (!bb_eval(S, K[i], W[i], val, &k) || !bb_eval(S, E[i], W[i], val, &e)) return 0;
+        if (pinned) {
+            if (k == 0) return 0;
+            if (pin % k != e) return 1;
+            continue;
+        }
         if (k == 0 || k > (1ull << 32)) return 0;
         if (e >= k) return 1;
         uint64_t a = M, b = k;
@@ -6690,6 +6707,13 @@ static int _ds_crt(dvs_bbsolver_t *S, const dvs_expr_t *K, const dvs_expr_t *E,
         uint64_t s = kg == 1 ? 0 : (d / g % kg) * _ds_inv(M / g % kg, kg) % kg;
         R += M * s;
         M = M / g * k;
+    }
+    if (pinned) {
+        if (pin < kl || pin > kh) return 1;
+        *f = pin;
+        *L = 1;
+        *cnt = 1;
+        return 1;
     }
     uint64_t first = kl + (R + M - kl % M) % M;
     if (first < kl || first > kh) return 1;
