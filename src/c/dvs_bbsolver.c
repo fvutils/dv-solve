@@ -3005,7 +3005,8 @@ static uint64_t bb_eval_ext(uint64_t x, uint32_t from, uint32_t to, int sg) {
  * substitution evaluates its S->subst entry. Returns 0 (decline) on any
  * construct it does not model or a width above 64; the ladder then leaves the
  * component to the SAT path. Covers CONST, VAR, BINARY (no DIV/MOD), UNARY,
- * ITE, IN_RANGE, IN_SET, IN_RANGES. */
+ * ITE, IN_RANGE, IN_SET, IN_RANGES, EXTEND, SV_CAST, EXTRACT, CONCAT,
+ * COUNTONES. */
 static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
                    const uint64_t *val, uint64_t *out);
 
@@ -3202,6 +3203,68 @@ static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
             any |= in;
         }
         *out = (uint64_t)any;
+        return 1;
+    }
+    case EXPR_EXTEND:
+    case EXPR_SV_CAST: {
+        /* Same layout (bb_extend); the cast's signedness is in bb_signed. */
+        const ExprExtend *e = (const ExprExtend *)(const void *)kp;
+        if (e->from_bits == 0 || e->from_bits > 64 || e->to_bits == 0
+            || e->to_bits > 64) return 0;
+        uint64_t x;
+        if (!bb_eval(S, e->operand, e->from_bits, val, &x)) return 0;
+        x = bb_eval_ext(x, e->from_bits, e->to_bits, e->sign_extend);
+        *out = bb_eval_ext(x, e->to_bits, w, bb_signed(S, ref, 0));
+        return 1;
+    }
+    case EXPR_EXTRACT: {
+        /* Operand at its own width, zero-extended to hi_bit+1 (bb_extract). */
+        const ExprExtract *e = (const ExprExtract *)kp;
+        if (e->hi_bit >= 64 || e->lo_bit > e->hi_bit) return 0;
+        uint32_t sw = bb_self_width(S, e->operand, 0);
+        if (sw == 0 || sw > 64) return 0;
+        uint64_t x;
+        if (!bb_eval(S, e->operand, sw, val, &x)) return 0;
+        x &= bb_eval_mask(sw);
+        uint32_t rw = e->hi_bit - e->lo_bit + 1;
+        x = (x >> e->lo_bit) & bb_eval_mask(rw);
+        *out = bb_eval_ext(x, rw, w, bb_signed(S, ref, 0));
+        return 1;
+    }
+    case EXPR_CONCAT: {
+        /* lo sized to lo_width (zero-extended if narrower), hi at its own
+         * width (bb_concat). */
+        const ExprConcat *e = (const ExprConcat *)kp;
+        uint32_t lw = e->lo_width, hw = bb_self_width(S, e->hi, 0);
+        if (lw == 0 || hw == 0 || lw + hw > 64) return 0;
+        uint32_t lsw = bb_self_width(S, e->lo, 0);
+        if (lsw == 0) return 0;
+        uint64_t l, h;
+        if (lsw >= lw) {
+            if (!bb_eval(S, e->lo, lw, val, &l)) return 0;
+        } else {
+            if (!bb_eval(S, e->lo, lsw, val, &l)) return 0;
+            l = bb_eval_ext(l, lsw, lw, 0);
+        }
+        if (!bb_eval(S, e->hi, hw, val, &h)) return 0;
+        uint64_t x = ((h & bb_eval_mask(hw)) << lw) | (l & bb_eval_mask(lw));
+        *out = bb_eval_ext(x, lw + hw, w, bb_signed(S, ref, 0));
+        return 1;
+    }
+    case EXPR_COUNTONES: {
+        /* result == popcount(operand), compared at W as bb_countones does. */
+        const ExprCountones *c = (const ExprCountones *)kp;
+        uint32_t xs = bb_self_width(S, c->operand, 0);
+        uint32_t rs = bb_self_width(S, c->result, 0);
+        if (xs == 0 || xs > 64 || rs == 0) return 0;
+        uint32_t xb = bb_bits_for(xs);
+        uint32_t W = (rs > xb ? rs : xb) + 1;
+        if (W > 64) return 0;
+        uint64_t x, r, n = 0;
+        if (!bb_eval(S, c->operand, xs, val, &x)
+            || !bb_eval(S, c->result, W, val, &r)) return 0;
+        for (x &= bb_eval_mask(xs); x; x &= x - 1) n++;
+        *out = r == n;
         return 1;
     }
     default:
