@@ -189,9 +189,8 @@ This is the one place where structure depends on run-time values.
   today, but inside one `dvs_randomize` call and without rebuilding any text. The
   element phase then uses the size-class context for the chosen size.
 
-Open question: the cap on distinct size classes per handle before falling back to
-"compile per call" (queues that grow every call). Start with a small LRU and count
-misses.
+The cap on distinct size classes per handle (queues that grow every call) is a small
+LRU with a miss count; see decision 2 at the end.
 
 ## Lifecycle
 
