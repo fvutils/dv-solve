@@ -5055,7 +5055,10 @@ int dvs_bbsolver_sess_add(dvs_bbsolver_t *S, const dvs_expr_t *roots, uint32_t n
  * If a three-valued evaluation makes every live assert true whatever the
  * unknown bits are, any fill is a model: the unknown inputs get a seeded fill
  * and the model is installed as node_val, with no simulation, SAT or
- * diversify. Returns DVS_BB_SAT, else DVS_BB_UNKNOWN (take the normal path). */
+ * diversify. The forced bits hold in every model, so a forced input wanted
+ * both ways, a constant-false conjunct or an assert that evaluates false is
+ * unsat. Returns DVS_BB_SAT or DVS_BB_UNSAT, else DVS_BB_UNKNOWN (take the
+ * normal path). */
 static int _pinfast(dvs_bbsolver_t *S) {
     if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig) return DVS_BB_UNKNOWN;
     const char *pf = getenv("DV_PINFAST");
@@ -5080,13 +5083,14 @@ static int _pinfast(dvs_bbsolver_t *S) {
         while (top) {
             dvs_aig_node_t lit = wl[--top];
             if (lit == DVS_AIG_TRUE) continue;
-            if (lit == DVS_AIG_FALSE || lit == 0) goto out;
+            if (lit == DVS_AIG_FALSE) { rc = DVS_BB_UNSAT; goto out; }
+            if (lit == 0) goto out;
             uint32_t id = (uint32_t)(lit < 0 ? -lit : lit);
             if (id > N) goto out;
             if (dvs_aig_is_input(m, (dvs_aig_node_t)id)) {
                 int8_t want = lit > 0 ? 1 : 0;
                 if (tv[id] == 2) { tv[id] = want; forced++; }
-                else if (tv[id] != want) goto out;   /* conflict: SAT decides */
+                else if (tv[id] != want) { rc = DVS_BB_UNSAT; goto out; }
             } else if (lit > 0 && !seen[id] && dvs_aig_is_and(m, lit)) {
                 dvs_aig_node_t l, r;
                 seen[id] = 1;   /* each AND pushes once: top <= N + 1 */
@@ -5109,7 +5113,12 @@ static int _pinfast(dvs_bbsolver_t *S) {
     for (uint32_t a = 0; a < S->n_asserts; a++) {
         dvs_aig_node_t lit = S->assert_nodes[a];
         int8_t v = tv[lit < 0 ? -lit : lit];
-        if (v == 2 || (lit < 0 ? !v : v) != 1) goto out;
+        if (v != 2 && (lit < 0 ? !v : v) == 0) { rc = DVS_BB_UNSAT; goto out; }
+    }
+    for (uint32_t a = 0; a < S->n_asserts; a++) {
+        dvs_aig_node_t lit = S->assert_nodes[a];
+        int8_t v = tv[lit < 0 ? -lit : lit];
+        if (v == 2) goto out;
     }
     /* Every assert holds for any fill of the unknown inputs: fill and evaluate. */
     for (uint32_t id = 2; id <= N; id++) {
@@ -5131,7 +5140,7 @@ static int _pinfast(dvs_bbsolver_t *S) {
 out:
     if (getenv("DV_BB_STATS"))
         fprintf(stderr, "[bb-pinfast] pinfast=%d forced=%u nodes=%u asserts=%u\n",
-                rc == DVS_BB_SAT, forced, N, S->n_asserts);
+                rc == DVS_BB_SAT ? 1 : rc == DVS_BB_UNSAT ? 2 : 0, forced, N, S->n_asserts);
     free(tv); free(seen); free(wl);
     return rc;
 }
@@ -5143,10 +5152,11 @@ int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
     S->seed = seed;
     free(S->node_val);
     S->node_val = NULL;
-    if (_pinfast(S) == DVS_BB_SAT) {
-        _sim_check(S, DVS_BB_SAT);
-        S->last_result = DVS_BB_SAT;
-        return DVS_BB_SAT;
+    int pf = _pinfast(S);
+    if (pf != DVS_BB_UNKNOWN) {
+        _sim_check(S, pf);
+        S->last_result = pf;
+        return pf;
     }
     dvs_sat_set_seed(S->sat, seed);
     {
