@@ -6225,11 +6225,39 @@ static int _ss_pure(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v) {
 static void _ss_hull(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v, uint64_t *bias,
                      int *have_bias, uint64_t *kl, uint64_t *kh) {
     const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
+    for (int hops = 0; k && hops < 32; hops++) {
+        /* ite(c, 1, 0) is c (the frontend's __Vbv). */
+        uint64_t tv, ev;
+        if (*k != EXPR_ITE) break;
+        const ExprITE *ie = (const ExprITE *)k;
+        if (!bb_const_u(S, ie->then_e, &tv) || !bb_const_u(S, ie->else_e, &ev) || tv != 1 || ev != 0)
+            return;
+        r = _ss_strip(S, ie->cond);
+        k = (const ExprKind *)POOL_PTR(S->problem, r);
+    }
     if (!k || *k != EXPR_BINARY) return;
     const ExprBinary *e = (const ExprBinary *)k;
     dvs_binop_t op = e->op;
     dvs_expr_t t;
     uint64_t c, b = 0;
+    if (op == DVS_BIN_OR) {
+        /* Union of the disjuncts' hulls, each under the same bias; a
+         * disjunct that does not narrow leaves the hull as is. */
+        uint64_t ul = UINT64_MAX, uh = 0, m = bb_eval_mask(S->vars[v].width);
+        uint64_t b0 = *bias;
+        int h0 = *have_bias;
+        for (int side = 0; side < 2; side++) {
+            uint64_t l = 0, h = m;
+            _ss_hull(S, _ss_strip(S, side ? e->rhs : e->lhs), v, bias, have_bias, &l, &h);
+            if (l == 0 && h == m) { *bias = b0; *have_bias = h0; return; }
+            if (l <= h) { if (l < ul) ul = l; if (h > uh) uh = h; }
+        }
+        if (h0 && *bias != b0) { *bias = b0; return; }
+        if (ul > uh) { *kl = 1; *kh = 0; return; }
+        if (ul > *kl) *kl = ul;
+        if (uh < *kh) *kh = uh;
+        return;
+    }
     if (bb_const_u(S, e->rhs, &c)) t = e->lhs;
     else if (bb_const_u(S, e->lhs, &c)) {
         t = e->rhs;
@@ -6602,6 +6630,75 @@ static int _ds_reaches(dvs_bbsolver_t *S, const uint32_t *vs, size_t s0, size_t 
 }
 
 #define DVS_DS_TRIES 64
+#define DVS_DS_TUPLES 4096u
+#define DVS_DS_DVARS 16
+
+/* Every var of e is free and drawn from an enumerated domain. */
+static int _ds_enum_only(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t **vs, size_t s0,
+                         size_t *cap, const uint8_t *role, const uint32_t *dn) {
+    size_t n2 = s0;
+    if (!_ds_vars(S, e, vs, s0, &n2, cap, 0)) return 0;
+    for (size_t j = s0; j < n2; j++)
+        if (role[(*vs)[j]] != 2 || !dn[(*vs)[j]]) return 0;
+    return 1;
+}
+
+/* `e` through substitutions and zero extends to a bare var id, else -1. */
+static int64_t _ds_bare(dvs_bbsolver_t *S, dvs_expr_t e, int zext) {
+    for (int hops = 0; hops < 32; hops++) {
+        e = _ss_strip(S, e);
+        const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+        if (!k) return -1;
+        if (*k == EXPR_VAR) return ((const ExprVar *)k)->var_id;
+        if (!zext || *k != EXPR_EXTEND || ((const ExprExtend *)k)->sign_extend) return -1;
+        e = ((const ExprExtend *)k)->operand;
+    }
+    return -1;
+}
+
+/* Inverse of a mod n (gcd 1, n <= 2^32). */
+static uint64_t _ds_inv(uint64_t a, uint64_t n) {
+    int64_t t = 0, nt = 1, r = (int64_t)n, nr = (int64_t)(a % n);
+    while (nr) {
+        int64_t q = r / nr, x;
+        x = t - q * nt; t = nt; nt = x;
+        x = r - q * nr; r = nr; nr = x;
+    }
+    return (uint64_t)(t < 0 ? t + (int64_t)n : t);
+}
+
+/* The residue leaves (K[i], e[i], width w[i]) of a var x: x mod K == e
+ * for each. CRT-combines them under val into x = f + j*L, j < *cnt, within
+ * [kl, kh]. Returns 0 to decline (zero modulus, modulus over 2^32). */
+static int _ds_crt(dvs_bbsolver_t *S, const dvs_expr_t *K, const dvs_expr_t *E,
+                   const uint32_t *W, const dvs_expr_t *C, const uint8_t *T, uint32_t n, const uint64_t *val, uint64_t kl,
+                   uint64_t kh, uint64_t *f, uint64_t *L, uint64_t *cnt) {
+    uint64_t R = 0, M = 1;
+    *cnt = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t k, e, c;
+        if (C[i] != EXPR_NULL && (!bb_eval_pred(S, C[i], val, &c) || !c != !T[i])) return 0;
+        if (!bb_eval(S, K[i], W[i], val, &k) || !bb_eval(S, E[i], W[i], val, &e)) return 0;
+        if (k == 0 || k > (1ull << 32)) return 0;
+        if (e >= k) return 1;
+        uint64_t a = M, b = k;
+        while (b) { uint64_t t = a % b; a = b; b = t; }
+        uint64_t g = a, d = (e + k - R % k) % k;
+        if (d % g) return 1;
+        uint64_t kg = k / g;
+        if (M / g > (1ull << 32) / k) return 0;
+        uint64_t s = kg == 1 ? 0 : (d / g % kg) * _ds_inv(M / g % kg, kg) % kg;
+        R += M * s;
+        M = M / g * k;
+    }
+    uint64_t first = kl + (R + M - kl % M) % M;
+    if (first < kl || first > kh) return 1;
+    if ((kh - first) / M == UINT64_MAX) return 0;
+    *f = first;
+    *L = M;
+    *cnt = (kh - first) / M + 1;
+    return 1;
+}
 
 /* Div/mul rejection sampler (DV_DIVSAMP=0 off). A var a leaf `v == e`
  * defines (v a bare unsigned var not in e, the definitions acyclic) is
@@ -6626,7 +6723,7 @@ static int _divsamp(dvs_bbsolver_t *S) {
     int rc = DVS_BB_UNKNOWN;
     const char *why = "shape";
     size_t n_lf = 0, cap_lf = 0, n_vs = 0, cap_vs = 0, n_ck = 0;
-    uint32_t n_free = 0, n_def = 0, tries = 0;
+    uint32_t n_free = 0, n_def = 0, tries = 0, n_res = 0, n_cov = 0;
     dvs_expr_t *lf = NULL;
     uint32_t *vs = NULL, *ck = NULL, *dom_all = NULL;
     size_t *loff = NULL;
@@ -6652,6 +6749,19 @@ static int _divsamp(dvs_bbsolver_t *S) {
     uint32_t *stk = (uint32_t *)malloc(((size_t)nv + 1) * sizeof(uint32_t));
     uint8_t *seen = (uint8_t *)malloc(nv);
     uint32_t *unext = NULL;
+    /* Box-var proposals: pk 0 box, 1 residue (pn leaves at rK/rE/rW + roff,
+     * accept N/nmx), 2 change of variable x = t - pe, t <= pc. */
+    uint8_t *pk = (uint8_t *)calloc(nv, 1);
+    uint64_t *pc = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint64_t *nmx = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    dvs_expr_t *pe = (dvs_expr_t *)calloc(nv, sizeof(dvs_expr_t));
+    uint32_t *pw = (uint32_t *)calloc(nv, sizeof(uint32_t));
+    uint32_t *roff = (uint32_t *)calloc(nv, sizeof(uint32_t));
+    uint32_t *pn = (uint32_t *)calloc(nv, sizeof(uint32_t));
+    dvs_expr_t *rK = NULL, *rE = NULL, *rC = NULL;
+    uint32_t *rW = NULL;
+    uint8_t *rT = NULL;
+    if (!pk || !pc || !nmx || !pe || !pw || !roff || !pn) goto out;
     if (!dvoff || !dvn || !stk || !seen || !def || !defl || !uhead || !order || !dn || !doff || !kl || !kh || !bias ||
         !lo || !hi || !fmask || !fval || !vval || !role || !nmark || !val) goto out;
     for (uint32_t v = 0; v < nv; v++) {
@@ -6828,6 +6938,148 @@ static int _divsamp(dvs_bbsolver_t *S) {
             if (!dn[v]) { why = "small"; goto out; }
         }
     }
+    /* Box-var proposals over the enumerated vars, each exact:
+     * - residue: leaves x mod K == e CRT-combine to N values of x in the
+     *   hull; the draw is accepted with prob N / max N over every tuple of
+     *   the enumerated vars K and e read, so tuples weigh by N.
+     * - change of variable: leaf x + e <=u C at x's width: t uniform in
+     *   [0, C], x = t - e, a bijection for every e.
+     * The one with the fewest values wins over the box. */
+    rK = (dvs_expr_t *)malloc((n_lf + 1) * sizeof(dvs_expr_t));
+    rE = (dvs_expr_t *)malloc((n_lf + 1) * sizeof(dvs_expr_t));
+    rW = (uint32_t *)malloc((n_lf + 1) * sizeof(uint32_t));
+    rC = (dvs_expr_t *)malloc((n_lf + 1) * sizeof(dvs_expr_t));
+    rT = (uint8_t *)malloc(n_lf + 1);
+    if (!rK || !rE || !rW || !rC || !rT) goto out;
+    for (uint32_t v = 0, nr = 0; v < nv; v++) {
+        if (role[v] != 2 || dn[v] || bias[v]) continue;
+        uint64_t best = kh[v] - kl[v], cc = UINT64_MAX;
+        dvs_expr_t ce = EXPR_NULL;
+        uint32_t ccw = 0, r0 = nr;
+        for (size_t li = 0; li < n_lf; li++) {
+            const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, lf[li]);
+            if (!k || *k != EXPR_BINARY) continue;
+            const ExprBinary *b = (const ExprBinary *)k;
+            uint32_t lw = bb_self_width(S, b->lhs, 0), rw = bb_self_width(S, b->rhs, 0);
+            uint32_t cw = lw > rw ? lw : rw;
+            uint64_t c;
+            dvs_binop_t op = b->op;
+            dvs_expr_t t;
+            if (cw == 0 || cw > 64) continue;
+            if (op == DVS_BIN_EQ) {
+                for (int side = 0; side < 2; side++) {
+                    dvs_expr_t sd = side ? b->rhs : b->lhs, o = side ? b->lhs : b->rhs;
+                    dvs_expr_t s = _ss_strip(S, sd);
+                    const ExprKind *sk = (const ExprKind *)POOL_PTR(S->problem, s);
+                    dvs_expr_t cnd = EXPR_NULL;
+                    int mthen = 0;
+                    if (sk && *sk == EXPR_ITE) {
+                        /* The zero-divisor guard ite(c, x, x mod K): the
+                         * mod branch must be the one c takes (_ds_crt). */
+                        const ExprITE *ie = (const ExprITE *)sk;
+                        for (int br = 0; br < 2; br++) {
+                            dvs_expr_t m2 = _ss_strip(S, br ? ie->else_e : ie->then_e);
+                            const ExprKind *mk = (const ExprKind *)POOL_PTR(S->problem, m2);
+                            if (mk && *mk == EXPR_BINARY && ((const ExprBinary *)mk)->op == DVS_BIN_MOD &&
+                                _ds_bare(S, br ? ie->then_e : ie->else_e, 1) == (int64_t)v &&
+                                _ds_enum_only(S, ie->cond, &vs, n_vs, &cap_vs, role, dn)) {
+                                cnd = ie->cond;
+                                mthen = !br;
+                                sk = mk;
+                                break;
+                            }
+                        }
+                        if (cnd == EXPR_NULL) continue;
+                    }
+                    if (!sk || *sk != EXPR_BINARY) continue;
+                    const ExprBinary *mb = (const ExprBinary *)sk;
+                    if (mb->op != DVS_BIN_MOD || bb_self_width(S, s, 0) != bb_self_width(S, sd, 0) ||
+                        bb_self_width(S, mb->lhs, 0) > cw || bb_self_width(S, mb->rhs, 0) > cw ||
+                        _ds_bare(S, mb->lhs, 1) != (int64_t)v ||
+                        !_ds_enum_only(S, mb->rhs, &vs, n_vs, &cap_vs, role, dn) ||
+                        !_ds_enum_only(S, o, &vs, n_vs, &cap_vs, role, dn))
+                        continue;
+                    rK[nr] = mb->rhs;
+                    rE[nr] = o;
+                    rC[nr] = cnd;
+                    rT[nr] = (uint8_t)mthen;
+                    rW[nr++] = cw;
+                    break;
+                }
+                continue;
+            }
+            if ((op == DVS_BIN_LT || op == DVS_BIN_LTE) && bb_const_u(S, b->rhs, &c)) t = b->lhs;
+            else if ((op == DVS_BIN_GT || op == DVS_BIN_GTE) && bb_const_u(S, b->lhs, &c)) {
+                t = b->rhs;
+                op = op == DVS_BIN_GT ? DVS_BIN_LT : DVS_BIN_LTE;
+            } else continue;
+            if (bb_signed(S, b->lhs, 0) && bb_signed(S, b->rhs, 0)) continue;
+            if (op == DVS_BIN_LT) { if (c == 0) continue; c--; }
+            if (c > bb_eval_mask(cw) || S->vars[v].width != cw || bb_self_width(S, t, 0) != cw)
+                continue;
+            dvs_expr_t a = _ss_strip(S, t);
+            const ExprKind *ak = (const ExprKind *)POOL_PTR(S->problem, a);
+            if (!ak || *ak != EXPR_BINARY || ((const ExprBinary *)ak)->op != DVS_BIN_ADD ||
+                bb_self_width(S, a, 0) != cw)
+                continue;
+            const ExprBinary *ab = (const ExprBinary *)ak;
+            for (int side = 0; side < 2; side++) {
+                dvs_expr_t sd = side ? ab->rhs : ab->lhs, o = side ? ab->lhs : ab->rhs;
+                if (_ds_bare(S, sd, 0) != (int64_t)v || bb_self_width(S, sd, 0) != cw ||
+                    bb_self_width(S, o, 0) > cw ||
+                    !_ds_enum_only(S, o, &vs, n_vs, &cap_vs, role, dn))
+                    continue;
+                if (c < cc) { cc = c; ce = o; ccw = cw; }
+                break;
+            }
+        }
+        if (nr > r0) {
+            /* Max N over the tuples of the vars the residue leaves read. */
+            size_t n2 = n_vs, j;
+            uint32_t nd, ix[DVS_DS_DVARS];
+            uint64_t prod = 1, mx = 0, f, L, cnt;
+            int okr = 1;
+            for (uint32_t i = r0; okr && i < nr; i++)
+                okr = _ds_vars(S, rK[i], &vs, n_vs, &n2, &cap_vs, 0) &&
+                      _ds_vars(S, rE[i], &vs, n_vs, &n2, &cap_vs, 0);
+            nd = (uint32_t)(n2 - n_vs);
+            if (nd > DVS_DS_DVARS) okr = 0;
+            for (j = 0; okr && j < nd; j++) {
+                prod *= dn[vs[n_vs + j]];
+                if (prod > DVS_DS_TUPLES) okr = 0;
+                ix[j] = 0;
+            }
+            while (okr) {
+                for (j = 0; j < nd; j++) {
+                    uint32_t d = vs[n_vs + j];
+                    vval[d] = (kl[d] + dom_all[doff[d] + ix[j]]) ^ bias[d];
+                }
+                if (!_ds_crt(S, rK + r0, rE + r0, rW + r0, rC + r0, rT + r0, nr - r0, vval, kl[v], kh[v],
+                             &f, &L, &cnt)) { okr = 0; break; }
+                if (cnt > mx) mx = cnt;
+                for (j = 0; j < nd && ++ix[j] == dn[vs[n_vs + j]]; j++) ix[j] = 0;
+                if (j == nd) break;
+            }
+            for (j = 0; j < nd; j++) vval[vs[n_vs + j]] = 0;
+            if (okr && mx && mx - 1 < best) {
+                pk[v] = 1;
+                roff[v] = r0;
+                pn[v] = nr - r0;
+                nmx[v] = mx;
+                best = mx - 1;
+                n_res++;
+            } else nr = r0;
+        }
+        if (ce != EXPR_NULL && cc < best) {
+            pk[v] = 2;
+            pc[v] = cc;
+            if (pk[v] == 1) n_res--;
+            pe[v] = ce;
+            pw[v] = ccw;
+            n_cov++;
+        }
+    }
+
     /* Checks: every leaf of two or more vars, and the unary leaves of the
      * defined vars (the box vars' were added above). */
     for (size_t li = 0; li < n_lf; li++)
@@ -6856,10 +7108,24 @@ static int _divsamp(dvs_bbsolver_t *S) {
             uint32_t v;
             uint64_t x, t;
             int ok = 1;
-            for (v = 0; ok && v < nv; v++) {
-                if (role[v] != 2) continue;
+            /* The enumerated vars first: the box proposals read them. */
+            for (uint32_t it = 0; ok && it < 2 * nv; it++) {
+                v = it < nv ? it : it - nv;
+                if (role[v] != 2 || (it < nv) != (dn[v] != 0)) continue;
                 if (dn[v]) x = (kl[v] + dom_all[doff[v] + _ps_below(&st, dn[v])]) ^ bias[v];
-                else {
+                else if (pk[v] == 1) {
+                    uint64_t f, L, cnt;
+                    if (!_ds_crt(S, rK + roff[v], rE + roff[v], rW + roff[v], rC + roff[v], rT + roff[v], pn[v], vval,
+                                 kl[v], kh[v], &f, &L, &cnt)) { why = "eval"; goto out; }
+                    ok = cnt && _ps_below(&st, nmx[v]) < cnt;
+                    x = ok ? f + L * _ps_below(&st, cnt) : 0;
+                    ok = ok && (x & fmask[v]) == fval[v];
+                } else if (pk[v] == 2) {
+                    uint64_t y;
+                    if (!bb_eval(S, pe[v], pw[v], vval, &y)) { why = "eval"; goto out; }
+                    x = (_ps_below(&st, pc[v] + 1) - y) & bb_eval_mask(pw[v]);
+                    ok = (x & fmask[v]) == fval[v];
+                } else {
                     uint64_t span = kh[v] - kl[v];
                     x = (kl[v] + (span == UINT64_MAX ? _ps_next(&st)
                                                      : _ps_below(&st, span + 1))) ^ bias[v];
@@ -6907,13 +7173,15 @@ static int _divsamp(dvs_bbsolver_t *S) {
     }
 out:
     if (getenv("DV_BB_STATS"))
-        fprintf(stderr, "[bb-divsamp] free=%u def=%u checks=%zu tries=%u -> %s\n",
-                n_free, n_def, n_ck, tries, rc == DVS_BB_SAT ? "sat" : why);
+        fprintf(stderr, "[bb-divsamp] free=%u def=%u res=%u cov=%u checks=%zu tries=%u -> %s\n",
+                n_free, n_def, n_res, n_cov, n_ck, tries, rc == DVS_BB_SAT ? "sat" : why);
     free(lf); free(vs); free(ck); free(dom_all); free(loff); free(unext);
     free(def); free(defl); free(uhead); free(order); free(dn); free(doff);
     free(kl); free(kh); free(bias); free(lo); free(hi); free(fmask); free(fval);
     free(vval); free(role); free(nmark); free(val);
     free(dvoff); free(dvn); free(stk); free(seen);
+    free(pk); free(pc); free(nmx); free(pe); free(pw); free(roff); free(pn);
+    free(rK); free(rE); free(rW); free(rC); free(rT);
     return rc;
 }
 
