@@ -425,6 +425,7 @@ static dvs_bv_t ext_ref(dvs_bbsolver_t *S, dvs_bv_t v, dvs_expr_t ref,
 
 /* Forward decl — needed because bv_for_var may recurse through bb_expr. */
 static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t hint_width);
+static dvs_bv_t bb_popcount(dvs_bbsolver_t *S, dvs_expr_t operand, uint32_t W);
 
 /* True iff `ref`'s subtree (transitively following the current subst[]
  * map for any EXPR_VAR encountered) reaches EXPR_VAR with id `target_var`.
@@ -884,6 +885,38 @@ static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
     return collect_substs_from_m(S, root, 0);
 }
 
+/* `countones(r, x)` with r a plain variable DEFINES r: substitute r by the
+ * countones node itself. bv_for_var and bb_eval read such a substitution as
+ * the VALUE popcount(x) (see popcount_def), so r is no search input. Only
+ * when popcount(x) always fits r (non-negative if r is signed): then
+ * r == popcount(x) holds by construction and the constraint is consumed. */
+static int try_record_popcount(dvs_bbsolver_t *S, dvs_expr_t cref) {
+    const ExprCountones *ec = (const ExprCountones *)POOL_PTR(S->problem, cref);
+    const ExprKind *vk = (const ExprKind *)POOL_PTR(S->problem, ec->result);
+    if (!vk || *vk != EXPR_VAR) return 0;
+    uint32_t id = ((const ExprVar *)vk)->var_id;
+    if (id >= S->n_vars || !subst_definable(S, id)) return 0;
+    if (S->subst[id] != EXPR_NULL) return 0;
+    if (S->slice_head && S->slice_head[id] != BB_NO_SLICE) return 0;
+    uint32_t xs = bb_self_width(S, ec->operand, 0);
+    uint32_t rw = S->vars[id].width - (S->vars[id].is_signed ? 1u : 0u);
+    if (xs == 0 || (rw < 32 && xs >= (1u << rw))) return 0;
+    if (subst_cycles(S, ec->operand, id)) return 0;
+    S->subst[id] = cref;
+    S->n_substs++;
+    note_subst(S, ec->operand, id);
+    return 1;
+}
+
+/* The countones node defining var `id` by try_record_popcount, or NULL. */
+static const ExprCountones *popcount_def(dvs_bbsolver_t *S, uint32_t id) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, S->subst[id]);
+    if (!k || *k != EXPR_COUNTONES) return NULL;
+    const ExprCountones *ec = (const ExprCountones *)k;
+    const ExprKind *rk = (const ExprKind *)POOL_PTR(S->problem, ec->result);
+    return (rk && *rk == EXPR_VAR && ((const ExprVar *)rk)->var_id == id) ? ec : NULL;
+}
+
 /* forced: root is a forced condition (see forced_ite_cond). Its equalities
  * are recorded only through try_record_forced; forced conditions met at the
  * top level are deferred to a second pass, so recording order for the
@@ -947,6 +980,8 @@ static int collect_substs_from_m(dvs_bbsolver_t *S, dvs_expr_t root, int forced)
                     else if (n_fc < sizeof fc / sizeof fc[0]) fc[n_fc++] = c;
                 }
             }
+        } else if (*kp == EXPR_COUNTONES && !forced) {
+            if (try_record_popcount(S, r)) continue;   /* consumed */
         }
         all_consumed = 0;   /* this leaf was not consumable as a substitution */
     }
@@ -1387,7 +1422,9 @@ static dvs_bv_t bv_for_var(dvs_bbsolver_t *S, uint32_t var_id) {
          * the variable's declared width — adjust via zext or extract. */
         if (S->subst && S->subst[var_id] != EXPR_NULL && !S->resolving[var_id]) {
             S->resolving[var_id] = 1;
-            dvs_bv_t e = bb_expr(S, S->subst[var_id], v->width);
+            const ExprCountones *pc = popcount_def(S, var_id);
+            dvs_bv_t e = pc ? bb_popcount(S, pc->operand, v->width)
+                            : bb_expr(S, S->subst[var_id], v->width);
             S->resolving[var_id] = 0;
             if (!S->had_error) {
                 if (e.size < v->width) {
@@ -2034,6 +2071,25 @@ static dvs_bv_t bb_sum(dvs_bbsolver_t *S, const ExprSum *es) {
     return dvs_bb_eq(S->bb, ext_ref(S, res, es->result, (uint32_t)W), acc);
 }
 
+/* popcount(x) as a W-bit sum of x's bits; W must hold it (callers ensure). */
+static dvs_bv_t bb_popcount_bits(dvs_bbsolver_t *S, dvs_bv_t x, uint32_t W) {
+    dvs_bv_t acc = dvs_bb_value_u64(S->bb, W, 0);
+    for (uint32_t i = 0; i < x.size; i++)
+        acc = dvs_bb_add(S->bb, acc,
+                         zext_to(S, dvs_bb_extract(S->bb, x, i, i), W));
+    return acc;
+}
+
+/* The value popcount(operand) in W bits, for a var try_record_popcount
+ * defined (popcount fits W there). */
+static dvs_bv_t bb_popcount(dvs_bbsolver_t *S, dvs_expr_t operand, uint32_t W) {
+    dvs_bv_t x = bb_expr(S, operand, 0);
+    if (S->had_error) return x;
+    uint32_t xb = bb_bits_for(x.size) + 1;
+    dvs_bv_t acc = bb_popcount_bits(S, x, W > xb ? W : xb);
+    return acc.size > W ? dvs_bb_extract(S->bb, acc, W - 1, 0) : acc;
+}
+
 /* `result == popcount(x)`: the bits of x, each widened, summed. */
 static dvs_bv_t bb_countones(dvs_bbsolver_t *S, const ExprCountones *ec) {
     dvs_bv_t x = bb_expr(S, ec->operand, 0);
@@ -2042,10 +2098,7 @@ static dvs_bv_t bb_countones(dvs_bbsolver_t *S, const ExprCountones *ec) {
     if (S->had_error) return res;
     uint32_t xb = bb_bits_for(x.size);
     uint32_t W = (uint32_t)((res.size > xb ? res.size : xb) + 1);
-    dvs_bv_t acc = dvs_bb_value_u64(S->bb, W, 0);
-    for (uint32_t i = 0; i < x.size; i++)
-        acc = dvs_bb_add(S->bb, acc,
-                         zext_to(S, dvs_bb_extract(S->bb, x, i, i), W));
+    dvs_bv_t acc = bb_popcount_bits(S, x, W);
     return dvs_bb_eq(S->bb, ext_ref(S, res, ec->result, W), acc);
 }
 
@@ -3090,7 +3143,16 @@ static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
         if (S->subst && S->subst[id] != EXPR_NULL) {
             if (S->resolving[id]) return 0;
             S->resolving[id] = 1;
-            int ok = bb_eval(S, S->subst[id], vw, val, &x);
+            const ExprCountones *pc = popcount_def(S, id);
+            uint32_t xs = pc ? bb_self_width(S, pc->operand, 0) : 0;
+            int ok;
+            if (!pc) ok = bb_eval(S, S->subst[id], vw, val, &x);
+            else if ((ok = xs > 0 && xs <= 64
+                           && bb_eval(S, pc->operand, xs, val, &x))) {
+                uint64_t n = 0;
+                for (x &= bb_eval_mask(xs); x; x &= x - 1) n++;
+                x = n;
+            }
             S->resolving[id] = 0;
             if (!ok) return 0;
         } else {
