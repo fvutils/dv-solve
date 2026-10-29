@@ -23,9 +23,13 @@
  *            with --reuse rediversify the 0.3 re-flip of one model), as the
  *            lifecycle in docs/verilator_integration.md prescribes. The
  *            problem is still built every call.
+ *   buffer   each distinct CDCL problem built once into a dvs_handle_t, and
+ *            every call one dvs_randomize() (pass_buffer). Bitblast calls and
+ *            calls with add-ons are left out; api/api-cache print their cost
+ *            on the same set ("CDCL, no add-ons").
  *
  * Usage: bench_vlt_replay <cmds.smt2> [--solver PATH] [--reps N]
- *        [--passes pipe,text,api,api-cache] [--quality] [--census] [--dump-values FILE]
+ *        [--passes pipe,text,api,api-cache,buffer] [--quality] [--census] [--dump-values FILE]
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -771,6 +775,8 @@ static void bb_read(dvs_bbsolver_t *bb, uint32_t n_vars) {
 typedef struct {
     double build, compile, solve, hit_solve, wall, cpu;
     double timed_wall;   /* build + compile + solve of the timed calls */
+    double sub;          /* calls the buffer pass also answers (CDCL, no add-ons) */
+    size_t n_sub;
     size_t fails, bb_fails, escalated, hits, distinct;
     int    reusing;      /* api-cache: contexts are kept for later calls */
 } ApiStats;
@@ -878,6 +884,7 @@ static void pass_api(int cached, ApiStats *st) {
         st->solve += e - b - tc;
         if (hit) { st->hits++; st->hit_solve += e - b - tc; }
         if (timed(cp->call)) st->timed_wall += e - a;
+        if (!cp->bitblast && !cp->n_aux) { st->sub += e - a; st->n_sub++; }
     }
     st->wall = now_s() - w0;
     st->cpu = cpu_s() - c0;
@@ -888,6 +895,93 @@ static void pass_api(int cached, ApiStats *st) {
         built_free(&r, &cache[j].bt);
     }
     free(cache);
+    free(tab);
+    dvs_builder_destroy(r.b);
+    free(r.memo.key); free(r.memo.val); free(r.tmp);
+}
+
+/* ------------------------------------------------------------------ */
+/* Pass: buffer                                                        */
+/* ------------------------------------------------------------------ */
+
+/* V2 of docs/verilator_problem_buffer.md: each distinct problem is built
+ * once, untimed (Verilator would emit the image at compile time), into a
+ * dvs_handle_t, and every call is one dvs_randomize() through refs to a
+ * value slot per variable. The first call on a handle (its compile) is timed
+ * apart from the rest. dvs_randomize() is CDCL only and takes one image, so
+ * the calls the front end answered on bitblast, and those with constraints
+ * added under (push), are left out and counted. */
+typedef struct {
+    double first, hot;     /* first calls (compile + solve), the rest   */
+    size_t n_first, n_hot, distinct, errors, skip_bb, skip_aux;
+    double timed_wall;     /* of the timed calls                        */
+} BufStats;
+
+typedef struct {
+    uint64_t      hash;
+    dvs_handle_t *h;
+    dvs_ref_t    *refs;
+    int64_t      *slot;
+} BufEnt;
+
+static void pass_buffer(BufStats *st) {
+    memset(st, 0, sizeof *st);
+    Rebuild r;
+    memset(&r, 0, sizeof r);
+    r.b = dvs_builder_create(0, NULL);
+    BufEnt *ents = calloc(g_ncap ? g_ncap : 1, sizeof *ents);
+    size_t tab_cap = 1024;
+    while (tab_cap < 2 * g_ncap) tab_cap <<= 1;
+    BufEnt **tab = calloc(tab_cap, sizeof *tab);
+    for (size_t i = 0; i < g_ncap; i++) {
+        Capture *cp = &g_cap[i];
+        if (cp->bitblast) { st->skip_bb++; continue; }
+        if (cp->n_aux) { st->skip_aux++; continue; }
+        size_t slot = cp->hash & (tab_cap - 1);
+        BufEnt *e = NULL;
+        for (; tab[slot]; slot = (slot + 1) & (tab_cap - 1))
+            if (tab[slot]->hash == cp->hash) { e = tab[slot]; break; }
+        int first = !e;
+        if (first) {
+            e = tab[slot] = &ents[st->distinct++];
+            e->hash = cp->hash;
+            size_t sz;
+            dvs_problem_t *q = rebuild(&r, cp->p, &sz);
+            e->h = q ? dvs_handle_new(q, sz) : NULL;
+            if (q) dvs_builder_free_problem(r.b, q, sz);
+            uint32_t n = dvs_handle_n_vars(e->h);
+            e->refs = calloc(n ? n : 1, sizeof *e->refs);
+            e->slot = calloc(n ? n : 1, sizeof *e->slot);
+            for (dvs_expr_t v = cp->p->vars_head; v != EXPR_NULL; ) {
+                const VarSpec *vs = POOL_PTR(cp->p, v);
+                if (vs->var_id < n && vs->width <= 64) {
+                    e->refs[vs->var_id].addr = &e->slot[vs->var_id];
+                    e->refs[vs->var_id].width = vs->width;
+                    e->refs[vs->var_id].is_signed = vs->is_signed;
+                }
+                v = vs->next;
+            }
+        }
+        double a = now_s();
+        int rc = e->h ? dvs_randomize(e->h, e->refs, NULL, cp->seed) : DVS_RANDOMIZE_ERROR;
+        double d = now_s() - a;
+        if (first) { st->first += d; st->n_first++; }
+        else       { st->hot += d; st->n_hot++; }
+        if (timed(cp->call)) st->timed_wall += d;
+        if (rc != (cp->unsat ? DVS_RANDOMIZE_UNSAT : DVS_RANDOMIZE_OK)) { st->errors++; continue; }
+        if (cp->unsat || !g_collect) continue;
+        if (!cp->vals) cp->vals = calloc(cp->n_named ? cp->n_named : 1, sizeof *cp->vals);
+        uint32_t n = dvs_handle_n_vars(e->h);
+        for (uint32_t k = 0; k < cp->n_named; k++)
+            cp->vals[k] = cp->named[k].id < n ? e->slot[cp->named[k].id] : 0;
+        cp->got = 1;
+    }
+    for (size_t j = 0; j < st->distinct; j++) {
+        dvs_handle_free(ents[j].h);
+        free(ents[j].refs);
+        free(ents[j].slot);
+    }
+    free(ents);
     free(tab);
     dvs_builder_destroy(r.b);
     free(r.memo.key); free(r.memo.val); free(r.tmp);
@@ -1786,6 +1880,9 @@ int main(int argc, char **argv) {
         printf("             build (builder)  %7.3f s  %7.1f us\n", best.build, best.build * pc);
         printf("             compile/bitblast %7.3f s  %7.1f us\n", best.compile, best.compile * pc);
         printf("             solve+read       %7.3f s  %7.1f us\n", best.solve, best.solve * pc);
+        if (best.n_sub)
+            printf("             CDCL, no add-ons %7.3f s  %7.1f us per call (%zu calls; the buffer "
+                   "pass's set)\n", best.sub, 1e6 * best.sub / (double)best.n_sub, best.n_sub);
         if (cached && best.hits)
             printf("               on a reused context: %.1f us per call; on a new one: %.1f us\n",
                    1e6 * best.hit_solve / best.hits,
@@ -1800,6 +1897,30 @@ int main(int argc, char **argv) {
             pass_api(cached, &s);
             g_collect = 0;
             if (g_quality) quality(name);
+        }
+    }
+    if (has(passes, "buffer")) {
+        BufStats best = {0}, s;
+        best.timed_wall = 1e30;
+        for (int k = 0; k < reps; k++) {
+            pass_buffer(&s);
+            if (s.first + s.hot < best.first + best.hot || k == 0) best = s;
+        }
+        size_t n = best.n_first + best.n_hot;
+        printf("buffer     %zu calls on %zu handles (%zu bitblast, %zu with add-ons left out; "
+               "%zu errors)\n", n, best.distinct, best.skip_bb, best.skip_aux, best.errors);
+        printf("buffer     per call %9.1f us   (all calls)\n",
+               1e6 * (best.first + best.hot) / (double)(n ? n : 1));
+        printf("             first call       %7.3f s  %7.1f us\n", best.first,
+               1e6 * best.first / (double)(best.n_first ? best.n_first : 1));
+        printf("             hot call         %7.3f s  %7.1f us\n", best.hot,
+               1e6 * best.hot / (double)(best.n_hot ? best.n_hot : 1));
+        if (g_quality) {
+            for (size_t i = 0; i < g_ncap; i++) g_cap[i].got = 0;
+            g_collect = 1;
+            pass_buffer(&s);
+            g_collect = 0;
+            if (g_quality) quality("buffer");
         }
     }
     if (g_dump) fclose(g_dump);
