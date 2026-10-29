@@ -173,6 +173,12 @@ struct dvs_bbsolver_s {
     uint32_t        n_asserts;
     uint32_t        asserts_cap;
     int8_t         *node_val;
+    /* _diversify_sweeps' AND children (L/R) and fanout CSR (fo_off/fo_adj), built
+     * for the first div_n nodes. The AIG is append-only, so they stay valid until
+     * the node count changes. */
+    dvs_aig_node_t *div_L, *div_R;
+    uint32_t       *div_fo_off, *div_fo_adj;
+    uint32_t        div_n;
 
     /* DV_BB_NO_MEMO, read once at construction: getenv per blasted node was
      * ~7% of an enumeration-heavy Verilator run. */
@@ -2014,6 +2020,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     xfree(S->alloc, S->constraint_skip, S->n_constraints * sizeof(uint8_t));
     xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(dvs_aig_node_t));
     free(S->node_val);
+    free(S->div_L); free(S->div_R); free(S->div_fo_off); free(S->div_fo_adj);
     xfree(S->alloc, S, sizeof(*S));
 }
 
@@ -2202,42 +2209,86 @@ static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
     dvs_aig_t *m = S->aig;
     /* Plain malloc for these transient per-solve buffers: node_val (nv) is freed
      * in dvs_bbsolver_free, the rest here -- all independent of the arena. */
-    int8_t *nv        = (int8_t *)malloc((size_t)(N + 1));
-    dvs_aig_node_t *L = (dvs_aig_node_t *)malloc((size_t)(N + 1) * sizeof(dvs_aig_node_t));
-    dvs_aig_node_t *R = (dvs_aig_node_t *)malloc((size_t)(N + 1) * sizeof(dvs_aig_node_t));
-    if (!nv || !L || !R) { free(nv); free(L); free(R); return; }
+    int8_t *nv = (int8_t *)malloc((size_t)(N + 1));
+    if (!nv) return;
+    if (S->div_n != N) {
+        /* (Re)build the cached AND children (0 = input/const) and the fanout
+         * index (CSR): fo_adj[fo_off[c]..fo_off[c+1]) lists the AND nodes that
+         * reference node c as a child. Constants (|child| <= 1, i.e. TRUE=id1 /
+         * FALSE) get no edge -- their value never changes. */
+        free(S->div_L); free(S->div_R); free(S->div_fo_off); free(S->div_fo_adj);
+        S->div_fo_adj = NULL; S->div_n = 0;
+        S->div_L      = (dvs_aig_node_t *)malloc((size_t)(N + 1) * sizeof(dvs_aig_node_t));
+        S->div_R      = (dvs_aig_node_t *)malloc((size_t)(N + 1) * sizeof(dvs_aig_node_t));
+        S->div_fo_off = (uint32_t *)malloc(((size_t)N + 2) * sizeof(uint32_t));
+        uint32_t *cnt = (uint32_t *)calloc((size_t)N + 2, sizeof(uint32_t));
+        dvs_aig_node_t *cL = S->div_L, *cR = S->div_R;
+        uint32_t *off = S->div_fo_off, *adj = NULL;
+        if (cL && cR && off && cnt) {
+            cL[0] = 0; cR[0] = 0;
+            for (uint32_t id = 1; id <= N; id++) {
+                if (dvs_aig_is_and(m, (dvs_aig_node_t)id))
+                    dvs_aig_get_children(m, (dvs_aig_node_t)id, &cL[id], &cR[id]);
+                else { cL[id] = 0; cR[id] = 0; }
+            }
+            for (uint32_t id = 1; id <= N; id++) {
+                if (!cL[id]) continue;
+                uint32_t cl = (uint32_t)(cL[id] < 0 ? -cL[id] : cL[id]);
+                uint32_t cr = (uint32_t)(cR[id] < 0 ? -cR[id] : cR[id]);
+                if (cl > 1) cnt[cl]++;
+                if (cr > 1) cnt[cr]++;
+            }
+            uint32_t acc = 0;
+            for (uint32_t i = 0; i <= N; i++) { off[i] = acc; acc += cnt[i]; }
+            off[N + 1] = acc;
+            adj = (uint32_t *)malloc((acc ? (size_t)acc : 1) * sizeof(uint32_t));
+            if (adj) {
+                for (uint32_t i = 0; i <= N; i++) cnt[i] = off[i];   /* fill cursor */
+                for (uint32_t id = 1; id <= N; id++) {
+                    if (!cL[id]) continue;
+                    uint32_t cl = (uint32_t)(cL[id] < 0 ? -cL[id] : cL[id]);
+                    uint32_t cr = (uint32_t)(cR[id] < 0 ? -cR[id] : cR[id]);
+                    if (cl > 1) adj[cnt[cl]++] = id;
+                    if (cr > 1) adj[cnt[cr]++] = id;
+                }
+            }
+        }
+        free(cnt);
+        S->div_fo_adj = adj;
+        if (!adj) {
+            free(S->div_L); free(S->div_R); free(S->div_fo_off);
+            S->div_L = S->div_R = NULL; S->div_fo_off = NULL;
+            free(nv); return;
+        }
+        S->div_n = N;
+    }
+    const dvs_aig_node_t *L = S->div_L, *R = S->div_R;
+    const uint32_t *fo_off = S->div_fo_off, *fo_adj = S->div_fo_adj;
     S->aux_work += N;
     /* The model to start from: a simulation's (node_val), else the SAT solver's. */
     int8_t *base_nv = S->node_val;
     S->node_val = NULL;
 
-    /* Cache AND children (0 = input/const) and build the initial valuation in
-     * topological (ascending id) order -- children always have a smaller id. */
-    nv[0] = 0; L[0] = 0; R[0] = 0;
+    /* Build the initial valuation in topological (ascending id) order --
+     * children always have a smaller id. */
+    nv[0] = 0;
     for (uint32_t id = 1; id <= N; id++) {
-        if (dvs_aig_is_and(m, (dvs_aig_node_t)id)) {
-            dvs_aig_get_children(m, (dvs_aig_node_t)id, &L[id], &R[id]);
+        if (L[id])
             nv[id] = (int8_t)(_lit_val(nv, L[id]) & _lit_val(nv, R[id]));
-        } else {
-            L[id] = 0; R[id] = 0;
+        else
             nv[id] = base_nv ? base_nv[id]
                              : (int8_t)(dvs_aig_cnf_value(S->cnf, (dvs_aig_node_t)id) == 1);
-        }
     }
     free(base_nv);
 
-    /* Build the fanout index (CSR): fo_adj[fo_off[c]..fo_off[c+1]) lists the AND
-     * nodes that reference node c as a child. Constants (|child| <= 1, i.e.
-     * TRUE=id1 / FALSE) get no edge -- their value never changes. */
-    uint32_t *cnt    = (uint32_t *)calloc((size_t)N + 2, sizeof(uint32_t));
-    uint32_t *fo_off = (uint32_t *)malloc(((size_t)N + 2) * sizeof(uint32_t));
     uint8_t  *inq    = (uint8_t  *)calloc((size_t)N + 1, 1);
     uint32_t *wl     = (uint32_t *)malloc(((size_t)N + 1) * sizeof(uint32_t));
     uint32_t *trail  = (uint32_t *)malloc(((size_t)N + 1) * sizeof(uint32_t));
     uint8_t  *areq   = (uint8_t  *)calloc((size_t)N + 1, 1);
-    if (!cnt || !fo_off || !inq || !wl || !trail || !areq) {
-        free(cnt); free(fo_off); free(inq); free(wl); free(trail); free(areq);
-        free(L); free(R); S->node_val = nv; return;   /* keep the valid (undiversified) model */
+    uint32_t *cnt    = (uint32_t *)malloc(((size_t)N + 2) * sizeof(uint32_t));
+    if (!inq || !wl || !trail || !areq || !cnt) {
+        free(inq); free(wl); free(trail); free(areq); free(cnt);
+        S->node_val = nv; return;   /* keep the valid (undiversified) model */
     }
     /* Mark each asserted node with the value it must keep. */
     for (uint32_t a = 0; a < S->n_asserts; a++) {
@@ -2246,36 +2297,13 @@ static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
         if (id == 0 || id > N || lit == DVS_AIG_TRUE || lit == DVS_AIG_FALSE) continue;
         areq[id] |= (lit < 0) ? 2u : 1u;          /* lit>0: node must be 1 */
     }
-    for (uint32_t id = 1; id <= N; id++) {
-        if (!L[id]) continue;
-        uint32_t cl = (uint32_t)(L[id] < 0 ? -L[id] : L[id]);
-        uint32_t cr = (uint32_t)(R[id] < 0 ? -R[id] : R[id]);
-        if (cl > 1) cnt[cl]++;
-        if (cr > 1) cnt[cr]++;
-    }
-    uint32_t acc = 0;
-    for (uint32_t i = 0; i <= N; i++) { fo_off[i] = acc; acc += cnt[i]; }
-    fo_off[N + 1] = acc;
-    uint32_t *fo_adj = (uint32_t *)malloc((acc ? (size_t)acc : 1) * sizeof(uint32_t));
-    if (!fo_adj) {
-        free(cnt); free(fo_off); free(inq); free(wl); free(trail); free(areq);
-        free(L); free(R); S->node_val = nv; return;
-    }
-    for (uint32_t i = 0; i <= N; i++) cnt[i] = fo_off[i];   /* reuse cnt as fill cursor */
-    for (uint32_t id = 1; id <= N; id++) {
-        if (!L[id]) continue;
-        uint32_t cl = (uint32_t)(L[id] < 0 ? -L[id] : L[id]);
-        uint32_t cr = (uint32_t)(R[id] < 0 ? -R[id] : R[id]);
-        if (cl > 1) fo_adj[cnt[cl]++] = id;
-        if (cr > 1) fo_adj[cnt[cr]++] = id;
-    }
 
     /* The candidate flips, in visit order: each variable bit that is a
      * primary input, with its seeded target, once per sweep; sweeps after the
      * first draw fresh targets.
      * A constant bit (TRUE, id 1) is not a candidate: readback takes constants
      * from the literal, never from nv[1]. Count the distinct inputs on the way
-     * (cnt is free again; it becomes slot[], the input's index + 1). */
+     * (cnt is slot[], the input's index + 1). */
     uint32_t ncand = 0, k = 0;
     for (uint32_t i = 0; i <= N; i++) cnt[i] = 0;
     for (uint32_t vi = 0; vi < S->n_vars; vi++) {
@@ -2374,14 +2402,10 @@ static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
     free(inputs);
 
     free(cnt);
-    free(fo_off);
-    free(fo_adj);
     free(inq);
     free(wl);
     free(trail);
     free(areq);
-    free(L);
-    free(R);
     S->node_val = nv;
 }
 
