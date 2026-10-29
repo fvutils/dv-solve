@@ -141,6 +141,7 @@ struct dvs_bbsolver_s {
     /* Independent components of the kept constraints (analysis only). */
     dvs_components_t comps;
     uint32_t        *cons_comp;   /* constraint -> comp (UINT32_MAX: none/skipped) */
+    uint32_t         ladder_enum_zero; /* claimed comps with 0 solutions (stats) */
 
     uint64_t        n_substs;    /* statistics */
 
@@ -1177,6 +1178,9 @@ static void compute_components(dvs_bbsolver_t *S) {
     #define CC_VAR(ID) do {                                                    \
         uint32_t v_ = (ID);                                                    \
         if (v_ < nv) { used[v_] = 1; dvs_uf_union(&uf, v_, nv + me); }         \
+        /* A substituted var stands for its subst expr: walk it too. */        \
+        if (S->subst && v_ < nv && S->subst[v_] != EXPR_NULL)                  \
+            CC_EDGE(S->subst[v_]);                                             \
         if (S->slice_head && v_ < nv)                                          \
             for (uint32_t i_ = S->slice_head[v_]; i_ != BB_NO_SLICE;           \
                  i_ = S->slices[i_].next) CC_EDGE(S->slices[i_].eref);         \
@@ -3329,6 +3333,48 @@ static int bb_comp_small_domain(dvs_bbsolver_t *S, uint32_t comp,
 static const bb_comp_recognizer_t bb_comp_ladder[] = {
     bb_comp_small_domain, NULL };
 
+/** Count the solutions of a claimed small-domain comp: every tuple of its
+ * non-subst vars over [lo,hi] at which each of its constraints is true
+ * (stats only; 5b4b slice 1). Returns UINT64_MAX if bb_eval declines. */
+static uint64_t bb_comp_enum_count(dvs_bbsolver_t *S, uint32_t comp,
+                                   const uint64_t *lo, const uint64_t *hi) {
+    uint32_t nv = S->comps.n_vars, nd = 0;
+    uint32_t *dim = (uint32_t *)malloc((nv ? nv : 1) * sizeof(uint32_t));
+    uint64_t *val = (uint64_t *)calloc(nv ? nv : 1, sizeof(uint64_t));
+    uint64_t n = 0;
+    if (!dim || !val) { free(dim); free(val); return UINT64_MAX; }
+    for (uint32_t i = 0; i < nv; i++) {
+        val[i] = lo[i];
+        if (S->comps.var_comp[i] != comp) continue;
+        if (S->subst && S->subst[i] != EXPR_NULL) continue;
+        dim[nd++] = i;
+    }
+    for (;;) {
+        int ok = 1;
+        uint32_t i = 0;
+        for (dvs_expr_t cur = S->problem->constraints_head;
+             ok && cur != EXPR_NULL && i < S->n_constraints; i++) {
+            ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+            cur = cs->next;
+            if (S->cons_comp[i] != comp) continue;
+            uint64_t t;
+            if (!bb_eval_pred(S, cs->root, val, &t)) { n = UINT64_MAX; goto out; }
+            ok = t != 0;
+        }
+        if (ok) n++;
+        uint32_t d = 0;   /* odometer step */
+        for (; d < nd; d++) {
+            uint32_t v = dim[d];
+            if (val[v] < hi[v]) { val[v]++; break; }
+            val[v] = lo[v];
+        }
+        if (d == nd) break;
+    }
+out:
+    free(dim); free(val);
+    return n;
+}
+
 /** Count components some ladder recognizer claims (stats only). */
 static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S, uint32_t *n_evalable) {
     uint32_t nv = S->comps.n_vars, claimed = 0;
@@ -3349,7 +3395,12 @@ static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S, uint32_t *n_evalable) {
         if (n_evalable && S->problem && bb_comp_evalable(S, c, lo))
             (*n_evalable)++;
         for (size_t r = 0; bb_comp_ladder[r]; r++)
-            if (bb_comp_ladder[r](S, c, lo, hi)) { claimed++; break; }
+            if (bb_comp_ladder[r](S, c, lo, hi)) {
+                claimed++;
+                if (S->problem && bb_comp_enum_count(S, c, lo, hi) == 0)
+                    S->ladder_enum_zero++;
+                break;
+            }
     }
     free(lo);
     return claimed;
@@ -3373,10 +3424,11 @@ static int _bb_encode(dvs_bbsolver_t *S) {
     if (getenv("DV_BB_STATS")) {
         compute_components(S);
         uint32_t n_evalable = 0;
+        S->ladder_enum_zero = 0;
         uint32_t claimed = bb_comp_ladder_claims(S, &n_evalable);
-        fprintf(stderr, "[bb-comp] n=%u largest=%u vars=%u claimed=%u evalable=%u\n",
+        fprintf(stderr, "[bb-comp] n=%u largest=%u vars=%u claimed=%u evalable=%u enum_zero=%u\n",
                 S->comps.n_comp, S->comps.largest, S->n_vars,
-                claimed, n_evalable);
+                claimed, n_evalable, S->ladder_enum_zero);
     }
     /* bv_for_var uses S->resolving as its recursion guard; start clear. */
     if (S->resolving) memset(S->resolving, 0, S->n_vars);
@@ -3894,8 +3946,9 @@ static void bb_eval_model_check(dvs_bbsolver_t *S) {
         if (!t) mismatch++;
     }
     free(val);
-    fprintf(stderr, "[bb-eval] mismatch=%u checked=%u declined=%u\n",
-            mismatch, checked, declined);
+    /* A claimed comp with 0 enumerated solutions contradicts this SAT. */
+    fprintf(stderr, "[bb-eval] mismatch=%u checked=%u declined=%u enum_zero_sat=%u\n",
+            mismatch, checked, declined, S->ladder_enum_zero);
 }
 
 int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
