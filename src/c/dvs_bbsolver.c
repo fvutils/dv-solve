@@ -3113,7 +3113,7 @@ static uint64_t bb_eval_ext(uint64_t x, uint32_t from, uint32_t to, int sg) {
  * id), sized to context width w (1..64) as bb_expr would size it. A var with a
  * substitution evaluates its S->subst entry. Returns 0 (decline) on any
  * construct it does not model or a width above 64; the ladder then leaves the
- * component to the SAT path. Covers CONST, VAR, BINARY (no DIV/MOD), UNARY,
+ * component to the SAT path. Covers CONST, VAR, BINARY (unsigned DIV/MOD), UNARY,
  * ITE, IN_RANGE, IN_SET, IN_RANGES, EXTEND, SV_CAST, EXTRACT, CONCAT,
  * COUNTONES. */
 static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
@@ -3257,8 +3257,23 @@ static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
             *out = r & bb_eval_mask(w);
             return 1;
         }
+        case DVS_BIN_DIV: case DVS_BIN_MOD: {
+            /* Unsigned only (signed decline). Zero divisor as the restoring
+             * divider encodes it: quotient all-ones, remainder the dividend. */
+            if (bb_signed(S, b->lhs, 0) && bb_signed(S, b->rhs, 0)) return 0;
+            uint32_t lw = bb_self_width(S, b->lhs, 0), rw = bb_self_width(S, b->rhs, 0);
+            uint32_t ow = lw > rw ? lw : rw;
+            if (w > ow) ow = w;
+            if (ow > 64) return 0;
+            if (!bb_eval(S, b->lhs, ow, val, &x)) return 0;
+            if (!bb_eval(S, b->rhs, ow, val, &y)) return 0;
+            uint64_t r = b->op == DVS_BIN_DIV ? (y ? x / y : bb_eval_mask(ow))
+                                               : (y ? x % y : x);
+            *out = r & bb_eval_mask(w);
+            return 1;
+        }
         default:
-            return 0; /* DIV/MOD (zero-divisor rule), anything new */
+            return 0; /* anything new */
         }
     }
     case EXPR_UNARY: {
