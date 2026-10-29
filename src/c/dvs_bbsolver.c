@@ -535,6 +535,36 @@ static dvs_bv_t ext_ref(dvs_bbsolver_t *S, dvs_bv_t v, dvs_expr_t ref,
     return bb_signed(S, ref, 0) ? sext_to(S, v, target) : zext_to(S, v, target);
 }
 
+/* Is the divisor `r` (the bits of `ref`, extended) always 0 or a power of
+ * two? True for constant bits with at most one set, and for an unsigned
+ * `1 << s` (one-hot, or 0 once s reaches the width). DV_URW_POW2=0 = never. */
+static int bb_pow2_or_zero(dvs_bbsolver_t *S, dvs_expr_t ref, dvs_bv_t r) {
+    static int off = -1;
+    if (off < 0) { const char *e = getenv("DV_URW_POW2"); off = e && *e == '0'; }
+    if (off) return 0;
+    uint32_t ones = 0, i;
+    for (i = 0; i < r.size; i++) {
+        if (r.bits[i] == DVS_AIG_TRUE) ones++;
+        else if (r.bits[i] != DVS_AIG_FALSE) break;
+    }
+    if (i == r.size) return ones <= 1;
+    /* A signed divisor would be sign-extended: 1 << (w-1) is then not one-hot. */
+    if (bb_signed(S, ref, 0)) return 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    /* Follow substituted variables to their definitions. */
+    for (int k = 0; kp && *kp == EXPR_VAR && k < 8; k++) {
+        uint32_t id = ((const ExprVar *)kp)->var_id;
+        if (!S->subst || id >= S->n_vars || S->subst[id] == EXPR_NULL) break;
+        ref = S->subst[id];
+        kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    }
+    if (!kp || *kp != EXPR_BINARY || bb_signed(S, ref, 0)) return 0;
+    const ExprBinary *b = (const ExprBinary *)kp;
+    if (b->op != DVS_BIN_LSHIFT) return 0;
+    ExprKind *lk = (ExprKind *)POOL_PTR(S->problem, b->lhs);
+    return lk && *lk == EXPR_CONST && ((const ExprConst *)lk)->value == 1;
+}
+
 /* Forward decl — needed because bv_for_var may recurse through bb_expr. */
 static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t hint_width);
 static dvs_bv_t bb_popcount(dvs_bbsolver_t *S, dvs_expr_t operand, uint32_t W);
@@ -1927,6 +1957,14 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
         r = ext_ref(S, r, b->rhs, w);
         if (!sgn) {
             if (b->op == DVS_BIN_DIV) return dvs_bb_udiv(S->bb, l, r);
+            /* r is 0 or a power of two: x urem r == x & (r - 1), exactly
+             * (r == 0 gives an all-ones mask, and x urem 0 == x). */
+            if (bb_pow2_or_zero(S, b->rhs, r)) {
+                dvs_bv_t m = dvs_bb_and(S->bb, l,
+                    dvs_bb_sub(S->bb, r, dvs_bb_value_u64(S->bb, w, 1)));
+                dvs_bbword_note_urem(S->word, l, r, m);
+                return m;
+            }
             dvs_bv_t m = dvs_bb_urem(S->bb, l, r);
             dvs_bbword_note_urem(S->word, l, r, m);
             return m;
