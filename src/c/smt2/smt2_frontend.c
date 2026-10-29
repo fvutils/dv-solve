@@ -5588,6 +5588,11 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
     if (!fe->verilator_mode) {
         const char *sim = getenv("DV_SIM");
         dvs_bbsolver_set_presim(fe->bb_solver, !(sim && *sim == '0'));
+    } else {
+        /* Keep the clauses so a cache hit's rediversify can take a fresh
+         * seeded base model each epoch: re-flipping one cached model gives
+         * the same answer on every call when no single-bit flip is legal. */
+        dvs_bbsolver_set_resample(fe->bb_solver, 1);
     }
     int rc = dvs_bbsolver_check(fe->bb_solver, fe->seed);
     fe->bb_model_valid = (rc == DVS_BB_SAT);
