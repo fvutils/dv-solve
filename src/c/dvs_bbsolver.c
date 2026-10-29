@@ -1148,7 +1148,11 @@ static void compute_components(dvs_bbsolver_t *S) {
     uint8_t *used = (uint8_t *)calloc(nv ? nv : 1, 1);
     dvs_expr_t *stk = NULL;
     size_t n = 0, scap = 0;
-    if (!seen_by || !used || !dvs_uf_init(&uf, nv + nc)) {
+    /* Softs take uf nodes after the constraints (nv + nc + i). */
+    uint32_t ns = 0;
+    for (dvs_expr_t s = S->problem->softs_head; s != EXPR_NULL; ns++)
+        s = ((SoftSpec *)POOL_PTR(S->problem, s))->next;
+    if (!seen_by || !used || !dvs_uf_init(&uf, nv + nc + ns)) {
         free(seen_by); free(used);
         return;
     }
@@ -1173,11 +1177,23 @@ static void compute_components(dvs_bbsolver_t *S) {
             for (uint32_t i_ = S->slice_head[v_]; i_ != BB_NO_SLICE;           \
                  i_ = S->slices[i_].next) CC_EDGE(S->slices[i_].eref);         \
     } while (0)
-    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL && me < nc; me++) {
-        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
-        cur = cs->next;
-        if (S->constraint_skip && S->constraint_skip[me]) continue;
-        CC_EDGE(cs->root);
+    for (int phase = 0; phase < 2; phase++) {
+    dvs_expr_t cur = phase ? S->problem->softs_head : S->problem->constraints_head;
+    uint32_t lim = phase ? nc + ns : nc;
+    if (phase) me = nc;
+    for (; cur != EXPR_NULL && me < lim; me++) {
+        dvs_expr_t root;
+        if (phase) {
+            SoftSpec *ss = (SoftSpec *)POOL_PTR(S->problem, cur);
+            cur = ss->next;
+            root = ss->root;
+        } else {
+            ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+            cur = cs->next;
+            if (S->constraint_skip && S->constraint_skip[me]) continue;
+            root = cs->root;
+        }
+        CC_EDGE(root);
         while (n > 0) {
             dvs_expr_t r = stk[--n];
             ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, r);
@@ -1247,6 +1263,23 @@ static void compute_components(dvs_bbsolver_t *S) {
                 break;
             }
         }
+    }
+    }
+    /* A dist only constrains its own var; an alldiff group ties its vars. */
+    for (dvs_expr_t d = S->problem->dists_head; d != EXPR_NULL; ) {
+        DistSpec *ds = (DistSpec *)POOL_PTR(S->problem, d);
+        if (ds->var_id < nv) used[ds->var_id] = 1;
+        d = ds->next;
+    }
+    for (dvs_expr_t a = S->problem->allDiff_head; a != EXPR_NULL; ) {
+        AllDiffSpec *as = (AllDiffSpec *)POOL_PTR(S->problem, a);
+        uint32_t *ids = (uint32_t *)(as + 1);
+        for (uint32_t i = 0; i < as->n_vars; i++) {
+            if (ids[i] >= nv) continue;
+            used[ids[i]] = 1;
+            if (ids[0] < nv) dvs_uf_union(&uf, ids[0], ids[i]);
+        }
+        a = as->next;
     }
     dvs_components_from_uf(&S->comps, &uf, used, nv);
 done:
@@ -2781,6 +2814,22 @@ static int _bb_encode_alldiff(dvs_bbsolver_t *S) {
     return 1;
 }
 
+/* L0 decomposition ladder: per-component recognizers, tried in order. A
+ * recognizer returns 1 if it would solve component `comp` itself, 0 to fall
+ * through to the whole-problem bit-blast. None yet, so every component falls
+ * through and the SAT call is unchanged. */
+typedef int (*bb_comp_recognizer_t)(dvs_bbsolver_t *S, uint32_t comp);
+static const bb_comp_recognizer_t bb_comp_ladder[] = { NULL };
+
+/** Count components some ladder recognizer claims (stats only). */
+static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S) {
+    uint32_t claimed = 0;
+    for (uint32_t c = 0; c < S->comps.n_comp; c++)
+        for (size_t r = 0; bb_comp_ladder[r]; r++)
+            if (bb_comp_ladder[r](S, c)) { claimed++; break; }
+    return claimed;
+}
+
 static int _bb_encode(dvs_bbsolver_t *S) {
     /* A-4 soundness guard: the bit-blaster does not encode Source groups.
      * pyvsc never emits these on the dv-solve path, but if one ever appears we
@@ -2798,8 +2847,9 @@ static int _bb_encode(dvs_bbsolver_t *S) {
     /* Component census for the decomposition ladder; stats-only for now. */
     if (getenv("DV_BB_STATS")) {
         compute_components(S);
-        fprintf(stderr, "[bb-comp] n=%u largest=%u vars=%u\n",
-                S->comps.n_comp, S->comps.largest, S->n_vars);
+        fprintf(stderr, "[bb-comp] n=%u largest=%u vars=%u claimed=%u\n",
+                S->comps.n_comp, S->comps.largest, S->n_vars,
+                bb_comp_ladder_claims(S));
     }
     /* bv_for_var uses S->resolving as its recursion guard; start clear. */
     if (S->resolving) memset(S->resolving, 0, S->n_vars);
