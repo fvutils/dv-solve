@@ -6352,8 +6352,7 @@ static int _ss_const_u(dvs_bbsolver_t *S, dvs_expr_t e, uint64_t *c) {
 }
 
 /* r with its predicate wrappers peeled: 1 == p is p, ite(c, 1, 0) is c, an
- * ite on a var-free cond is its taken arm. EXPR_NULL when an ite is none of
- * these. */
+ * ite on a var-free cond is its taken arm. Any other ite is returned as is. */
 static dvs_expr_t _ss_unwrap(dvs_bbsolver_t *S, dvs_expr_t r) {
     const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
     for (int hops = 0; k && hops < 32; hops++) {
@@ -6381,7 +6380,7 @@ static dvs_expr_t _ss_unwrap(dvs_bbsolver_t *S, dvs_expr_t r) {
             r = _ss_strip(S, tv ? ie->then_e : ie->else_e);
         else if (!bb_const_u(S, ie->then_e, &tv) || !bb_const_u(S, ie->else_e, &ev) || tv != 1 ||
                  ev != 0)
-            return EXPR_NULL;
+            break;
         else
             r = _ss_strip(S, ie->cond);
         k = (const ExprKind *)POOL_PTR(S->problem, r);
@@ -6470,24 +6469,28 @@ static void _ss_hull(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v, uint64_t *bias
 
 /* A superset of the values of v that the 1-bit predicate r allows, as up to
  * DVS_DS_IVALS sorted disjoint intervals [il[i], ih[i]]: compares of v with
- * constants (_ss_hull, unbiased) under 1-bit & and |. Returns the count, or
- * -1 when r is not of that shape or does not narrow v. */
+ * constants (_ss_hull, unbiased) under 1-bit &, | and ite (the union of the
+ * arms: either may be taken). Returns the count, or -1 when r is not of that
+ * shape or does not narrow v. */
 static int _ss_ivals(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v, uint64_t *il, uint64_t *ih,
                      int depth) {
     uint64_t m = bb_eval_mask(S->vars[v].width);
-    dvs_expr_t u = _ss_unwrap(S, r);
+    dvs_expr_t u = _ss_unwrap(S, _ss_strip(S, r));
     if (u == EXPR_NULL || depth > 16) return -1;
     u = _ss_strip(S, u);
     const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, u);
     if (!k) return -1;
-    if (*k == EXPR_BINARY) {
+    int is_ite = *k == EXPR_ITE;
+    if (*k == EXPR_BINARY || is_ite) {
         const ExprBinary *b = (const ExprBinary *)k;
-        int is_or = b->op == DVS_BIN_OR || b->op == DVS_BIN_BOR;
+        const ExprITE *ie = (const ExprITE *)k;
+        dvs_expr_t x = is_ite ? ie->then_e : b->lhs, y = is_ite ? ie->else_e : b->rhs;
+        int is_or = is_ite || b->op == DVS_BIN_OR || b->op == DVS_BIN_BOR;
         if ((is_or || b->op == DVS_BIN_AND || b->op == DVS_BIN_BAND) &&
-            bb_self_width(S, b->lhs, 0) == 1 && bb_self_width(S, b->rhs, 0) == 1) {
+            bb_self_width(S, x, 0) == 1 && bb_self_width(S, y, 0) == 1) {
             uint64_t al[DVS_DS_IVALS], ah[DVS_DS_IVALS], bl[DVS_DS_IVALS], bh[DVS_DS_IVALS];
-            int na = _ss_ivals(S, b->lhs, v, al, ah, depth + 1);
-            int nb = _ss_ivals(S, b->rhs, v, bl, bh, depth + 1);
+            int na = _ss_ivals(S, x, v, al, ah, depth + 1);
+            int nb = _ss_ivals(S, y, v, bl, bh, depth + 1);
             int n = 0;
             if (!is_or) {
                 /* A side that does not narrow is the full range. */
@@ -6534,6 +6537,49 @@ static int _ss_ivals(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v, uint64_t *il, 
     il[0] = l;
     ih[0] = h;
     return 1;
+}
+
+/* The intersection of _ss_ivals over the leaves that read v and another var
+ * (vs[loff[li]..loff[li + 1]) are leaf li's vars): a superset of v's values.
+ * -1 when none narrows v. */
+static int _ds_proj(dvs_bbsolver_t *S, const dvs_expr_t *lf, size_t n_lf, const size_t *loff,
+                    const uint32_t *vs, uint32_t v, uint64_t *il, uint64_t *ih) {
+    int na = -1;
+    for (size_t li = 0; li < n_lf && na != 0; li++) {
+        size_t i = loff[li];
+        if (loff[li + 1] - i < 2) continue;
+        while (i < loff[li + 1] && vs[i] != v) i++;
+        if (i == loff[li + 1]) continue;
+        uint64_t bl[DVS_DS_IVALS], bh[DVS_DS_IVALS], cl[DVS_DS_IVALS], ch[DVS_DS_IVALS];
+        int nb = _ss_ivals(S, lf[li], v, bl, bh, 0), n = 0;
+        if (nb < 0) continue;
+        if (na < 0) {
+            memcpy(il, bl, (size_t)nb * sizeof(*il));
+            memcpy(ih, bh, (size_t)nb * sizeof(*ih));
+            na = nb;
+            continue;
+        }
+        for (int a = 0, b = 0; a < na && b < nb;) {
+            uint64_t l2 = il[a] > bl[b] ? il[a] : bl[b];
+            uint64_t h2 = ih[a] < bh[b] ? ih[a] : bh[b];
+            if (l2 <= h2) { cl[n] = l2; ch[n++] = h2; }
+            if (ih[a] < bh[b]) a++; else b++;
+        }
+        memcpy(il, cl, (size_t)n * sizeof(*il));
+        memcpy(ih, ch, (size_t)n * sizeof(*ih));
+        na = n;
+    }
+    return na;
+}
+
+/* x lies in one of the n sorted intervals (n < 0: no intervals, all do). */
+static int _ds_in(const uint64_t *il, const uint64_t *ih, int n, uint64_t x) {
+    if (n < 0) return 1;
+    for (int i = 0; i < n; i++) {
+        if (x < il[i]) return 0;
+        if (x <= ih[i]) return 1;
+    }
+    return 0;
 }
 
 static int _ss_u64_cmp(const void *a, const void *b) {
@@ -7194,6 +7240,7 @@ static int _divsamp(dvs_bbsolver_t *S) {
             memcpy(dom_all, S->ds_dom, S->ds_n_dom * sizeof(*dom_all));
             cap_d = n_d = S->ds_n_dom;
         }
+        uint64_t pl[DVS_DS_IVALS], ph[DVS_DS_IVALS];
         for (uint32_t v = 0; v < nv; v++) {
             if (role[v] != 2) continue;
             int have = 0;
@@ -7202,9 +7249,15 @@ static int _divsamp(dvs_bbsolver_t *S) {
             kh[v] = bb_eval_mask(S->vars[v].width);
             for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u])
                 _ss_hull(S, lf[u], v, &bias[v], &have, &kl[v], &kh[v]);
+            /* The leaves of v and other vars, projected on v (mode ? a == 2 :
+             * a == 7 allows a in {2, 7}); the enumeration keeps only those. */
+            int np = bias[v] == 0 ? _ds_proj(S, lf, n_lf, loff, vs, v, pl, ph) : -1;
             if (bias[v] == 0) {
                 if (lo[v] > kl[v]) kl[v] = lo[v];
                 if (hi[v] < kh[v]) kh[v] = hi[v];
+                if (np == 0) goto out;
+                if (np > 0 && pl[0] > kl[v]) kl[v] = pl[0];
+                if (np > 0 && ph[np - 1] < kh[v]) kh[v] = ph[np - 1];
             }
             if (kl[v] > kh[v]) goto out;       /* empty: the normal path decides */
             if (cached) {
@@ -7248,7 +7301,7 @@ static int _divsamp(dvs_bbsolver_t *S) {
             doff[v] = n_d;
             for (uint64_t key = kl[v]; ; key++) {
                 uint64_t x = key ^ bias[v];
-                if ((x & fmask[v]) == fval[v]) {
+                if ((x & fmask[v]) == fval[v] && _ds_in(pl, ph, np, x)) {
                     int ok = 1;
                     vval[v] = x;
                     for (uint32_t u = uhead[v]; ok && u != UINT32_MAX; u = unext[u]) {
@@ -8195,3 +8248,4 @@ uint64_t dvs_bbsolver_num_sat_vars(const dvs_bbsolver_t *S) {
     if (S) _cnf_flush((dvs_bbsolver_t *)S);
     return S ? dvs_aig_cnf_num_vars(S->cnf) : 0;
 }
+

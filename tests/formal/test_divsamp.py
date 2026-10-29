@@ -244,6 +244,44 @@ def test_box_proposals(case, key):
         assert len(tries) == _N and max(tries) <= 16, err[-2000:]
 
 
+# A leaf that reads two vars (dist.dist_if): `mode ? (ranges & len==2) :
+# (ranges & len==0x6b)`. len has no unary hull, so the box is projected onto
+# each var through the ite's arms; without that every draw is rejected.
+def _dist_if(seed: int) -> str:
+    zl = "((_ zero_extend 24) len)"
+
+    def rng(lo, hi):
+        return f"(bvand (__Vbv (bvuge {zl} #x{lo:08x})) (__Vbv (bvule {zl} #x{hi:08x})))"
+
+    def arm(r0, r1, k):
+        return (f"(bvand (bvor {rng(*r0)} {rng(*r1)}) "
+                f"(ite (__Vbool (__Vbv (bvule #x0000000b #x0000000c))) "
+                f"(__Vbv (= {zl} #x{k:08x})) (__Vbv (= {zl} #x00000007))))")
+    return f"""(reset)
+(set-option :produce-models true)
+(set-option :random-seed {seed})
+(set-logic QF_ABV)
+(define-fun __Vbv ((b Bool)) (_ BitVec 1) (ite b #b1 #b0))
+(define-fun __Vbool ((v (_ BitVec 1))) Bool (= #b1 v))
+(declare-fun len () (_ BitVec 8))
+(declare-fun mode () (_ BitVec 1))
+(assert (= #b1 (ite (__Vbool mode) {arm((5, 0x40), (1, 4), 2)} {arm((0x81, 0xff), (0x40, 0x80), 0x6b)})))
+(check-sat)
+(get-value (len mode))
+"""
+
+
+def test_two_var_leaf_projection():
+    n = 200
+    verdicts, models, err = _run("".join(_dist_if(7000 + i) for i in range(n)))
+    assert verdicts == ["sat"] * n
+    for m in models:
+        assert (m["mode"], m["len"]) in ((1, 2), (0, 0x6b)), m
+    assert {m["mode"] for m in models} == {0, 1}
+    tries = [int(t) for t in re.findall(r"\[bb-divsamp\].*tries=(\d+) -> sat", err)]
+    assert len(tries) == n and max(tries) <= 8, err[-2000:]
+
+
 # Shapes the proposals must decline: a signed compare, and an add narrower
 # than its operand. They still give valid, well-spread models.
 _SG = 1 << (_XW - 1)
