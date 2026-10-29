@@ -4786,7 +4786,16 @@ int dvs_bbsolver_resample(dvs_bbsolver_t *S, uint64_t seed) {
  * diversify it. Returns 0 on success, -1 leaving the cached model in place. */
 static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
     S->seed = seed;
-    int rc = DVS_BB_UNKNOWN;
+    /* The popcount sampler draws a model that needs no diversify; a miss
+     * leaves the cached model in place. (No _sim_check: the verdict is
+     * already SAT, and a second kissat solve is not supported.) */
+    int rc = _popsamp(S);
+    if (rc == DVS_BB_SAT) {
+        S->last_result = DVS_BB_SAT;
+        S->redivs_since_base = 0;
+        return 0;
+    }
+    rc = DVS_BB_UNKNOWN;
     if (S->base_sim && !S->asserts_lost) rc = _sim_once(S);
     if (rc != DVS_BB_SAT && S->resample) rc = _sat_fresh(S);
     if (rc != DVS_BB_SAT) return -1;

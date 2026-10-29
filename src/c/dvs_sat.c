@@ -178,7 +178,8 @@ static int lz_grow(dvs_sat_t *s, void **buf, size_t *cap, size_t n, size_t elem)
 
 static void lz_log(dvs_sat_t *s, uint32_t op, uint64_t v) {
     if (s->lz_failed) return;
-    if (lz_grow(s, (void **)&s->lz_ops, &s->lz_capops, s->lz_nops, sizeof(*s->lz_ops)))
+    if (s->lz_nops >= s->lz_capops
+            && lz_grow(s, (void **)&s->lz_ops, &s->lz_capops, s->lz_nops, sizeof(*s->lz_ops)))
         return;
     s->lz_ops[s->lz_nops].op = op;
     s->lz_ops[s->lz_nops].v = v;
@@ -189,7 +190,8 @@ static void lz_log(dvs_sat_t *s, uint32_t op, uint64_t v) {
 static void vt_add(dvs_sat_t *s, dvs_sat_lit_t lit) {
     if (s->impl) { s->vt->add(s->impl, lit); return; }
     if (s->lz_failed) return;
-    if (lz_grow(s, (void **)&s->lz_lits, &s->lz_caplits, s->lz_nlits, sizeof(*s->lz_lits)))
+    if (s->lz_nlits >= s->lz_caplits
+            && lz_grow(s, (void **)&s->lz_lits, &s->lz_caplits, s->lz_nlits, sizeof(*s->lz_lits)))
         return;
     s->lz_lits[s->lz_nlits++] = lit;
     if (s->lz_nops && s->lz_ops[s->lz_nops - 1].op == LZ_ADD) s->lz_ops[s->lz_nops - 1].v++;
