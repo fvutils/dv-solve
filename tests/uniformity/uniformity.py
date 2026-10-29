@@ -61,7 +61,7 @@ _REPO = _HERE.parents[1]
 sys.path.insert(0, str(_HERE))
 
 ARMS_ALL = ("default", "cdcl", "verilator", "api-cache", "uniform")
-_VAL = re.compile(r"\(\s*(\|[^|]*\||[^\s()]+)\s+(#b[01]+|#x[0-9a-fA-F]+|true|false)\s*\)")
+_VAL = re.compile(r"\(\s*(\|[^|]*\||[^\s()]+|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))\s+(#b[01]+|#x[0-9a-fA-F]+|true|false)\s*\)")
 
 
 # --------------------------------------------------------------------------
@@ -113,6 +113,11 @@ def enumerate_solutions(p: Problem, cap: int) -> list[tuple] | None:
         walk(a)
     vars_ = []
     for n in p.names:
+        if n.startswith("("):
+            # A term such as (select a #x0): parse it in the problem's scope.
+            t = z3.parse_smt2_string(text + f"\n(assert (= {n} {n}))")[-1]
+            vars_.append(t.arg(0))
+            continue
         key = n[1:-1] if n.startswith("|") else n
         if key not in seen:
             # Declared but unconstrained: every value is a solution.
@@ -183,7 +188,7 @@ def _parse_models(text: str, names: list[str]) -> list[tuple | None]:
             res.append(None)
             continue
         for n, v in _VAL.findall(t):
-            cur[n] = v
+            cur[" ".join(n.split())] = v
         if len(cur) == len(names) and all(n in cur for n in names):
             res.append(tuple(_lit(cur[n]) for n in names))
             cur = {}

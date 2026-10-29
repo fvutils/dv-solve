@@ -30,6 +30,32 @@ from uniformity import Problem
 _GV = re.compile(r"^\(get-value \((.*)\)\)\s*$")
 
 
+
+def split_terms(s: str) -> list[str]:
+    """Top-level SMT-LIB terms of s: symbols, or parenthesised terms such as
+    `(select a #x00000000)` (whitespace inside a term collapsed to one space)."""
+    out, depth, cur = [], 0, ""
+    for ch in s:
+        if ch == "(":
+            if depth == 0 and cur.strip():
+                out.append(cur.strip())
+                cur = ""
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if depth == 0 and (ch.isspace() or ch == ")"):
+            if ch == ")":
+                cur += ch
+            if cur.strip():
+                out.append(" ".join(cur.replace("(", "( ").replace(")", " )").split())
+                           .replace("( ", "(").replace(" )", ")"))
+            cur = ""
+            continue
+        cur += ch
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
 def _is_sat(body: list[str]) -> bool:
     import z3
     sv = z3.Solver()
@@ -62,7 +88,7 @@ def calls(text: str) -> list[tuple[list[str], list[str]]]:
                 continue
             m = _GV.match(t)
             if m:
-                names = m.group(1).split()
+                names = split_terms(m.group(1))
             elif t.startswith("(push"):
                 stack += [[] for _ in range(int(t[5:-1].strip() or 1))]
             elif t.startswith("(pop"):
@@ -109,7 +135,7 @@ def load(path: Path) -> list[Problem]:
                 name, body = l.split()[2], []
                 note = l
             elif l.startswith("; get-value "):
-                names = l[len("; get-value "):].split()
+                names = split_terms(l[len("; get-value "):])
             elif l.startswith("; end"):
                 out.append(Problem(name=name, body=body, names=names, note=note,
                                    source=f"corpus:{f.name}"))
