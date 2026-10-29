@@ -23,13 +23,15 @@
  *            with --reuse rediversify the 0.3 re-flip of one model), as the
  *            lifecycle in docs/verilator_integration.md prescribes. The
  *            problem is still built every call.
- *   buffer   each distinct problem built once into a dvs_handle_t on the
+ *   buffer   each problem shape built once into a dvs_handle_t on the
  *            engine the front end used, and every call one dvs_randomize()
- *            (pass_buffer). Calls with add-ons are left out; api/api-cache
+ *            (pass_buffer). Literals that vary between calls of a shape are
+ *            STATE variables (CDCL); --no-lift keys handles by the exact
+ *            problem. Calls with add-ons are left out; api/api-cache
  *            print their cost on the same set ("no add-ons").
  *
  * Usage: bench_vlt_replay <cmds.smt2> [--solver PATH] [--reps N]
- *        [--passes pipe,text,api,api-cache,buffer] [--quality] [--census] [--dump-values FILE]
+ *        [--passes pipe,text,api,api-cache,buffer] [--no-lift] [--quality] [--census] [--dump-values FILE]
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -449,7 +451,31 @@ typedef struct {
     Memo           memo;
     dvs_expr_t    *tmp;
     uint32_t       tmp_cap;
+    /* Literal lifting (pass_buffer): LIFT_RECORD builds the problem with
+     * each liftable literal as 0 and records its value, so calls that differ
+     * only in those literals build the same problem; LIFT_BUILD makes the
+     * literals lift_mask[] marks STATE variables lift_id[slot]. Both walk the
+     * expressions as trees (no memo), so slot i is the same literal in every
+     * call of one shape. */
+    int            lift;
+    uint64_t       skh;        /* LIFT_RECORD: the shape, literals left out */
+    int64_t       *cv;         /* LIFT_RECORD: every slot's value           */
+    uint8_t       *cw;         /* ... and width (0: not liftable)           */
+    uint32_t       ncv, cv_cap, visits, no_lift;
+    int            over;       /* the tree walk passed LIFT_MAX nodes       */
+    const uint8_t *lift_mask;  /* LIFT_BUILD: per slot, 1 = lift            */
+    const uint8_t *lift_w;     /* ... and cw from a LIFT_RECORD of the shape */
+    uint32_t       lift_n;
+    const uint32_t *lift_id;   /* variable id of each lifted slot */
 } Rebuild;
+
+enum { LIFT_OFF, LIFT_RECORD, LIFT_BUILD };
+#define LIFT_MAX (1u << 16)
+
+static void skh_mix(Rebuild *r, uint64_t v) {
+    r->skh = (r->skh ^ v) * 0x9e3779b97f4a7c15ull;
+    r->skh ^= r->skh >> 29;
+}
 
 static dvs_expr_t rb(Rebuild *r, dvs_expr_t ref);
 
@@ -460,6 +486,27 @@ static dvs_expr_t rb_uncached(Rebuild *r, dvs_expr_t ref) {
     switch (*k) {
     case EXPR_CONST: {
         ExprConst *n = (ExprConst *)k;
+        if (r->lift) {
+            /* In-set elements and range bounds stay literals. */
+            int ok = n->width > 0 && n->width < 64 && !r->no_lift;
+            uint32_t i = r->ncv;
+            if (r->lift == LIFT_BUILD) {
+                r->ncv++;
+                if (i < r->lift_n && r->lift_mask[i]) return dvs_builder_expr_var(b, r->lift_id[i]);
+            } else {
+                if (r->ncv == r->cv_cap) {
+                    r->cv_cap = r->cv_cap ? 2 * r->cv_cap : 64;
+                    r->cv = realloc(r->cv, r->cv_cap * sizeof *r->cv);
+                    r->cw = realloc(r->cw, r->cv_cap * sizeof *r->cw);
+                }
+                r->cv[i] = n->value;
+                r->cw[i] = ok ? (uint8_t)n->width | (n->is_signed ? 0x80 : 0) : 0;
+                r->ncv++;
+                skh_mix(r, ((uint64_t)n->width << 8 | n->is_signed) * 3 + ok);
+                if (!ok) skh_mix(r, (uint64_t)n->value);
+                else return dvs_builder_expr_const_sized(b, 0, n->is_signed, n->width);
+            }
+        }
         return dvs_builder_expr_const_sized(b, n->value, n->is_signed, n->width);
     }
     case EXPR_VAR:
@@ -489,7 +536,9 @@ static dvs_expr_t rb_uncached(Rebuild *r, dvs_expr_t ref) {
         dvs_expr_t v = rb(r, n->value);
         dvs_expr_t *src = expr_in_set_elems(p, ref);
         dvs_expr_t *el = malloc((ne ? ne : 1) * sizeof(dvs_expr_t));
+        r->no_lift++;
         for (uint32_t i = 0; i < ne; i++) el[i] = rb(r, src[i]);
+        r->no_lift--;
         dvs_expr_t out = dvs_builder_expr_in_set(b, v, ne, el);
         free(el);
         return out;
@@ -500,7 +549,9 @@ static dvs_expr_t rb_uncached(Rebuild *r, dvs_expr_t ref) {
         dvs_expr_t v = rb(r, n->value);
         dvs_expr_t *los = expr_in_ranges_los(p, ref), *his = expr_in_ranges_his(p, ref);
         dvs_expr_t *el = malloc((2 * nr ? 2 * nr : 1) * sizeof(dvs_expr_t));
+        r->no_lift++;
         for (uint32_t i = 0; i < nr; i++) { el[i] = rb(r, los[i]); el[nr + i] = rb(r, his[i]); }
+        r->no_lift--;
         dvs_expr_t out = dvs_builder_expr_in_ranges(b, v, nr, el, el + nr);
         free(el);
         return out;
@@ -554,8 +605,53 @@ static dvs_expr_t rb_uncached(Rebuild *r, dvs_expr_t ref) {
     exit(2);
 }
 
+/* The shape of a node, for LIFT_RECORD: kind and the fields that are not
+ * child references or literal values. */
+static void skh_node(Rebuild *r, const ExprKind *k) {
+    skh_mix(r, *k);
+    switch (*k) {
+    case EXPR_VAR:     skh_mix(r, ((const ExprVar *)k)->var_id); break;
+    case EXPR_BINARY:  skh_mix(r, ((const ExprBinary *)k)->op); break;
+    case EXPR_UNARY:   skh_mix(r, ((const ExprUnary *)k)->op); break;
+    case EXPR_IN_SET:  skh_mix(r, ((const ExprInSet *)k)->n_elems); break;
+    case EXPR_IN_RANGES: skh_mix(r, ((const ExprInRanges *)k)->n_ranges); break;
+    case EXPR_EXTEND: {
+        const ExprExtend *n = (const ExprExtend *)k;
+        skh_mix(r, (uint64_t)n->from_bits << 33 | (uint64_t)n->to_bits << 1 | n->sign_extend);
+        break;
+    }
+    case EXPR_SV_CAST: {
+        const ExprSvCast *n = (const ExprSvCast *)k;
+        skh_mix(r, (uint64_t)n->from_bits << 34 | (uint64_t)n->to_bits << 2
+                   | n->sign_extend << 1 | n->dst_signed);
+        break;
+    }
+    case EXPR_EXTRACT: {
+        const ExprExtract *n = (const ExprExtract *)k;
+        skh_mix(r, (uint64_t)n->hi_bit << 32 | n->lo_bit);
+        break;
+    }
+    case EXPR_CONCAT:  skh_mix(r, ((const ExprConcat *)k)->lo_width); break;
+    case EXPR_SUM:     skh_mix(r, ((const ExprSum *)k)->n_vars); break;
+    case EXPR_ARRAY_SELECT: {
+        const ExprArraySelect *n = (const ExprArraySelect *)k;
+        skh_mix(r, (uint64_t)n->base_var_id << 32 | n->n_elems);
+        break;
+    }
+    default: break;
+    }
+}
+
 static dvs_expr_t rb(Rebuild *r, dvs_expr_t ref) {
     if (ref == EXPR_NULL) return EXPR_NULL;
+    if (r->lift) {
+        if (r->over || ++r->visits > LIFT_MAX) {
+            r->over = 1;
+            return dvs_builder_expr_const_sized(r->b, 0, 0, 1);
+        }
+        if (r->lift == LIFT_RECORD) skh_node(r, POOL_PTR(r->p, ref));
+        return rb_uncached(r, ref);
+    }
     dvs_expr_t *slot = memo_slot(&r->memo, ref);
     if (*slot == ref) return r->memo.val[slot - r->memo.key];
     dvs_expr_t out = rb_uncached(r, ref);
@@ -601,21 +697,52 @@ static dvs_problem_t *rebuild(Rebuild *r, dvs_problem_t *p, size_t *size) {
     r->p = p;
     memo_clear(&r->memo, p->pool.used / 8);
     uint32_t n;
+    r->skh = 0;
+    r->ncv = r->visits = 0;
+    r->over = 0;
     n = walk(p, p->vars_head, &r->tmp, &r->tmp_cap);
     for (uint32_t i = n; i-- > 0;) {
         VarSpec *v = POOL_PTR(p, r->tmp[i]);
         dvs_expr_t vr = dvs_builder_add_var(b, v->var_id, v->width, v->is_signed, v->lo, v->hi);
         if (v->kind == DVS_VAR_AUX) dvs_builder_mark_var_aux(b, vr);
     }
+    if (r->lift == LIFT_BUILD) {
+        for (uint32_t i = 0; i < r->lift_n; i++) {
+            if (!r->lift_mask[i]) continue;
+            uint32_t w = r->lift_w[i] & 0x7f, sg = r->lift_w[i] >> 7;
+            int64_t lo = sg ? -(1ll << (w - 1)) : 0;
+            int64_t hi = sg ? (1ll << (w - 1)) - 1 : (int64_t)((1ull << w) - 1);
+            dvs_builder_add_var(b, r->lift_id[i], w, sg, lo, hi);
+            dvs_builder_set_var_kind(b, r->lift_id[i], DVS_VAR_STATE);
+        }
+        /* The handle then solves on CDCL, whose compile wants ids 0..n-1
+         * with no gap: a gap in the captured ids (bitblast takes them)
+         * gets an unreferenced 1-bit variable. */
+        uint32_t top = 0;
+        for (uint32_t i = 0; i < r->lift_n; i++)
+            if (r->lift_mask[i] && r->lift_id[i] >= top) top = r->lift_id[i] + 1;
+        uint8_t *seen = calloc(top ? top : 1, 1);
+        for (uint32_t i = 0; i < n; i++) {
+            const VarSpec *v = POOL_PTR(p, r->tmp[i]);
+            if (v->var_id < top) seen[v->var_id] = 1;
+        }
+        for (uint32_t i = 0; i < r->lift_n; i++)
+            if (r->lift_mask[i]) seen[r->lift_id[i]] = 1;
+        for (uint32_t id = 0; id < top; id++)
+            if (!seen[id]) dvs_builder_add_var(b, id, 1, 0, 0, 1);
+        free(seen);
+    }
     n = walk(p, p->constraints_head, &r->tmp, &r->tmp_cap);
     for (uint32_t i = n; i-- > 0;) {
         ConstraintSpec *c = POOL_PTR(p, r->tmp[i]);
+        if (r->lift == LIFT_RECORD) skh_mix(r, 0xc0);
         dvs_builder_add_constraint(b, rb(r, c->root));
     }
     if (g_pin && g_pin->p == p) add_pins(b, g_pin);
     n = walk(p, p->softs_head, &r->tmp, &r->tmp_cap);
     for (uint32_t i = n; i-- > 0;) {
         SoftSpec *s = POOL_PTR(p, r->tmp[i]);
+        if (r->lift == LIFT_RECORD) skh_mix(r, 0xc1);
         dvs_builder_add_soft_constraint(b, rb(r, s->root), s->priority);
     }
     n = walk(p, p->dists_head, &r->tmp, &r->tmp_cap);
@@ -914,45 +1041,180 @@ static void pass_api(int cached, ApiStats *st) {
  * and counted. */
 typedef struct {
     double first, hot;     /* first calls (compile + solve), the rest   */
-    size_t n_first, n_hot, distinct, errors, on_bb, skip_aux;
+    size_t n_first, n_hot, distinct, errors, on_bb, skip_aux, lifted;
     double timed_wall;     /* of the timed calls                        */
 } BufStats;
 
+static int g_lift = 1;     /* --no-lift: one handle per distinct problem */
+
 typedef struct {
-    uint64_t      hash;
-    dvs_handle_t *h;
-    dvs_ref_t    *refs;
-    int64_t      *slot;
+    int            made;
+    dvs_handle_t  *h;
+    dvs_ref_t     *refs;
+    int64_t       *slot;
+    size_t         first;  /* capture that set the shape's slot widths  */
+    uint8_t       *mask;   /* per literal slot: lifted to STATE          */
+    uint32_t       n_lift, *id;   /* id: the variable of each lifted slot */
 } BufEnt;
+
+typedef struct {
+    uint64_t  key;
+    int64_t  *cv;          /* literal values, LIFT_RECORD order         */
+    uint8_t  *cw;
+    uint32_t  ncv;
+    uint32_t  group;
+} BufKey;
+
+/* Number the groups of equal keys (calls with add-ons left out). */
+static size_t group_keys(BufKey *k) {
+    size_t tab_cap = 1024, ng = 0;
+    while (tab_cap < 2 * g_ncap) tab_cap <<= 1;
+    size_t *tab = malloc(tab_cap * sizeof *tab);
+    memset(tab, 0xff, tab_cap * sizeof *tab);
+    for (size_t i = 0; i < g_ncap; i++) {
+        if (g_cap[i].n_aux) continue;
+        size_t slot = k[i].key & (tab_cap - 1);
+        for (; tab[slot] != (size_t)-1; slot = (slot + 1) & (tab_cap - 1))
+            if (k[tab[slot]].key == k[i].key) break;
+        if (tab[slot] == (size_t)-1) { tab[slot] = i; k[i].group = (uint32_t)ng++; }
+        else k[i].group = k[tab[slot]].group;
+    }
+    free(tab);
+    return ng;
+}
+
+static int cmp_pair_u64(const void *a, const void *b) {
+    const uint64_t *x = a, *y = b;
+    if (x[0] != y[0]) return x[0] < y[0] ? -1 : 1;
+    return x[1] < y[1] ? -1 : x[1] > y[1];
+}
+
+/* Calls whose problems differ only in literals (an inlined state member, a
+ * dist draw, a randc exclusion: Verilator sends them as constants) share one
+ * shape. Per shape, the literals that take more than one value are lifted
+ * to STATE variables and each call writes its values into their refs. With
+ * --no-lift, a shape is one byte-identical problem. */
+static BufKey *buf_keys(Rebuild *r, size_t *n_groups) {
+    BufKey *k = calloc(g_ncap ? g_ncap : 1, sizeof *k);
+    for (size_t i = 0; i < g_ncap; i++) {
+        Capture *cp = &g_cap[i];
+        k[i].key = cp->hash;
+        if (!g_lift || cp->n_aux) continue;
+        size_t sz;
+        r->lift = LIFT_RECORD;
+        dvs_problem_t *q = rebuild(r, cp->p, &sz);
+        r->lift = LIFT_OFF;
+        if (q && !r->over) {
+            k[i].key = fnv(q, sizeof(dvs_problem_t) + q->pool.used) ^ r->skh
+                       ^ ((uint64_t)r->ncv << 40) ^ 0x5bd1e995ull;
+            k[i].ncv = r->ncv;
+            k[i].cv = malloc((r->ncv ? r->ncv : 1) * sizeof *k[i].cv);
+            k[i].cw = malloc(r->ncv ? r->ncv : 1);
+            memcpy(k[i].cv, r->cv, r->ncv * sizeof *k[i].cv);
+            memcpy(k[i].cw, r->cw, r->ncv);
+        }
+        if (q) dvs_builder_free_problem(r->b, q, sz);
+    }
+    size_t ng = group_keys(k);
+    /* A handle with STATE variables solves on CDCL. A bitblast shape of
+     * fewer than 8 distinct problems keeps its literals: one handle per
+     * problem, on bitblast, is faster there (dist1). Lifting pays when many
+     * problems share a shape (cont7, arra0, dist5). Threshold from a sweep of
+     * 1/8/16/64; dist6 (shapes of 8-16) still prefers no lifting. */
+    uint32_t *calls = calloc(ng ? ng : 1, sizeof *calls);
+    uint32_t *nd = calloc(ng ? ng : 1, sizeof *nd);
+    uint8_t *bb = calloc(ng ? ng : 1, 1);
+    uint64_t *gh = malloc((g_ncap ? g_ncap : 1) * 2 * sizeof *gh);
+    size_t nh = 0;
+    for (size_t i = 0; i < g_ncap; i++) {
+        if (g_cap[i].n_aux) continue;
+        calls[k[i].group]++;
+        if (g_cap[i].bitblast) bb[k[i].group] = 1;
+        gh[2 * nh] = k[i].group;
+        gh[2 * nh + 1] = g_cap[i].hash;
+        nh++;
+    }
+    qsort(gh, nh, 2 * sizeof *gh, cmp_pair_u64);
+    for (size_t j = 0; j < nh; j++)
+        if (!j || gh[2 * j] != gh[2 * j - 2] || gh[2 * j + 1] != gh[2 * j - 1])
+            nd[gh[2 * j]]++;
+    free(gh);
+    int regroup = 0;
+    for (size_t i = 0; i < g_ncap; i++) {
+        uint32_t g = k[i].group;
+        if (g_cap[i].n_aux || !bb[g] || nd[g] >= 8
+            || k[i].key == g_cap[i].hash) continue;
+        k[i].key = g_cap[i].hash;
+        k[i].ncv = 0;
+        regroup = 1;
+    }
+    free(calls); free(nd); free(bb);
+    if (regroup) ng = group_keys(k);
+    *n_groups = ng;
+    return k;
+}
 
 static void pass_buffer(BufStats *st) {
     memset(st, 0, sizeof *st);
     Rebuild r;
     memset(&r, 0, sizeof r);
     r.b = dvs_builder_create(0, NULL);
-    BufEnt *ents = calloc(g_ncap ? g_ncap : 1, sizeof *ents);
-    size_t tab_cap = 1024;
-    while (tab_cap < 2 * g_ncap) tab_cap <<= 1;
-    BufEnt **tab = calloc(tab_cap, sizeof *tab);
+    size_t ng;
+    BufKey *k = buf_keys(&r, &ng);
+    BufEnt *ents = calloc(ng ? ng : 1, sizeof *ents);
+    /* The slots to lift: those whose value differs from the shape's first call. */
+    for (size_t i = 0; i < g_ncap; i++) {
+        if (g_cap[i].n_aux) continue;
+        BufEnt *e = &ents[k[i].group];
+        if (!e->mask) {
+            e->first = i;
+            e->n_lift = k[i].ncv;
+            e->mask = calloc(e->n_lift ? e->n_lift : 1, 1);
+            continue;
+        }
+        const BufKey *f = &k[e->first];
+        for (uint32_t j = 0; j < e->n_lift && j < k[i].ncv; j++)
+            if (f->cw[j] && k[i].cv[j] != f->cv[j]) e->mask[j] = 1;
+    }
     for (size_t i = 0; i < g_ncap; i++) {
         Capture *cp = &g_cap[i];
         if (cp->n_aux) { st->skip_aux++; continue; }
-        size_t slot = cp->hash & (tab_cap - 1);
-        BufEnt *e = NULL;
-        for (; tab[slot]; slot = (slot + 1) & (tab_cap - 1))
-            if (tab[slot]->hash == cp->hash) { e = tab[slot]; break; }
-        int first = !e;
+        BufEnt *e = &ents[k[i].group];
+        int first = !e->made;
         if (first) {
-            e = tab[slot] = &ents[st->distinct++];
-            e->hash = cp->hash;
+            e->made = 1;
+            st->distinct++;
+            /* Lifted slots take the ids after the problem's: compile wants
+             * ids 0..n-1 with no gap (p->n_vars counts the front end's
+             * variables, which may be more than the problem declares). */
+            int lift = 0;
+            uint32_t id = 0;
+            for (dvs_expr_t v = cp->p->vars_head; v != EXPR_NULL; ) {
+                const VarSpec *vs = POOL_PTR(cp->p, v);
+                if (vs->var_id >= id) id = vs->var_id + 1;
+                v = vs->next;
+            }
+            e->id = calloc(e->n_lift ? e->n_lift : 1, sizeof *e->id);
+            for (uint32_t j = 0; j < e->n_lift; j++)
+                if (e->mask[j]) { e->id[j] = id++; lift = 1; }
+            if (lift) {
+                r.lift = LIFT_BUILD;
+                r.lift_mask = e->mask;
+                r.lift_w = k[i].cw;
+                r.lift_n = e->n_lift;
+                r.lift_id = e->id;
+                st->lifted++;
+            }
             size_t sz;
             dvs_problem_t *q = rebuild(&r, cp->p, &sz);
+            r.lift = LIFT_OFF;
             e->h = q ? dvs_handle_new(q, sz) : NULL;
             /* The engine the front end settles on for this shape: it may
-             * answer the first call on CDCL and move to bitblast after. */
+             * answer the first call on CDCL and move to bitblast after. A
+             * handle with STATE variables solves on CDCL. */
             int bb = 0;
-            for (size_t j = i; !bb && j < g_ncap; j++)
-                bb = g_cap[j].hash == cp->hash && !g_cap[j].n_aux && g_cap[j].bitblast;
+            for (size_t j = i; !lift && !bb && j < g_ncap; j++)
+                bb = k[j].key == k[i].key && !g_cap[j].n_aux && g_cap[j].bitblast;
             if (e->h) dvs_handle_set_engine(e->h, bb ? DVS_ENGINE_BITBLAST : DVS_ENGINE_CDCL);
             if (q) dvs_builder_free_problem(r.b, q, sz);
             uint32_t n = dvs_handle_n_vars(e->h);
@@ -967,7 +1229,16 @@ static void pass_buffer(BufStats *st) {
                 }
                 v = vs->next;
             }
+            for (uint32_t j = 0; j < e->n_lift; j++) {
+                if (!e->mask[j] || e->id[j] >= n) continue;
+                e->refs[e->id[j]].addr = &e->slot[e->id[j]];
+                e->refs[e->id[j]].width = k[i].cw[j] & 0x7f;
+                e->refs[e->id[j]].is_signed = k[i].cw[j] >> 7;
+            }
         }
+        uint32_t nv = e->h ? dvs_handle_n_vars(e->h) : 0;
+        for (uint32_t j = 0; j < e->n_lift && j < k[i].ncv; j++)
+            if (e->mask[j] && e->id[j] < nv) e->slot[e->id[j]] = k[i].cv[j];
         double a = now_s();
         int rc = e->h ? dvs_randomize(e->h, e->refs, NULL, cp->seed) : DVS_RANDOMIZE_ERROR;
         double d = now_s() - a;
@@ -978,20 +1249,22 @@ static void pass_buffer(BufStats *st) {
         if (rc != (cp->unsat ? DVS_RANDOMIZE_UNSAT : DVS_RANDOMIZE_OK)) { st->errors++; continue; }
         if (cp->unsat || !g_collect) continue;
         if (!cp->vals) cp->vals = calloc(cp->n_named ? cp->n_named : 1, sizeof *cp->vals);
-        uint32_t n = dvs_handle_n_vars(e->h);
-        for (uint32_t k = 0; k < cp->n_named; k++)
-            cp->vals[k] = cp->named[k].id < n ? e->slot[cp->named[k].id] : 0;
+        for (uint32_t m = 0; m < cp->n_named; m++)
+            cp->vals[m] = cp->named[m].id < nv ? e->slot[cp->named[m].id] : 0;
         cp->got = 1;
     }
-    for (size_t j = 0; j < st->distinct; j++) {
+    for (size_t j = 0; j < ng; j++) {
         dvs_handle_free(ents[j].h);
         free(ents[j].refs);
         free(ents[j].slot);
+        free(ents[j].mask);
+        free(ents[j].id);
     }
+    for (size_t i = 0; i < g_ncap; i++) { free(k[i].cv); free(k[i].cw); }
+    free(k);
     free(ents);
-    free(tab);
     dvs_builder_destroy(r.b);
-    free(r.memo.key); free(r.memo.val); free(r.tmp);
+    free(r.memo.key); free(r.memo.val); free(r.tmp); free(r.cv); free(r.cw);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1766,6 +2039,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--calls") && i + 1 < argc) g_calls = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--quality")) g_quality = 1;
         else if (!strcmp(argv[i], "--census")) g_census = 1;
+        else if (!strcmp(argv[i], "--no-lift")) g_lift = 0;
         else if (!strcmp(argv[i], "--reuse") && i + 1 < argc) {
             const char *m = argv[++i];
             if (!strcmp(m, "rediversify")) g_rediversify = 1;
@@ -1915,7 +2189,8 @@ int main(int argc, char **argv) {
         }
         size_t n = best.n_first + best.n_hot;
         printf("buffer     %zu calls on %zu handles (%zu on bitblast, %zu with add-ons left out; "
-               "%zu errors)\n", n, best.distinct, best.on_bb, best.skip_aux, best.errors);
+               "%zu errors; %zu with lifted literals)\n", n, best.distinct, best.on_bb,
+               best.skip_aux, best.errors, best.lifted);
         printf("buffer     per call %9.1f us   (all calls)\n",
                1e6 * (best.first + best.hot) / (double)(n ? n : 1));
         printf("             first call       %7.3f s  %7.1f us\n", best.first,
