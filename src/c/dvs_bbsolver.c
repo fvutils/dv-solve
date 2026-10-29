@@ -6335,6 +6335,22 @@ static int _ss_const_pred(dvs_bbsolver_t *S, dvs_expr_t c, uint64_t *t) {
     return ok && bb_eval_pred(S, c, &none, t);
 }
 
+/* An unsigned constant: a literal, or an unsigned expression that reads no
+ * var, at its own width (`b == 3 + 1`). */
+static int _ss_const_u(dvs_bbsolver_t *S, dvs_expr_t e, uint64_t *c) {
+    if (bb_const_u(S, e, c)) return 1;
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+    if (!k || *k != EXPR_BINARY || bb_signed(S, e, 0)) return 0;
+    uint32_t w = bb_self_width(S, e, 0);
+    uint32_t *vs = NULL;
+    size_t n = 0, cap = 0;
+    uint64_t none = 0;
+    int ok = w > 0 && w <= 64 && _ds_vars(S, e, &vs, 0, &n, &cap, 0) && n == 0
+             && bb_eval(S, e, w, &none, c);
+    free(vs);
+    return ok;
+}
+
 /* Narrow the key hull [*kl,*kh] of v (key = v ^ *bias) by `t cmp const` where
  * t is v or v ^ bias through substitutions; the first such conjunct fixes the
  * bias. Other conjuncts leave the hull as is (the enumeration checks them). */
@@ -6394,8 +6410,8 @@ static void _ss_hull(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v, uint64_t *bias
         if (uh < *kh) *kh = uh;
         return;
     }
-    if (bb_const_u(S, e->rhs, &c)) t = e->lhs;
-    else if (bb_const_u(S, e->lhs, &c)) {
+    if (_ss_const_u(S, e->rhs, &c)) t = e->lhs;
+    else if (_ss_const_u(S, e->lhs, &c)) {
         t = e->rhs;
         if (op == DVS_BIN_LT) op = DVS_BIN_GT;
         else if (op == DVS_BIN_LTE) op = DVS_BIN_GTE;
