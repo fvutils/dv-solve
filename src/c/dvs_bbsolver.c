@@ -4175,7 +4175,7 @@ static int _pinfast_first(void) {
     return !(e && *e == '0');
 }
 static uint64_t _en_key(const dvs_bbsolver_t *S);
-static int _enumsamp(dvs_bbsolver_t *S, int fresh);
+static int _enumsamp(dvs_bbsolver_t *S);
 
 /* The affine check runs unless DV_AFFINE=0 or the cone has fewer than
  * DV_AFFINE_MIN_INPUTS inputs: the exhaustive sweep is then at most 64 passes,
@@ -4416,7 +4416,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     if (rc == DVS_BB_UNKNOWN) rc = _sortsamp(S);
     if (rc == DVS_BB_UNKNOWN && _pinfast_first()) rc = _pinfast(S);
     if (rc == DVS_BB_UNKNOWN) rc = _divsamp(S);
-    if (rc == DVS_BB_UNKNOWN) rc = _enumsamp(S, 1);
+    if (rc == DVS_BB_UNKNOWN) rc = _enumsamp(S);
     int sampled = rc != DVS_BB_UNKNOWN;
     if (sampled) _sim_check(S, rc);
     else rc = _solve_with_sim(S);
@@ -5028,7 +5028,7 @@ static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
     if (rc != DVS_BB_SAT) rc = _sortsamp(S);
     if (rc != DVS_BB_SAT && _pinfast_first()) rc = _pinfast(S);
     if (rc != DVS_BB_SAT) rc = _divsamp(S);
-    if (rc != DVS_BB_SAT) rc = _enumsamp(S, 0);
+    if (rc != DVS_BB_SAT) rc = _enumsamp(S);
     if (rc == DVS_BB_SAT) {
         S->last_result = DVS_BB_SAT;
         S->redivs_since_base = 0;
@@ -8177,7 +8177,7 @@ out:
 #define DVS_EN_BUILDS 4     /* builds before the repay gate applies */
 #define DVS_EN_REPAY 4      /* draws per build that keep building */
 
-static int _enumsamp(dvs_bbsolver_t *S, int fresh) {
+static int _enumsamp(dvs_bbsolver_t *S) {
     if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig || S->n_frames)
         return DVS_BB_UNKNOWN;
     const char *env = getenv("DV_ENUMSAMP");   /* DV_ENUMSAMP=0 off */
@@ -8189,10 +8189,8 @@ static int _enumsamp(dvs_bbsolver_t *S, int fresh) {
     if (N < 2 || S->n_vars == 0) return DVS_BB_UNKNOWN;
     uint64_t key = _en_key(S);
     if (S->en_state == 0 || S->en_key != key) {
-        /* The build costs several SAT solves, so only a resample (which
-         * keeps S for more draws) pays for it; a check uses a table that
-         * is already there for this assert set. */
-        if (fresh) return DVS_BB_UNKNOWN;
+        /* A one-shot check builds too (API/SMT2 parity): the build is
+         * bounded by DVS_EN_MAX_NODES and costs ~0 when it declines. */
         S->en_key = key;
         if (S->en_builds >= DVS_EN_BUILDS && S->en_draws < DVS_EN_REPAY * S->en_builds) {
             S->en_state = 2;
