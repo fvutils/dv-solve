@@ -6682,7 +6682,23 @@ static int _divsamp(dvs_bbsolver_t *S) {
     }
     loff[n_lf] = n_vs;
 
-    /* Definitions: `v == e` of two or more vars, v bare and not in e. */
+    /* Definitions: `v == e` of two or more vars, v bare and not in e. The
+     * vars with the widest unary hull are defined first, so the narrow ones
+     * stay free and are drawn from their hull (a := p / b would leave p free
+     * over all of 2^64; p := a * b keeps a and b in range). */
+    bb_unary_bounds(S, lo, hi);
+    for (uint32_t v = 0; v < nv; v++) {
+        int have = 0;
+        uint64_t bs = 0;
+        kl[v] = 0;
+        kh[v] = bb_eval_mask(S->vars[v].width);
+        for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u])
+            _ss_hull(S, lf[u], v, &bs, &have, &kl[v], &kh[v]);
+        if (bs != 0) { kl[v] = 0; kh[v] = bb_eval_mask(S->vars[v].width); }
+        if (lo[v] > kl[v]) kl[v] = lo[v];
+        if (hi[v] < kh[v]) kh[v] = hi[v];
+    }
+    for (int pass = 0; pass < 2; pass++)
     for (size_t li = 0; li < n_lf; li++) {
         if (loff[li + 1] - loff[li] < 2) continue;
         const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, lf[li]);
@@ -6695,6 +6711,15 @@ static int _divsamp(dvs_bbsolver_t *S) {
             if (!sk || *sk != EXPR_VAR) continue;
             uint32_t v = ((const ExprVar *)sk)->var_id;
             if (v >= nv || def[v] != EXPR_NULL) continue;
+            if (pass == 0) {
+                /* First pass: only a var at least as wide as every other
+                 * var of the leaf. */
+                size_t s0 = n_vs, n2 = n_vs, j;
+                if (!_ds_vars(S, o, &vs, s0, &n2, &cap_vs, 0)) goto out;
+                for (j = s0; j < n2; j++)
+                    if (kh[vs[j]] - kl[vs[j]] > kh[v] - kl[v]) break;
+                if (j < n2) continue;
+            }
             size_t s0 = n_vs, n2 = n_vs, j;
             if (!_ds_vars(S, o, &vs, s0, &n2, &cap_vs, 0)) goto out;
             if (_ds_reaches(S, vs, s0, n2, def, dvoff, dvn, v, stk, seen)) continue;
@@ -6753,7 +6778,6 @@ static int _divsamp(dvs_bbsolver_t *S) {
             nmark[b] = 1;
         }
     }
-    bb_unary_bounds(S, lo, hi);
 
     /* Free-var proposals: the domain when the hull is small, else the box. */
     why = "domain";
