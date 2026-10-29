@@ -228,6 +228,13 @@ struct dvs_bbsolver_s {
     uint32_t        ss_tries, ss_hits;
     /* Div/mul sampler (_divsamp): tries and hits, as for _popsamp. */
     uint32_t        ds_tries, ds_hits;
+    /* Enumeration sampler (_enumsamp): the solutions of the leaves over
+     * en_vars (en_n_sol rows of en_n_vars values), valid while en_key
+     * matches the assert set; en_state 1 built, 2 declined for that key. */
+    uint64_t        en_key;
+    int             en_state;
+    uint32_t       *en_vars, en_n_vars;
+    uint64_t       *en_sol, en_n_sol;
 
     /* Session mode (dvs_bbsolver_sess_*): constraints arrive in batches, each
      * at the depth of its scope, and the instance outlives check-sats. */
@@ -2475,6 +2482,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     free(S->assert_roots);
     free(S->node_val);
     free(S->psk);
+    free(S->en_vars); free(S->en_sol);
     free(S->div_L); free(S->div_R); free(S->div_fo_off); free(S->div_fo_adj);
     xfree(S->alloc, S, sizeof(*S));
 }
@@ -4109,6 +4117,7 @@ static int _popsamp(dvs_bbsolver_t *S);
 static int _uniqsamp(dvs_bbsolver_t *S);
 static int _sortsamp(dvs_bbsolver_t *S);
 static int _divsamp(dvs_bbsolver_t *S);
+static int _enumsamp(dvs_bbsolver_t *S);
 
 /* Simulation, then SAT. Returns the DVS_BB_* verdict. */
 static int _solve_with_sim(dvs_bbsolver_t *S) {
@@ -4338,6 +4347,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     if (rc == DVS_BB_UNKNOWN) rc = _uniqsamp(S);
     if (rc == DVS_BB_UNKNOWN) rc = _sortsamp(S);
     if (rc == DVS_BB_UNKNOWN) rc = _divsamp(S);
+    if (rc == DVS_BB_UNKNOWN) rc = _enumsamp(S);
     int sampled = rc != DVS_BB_UNKNOWN;
     if (sampled) _sim_check(S, rc);
     else rc = _solve_with_sim(S);
@@ -4906,6 +4916,7 @@ static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
     if (rc != DVS_BB_SAT) rc = _uniqsamp(S);
     if (rc != DVS_BB_SAT) rc = _sortsamp(S);
     if (rc != DVS_BB_SAT) rc = _divsamp(S);
+    if (rc != DVS_BB_SAT) rc = _enumsamp(S);
     if (rc == DVS_BB_SAT) {
         S->last_result = DVS_BB_SAT;
         S->redivs_since_base = 0;
@@ -7309,6 +7320,206 @@ out:
     free(pk); free(pc); free(nmx); free(pe); free(pw); free(roff); free(pn);
     free(rK); free(rE); free(rW); free(rC); free(rT);
     return rc;
+}
+
+/* Enumeration sampler (plan 9a, bounded by solution count, not box size):
+ * a pruned DFS over the leaves' vars in their unary hulls, each leaf checked
+ * once its last var is set, keeps every model on S; a draw is one row by a
+ * seeded index, so it is exactly uniform over the leaves' models. Declines
+ * past DVS_EN_MAX_SOL models or DVS_EN_MAX_NODES evaluations (counts, never
+ * time). The table is keyed by the assert set and every draw is checked
+ * against the AIG asserts, so a stale or mis-evaluated table only declines. */
+#define DVS_EN_MAX_SOL   65536u
+#define DVS_EN_MAX_CELLS (1u << 22)
+#define DVS_EN_MAX_NODES 4000000ull
+
+static uint64_t _en_key(const dvs_bbsolver_t *S) {
+    uint64_t h = 0xcbf29ce484222325ull ^ (uint64_t)(uintptr_t)S->problem;
+    h = (h ^ S->n_asserts) * 0x100000001b3ull;
+    h = (h ^ S->n_constraints) * 0x100000001b3ull;
+    h = (h ^ (uint64_t)S->problem->constraints_head) * 0x100000001b3ull;
+    h = (h ^ (uint64_t)(uintptr_t)S->subst) * 0x100000001b3ull;
+    for (uint32_t a = 0; a < S->n_asserts; a++)
+        h = (h ^ (uint32_t)S->assert_nodes[a]) * 0x100000001b3ull;
+    return h;
+}
+
+/* Build S->en_* for the current assert set; 1 on a table with models. */
+static int _en_build(dvs_bbsolver_t *S) {
+    uint32_t nv = S->n_vars, n_ord = 0;
+    size_t n_lf = 0, cap_lf = 0, n_vs = 0, cap_vs = 0, n_sol = 0, cap_sol = 0;
+    dvs_expr_t *lf = NULL;
+    uint32_t *vs = NULL;
+    size_t *loff = NULL;
+    uint32_t *pos = (uint32_t *)malloc(nv * sizeof(uint32_t));
+    uint32_t *ord = (uint32_t *)malloc(nv * sizeof(uint32_t));
+    uint64_t *lo = (uint64_t *)malloc(nv * sizeof(uint64_t));
+    uint64_t *hi = (uint64_t *)malloc(nv * sizeof(uint64_t));
+    uint64_t *vval = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint32_t *dhead = NULL, *dlf = NULL;
+    uint64_t *sol = NULL, nodes = 0;
+    int ok = 0;
+    if (!pos || !ord || !lo || !hi || !vval) goto out;
+    for (uint32_t v = 0; v < nv; v++) {
+        pos[v] = UINT32_MAX;
+        lo[v] = 0;
+        hi[v] = bb_eval_mask(S->vars[v].width);
+    }
+    if (!_us_leaves(S, &lf, &n_lf, &cap_lf)) goto out;
+    loff = (size_t *)malloc((n_lf + 1) * sizeof(size_t));
+    if (!loff) goto out;
+    /* Vars in order of first use, so each leaf is checked early. */
+    for (size_t li = 0; li < n_lf; li++) {
+        loff[li] = n_vs;
+        if (!_ds_vars(S, lf[li], &vs, n_vs, &n_vs, &cap_vs, 0)) goto out;
+        for (size_t i = loff[li]; i < n_vs; i++) {
+            uint32_t v = vs[i];
+            if (S->vars[v].width == 0 || S->vars[v].width > 64) goto out;
+            if (pos[v] == UINT32_MAX) { pos[v] = n_ord; ord[n_ord++] = v; }
+        }
+    }
+    loff[n_lf] = n_vs;
+    if (n_ord == 0) goto out;
+    bb_unary_bounds(S, lo, hi);
+    for (uint32_t k = 0; k < n_ord; k++)
+        if (lo[ord[k]] > hi[ord[k]] || hi[ord[k]] - lo[ord[k]] >= DVS_EN_MAX_NODES) goto out;
+    /* Leaves by the depth of their last var (CSR); a no-var leaf must hold. */
+    dhead = (uint32_t *)calloc((size_t)n_ord + 1, sizeof(uint32_t));
+    dlf = (uint32_t *)malloc((n_lf + 1) * sizeof(uint32_t));
+    if (!dhead || !dlf) goto out;
+    for (size_t li = 0; li < n_lf; li++) {
+        uint32_t d = 0;
+        if (loff[li + 1] == loff[li]) {
+            uint64_t t;
+            if (!bb_eval_pred(S, lf[li], vval, &t) || !t) goto out;
+            continue;
+        }
+        for (size_t i = loff[li]; i < loff[li + 1]; i++)
+            if (pos[vs[i]] > d) d = pos[vs[i]];
+        dhead[d + 1]++;
+    }
+    for (uint32_t k = 0; k < n_ord; k++) dhead[k + 1] += dhead[k];
+    {
+        uint32_t *fill = (uint32_t *)malloc(((size_t)n_ord + 1) * sizeof(uint32_t));
+        if (!fill) goto out;
+        memcpy(fill, dhead, ((size_t)n_ord + 1) * sizeof(uint32_t));
+        for (size_t li = 0; li < n_lf; li++) {
+            if (loff[li + 1] == loff[li]) continue;
+            uint32_t d = 0;
+            for (size_t i = loff[li]; i < loff[li + 1]; i++)
+                if (pos[vs[i]] > d) d = pos[vs[i]];
+            dlf[fill[d]++] = (uint32_t)li;
+        }
+        free(fill);
+    }
+    /* DFS: vval[ord[k]] runs lo..hi; a failed leaf at depth k prunes. */
+    {
+        uint32_t k = 0;
+        vval[ord[0]] = lo[ord[0]];
+        for (;;) {
+            uint32_t v = ord[k];
+            int hold = 1;
+            nodes++;
+            for (uint32_t j = dhead[k]; hold && j < dhead[k + 1]; j++) {
+                uint64_t t;
+                nodes++;
+                if (!bb_eval_pred(S, lf[dlf[j]], vval, &t)) goto out;
+                hold = t != 0;
+            }
+            if (nodes > DVS_EN_MAX_NODES) goto out;
+            if (hold && k + 1 < n_ord) {
+                k++;
+                vval[ord[k]] = lo[ord[k]];
+                continue;
+            }
+            if (hold) {
+                if (n_sol >= DVS_EN_MAX_SOL || (n_sol + 1) * n_ord > DVS_EN_MAX_CELLS) goto out;
+                if ((n_sol + 1) * n_ord > cap_sol) {
+                    size_t c = cap_sol ? 2 * cap_sol : 64 * (size_t)n_ord;
+                    uint64_t *t = (uint64_t *)realloc(sol, c * sizeof(*sol));
+                    if (!t) goto out;
+                    sol = t;
+                    cap_sol = c;
+                }
+                for (uint32_t q = 0; q < n_ord; q++) sol[n_sol * n_ord + q] = vval[ord[q]];
+                n_sol++;
+            }
+            /* Next value at the deepest level that has one. */
+            for (;;) {
+                v = ord[k];
+                if (vval[v] < hi[v]) { vval[v]++; break; }
+                if (k == 0) goto done;
+                k--;
+            }
+        }
+    }
+done:
+    if (n_sol == 0) goto out;   /* SAT decides an empty table */
+    free(S->en_vars); free(S->en_sol);
+    S->en_vars = (uint32_t *)malloc(n_ord * sizeof(uint32_t));
+    if (!S->en_vars) { free(sol); sol = NULL; S->en_sol = NULL; goto out; }
+    memcpy(S->en_vars, ord, n_ord * sizeof(uint32_t));
+    S->en_n_vars = n_ord;
+    S->en_sol = sol;
+    S->en_n_sol = n_sol;
+    sol = NULL;
+    ok = 1;
+out:
+    S->aux_work += nodes;
+    if (getenv("DV_LOG"))
+        fprintf(stderr, "bb-enumsamp: vars=%u leaves=%zu nodes=%llu sols=%zu -> %s\n",
+                n_ord, n_lf, (unsigned long long)nodes, n_sol, ok ? "table" : "decline");
+    free(lf); free(vs); free(loff); free(pos); free(ord); free(lo); free(hi);
+    free(vval); free(dhead); free(dlf); free(sol);
+    return ok;
+}
+
+static int _enumsamp(dvs_bbsolver_t *S) {
+    if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig || S->n_frames)
+        return DVS_BB_UNKNOWN;
+    const char *env = getenv("DV_ENUMSAMP");   /* opt-in until measured */
+    if (!env || strcmp(env, "1") != 0) return DVS_BB_UNKNOWN;
+    if (S->problem->softs_head != EXPR_NULL || S->problem->dists_head != EXPR_NULL ||
+        S->problem->allDiff_head != EXPR_NULL)
+        return DVS_BB_UNKNOWN;
+    uint32_t N = (uint32_t)dvs_aig_num_nodes(S->aig);
+    if (N < 2 || S->n_vars == 0) return DVS_BB_UNKNOWN;
+    uint64_t key = _en_key(S);
+    if (S->en_state == 0 || S->en_key != key) {
+        S->en_key = key;
+        S->en_state = _en_build(S) ? 1 : 2;
+    }
+    if (S->en_state != 1) return DVS_BB_UNKNOWN;
+    int8_t *val = (int8_t *)malloc((size_t)N + 2);
+    if (!val) return DVS_BB_UNKNOWN;
+    uint64_t st = S->seed ^ 0x454E554D53414D50ull, bits = 0;
+    uint32_t nb = 0;
+    val[0] = 0;
+    val[1] = 1;
+    for (uint32_t id = 2; id <= N; id++) {
+        if (!dvs_aig_is_input(S->aig, (dvs_aig_node_t)id)) { val[id] = 0; continue; }
+        if (!nb) { bits = _ps_next(&st); nb = 64; }
+        val[id] = (int8_t)(bits & 1);
+        bits >>= 1;
+        nb--;
+    }
+    const uint64_t *row = S->en_sol + _ps_below(&st, S->en_n_sol) * S->en_n_vars;
+    for (uint32_t q = 0; q < S->en_n_vars; q++) _ss_write(S, val, S->en_vars[q], row[q]);
+    _eval_ands(S, val, N);
+    S->aux_work += N;
+    uint32_t a = 0;
+    while (a < S->n_asserts && _lit_val(val, S->assert_nodes[a])) a++;
+    if (a < S->n_asserts) {
+        /* The table disagrees with the AIG: never sample from it again. */
+        S->en_state = 2;
+        free(val);
+        return DVS_BB_UNKNOWN;
+    }
+    free(S->node_val);
+    S->node_val = val;
+    S->model_in_sat = 0;
+    S->base_sim = 1;
+    return DVS_BB_SAT;
 }
 
 /* Pinned-constant fast path (DV_PINFAST=0 off). The input bits a live assert
