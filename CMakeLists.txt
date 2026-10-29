@@ -240,6 +240,7 @@ set(DVS_SOURCES
     src/c/dvs_aig_cnf.c
     src/c/dvs_bitblast.c
     src/c/dvs_bbsolver.c
+    src/c/dvs_components.c
     src/c/dvs_cube.c
     src/c/dvs_shape.c
     src/c/dvs_aigsim.c

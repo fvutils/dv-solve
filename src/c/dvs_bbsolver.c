@@ -20,6 +20,7 @@
 #include "dvs_sv.h"
 #include "dvs_thread.h"
 #include "dvs_stackinfo.h"
+#include "dvs_components.h"
 
 /* The per-kind blasters stay out of bb_expr, so a level of nesting costs
  * bb_expr's frame plus the one kind's, not the union of all of them. */
@@ -135,6 +136,9 @@ struct dvs_bbsolver_s {
      * Indexed by enumeration order of constraints_head walk. */
     uint8_t        *constraint_skip;
     uint32_t        n_constraints;
+
+    /* Independent components of the kept constraints (analysis only). */
+    dvs_components_t comps;
 
     uint64_t        n_substs;    /* statistics */
 
@@ -1129,6 +1133,129 @@ fail:
     free(stk);
     free(S->uses); free(S->fo_seen);
     S->uses = NULL; S->fo_seen = NULL; S->uses_cap = 0;
+}
+
+/* Union the variables each kept constraint reads into components. Elements
+ * are vars [0,n_vars) then constraints; an expr node shared by two
+ * constraints links them through seen_by. Iterative; nothing reads the
+ * result yet, so answers do not change. */
+static void compute_components(dvs_bbsolver_t *S) {
+    dvs_components_free(&S->comps);
+    uint32_t nv = S->n_vars, nc = S->n_constraints, cap = S->cache_cap;
+    if (!S->problem || !cap) return;
+    dvs_uf_t uf;
+    uint32_t *seen_by = (uint32_t *)malloc(cap * sizeof(uint32_t));
+    uint8_t *used = (uint8_t *)calloc(nv ? nv : 1, 1);
+    dvs_expr_t *stk = NULL;
+    size_t n = 0, scap = 0;
+    if (!seen_by || !used || !dvs_uf_init(&uf, nv + nc)) {
+        free(seen_by); free(used);
+        return;
+    }
+    memset(seen_by, 0xff, cap * sizeof(uint32_t));
+    uint32_t me = 0;
+    #define CC_EDGE(C) do {                                                    \
+        dvs_expr_t c_ = (C);                                                   \
+        if (c_ == EXPR_NULL || c_ >= cap) break;                               \
+        if (seen_by[c_] != UINT32_MAX) {                                       \
+            dvs_uf_union(&uf, nv + me, nv + seen_by[c_]); break; }             \
+        seen_by[c_] = me;                                                      \
+        if (n == scap) { size_t nc_ = scap ? 2 * scap : 256;                   \
+            dvs_expr_t *t_ = (dvs_expr_t *)realloc(stk, nc_ * sizeof(*t_));    \
+            if (!t_) goto done;                                                \
+            stk = t_; scap = nc_; }                                            \
+        stk[n++] = c_;                                                         \
+    } while (0)
+    #define CC_VAR(ID) do {                                                    \
+        uint32_t v_ = (ID);                                                    \
+        if (v_ < nv) { used[v_] = 1; dvs_uf_union(&uf, v_, nv + me); }         \
+        if (S->slice_head && v_ < nv)                                          \
+            for (uint32_t i_ = S->slice_head[v_]; i_ != BB_NO_SLICE;           \
+                 i_ = S->slices[i_].next) CC_EDGE(S->slices[i_].eref);         \
+    } while (0)
+    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL && me < nc; me++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        cur = cs->next;
+        if (S->constraint_skip && S->constraint_skip[me]) continue;
+        CC_EDGE(cs->root);
+        while (n > 0) {
+            dvs_expr_t r = stk[--n];
+            ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, r);
+            if (!kp) continue;
+            switch (*kp) {
+            case EXPR_BINARY:
+                CC_EDGE(((ExprBinary *)kp)->lhs);
+                CC_EDGE(((ExprBinary *)kp)->rhs);
+                break;
+            case EXPR_UNARY:   CC_EDGE(((ExprUnary *)kp)->operand); break;
+            case EXPR_EXTEND:  CC_EDGE(((ExprExtend *)kp)->operand); break;
+            case EXPR_SV_CAST: CC_EDGE(((ExprSvCast *)kp)->operand); break;
+            case EXPR_EXTRACT: CC_EDGE(((ExprExtract *)kp)->operand); break;
+            case EXPR_CONCAT:
+                CC_EDGE(((ExprConcat *)kp)->hi);
+                CC_EDGE(((ExprConcat *)kp)->lo);
+                break;
+            case EXPR_ITE:
+                CC_EDGE(((ExprITE *)kp)->cond);
+                CC_EDGE(((ExprITE *)kp)->then_e);
+                CC_EDGE(((ExprITE *)kp)->else_e);
+                break;
+            case EXPR_IN_RANGE:
+                CC_EDGE(((ExprInRange *)kp)->value);
+                CC_EDGE(((ExprInRange *)kp)->lo);
+                CC_EDGE(((ExprInRange *)kp)->hi);
+                break;
+            case EXPR_IN_SET: {
+                ExprInSet *iset = (ExprInSet *)kp;
+                CC_EDGE(iset->value);
+                dvs_expr_t *el = expr_in_set_elems(S->problem, r);
+                for (uint32_t i = 0; i < iset->n_elems; i++) CC_EDGE(el[i]);
+                break;
+            }
+            case EXPR_IN_RANGES: {
+                ExprInRanges *irs = (ExprInRanges *)kp;
+                CC_EDGE(irs->value);
+                dvs_expr_t *los = expr_in_ranges_los(S->problem, r);
+                dvs_expr_t *his = expr_in_ranges_his(S->problem, r);
+                for (uint32_t i = 0; i < irs->n_ranges; i++) { CC_EDGE(los[i]); CC_EDGE(his[i]); }
+                break;
+            }
+            case EXPR_VAR: CC_VAR(((ExprVar *)kp)->var_id); break;
+            case EXPR_SUM: {
+                const ExprSum *es = (const ExprSum *)kp;
+                const dvs_expr_t *xs = (const dvs_expr_t *)(es + 1);
+                CC_EDGE(es->result);
+                for (uint32_t i = 0; i < es->n_vars; i++) CC_EDGE(xs[i]);
+                break;
+            }
+            case EXPR_COUNTONES:
+                CC_EDGE(((ExprCountones *)kp)->result);
+                CC_EDGE(((ExprCountones *)kp)->operand);
+                break;
+            case EXPR_CLOG2:
+                CC_EDGE(((ExprClog2 *)kp)->result);
+                CC_EDGE(((ExprClog2 *)kp)->operand);
+                break;
+            case EXPR_ARRAY_SELECT: {
+                const ExprArraySelect *as = (const ExprArraySelect *)kp;
+                CC_EDGE(as->result);
+                CC_EDGE(as->index);
+                for (uint32_t e = 0; e < as->n_elems; e++) CC_VAR(as->base_var_id + e);
+                break;
+            }
+            default:
+                break;
+            }
+        }
+    }
+    dvs_components_from_uf(&S->comps, &uf, used, nv);
+done:
+    #undef CC_EDGE
+    #undef CC_VAR
+    free(stk);
+    free(seen_by);
+    free(used);
+    dvs_uf_free(&uf);
 }
 
 /* Fanout over the constraints that are still encoded (see S->uses). */
@@ -2135,6 +2262,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     free(S->assert_tags);
     free(S->slices);
     xfree(S->alloc, S->constraint_skip, S->n_constraints * sizeof(uint8_t));
+    dvs_components_free(&S->comps);
     xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(dvs_aig_node_t));
     free(S->node_val);
     free(S->div_L); free(S->div_R); free(S->div_fo_off); free(S->div_fo_adj);
@@ -2667,6 +2795,12 @@ static int _bb_encode(dvs_bbsolver_t *S) {
 
     if (subst_enabled) run_subst_pass(S);
     count_fanout(S);
+    /* Component census for the decomposition ladder; stats-only for now. */
+    if (getenv("DV_BB_STATS")) {
+        compute_components(S);
+        fprintf(stderr, "[bb-comp] n=%u largest=%u vars=%u\n",
+                S->comps.n_comp, S->comps.largest, S->n_vars);
+    }
     /* bv_for_var uses S->resolving as its recursion guard; start clear. */
     if (S->resolving) memset(S->resolving, 0, S->n_vars);
 
