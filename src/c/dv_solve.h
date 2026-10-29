@@ -595,6 +595,68 @@ const char *dvs_oracle_run_dir(const dvs_oracle_t *o);
  */
 int dvs_problem_write_smt2(const dvs_problem_t *p, FILE *out);
 
+/* ------------------------------------------------------------------ */
+/* Problem handles: one randomize() call site (docs/verilator_problem_buffer.md) */
+/* ------------------------------------------------------------------ */
+
+/** A problem buffer compiled once and solved on every dvs_randomize(). */
+typedef struct dvs_handle_s dvs_handle_t;
+
+/** dvs_ref_t.layout values. Only DVS_REF_SCALAR is supported so far. */
+enum {
+    DVS_REF_SCALAR = 0   /* one little-endian word of 1, 2, 4 or 8 bytes (the
+                          * smallest that holds `width`; Verilator C/S/I/Q) */
+};
+
+/** Where the value of one variable lives. refs[i] is variable i. */
+typedef struct {
+    void     *addr;       /* the variable's storage, or NULL: not read or written */
+    uint32_t  width;      /* bits, 1 to 64 */
+    uint8_t   is_signed;  /* a STATE value is sign-extended when set */
+    uint8_t   layout;     /* DVS_REF_SCALAR */
+    uint16_t  _pad;
+} dvs_ref_t;
+
+/**
+ * Make a handle for the problem image `buf` of `size` bytes (as
+ * dvs_builder_finalize() returns it). The image is copied: `buf` may be freed
+ * or be read-only. It is compiled on the first dvs_randomize().
+ *
+ * @return  The handle, or NULL if `size` is too small or memory runs out.
+ */
+dvs_handle_t *dvs_handle_new(const void *buf, size_t size);
+
+/** Release a handle and its compiled context. NULL is ignored. */
+void dvs_handle_free(dvs_handle_t *h);
+
+/** The number of entries dvs_randomize() reads from `refs`: one past the
+ *  highest variable id the problem declares. */
+uint32_t dvs_handle_n_vars(const dvs_handle_t *h);
+
+/** dvs_randomize() return codes. */
+enum {
+    DVS_RANDOMIZE_OK    = 0,   /* RAND and RANDC values were written      */
+    DVS_RANDOMIZE_UNSAT = 1,   /* no solution with these STATE values     */
+    DVS_RANDOMIZE_ERROR = -1   /* unsupported ref or modes, a compile
+                                * error, or the search gave up           */
+};
+
+/**
+ * Solve the handle's problem once (SV randomize()). Each STATE variable with
+ * a non-NULL ref is pinned to the value read through it; then the values of
+ * the RAND and RANDC variables with a non-NULL ref are written through it,
+ * masked to the ref's width. On any return but DVS_RANDOMIZE_OK no ref is
+ * written. Calls on one handle must not overlap.
+ *
+ * @param refs   dvs_handle_n_vars(h) entries.
+ * @param modes  constraint_mode / rand_mode bits. The buffer format has none
+ *               yet: pass NULL (non-NULL is DVS_RANDOMIZE_ERROR).
+ * @param seed   The sampling seed; the same seed and STATE values give the
+ *               same result.
+ */
+int dvs_randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes,
+                  uint64_t seed);
+
 /**
  * How this copy of the library was built, as one line of key=value pairs:
  * commit, dirty (tracked files modified at build time), build_type,

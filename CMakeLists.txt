@@ -254,6 +254,7 @@ set(DVS_SOURCES
     src/c/dvs_oracle_core.c
     src/c/dvs_smt2_emit.c
     src/c/dvs_oracle.c
+    src/c/dvs_handle.c
 )
 
 # The CaDiCaL backend translation unit (pure C over the ccadical.h C API) is
@@ -423,6 +424,11 @@ add_executable(test_dvs_bbsolver tests/c/test_dvs_bbsolver.c)
 target_link_libraries(test_dvs_bbsolver PRIVATE dv_solve kissat)
 target_include_directories(test_dvs_bbsolver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_dvs_bbsolver COMMAND test_dvs_bbsolver)
+
+add_executable(test_handle tests/c/test_handle.c)
+target_link_libraries(test_handle PRIVATE dv_solve)
+target_include_directories(test_handle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_handle COMMAND test_handle)
 
 add_executable(test_dvs_bbsolver_incremental tests/c/test_dvs_bbsolver_incremental.c)
 target_link_libraries(test_dvs_bbsolver_incremental PRIVATE dv_solve kissat)
