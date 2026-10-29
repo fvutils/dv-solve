@@ -4167,6 +4167,13 @@ static int _popsamp(dvs_bbsolver_t *S);
 static int _uniqsamp(dvs_bbsolver_t *S);
 static int _sortsamp(dvs_bbsolver_t *S);
 static int _divsamp(dvs_bbsolver_t *S);
+static int _pinfast(dvs_bbsolver_t *S);
+/* The one-shot check and the reused-context draw try the pinned-constant fast
+ * path before the division sampler (DV_PINFAST_FIRST=0: old order, no pinfast). */
+static int _pinfast_first(void) {
+    const char *e = getenv("DV_PINFAST_FIRST");
+    return !(e && *e == '0');
+}
 static uint64_t _en_key(const dvs_bbsolver_t *S);
 static int _enumsamp(dvs_bbsolver_t *S, int fresh);
 
@@ -4407,6 +4414,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     int rc = _popsamp(S);
     if (rc == DVS_BB_UNKNOWN) rc = _uniqsamp(S);
     if (rc == DVS_BB_UNKNOWN) rc = _sortsamp(S);
+    if (rc == DVS_BB_UNKNOWN && _pinfast_first()) rc = _pinfast(S);
     if (rc == DVS_BB_UNKNOWN) rc = _divsamp(S);
     if (rc == DVS_BB_UNKNOWN) rc = _enumsamp(S, 1);
     int sampled = rc != DVS_BB_UNKNOWN;
@@ -5018,6 +5026,7 @@ static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
     int rc = _popsamp(S);
     if (rc != DVS_BB_SAT) rc = _uniqsamp(S);
     if (rc != DVS_BB_SAT) rc = _sortsamp(S);
+    if (rc != DVS_BB_SAT && _pinfast_first()) rc = _pinfast(S);
     if (rc != DVS_BB_SAT) rc = _divsamp(S);
     if (rc != DVS_BB_SAT) rc = _enumsamp(S, 0);
     if (rc == DVS_BB_SAT) {
