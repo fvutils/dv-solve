@@ -182,6 +182,7 @@ def _or(var, w, vals):
 
 
 # x mod k == e, k from an OR-of-equalities domain, e < k (arith.mod_align).
+# zext(e) == x mod k defines e; zg below keeps the residue proposal covered.
 _RES = ({"x": _XW, "k": 4, "e": 3},
         [_or("k", 4, (3, 5, 6)), f"(bvult {_zx('e', 1)} k)",
          f"(= (bvurem x {_zx('k', _XW - 4)}) {_zx('e', _XW - 3)})"],
@@ -228,7 +229,7 @@ _IVS = ({"x": _XW, "y": 4},
 
 
 @pytest.mark.parametrize("case,key", [
-    ("res", "res"), ("zg", "res"), ("cov", "cov"), ("or", None), ("pin", None),
+    ("res", "def"), ("zg", "res"), ("cov", "cov"), ("or", None), ("pin", None),
     ("ivs", None)])
 def test_box_proposals(case, key):
     widths, asserts, pred = {"res": _RES, "zg": _ZG, "cov": _COV, "or": _ORH,
@@ -381,3 +382,45 @@ def test_chain_proposal(g):
         exp = cells[keep] * _N / cells.sum()
         p = chisquare(obs[keep], exp).pvalue
         assert p > 1e-3, (v, p, list(obs[keep]), [round(e, 1) for e in exp])
+
+
+# --- ext(v) == e defines v ---------------------------------------------------
+# construct.signed_mix: `sext(c) == a - sext(b)` left c free over 2^16 and every
+# draw was rejected. c := the low bits of e, evaluated at the extended width,
+# and the leaf stays a check, so only the e that ext(c) reproduces pass.
+
+def _sx(v, f, t):
+    return (v | (((1 << t) - 1) ^ ((1 << f) - 1))) if v >> (f - 1) & 1 else v
+
+
+@pytest.mark.parametrize("kind", ["sign", "zero"])
+def test_extend_definition(kind):
+    from collections import Counter
+    from scipy.stats import chisquare
+    widths = {"a": 8, "b": 4, "c": 6}
+    if kind == "sign":
+        e = f"(bvsub a {_zx('b', 4)})"
+        f = lambda a, b: (a - b) & 0xFF
+        ext = lambda c: _sx(c, 6, 8)
+    else:
+        e = f"(bvudiv a (bvor {_zx('b', 4)} #x01))"
+        f = lambda a, b: a // (b | 1)
+        ext = lambda c: c
+    asserts = [f"(= ((_ {kind}_extend 2) c) {e})"]
+    text = "".join(_session(widths, asserts, 9000 + i) for i in range(_N))
+    verdicts, models, err = _run(text)
+    assert verdicts == ["sat"] * _N
+    sols = [(a, b) for a in range(256) for b in range(16)
+            if any(ext(c) == f(a, b) for c in range(64))]
+    for m in models:
+        assert ext(m["c"]) == f(m["a"], m["b"]), m
+    hits = re.findall(r"\[bb-divsamp\].* def=(\d+) .*-> sat", err)
+    assert len(hits) == _N and all(h == "1" for h in hits), err[-2000:]
+    for i, v in enumerate("ab"):
+        h = Counter(s[i] >> (4 if v == "a" else 0) for s in sols)
+        cells = sorted(h)
+        obs = Counter(m[v] >> (4 if v == "a" else 0) for m in models)
+        assert set(obs) <= set(cells), v
+        exp = [h[c] * _N / len(sols) for c in cells]
+        p = chisquare([obs[c] for c in cells], exp).pvalue
+        assert p > 1e-3, (v, p)

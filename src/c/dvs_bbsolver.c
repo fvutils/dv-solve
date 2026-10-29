@@ -7090,7 +7090,7 @@ static int _divsamp(dvs_bbsolver_t *S) {
     uint32_t *vs = NULL, *ck = NULL, *dom_all = NULL;
     size_t *loff = NULL;
     dvs_expr_t *def = (dvs_expr_t *)malloc(nv * sizeof(dvs_expr_t));
-    uint32_t *defl = (uint32_t *)malloc(nv * sizeof(uint32_t));
+    uint32_t *defl = (uint32_t *)malloc(nv * sizeof(uint32_t));   /* eval width of def, 0 = var's */
     uint32_t *uhead = (uint32_t *)malloc(nv * sizeof(uint32_t));
     uint32_t *order = (uint32_t *)malloc(nv * sizeof(uint32_t));
     uint32_t *dn = (uint32_t *)calloc(nv, sizeof(uint32_t));
@@ -7191,6 +7191,17 @@ static int _divsamp(dvs_bbsolver_t *S) {
             dvs_expr_t s = _ss_strip(S, side ? b->rhs : b->lhs);
             dvs_expr_t o = side ? b->lhs : b->rhs;
             const ExprKind *sk = (const ExprKind *)POOL_PTR(S->problem, s);
+            uint32_t ew = 0;
+            if (sk && *sk == EXPR_EXTEND) {
+                /* ext(v) == e: v := the low bits of e, and the leaf (a check)
+                 * keeps only the e that ext(v) reproduces. */
+                const ExprExtend *x = (const ExprExtend *)sk;
+                ew = x->to_bits;
+                sk = (const ExprKind *)POOL_PTR(S->problem, _ss_strip(S, x->operand));
+                if (ew > 64 || !sk || *sk != EXPR_VAR || ((const ExprVar *)sk)->var_id >= nv ||
+                    S->vars[((const ExprVar *)sk)->var_id].width != x->from_bits)
+                    continue;
+            }
             if (!sk || *sk != EXPR_VAR) continue;
             uint32_t v = ((const ExprVar *)sk)->var_id;
             if (v >= nv || def[v] != EXPR_NULL) continue;
@@ -7210,7 +7221,7 @@ static int _divsamp(dvs_bbsolver_t *S) {
             dvoff[v] = s0;
             dvn[v] = (uint32_t)(n2 - s0);
             n_vs = n2;
-            defl[v] = (uint32_t)li;
+            defl[v] = ew;
             role[v] = 3;
             break;
         }
@@ -7749,7 +7760,7 @@ static int _divsamp(dvs_bbsolver_t *S) {
             for (uint32_t i = 0; i < n_def; i++) {
                 v = order[i];
                 uint32_t w = S->vars[v].width;
-                if (!bb_eval(S, def[v], w, vval, &x)) { why = "eval"; goto out; }
+                if (!bb_eval(S, def[v], defl[v] ? defl[v] : w, vval, &x)) { why = "eval"; goto out; }
                 vval[v] = x & bb_eval_mask(w);
             }
             for (size_t c = 0; ok && c < n_ck; c++) {
