@@ -189,8 +189,55 @@ static int table_logged(void) {
     return strstr(buf, "bb-enumsamp:") && strstr(buf, "-> table") && !strstr(buf, "-> off");
 }
 
+/* The hull reads zero_extend(x) cmp c as x cmp c when c fits x: x in 250..255
+ * (zext(x) >= 250) with zext(x) < 300 and != 0x1ff, whose c does not fit and
+ * must not narrow. Every value must be drawn; zext(x) >= 300 is unsat. The
+ * other samplers would answer this shape, so they are off. */
+static void test_zext_hull(void) {
+    static const char *off[] = {"DV_POPSAMP", "DV_UNIQSAMP", "DV_SORTSAMP", "DV_DIVSAMP"};
+    for (int i = 0; i < 4; i++) setenv(off[i], "0", 1);
+    for (int unsat = 0; unsat < 2; unsat++) {
+        dvs_builder_t *b = dvs_builder_create(4096, NULL);
+        dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+        dvs_builder_add_var(b, 1, 8, 0, 0, 255);
+        dvs_expr_t zx = dvs_builder_expr_extend(b, dvs_builder_expr_var(b, 0), 8, 16, 0);
+        dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_GTE, zx,
+            dvs_builder_expr_const_sized(b, unsat ? 300 : 250, 0, 16)));
+        dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_LT, zx,
+            dvs_builder_expr_const_sized(b, 300, 0, 16)));
+        dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_NEQ, zx,
+            dvs_builder_expr_const_sized(b, 0x1ff, 0, 16)));
+        dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_LT,
+            dvs_builder_expr_var(b, 1), dvs_builder_expr_const_sized(b, 4, 0, 8)));
+        size_t sz;
+        dvs_problem_t *p = dvs_builder_finalize(b, &sz);
+        dvs_bbsolver_t *S = dvs_bbsolver_new(NULL, p);
+        dvs_bbsolver_set_presim(S, 1);
+        dvs_bbsolver_set_resample(S, 1);
+        int rc = dvs_bbsolver_check(S, 1);
+        if (unsat) {
+            CHECK(rc == DVS_BB_UNSAT, "[zext] zext(x) >= 300 is unsat");
+        } else {
+            int bad = rc != DVS_BB_SAT, seen = 0;
+            for (uint64_t s = 2; !bad && s < 2 + 4 * DRAWS; s++) {
+                int64_t x = -1, y = -1;
+                bad = dvs_bbsolver_resample(S, s) != 0 || dvs_bbsolver_value(S, 0, &x) != 0 ||
+                      dvs_bbsolver_value(S, 1, &y) != 0 || x < 250 || x > 255 || y < 0 || y > 3;
+                if (!bad) seen |= 1 << (x - 250);
+            }
+            CHECK(!bad, "[zext] models have x in 250..255, y < 4");
+            CHECK(seen == 0x3f, "[zext] every x in 250..255 drawn");
+        }
+        dvs_bbsolver_free(S);
+        dvs_builder_free_problem(b, p, sz);
+        dvs_builder_destroy(b);
+    }
+    for (int i = 0; i < 4; i++) unsetenv(off[i]);
+}
+
 int main(void) {
     unsetenv("DV_ENUMSAMP");
+    test_zext_hull();
     CHECK(table_logged(), "5-queens resamples draw from an enumeration table");
     test_assert_after_table();
     test_unsat_after_table();

@@ -6394,9 +6394,17 @@ static void _ss_hull(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v, uint64_t *bias
         else if (op == DVS_BIN_GTE) op = DVS_BIN_LTE;
     } else return;
     uint32_t w = S->vars[v].width;
+    const ExprKind *tk = (const ExprKind *)POOL_PTR(S->problem, _ss_strip(S, t));
+    if (tk && *tk == EXPR_EXTEND) {
+        /* zero_extend(t) cmp c is t cmp c when c fits t's width (a c that
+         * does not fit is left to the enumeration). */
+        const ExprExtend *x = (const ExprExtend *)tk;
+        if (x->sign_extend || x->from_bits != w || x->to_bits <= w) return;
+        t = x->operand;
+    }
     if (bb_self_width(S, t, 0) != w || c > bb_eval_mask(w)) return;
     t = _ss_strip(S, t);
-    const ExprKind *tk = (const ExprKind *)POOL_PTR(S->problem, t);
+    tk = (const ExprKind *)POOL_PTR(S->problem, t);
     if (!tk) return;
     if (*tk == EXPR_BINARY && ((const ExprBinary *)tk)->op == DVS_BIN_BXOR) {
         const ExprBinary *x = (const ExprBinary *)tk;
@@ -7420,6 +7428,14 @@ static int _en_build(dvs_bbsolver_t *S) {
     loff[n_lf] = n_vs;
     if (n_ord == 0) goto out;
     bb_unary_bounds(S, lo, hi);
+    /* A one-var leaf narrows its var (bias 0: lo/hi are values). */
+    for (size_t li = 0; li < n_lf; li++) {
+        if (loff[li + 1] - loff[li] != 1) continue;
+        uint32_t v = vs[loff[li]];
+        uint64_t b = 0;
+        int hb = 1;
+        _ss_hull(S, lf[li], v, &b, &hb, &lo[v], &hi[v]);
+    }
     /* Declared bounds are asserts too (assert_var_bounds), not leaves: without
      * them every row of a [0,4] var in 3 bits may hold 5..7 and fail the check. */
     for (uint32_t k = 0; k < n_ord; k++) {
