@@ -6717,6 +6717,43 @@ static int _ss_u64_cmp(const void *a, const void *b) {
     return x < y ? -1 : x > y;
 }
 
+/* Leaf r is v != c (randc's exclusions): 1 and *c, for unsubstituted v and
+ * c in v's range. DV_DS_EXCL=0 treats every leaf as a general one. */
+static int _ds_excl(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v, uint64_t *c) {
+    r = _ss_unwrap(S, _ss_strip(S, r));
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
+    int neg = 0;
+    if (k && *k == EXPR_UNARY && ((const ExprUnary *)k)->op == DVS_UN_NOT) {
+        k = (const ExprKind *)POOL_PTR(S->problem, _ss_strip(S, ((const ExprUnary *)k)->operand));
+        neg = 1;
+    }
+    if (!k || *k != EXPR_BINARY) return 0;
+    const ExprBinary *b = (const ExprBinary *)k;
+    if (!(neg ? b->op == DVS_BIN_EQ : b->op == DVS_BIN_NEQ)) return 0;
+    for (int side = 0; side < 2; side++) {
+        const ExprKind *sk = (const ExprKind *)POOL_PTR(S->problem,
+                                                        _ss_strip(S, side ? b->rhs : b->lhs));
+        if (!sk || *sk != EXPR_VAR || ((const ExprVar *)sk)->var_id != v) continue;
+        if (!bb_const_u(S, side ? b->lhs : b->rhs, c)) return 0;
+        return *c <= bb_eval_mask(S->vars[v].width);
+    }
+    return 0;
+}
+
+static int _ds_excl_on(void) {
+    const char *e = getenv("DV_DS_EXCL");
+    return !(e && *e == '0');
+}
+
+static int _ds_u64_has(const uint64_t *d, uint32_t n, uint64_t k) {
+    uint32_t a = 0, b = n;
+    while (a < b) {
+        uint32_t c = a + (b - a) / 2;
+        if (d[c] < k) a = c + 1; else b = c;
+    }
+    return a < n && d[a] == k;
+}
+
 static void _ss_write(dvs_bbsolver_t *S, int8_t *val, uint32_t v, uint64_t x) {
     const bb_var_t *bv = &S->vars[v];
     for (uint32_t q = 0; q < bv->width; q++) {
@@ -7252,6 +7289,12 @@ static int _divsamp(dvs_bbsolver_t *S) {
     size_t n_iv = 0, cap_iv = 0, cap_ivh = 0;
     uint32_t *rW = NULL;
     uint8_t *rT = NULL;
+    /* v != c leaves of the var being enumerated: skipped, x checked in exv. */
+    uint8_t *lskip = NULL;
+    uint64_t *exv = NULL;
+    uint32_t n_ex = 0, n_exs = 0;
+    size_t cap_ex = 0;
+    int use_ex = _ds_excl_on();
     if (!pk || !pc || !nmx || !pe || !pw || !roff || !pn || !pdir || !cbase) goto out;
     if (!dvoff || !dvn || !stk || !seen || !def || !defl || !uhead || !order || !dn || !doff || !kl || !kh || !bias ||
         !lo || !hi || !fmask || !fval || !vval || !role || !nmark || !val) goto out;
@@ -7267,7 +7310,8 @@ static int _divsamp(dvs_bbsolver_t *S) {
     loff = (size_t *)malloc((n_lf + 1) * sizeof(size_t));
     unext = (uint32_t *)malloc((n_lf + 1) * sizeof(uint32_t));
     ck = (uint32_t *)malloc((n_lf + 1) * sizeof(uint32_t));
-    if (!loff || !unext || !ck) goto out;
+    lskip = (uint8_t *)calloc(n_lf + 1, 1);
+    if (!loff || !unext || !ck || !lskip) goto out;
     for (size_t li = 0; li < n_lf; li++) {
         uint64_t t;
         loff[li] = n_vs;
@@ -7435,6 +7479,18 @@ static int _divsamp(dvs_bbsolver_t *S) {
                 continue;
             }
             int dense = kh[v] - kl[v] >= DVS_SS_HULL;
+            n_ex = 0;
+            if (!dense && use_ex) {
+                for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u]) {
+                    uint64_t c;
+                    lskip[u] = (uint8_t)_ds_excl(S, lf[u], v, &c);
+                    if (!lskip[u]) continue;
+                    if (!_us_grow((void **)&exv, &cap_ex, n_ex, sizeof(*exv))) goto out;
+                    exv[n_ex++] = c;
+                }
+                if (n_ex) qsort(exv, n_ex, sizeof(*exv), _ss_u64_cmp);
+                n_exs += n_ex;
+            }
             if (!dense && kh[v] - kl[v] >= DVS_DS_PROBE) {
                 /* A hull its unary leaves mostly pass is drawn from and
                  * checked, not enumerated. The probe stream is fixed, so the
@@ -7446,7 +7502,9 @@ static int _divsamp(dvs_bbsolver_t *S) {
                     int ok = 1;
                     x = (x & ~fmask[v]) | fval[v];
                     vval[v] = x;
+                    if (n_ex && _ds_u64_has(exv, n_ex, x)) ok = 0;
                     for (uint32_t u = uhead[v]; ok && u != UINT32_MAX; u = unext[u]) {
+                        if (n_ex && lskip[u]) continue;
                         if (!bb_eval_pred(S, lf[u], vval, &t)) goto out;
                         ok = t != 0;
                     }
@@ -7467,9 +7525,10 @@ static int _divsamp(dvs_bbsolver_t *S) {
             for (uint64_t key = kl[v]; ; key++) {
                 uint64_t x = key ^ bias[v];
                 if ((x & fmask[v]) == fval[v] && _ds_in(pl, ph, np, x)) {
-                    int ok = 1;
+                    int ok = !(n_ex && _ds_u64_has(exv, n_ex, x));
                     vval[v] = x;
                     for (uint32_t u = uhead[v]; ok && u != UINT32_MAX; u = unext[u]) {
+                        if (n_ex && lskip[u]) continue;
                         if (!bb_eval_pred(S, lf[u], vval, &t)) goto out;
                         ok = t != 0;
                     }
@@ -7918,8 +7977,8 @@ static int _divsamp(dvs_bbsolver_t *S) {
     }
 out:
     if (getenv("DV_BB_STATS"))
-        fprintf(stderr, "[bb-divsamp] free=%u def=%u res=%u cov=%u chains=%u checks=%zu dcache=%d tries=%u -> %s\n",
-                n_free, n_def, n_res, n_cov, n_ch, n_ck, dcached, tries, rc == DVS_BB_SAT ? "sat" : why);
+        fprintf(stderr, "[bb-divsamp] free=%u def=%u res=%u cov=%u chains=%u checks=%zu dcache=%d excl=%u tries=%u -> %s\n",
+                n_free, n_def, n_res, n_cov, n_ch, n_ck, dcached, n_exs, tries, rc == DVS_BB_SAT ? "sat" : why);
     free(lf); free(vs); free(ck); free(dom_all); free(loff); free(unext);
     free(def); free(defl); free(uhead); free(order); free(dn); free(doff);
     free(kl); free(kh); free(bias); free(lo); free(hi); free(fmask); free(fval);
@@ -7929,6 +7988,7 @@ out:
     free(cpred); free(csucc); free(cgap); free(cgrd); free(cL); free(cM); free(csub);
     free(cmemb); free(cst); free(inch); free(ex); free(ey); free(ec); free(eg);
     free(rK); free(rE); free(rW); free(rC); free(rT); free(ivl); free(ivh);
+    free(lskip); free(exv);
     return rc;
 }
 
