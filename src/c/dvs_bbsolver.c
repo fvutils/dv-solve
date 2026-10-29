@@ -3882,6 +3882,26 @@ static void _sim_check(dvs_bbsolver_t *S, int verdict) {
     }
 }
 
+/* The exhaustive sweep split into independent groups (DV_SIM_SPLIT=0 off).
+ * DVS_BB_UNKNOWN when it does not apply; the whole-cone sweep then runs. */
+static int _sim_split(dvs_bbsolver_t *S) {
+    const char *e = getenv("DV_SIM_SPLIT");
+    if (e && strcmp(e, "0") == 0) return DVS_BB_UNKNOWN;
+    int8_t *nv = NULL;
+    uint64_t work = 0;
+    int r = dvs_aigsim_split_exhaustive(S->aig, S->assert_nodes, S->n_asserts,
+                                        _env_u64("DV_SIM_MAX_WORK", 1500000ull), S->seed,
+                                        &nv, &work);
+    S->aux_work += work;
+    if (r == DVS_AIGSIM_UNSAT) return DVS_BB_UNSAT;
+    if (r != DVS_AIGSIM_SAT || !nv) { free(nv); return DVS_BB_UNKNOWN; }
+    free(S->node_val);
+    S->node_val = nv;
+    S->model_in_sat = 0;
+    S->base_sim = 1;
+    return DVS_BB_SAT;
+}
+
 /* Simulation, then SAT. Returns the DVS_BB_* verdict. */
 static int _solve_with_sim(dvs_bbsolver_t *S) {
     if (!S->presim || S->asserts_lost || !S->n_asserts) return bb_sat_solve(S);
@@ -3906,6 +3926,14 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
             _sim_check(S, rc);
             return rc;
         }
+    }
+    int src = _sim_split(S);
+    if (src != DVS_BB_UNKNOWN) {
+        if (log)
+            fprintf(stderr, "bb-sim: split -> %s in %.2f ms\n",
+                    src == DVS_BB_SAT ? "sat" : "unsat", _ms_since(&t0));
+        _sim_check(S, src);
+        return src;
     }
     dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
     if (!sim) return bb_sat_solve(S);
@@ -4606,6 +4634,9 @@ static int _sim_once(dvs_bbsolver_t *S) {
         free(nv);
         if (ar == DVS_AFFINE_UNSAT) return DVS_BB_UNKNOWN;   /* never trust it over the last verdict */
     }
+    int src = _sim_split(S);
+    if (src == DVS_BB_SAT) return src;
+    if (src == DVS_BB_UNSAT) return DVS_BB_UNKNOWN;   /* never trust it over the last verdict */
     dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
     if (!sim) return DVS_BB_UNKNOWN;
     uint64_t work = dvs_aigsim_exhaustive_work(sim);

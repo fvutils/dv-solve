@@ -63,6 +63,18 @@ int dvs_aigsim_random(dvs_aigsim_t *s, uint32_t blocks, uint64_t seed);
  *  cone are 0. The caller frees it. NULL when out of memory. */
 int8_t *dvs_aigsim_model(const dvs_aigsim_t *s);
 
+/** Exhaustive sweep split by independence: assertions whose cones share no
+ *  input are swept as separate groups, so the work is the sum, not the
+ *  product, of their spaces. DVS_AIGSIM_UNDECIDED when there are fewer than
+ *  two groups, a constant assertion, or the summed work exceeds `max_work`
+ *  (the caller then sweeps the whole cone). SAT sets *nv_out to a malloc'd
+ *  valuation as dvs_aigsim_model gives; the seed means what it does for
+ *  dvs_aigsim_exhaustive, per group. *work_out gets the gate-word
+ *  evaluations done. */
+int dvs_aigsim_split_exhaustive(const dvs_aig_t *m, const dvs_aig_node_t *asserts,
+                                uint32_t n_asserts, uint64_t max_work, uint64_t seed,
+                                int8_t **nv_out, uint64_t *work_out);
+
 #ifdef __cplusplus
 }
 #endif

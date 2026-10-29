@@ -267,3 +267,118 @@ int8_t *dvs_aigsim_model(const dvs_aigsim_t *s) {
         if (!_bit(nv, s->asserts[a])) { free(nv); return NULL; }
     return nv;
 }
+
+static uint32_t _uf_find(uint32_t *p, uint32_t x) {
+    while (p[x] != x) { p[x] = p[p[x]]; x = p[x]; }
+    return x;
+}
+
+static uint64_t _exh_work(uint32_t n_inputs, uint64_t per_pass) {
+    if (n_inputs > 32) return UINT64_MAX;
+    return (n_inputs > 6 ? (1ull << (n_inputs - 6)) : 1) * per_pass;
+}
+
+int dvs_aigsim_split_exhaustive(const dvs_aig_t *m, const dvs_aig_node_t *asserts,
+                                uint32_t n_asserts, uint64_t max_work, uint64_t seed,
+                                int8_t **nv_out, uint64_t *work_out) {
+    *nv_out = NULL;
+    *work_out = 0;
+    uint64_t nn = dvs_aig_num_nodes(m);
+    if (nn == 0 || nn > 0x3FFFFFF0ull || n_asserts < 2) return DVS_AIGSIM_UNDECIDED;
+    uint32_t N = (uint32_t)nn;
+    int rc = DVS_AIGSIM_UNDECIDED;
+    uint32_t *par = (uint32_t *)malloc(((size_t)N + 1) * sizeof(uint32_t));
+    uint32_t *grp = (uint32_t *)malloc(((size_t)N + 1) * sizeof(uint32_t));
+    uint32_t *stack = (uint32_t *)malloc(((size_t)N + 1) * sizeof(uint32_t));
+    uint8_t *cone = (uint8_t *)calloc((size_t)N + 1, 1);
+    uint32_t *ag = (uint32_t *)malloc((size_t)n_asserts * sizeof(uint32_t));
+    uint32_t *gin = NULL, *gand = NULL, *gas = NULL;
+    dvs_aig_node_t *sub = (dvs_aig_node_t *)malloc((size_t)n_asserts * sizeof(dvs_aig_node_t));
+    int8_t *nv = NULL;
+    if (!par || !grp || !stack || !cone || !ag || !sub) goto out;
+
+    /* Union the cone's nodes through its AND gates: assertions in different
+     * sets share no input, so their solution sets are independent. */
+    uint32_t sp = 0;
+    for (uint32_t a = 0; a < n_asserts; a++) {
+        uint32_t i = (uint32_t)(asserts[a] < 0 ? -asserts[a] : asserts[a]);
+        if (i <= 1 || i > N) goto out;            /* constant assertion: whole-AIG path */
+        if (!cone[i]) { cone[i] = 1; stack[sp++] = i; }
+    }
+    for (uint32_t id = 0; id <= N; id++) par[id] = id;
+    while (sp) {
+        uint32_t id = stack[--sp];
+        if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
+        dvs_aig_node_t ch[2];
+        dvs_aig_get_children(m, (dvs_aig_node_t)id, &ch[0], &ch[1]);
+        for (int c = 0; c < 2; c++) {
+            uint32_t j = (uint32_t)(ch[c] < 0 ? -ch[c] : ch[c]);
+            if (j <= 1) continue;
+            uint32_t ra = _uf_find(par, id), rb = _uf_find(par, j);
+            if (ra != rb) par[ra] = rb;
+            if (!cone[j]) { cone[j] = 1; stack[sp++] = j; }
+        }
+    }
+    uint32_t ng = 0;
+    for (uint32_t id = 0; id <= N; id++) grp[id] = UINT32_MAX;
+    for (uint32_t a = 0; a < n_asserts; a++) {
+        uint32_t r = _uf_find(par, (uint32_t)(asserts[a] < 0 ? -asserts[a] : asserts[a]));
+        if (grp[r] == UINT32_MAX) grp[r] = ng++;
+        ag[a] = grp[r];
+    }
+    /* One simulator is built per group, each O(N): bound the total. */
+    if (ng < 2 || (uint64_t)ng * N > (1ull << 24)) goto out;
+    gin = (uint32_t *)calloc(ng, sizeof(uint32_t));
+    gand = (uint32_t *)calloc(ng, sizeof(uint32_t));
+    gas = (uint32_t *)calloc(ng, sizeof(uint32_t));
+    if (!gin || !gand || !gas) goto out;
+    for (uint32_t id = 2; id <= N; id++) {
+        if (!cone[id]) continue;
+        uint32_t g = grp[_uf_find(par, id)];
+        if (dvs_aig_is_and(m, (dvs_aig_node_t)id)) gand[g]++; else gin[g]++;
+    }
+    for (uint32_t a = 0; a < n_asserts; a++) gas[ag[a]]++;
+    uint64_t total = 0;
+    for (uint32_t g = 0; g < ng; g++) {
+        uint64_t w = _exh_work(gin[g], (uint64_t)gand[g] + gas[g]);
+        if (w == UINT64_MAX || w > max_work || (total += w) > max_work) goto out;
+    }
+
+    nv = (int8_t *)calloc((size_t)N + 1, 1);
+    if (!nv) goto out;
+    nv[1] = 1;                                                  /* TRUE */
+    for (uint32_t g = 0; g < ng; g++) {
+        uint32_t k = 0;
+        for (uint32_t a = 0; a < n_asserts; a++)
+            if (ag[a] == g) sub[k++] = asserts[a];
+        dvs_aigsim_t *s = dvs_aigsim_new(m, sub, k);
+        if (!s) goto out;
+        /* Seed 0 keeps the first hit; any other seed samples each group
+         * uniformly from its own stream, so the product is uniform. */
+        uint64_t gs = seed;
+        if (seed) { uint64_t st = seed ^ ((uint64_t)(g + 1) * 0xD1B54A32D192ED03ull); gs = _rng(&st) | 1; }
+        int r = dvs_aigsim_exhaustive(s, NULL, gs);
+        *work_out += s->vectors / 64u * ((uint64_t)s->n_gates + s->n_asserts);
+        if (r == DVS_AIGSIM_SAT && s->hit_exh)
+            for (uint32_t i = 0; i < s->n_inputs; i++)
+                nv[s->inputs[i]] = (int8_t)((s->hit_index >> i) & 1u);
+        dvs_aigsim_free(s);
+        if (r == DVS_AIGSIM_UNSAT) { rc = r; goto out; }
+        if (r != DVS_AIGSIM_SAT) goto out;
+    }
+    for (uint32_t id = 2; id <= N; id++) {
+        if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
+        dvs_aig_node_t l, r;
+        dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
+        nv[id] = (int8_t)(_bit(nv, l) & _bit(nv, r));
+    }
+    for (uint32_t a = 0; a < n_asserts; a++)
+        if (!_bit(nv, asserts[a])) goto out;
+    rc = DVS_AIGSIM_SAT;
+    *nv_out = nv;
+    nv = NULL;
+out:
+    free(par); free(grp); free(stack); free(cone); free(ag); free(sub);
+    free(gin); free(gand); free(gas); free(nv);
+    return rc;
+}
