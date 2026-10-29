@@ -4858,10 +4858,47 @@ static int _rediversify_same_base(dvs_bbsolver_t *S, uint64_t seed) {
     return 0;
 }
 
+/* 1 when every primary input bit of a variable lies in the cone of the
+ * assertions: a model drawn uniformly over the cone's inputs then draws every
+ * variable bit. */
+static int _var_inputs_in_cone(dvs_bbsolver_t *S) {
+    uint32_t N = (uint32_t)dvs_aig_num_nodes(S->aig);
+    if (!N || !_div_arrays(S, N)) return 0;
+    const dvs_aig_node_t *L = S->div_L, *R = S->div_R;
+    uint8_t *in = (uint8_t *)calloc((size_t)N + 1, 1);
+    if (!in) return 0;
+    for (uint32_t a = 0; a < S->n_asserts; a++) {
+        dvs_aig_node_t lit = S->assert_nodes[a];
+        uint32_t id = (uint32_t)(lit < 0 ? -lit : lit);
+        if (id <= N) in[id] = 1;
+    }
+    for (uint32_t id = N; id > 1; id--) {      /* children have smaller ids */
+        if (!in[id] || !L[id]) continue;
+        in[(uint32_t)(L[id] < 0 ? -L[id] : L[id])] = 1;
+        in[(uint32_t)(R[id] < 0 ? -R[id] : R[id])] = 1;
+    }
+    int ok = 1;
+    for (uint32_t vi = 0; ok && vi < S->n_vars; vi++) {
+        bb_var_t *v = &S->vars[vi];
+        if (!v->defined || !v->bv_built) continue;
+        for (uint32_t p = 0; p < v->bv.size; p++) {
+            dvs_aig_node_t lit = v->bv.bits[p];
+            uint32_t base = (uint32_t)(lit < 0 ? -lit : lit);
+            if (base <= 1 || base > N || L[base] != 0) continue;
+            if (!in[base]) { ok = 0; break; }
+        }
+    }
+    free(in);
+    return ok;
+}
+
 /* The seeded steps _solve_with_sim runs before SAT, without the SAT race: the
  * affine check, then one simulation pass (exhaustive when small enough, else
- * budgeted random). */
-static int _sim_once(dvs_bbsolver_t *S) {
+ * budgeted random). *exact is set to 1 when the model is the affine check's
+ * over a pure XOR system (no opaque gate, no clause): a uniform draw over the
+ * cone's inputs. */
+static int _sim_once(dvs_bbsolver_t *S, int *exact) {
+    *exact = 0;
     dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
     if (_affine_worth(sim)) {
         dvs_affine_stats_t ast;
@@ -4872,6 +4909,7 @@ static int _sim_once(dvs_bbsolver_t *S) {
             free(S->node_val);
             S->node_val = nv;
             S->model_in_sat = 0;
+            *exact = ast.opaque == 0 && ast.clauses == 0;
             dvs_aigsim_free(sim);
             return DVS_BB_SAT;
         }
@@ -4950,12 +4988,16 @@ static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
         return 0;
     }
     rc = DVS_BB_UNKNOWN;
-    if (S->base_sim && !S->asserts_lost) rc = _sim_once(S);
-    if (rc != DVS_BB_SAT && S->resample) rc = _sat_fresh(S);
+    int exact = 0;
+    if (S->base_sim && !S->asserts_lost) rc = _sim_once(S, &exact);
+    if (rc != DVS_BB_SAT && S->resample) { exact = 0; rc = _sat_fresh(S); }
     if (rc != DVS_BB_SAT) return -1;
     S->last_result = DVS_BB_SAT;
     S->redivs_since_base = 0;
-    _diversify(S);
+    /* A uniform draw over every variable bit needs no flip sweep: each of its
+     * flips breaks an XOR (xor_parity: 32 rejected flips per call). */
+    const char *ex = getenv("DV_AFFINE_EXACT");     /* =0: always sweep (A/B tests) */
+    if (!(exact && !(ex && *ex == '0') && _var_inputs_in_cone(S))) _diversify(S);
     return 0;
 }
 
