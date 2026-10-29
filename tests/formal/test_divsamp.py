@@ -204,13 +204,26 @@ _ORH = ({"x": _XW, "y": 8},
         lambda x, y: _in(y, (1, 2, 4)) & (x >= 1000))
 
 
+# Bits an extract leaf pins (cons.addr_align): the box draw keeps them, so
+# no draw is rejected for them.
+_PIN = ({"x": _XW, "y": 4},
+        [_or("y", 4, (1, 2, 4)), "(= ((_ extract 1 0) x) #b00)", "(= ((_ extract 9 9) x) #b1)",
+         f"(bvuge x {_bv(1000, _XW)})", f"(bvule x {_bv(200001, _XW)})"],
+        lambda x, y: _in(y, (1, 2, 4)) & (x & 3 == 0) & ((x >> 9) & 1 == 1) &
+        (x >= 1000) & (x <= 200001))
+
+
 @pytest.mark.parametrize("case,key", [
-    ("res", "res"), ("zg", "res"), ("cov", "cov"), ("or", None)])
+    ("res", "res"), ("zg", "res"), ("cov", "cov"), ("or", None), ("pin", None)])
 def test_box_proposals(case, key):
-    widths, asserts, pred = {"res": _RES, "zg": _ZG, "cov": _COV, "or": _ORH}[case]
+    widths, asserts, pred = {"res": _RES, "zg": _ZG, "cov": _COV, "or": _ORH,
+                             "pin": _PIN}[case]
     models, err = _check(widths, asserts, pred)
     if key:
         assert _fires(err, key), err[-2000:]
+    if case == "pin":
+        tries = re.findall(r"\[bb-divsamp\].*tries=(\d+) -> sat", err)
+        assert tries == ["1"] * _N, err[-2000:]
 
 
 # Shapes the proposals must decline: a signed compare, and an add narrower

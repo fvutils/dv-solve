@@ -6643,6 +6643,32 @@ static int _ds_enum_only(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t **vs, size_t 
     return 1;
 }
 
+/* Values of a w-bit key with the bits of fm fixed to fv (fm != 0), in
+ * order: the j-th is _ds_dep(j). _ds_rank(y) counts those <= y. */
+static uint64_t _ds_rank(uint64_t y, uint64_t fm, uint64_t fv, uint32_t w) {
+    uint64_t cnt = 0;
+    uint32_t nfree = 0;
+    for (uint32_t i = 0; i < w; i++) nfree += !((fm >> i) & 1);
+    for (uint32_t i = w; i-- > 0;) {
+        uint64_t yb = (y >> i) & 1;
+        if ((fm >> i) & 1) {
+            uint64_t fb = (fv >> i) & 1;
+            if (fb != yb) return fb < yb ? cnt + (1ull << nfree) : cnt;
+        } else {
+            nfree--;
+            if (yb) cnt += 1ull << nfree;
+        }
+    }
+    return cnt + 1;
+}
+
+static uint64_t _ds_dep(uint64_t j, uint64_t fm, uint64_t fv, uint32_t w) {
+    uint64_t x = fv & fm;
+    for (uint32_t i = 0; i < w; i++)
+        if (!((fm >> i) & 1)) { x |= (j & 1) << i; j >>= 1; }
+    return x;
+}
+
 /* `e` through substitutions and zero extends to a bare var id, else -1. */
 static int64_t _ds_bare(dvs_bbsolver_t *S, dvs_expr_t e, int zext) {
     for (int hops = 0; hops < 32; hops++) {
@@ -7149,11 +7175,18 @@ static int _divsamp(dvs_bbsolver_t *S) {
                     if (!bb_eval(S, pe[v], pw[v], vval, &y)) { why = "eval"; goto out; }
                     x = (_ps_below(&st, pc[v] + 1) - y) & bb_eval_mask(pw[v]);
                     ok = (x & fmask[v]) == fval[v];
+                } else if (fmask[v]) {
+                    /* Draw over the keys with the pinned bits set. */
+                    uint32_t w = S->vars[v].width;
+                    uint64_t fk = (fval[v] ^ bias[v]) & fmask[v];
+                    uint64_t r0 = kl[v] ? _ds_rank(kl[v] - 1, fmask[v], fk, w) : 0;
+                    uint64_t r1 = _ds_rank(kh[v], fmask[v], fk, w);
+                    ok = r1 > r0;
+                    x = ok ? _ds_dep(r0 + _ps_below(&st, r1 - r0), fmask[v], fk, w) ^ bias[v] : 0;
                 } else {
                     uint64_t span = kh[v] - kl[v];
                     x = (kl[v] + (span == UINT64_MAX ? _ps_next(&st)
                                                      : _ps_below(&st, span + 1))) ^ bias[v];
-                    ok = (x & fmask[v]) == fval[v];
                 }
                 vval[v] = x;
             }
