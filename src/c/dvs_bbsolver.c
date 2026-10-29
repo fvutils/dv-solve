@@ -2835,11 +2835,18 @@ static int bb_const_u(dvs_bbsolver_t *S, dvs_expr_t e, uint64_t *out) {
 /* Var id of a bare reference to an unsigned var of width <= 64, else -1. */
 static int64_t bb_unsigned_var(dvs_bbsolver_t *S, dvs_expr_t e) {
     const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
-    while (k && *k == EXPR_EXTEND && !((const ExprExtend *)k)->sign_extend)
-        k = (const ExprKind *)POOL_PTR(S->problem,
-                                       ((const ExprExtend *)k)->operand);
-    if (!k || *k != EXPR_VAR) return -1;
-    uint32_t id = ((const ExprVar *)k)->var_id;
+    uint32_t id;
+    for (int hops = 0; ; hops++) {
+        while (k && *k == EXPR_EXTEND && !((const ExprExtend *)k)->sign_extend)
+            k = (const ExprKind *)POOL_PTR(S->problem,
+                                           ((const ExprExtend *)k)->operand);
+        if (!k || *k != EXPR_VAR) return -1;
+        id = ((const ExprVar *)k)->var_id;
+        /* `x == zero_extend(y)` taken as a substitution: bound y. */
+        if (hops >= 8 || id >= S->n_vars || !S->subst ||
+            S->subst[id] == EXPR_NULL) break;
+        k = (const ExprKind *)POOL_PTR(S->problem, S->subst[id]);
+    }
     if (id >= S->n_vars || S->vars[id].is_signed || S->vars[id].width > 64)
         return -1;
     return id;
@@ -2903,6 +2910,20 @@ static void bb_unary_bounds(dvs_bbsolver_t *S, uint64_t *lo, uint64_t *hi) {
                     bb_unsigned_var(S, e->rhs) < 0) {
                     if (n < 64) stk[n++] = e->rhs;
                     continue;
+                }
+                /* `b == ite(c,1,0)` with b substituted by 1: c holds. */
+                if (e->op == DVS_BIN_EQ && S->subst) {
+                    const ExprKind *lk =
+                        (const ExprKind *)POOL_PTR(S->problem, e->lhs);
+                    if (lk && *lk == EXPR_VAR &&
+                        ((const ExprVar *)lk)->var_id < S->n_vars &&
+                        S->subst[((const ExprVar *)lk)->var_id] != EXPR_NULL &&
+                        bb_const_u(S, S->subst[((const ExprVar *)lk)->var_id],
+                                   &a) && a == 1 &&
+                        bb_is_bool_ite(S, e->rhs, &cond)) {
+                        if (n < 64) stk[n++] = cond;
+                        continue;
+                    }
                 }
                 dvs_binop_t op = e->op;
                 int64_t v = bb_unsigned_var(S, e->lhs);
@@ -2977,6 +2998,8 @@ static int bb_comp_small_domain(dvs_bbsolver_t *S, uint32_t comp,
     double prod = 1.0;
     for (uint32_t i = 0; i < S->comps.n_vars; i++) {
         if (S->comps.var_comp[i] != comp) continue;
+        /* A substituted var is a function of the others: no dimension. */
+        if (S->subst && S->subst[i] != EXPR_NULL) continue;
         if (S->vars[i].width > 64 || lo[i] > hi[i]) return 0;
         prod *= (double)(hi[i] - lo[i]) + 1.0;
         if (prod > (double)(1u << BB_COMP_ENUM_LOG2)) return 0;
