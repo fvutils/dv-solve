@@ -7383,6 +7383,14 @@ static int _en_build(dvs_bbsolver_t *S) {
     loff[n_lf] = n_vs;
     if (n_ord == 0) goto out;
     bb_unary_bounds(S, lo, hi);
+    /* Declared bounds are asserts too (assert_var_bounds), not leaves: without
+     * them every row of a [0,4] var in 3 bits may hold 5..7 and fail the check. */
+    for (uint32_t k = 0; k < n_ord; k++) {
+        const bb_var_t *bv = &S->vars[ord[k]];
+        if (bv->is_signed || bv->lo < 0 || bv->hi < bv->lo) continue;
+        if ((uint64_t)bv->lo > lo[ord[k]]) lo[ord[k]] = (uint64_t)bv->lo;
+        if ((uint64_t)bv->hi < hi[ord[k]]) hi[ord[k]] = (uint64_t)bv->hi;
+    }
     for (uint32_t k = 0; k < n_ord; k++)
         if (lo[ord[k]] > hi[ord[k]] || hi[ord[k]] - lo[ord[k]] >= DVS_EN_MAX_NODES) goto out;
     /* Leaves by the depth of their last var (CSR); a no-var leaf must hold. */
@@ -7517,6 +7525,7 @@ static int _enumsamp(dvs_bbsolver_t *S, int fresh) {
     while (a < S->n_asserts && _lit_val(val, S->assert_nodes[a])) a++;
     if (a < S->n_asserts) {
         /* The table disagrees with the AIG: never sample from it again. */
+        if (getenv("DV_LOG")) fprintf(stderr, "bb-enumsamp: draw fails assert %u -> off\n", a);
         S->en_state = 2;
         free(val);
         return DVS_BB_UNKNOWN;
