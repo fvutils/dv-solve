@@ -8098,6 +8098,159 @@ static int _en_bits(dvs_bbsolver_t *S, dvs_expr_t e, uint64_t *fm, uint64_t *cut
     }
 }
 
+/* Leaves of the table: an expr leaf (lsl[li] == UINT32_MAX) holds when it is
+ * true; a slice leaf says bits [hi:lo] of var lown[li] equal slice lsl[li]'s
+ * eref (lf[li]). The AIG builds those bits from eref, so the DFS must too. */
+static int _en_eval(dvs_bbsolver_t *S, const dvs_expr_t *lf, const uint32_t *lsl,
+                    const uint32_t *lown, size_t li, const uint64_t *vval, uint64_t *t) {
+    if (lsl[li] == UINT32_MAX) return bb_eval_pred(S, lf[li], vval, t);
+    const bb_slice_t *sl = &S->slices[lsl[li]];
+    uint32_t w = sl->hi - sl->lo + 1;
+    uint64_t x;
+    if (!bb_eval(S, lf[li], w, vval, &x)) return 0;
+    *t = x == ((vval[lown[li]] >> sl->lo) & bb_eval_mask(w));
+    return 1;
+}
+
+static int _en_leaf_bits(dvs_bbsolver_t *S, const dvs_expr_t *lf, const uint32_t *lsl,
+                         const uint32_t *lown, size_t li, uint64_t *fm, uint64_t *cut) {
+    if (!_en_bits(S, lf[li], fm, cut, 0)) return 0;
+    if (lsl[li] != UINT32_MAX) {
+        const bb_slice_t *sl = &S->slices[lsl[li]];
+        uint32_t v = lown[li];
+        fm[v] |= bb_eval_mask(sl->hi - sl->lo + 1) << sl->lo;
+        cut[v] |= 1ull << sl->lo;
+        if (sl->hi + 1 < S->vars[v].width) cut[v] |= 1ull << (sl->hi + 1);
+    }
+    return 1;
+}
+
+/* 1 if `e` is a tree of &, |, ^, ~ over w-bit vars (through their
+ * substitutions) and w-bit constants: bit i of its value reads only bit i of each var. */
+static int _en_colwise(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t w, int depth) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+    if (!k || depth > 64 || bb_self_width(S, e, 0) != w) return 0;
+    switch (*k) {
+    case EXPR_CONST: return 1;
+    case EXPR_VAR: {
+        uint32_t id = ((const ExprVar *)k)->var_id;
+        if (id >= S->n_vars || S->vars[id].width != w) return 0;
+        if (S->subst && S->subst[id] != EXPR_NULL)
+            return _en_colwise(S, S->subst[id], w, depth + 1);
+        return 1;
+    }
+    case EXPR_BINARY: {
+        const ExprBinary *b = (const ExprBinary *)k;
+        return (b->op == DVS_BIN_BAND || b->op == DVS_BIN_BOR || b->op == DVS_BIN_BXOR) &&
+               _en_colwise(S, b->lhs, w, depth + 1) && _en_colwise(S, b->rhs, w, depth + 1);
+    }
+    case EXPR_UNARY: {
+        const ExprUnary *u = (const ExprUnary *)k;
+        return u->op == DVS_UN_INVERT && _en_colwise(S, u->operand, w, depth + 1);
+    }
+    default: return 0;
+    }
+}
+
+/* Bit columns: when every var is w bits and some leaves are `x == y` over
+ * bitwise trees (_en_colwise), those leaves hold column by column, so their
+ * models are the product of each column's bit patterns. Enumerate that
+ * product and filter it by the other leaves and lo/hi. 1 on a table (*sol,
+ * *n_sol rows of n_ord values); 0 leaves it to the slot DFS. */
+static int _en_cols(dvs_bbsolver_t *S, const dvs_expr_t *lf, const uint32_t *lsl,
+                    const uint32_t *lown, size_t n_lf,
+                    const uint32_t *ord, uint32_t n_ord, const uint64_t *lo,
+                    const uint64_t *hi, uint64_t *vval, uint64_t **sol_out,
+                    size_t *n_sol_out, uint64_t *nodes) {
+    uint32_t w = S->vars[ord[0]].width, n_col = 0;
+    if (n_ord > 12 || w > 64) return 0;
+    for (uint32_t q = 1; q < n_ord; q++)
+        if (S->vars[ord[q]].width != w) return 0;
+    uint8_t *col = (uint8_t *)calloc(n_lf + 1, 1);
+    uint32_t *pat = NULL, cnt[64], idx[64];
+    uint64_t *sol = NULL;
+    size_t n_sol = 0, cap = 0;
+    double prod = 1.0;
+    int ok = 0;
+    if (!col) return 0;
+    for (size_t li = 0; li < n_lf; li++) {
+        const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, lf[li]);
+        if (lsl[li] != UINT32_MAX || !k || *k != EXPR_BINARY) continue;
+        const ExprBinary *b = (const ExprBinary *)k;
+        if (b->op == DVS_BIN_EQ && _en_colwise(S, b->lhs, w, 0) &&
+            _en_colwise(S, b->rhs, w, 0)) { col[li] = 1; n_col++; }
+    }
+    uint32_t np = 1u << n_ord;
+    if (n_col == 0 || (uint64_t)w * np * n_col > DVS_EN_MAX_NODES) goto out;
+    pat = (uint32_t *)malloc((size_t)w * np * sizeof(uint32_t));
+    if (!pat) goto out;
+    /* Each column's patterns: bit q of p is bit i of ord[q]. */
+    for (uint32_t i = 0; i < w; i++) {
+        cnt[i] = 0;
+        for (uint32_t p = 0; p < np; p++) {
+            int hold = 1;
+            for (uint32_t q = 0; q < n_ord; q++)
+                vval[ord[q]] = (uint64_t)((p >> q) & 1) << i;
+            for (size_t li = 0; hold && li < n_lf; li++) {
+                if (!col[li]) continue;
+                const ExprBinary *b = (const ExprBinary *)POOL_PTR(S->problem, lf[li]);
+                uint64_t x, y;
+                (*nodes)++;
+                if (!bb_eval(S, b->lhs, w, vval, &x) || !bb_eval(S, b->rhs, w, vval, &y))
+                    goto out;
+                hold = ((x ^ y) >> i & 1) == 0;
+            }
+            if (hold) pat[(size_t)i * np + cnt[i]++] = p;
+        }
+        if (cnt[i] == 0) goto out;   /* SAT decides unsat */
+        prod *= cnt[i];
+    }
+    if (prod * (double)(n_lf - n_col + 1) + (double)*nodes > (double)DVS_EN_MAX_NODES) goto out;
+    /* Odometer over the columns; each product row is one model. */
+    memset(idx, 0, sizeof(idx));
+    for (;;) {
+        int hold = 1;
+        for (uint32_t q = 0; q < n_ord; q++) vval[ord[q]] = 0;
+        for (uint32_t i = 0; i < w; i++) {
+            uint32_t p = pat[(size_t)i * np + idx[i]];
+            for (uint32_t q = 0; q < n_ord; q++)
+                vval[ord[q]] |= (uint64_t)((p >> q) & 1) << i;
+        }
+        for (uint32_t q = 0; hold && q < n_ord; q++)
+            hold = lo[ord[q]] <= vval[ord[q]] && vval[ord[q]] <= hi[ord[q]];
+        for (size_t li = 0; hold && li < n_lf; li++) {
+            uint64_t t;
+            if (col[li]) continue;
+            (*nodes)++;
+            if (!_en_eval(S, lf, lsl, lown, li, vval, &t)) goto out;
+            hold = t != 0;
+        }
+        if (hold) {
+            if (n_sol >= DVS_EN_MAX_SOL || (n_sol + 1) * n_ord > DVS_EN_MAX_CELLS) goto out;
+            if ((n_sol + 1) * n_ord > cap) {
+                size_t c = cap ? 2 * cap : 64 * (size_t)n_ord;
+                uint64_t *t = (uint64_t *)realloc(sol, c * sizeof(*sol));
+                if (!t) goto out;
+                sol = t;
+                cap = c;
+            }
+            for (uint32_t q = 0; q < n_ord; q++) sol[n_sol * n_ord + q] = vval[ord[q]];
+            n_sol++;
+        }
+        uint32_t i = 0;
+        while (i < w && ++idx[i] == cnt[i]) idx[i++] = 0;
+        if (i == w) break;
+    }
+    if (n_sol == 0) goto out;
+    *sol_out = sol;
+    *n_sol_out = n_sol;
+    sol = NULL;
+    ok = 1;
+out:
+    free(col); free(pat); free(sol);
+    return ok;
+}
+
 /* Build S->en_* for the current assert set; 1 on a table with models. The
  * DFS runs over slots: a var whose leaves read it only through constant
  * extracts (a packed struct) splits into its fields, each its own level,
@@ -8105,8 +8258,9 @@ static int _en_bits(dvs_bbsolver_t *S, dvs_expr_t e, uint64_t *fm, uint64_t *cut
 static int _en_build(dvs_bbsolver_t *S) {
     uint32_t nv = S->n_vars, n_ord = 0, n_sl = 0;
     size_t n_lf = 0, cap_lf = 0, n_vs = 0, cap_vs = 0, n_sol = 0, cap_sol = 0;
+    size_t cap_ls = 0, cap_lo = 0, cap_off = 0;
     dvs_expr_t *lf = NULL;
-    uint32_t *vs = NULL;
+    uint32_t *vs = NULL, *lsl = NULL, *lown = NULL;
     size_t *loff = NULL;
     uint32_t *pos = (uint32_t *)malloc(nv * sizeof(uint32_t));
     uint32_t *ord = (uint32_t *)malloc(nv * sizeof(uint32_t));
@@ -8130,27 +8284,50 @@ static int _en_build(dvs_bbsolver_t *S) {
         hi[v] = bb_eval_mask(S->vars[v].width);
     }
     if (!_us_leaves(S, &lf, &n_lf, &cap_lf)) goto out;
-    loff = (size_t *)malloc((n_lf + 1) * sizeof(size_t));
-    if (!loff) goto out;
-    /* Vars in order of first use, so each leaf is checked early. */
     for (size_t li = 0; li < n_lf; li++) {
+        if (!_us_grow((void **)&lsl, &cap_ls, li, sizeof(*lsl)) ||
+            !_us_grow((void **)&lown, &cap_lo, li, sizeof(*lown))) goto out;
+        lsl[li] = lown[li] = UINT32_MAX;
+    }
+    /* Vars in order of first use, so each leaf is checked early. A var's
+     * slice substitutions join as leaves when the var does (n_lf grows). */
+    for (size_t li = 0; li < n_lf; li++) {
+        if (!_us_grow((void **)&loff, &cap_off, li + 1, sizeof(*loff))) goto out;
         loff[li] = n_vs;
         if (!_ds_vars(S, lf[li], &vs, n_vs, &n_vs, &cap_vs, 0)) goto out;
-        if (!_en_bits(S, lf[li], fm, cut, 0)) goto out;
+        if (lsl[li] != UINT32_MAX) {
+            size_t i = loff[li];
+            while (i < n_vs && vs[i] != lown[li]) i++;
+            if (i == n_vs) {
+                if (!_us_grow((void **)&vs, &cap_vs, n_vs, sizeof(*vs))) goto out;
+                vs[n_vs++] = lown[li];
+            }
+        }
+        if (!_en_leaf_bits(S, lf, lsl, lown, li, fm, cut)) goto out;
         for (size_t i = loff[li]; i < n_vs; i++) {
             uint32_t v = vs[i];
             if (S->vars[v].width == 0 || S->vars[v].width > 64) goto out;
-            /* A slice substitution holds a consumed constraint no leaf shows. */
-            if (S->slice_head && S->slice_head[v] != BB_NO_SLICE) goto out;
-            if (pos[v] == UINT32_MAX) { pos[v] = n_ord; ord[n_ord++] = v; }
+            if (pos[v] != UINT32_MAX) continue;
+            pos[v] = n_ord;
+            ord[n_ord++] = v;
+            if (!S->slice_head) continue;
+            for (uint32_t x = S->slice_head[v]; x != BB_NO_SLICE; x = S->slices[x].next) {
+                if (!_us_grow((void **)&lf, &cap_lf, n_lf, sizeof(*lf)) ||
+                    !_us_grow((void **)&lsl, &cap_ls, n_lf, sizeof(*lsl)) ||
+                    !_us_grow((void **)&lown, &cap_lo, n_lf, sizeof(*lown))) goto out;
+                lf[n_lf] = S->slices[x].eref;
+                lsl[n_lf] = x;
+                lown[n_lf++] = v;
+            }
         }
     }
+    if (!_us_grow((void **)&loff, &cap_off, n_lf + 1, sizeof(*loff))) goto out;
     loff[n_lf] = n_vs;
     if (n_ord == 0) goto out;
     bb_unary_bounds(S, lo, hi);
     /* A one-var leaf narrows its var (bias 0: lo/hi are values). */
     for (size_t li = 0; li < n_lf; li++) {
-        if (loff[li + 1] - loff[li] != 1) continue;
+        if (loff[li + 1] - loff[li] != 1 || lsl[li] != UINT32_MAX) continue;
         uint32_t v = vs[loff[li]];
         uint64_t b = 0;
         int hb = 1;
@@ -8164,6 +8341,13 @@ static int _en_build(dvs_bbsolver_t *S) {
         if ((uint64_t)bv->lo > lo[ord[k]]) lo[ord[k]] = (uint64_t)bv->lo;
         if ((uint64_t)bv->hi < hi[ord[k]]) hi[ord[k]] = (uint64_t)bv->hi;
     }
+    for (uint32_t k = 0; k < n_ord; k++)
+        if (lo[ord[k]] > hi[ord[k]]) goto out;
+    if (_en_cols(S, lf, lsl, lown, n_lf, ord, n_ord, lo, hi, vval, &sol, &n_sol, &nodes)) {
+        for (uint32_t k = 0; k < n_ord; k++) fm[ord[k]] = bb_eval_mask(S->vars[ord[k]].width);
+        goto done;
+    }
+    memset(vval, 0, nv * sizeof(uint64_t));
     /* Slots: a var with a narrowed hull stays whole (its range is a value
      * range, not per field), else one slot per field a leaf reads. */
     for (uint32_t k = 0; k < n_ord; k++) {
@@ -8208,7 +8392,7 @@ static int _en_build(dvs_bbsolver_t *S) {
         uint32_t np = 0;
         for (size_t li = 0; li < n_lf; li++) {
             uint32_t d = 0;
-            if (!_en_bits(S, lf[li], lfm, lcut, 0)) goto out;
+            if (!_en_leaf_bits(S, lf, lsl, lown, li, lfm, lcut)) goto out;
             for (size_t i = loff[li]; i < loff[li + 1]; i++) {
                 uint32_t v = vs[i], k = pos[v];
                 for (uint32_t s = s0[k]; s < s0[k + 1]; s++) {
@@ -8230,7 +8414,7 @@ static int _en_build(dvs_bbsolver_t *S) {
     for (size_t li = 0; li < n_lf; li++) {
         if (loff[li + 1] == loff[li]) {
             uint64_t t;
-            if (!bb_eval_pred(S, lf[li], vval, &t) || !t) goto out;
+            if (!_en_eval(S, lf, lsl, lown, li, vval, &t) || !t) goto out;
             continue;
         }
         dhead[ldep[li] + 1]++;
@@ -8259,7 +8443,7 @@ static int _en_build(dvs_bbsolver_t *S) {
             for (uint32_t j = dhead[k]; hold && j < dhead[k + 1]; j++) {
                 uint64_t t;
                 nodes++;
-                if (!bb_eval_pred(S, lf[dlf[j]], vval, &t)) goto out;
+                if (!_en_eval(S, lf, lsl, lown, dlf[j], vval, &t)) goto out;
                 hold = t != 0;
             }
             if (nodes > DVS_EN_MAX_NODES) goto out;
@@ -8329,7 +8513,7 @@ out:
     if (getenv("DV_LOG"))
         fprintf(stderr, "bb-enumsamp: vars=%u slots=%u leaves=%zu nodes=%llu sols=%zu -> %s\n",
                 n_ord, n_sl, n_lf, (unsigned long long)nodes, n_sol, ok ? "table" : "decline");
-    free(lf); free(vs); free(loff); free(pos); free(ord); free(lo); free(hi);
+    free(lf); free(lsl); free(lown); free(vs); free(loff); free(pos); free(ord); free(lo); free(hi);
     free(vval); free(fm); free(cut); free(lfm); free(lcut); free(s0);
     free(dhead); free(dlf); free(ldep); free(sv); free(sl); free(spos); free(dord);
     free(sm); free(slo); free(shi); free(sol);
