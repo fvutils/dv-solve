@@ -2483,11 +2483,10 @@ static uint64_t _free_var_fill(uint64_t seed, uint32_t var_id, uint32_t limb);
 
 /* Value of AIG literal `lit` under node valuation nv[] (nv indexed by |id|). */
 static inline int _lit_val(const int8_t *nv, dvs_aig_node_t lit) {
-    if (lit == DVS_AIG_TRUE)  return 1;
-    if (lit == DVS_AIG_FALSE) return 0;
-    uint32_t i = (uint32_t)(lit < 0 ? -lit : lit);
-    int v = nv[i];
-    return lit < 0 ? !v : v;
+    /* Branch-light: id 1 is the TRUE constant, whatever nv[1] holds. */
+    int neg = lit < 0;
+    uint32_t i = (uint32_t)(neg ? -lit : lit);
+    return ((nv[i] | (i == 1)) & 1) ^ neg;
 }
 
 /* Binary min-heap over node ids (the worklist of _prop_cone). */
