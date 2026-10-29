@@ -2819,23 +2819,166 @@ static int _bb_encode_alldiff(dvs_bbsolver_t *S) {
  * recognizer returns 1 if it would solve component `comp` itself, 0 to fall
  * through to the whole-problem bit-blast. None yet, so every component falls
  * through and the SAT call is unchanged. */
-typedef int (*bb_comp_recognizer_t)(dvs_bbsolver_t *S, uint32_t comp);
+typedef int (*bb_comp_recognizer_t)(dvs_bbsolver_t *S, uint32_t comp,
+                                    const uint64_t *lo, const uint64_t *hi);
+
+/* Unsigned value of a non-negative 64-bit-or-narrower constant, else -1. */
+static int bb_const_u(dvs_bbsolver_t *S, dvs_expr_t e, uint64_t *out) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+    if (!k || *k != EXPR_CONST) return 0;
+    const ExprConst *c = (const ExprConst *)k;
+    if (c->value < 0) return 0;
+    *out = (uint64_t)c->value;
+    return 1;
+}
+
+/* Var id of a bare reference to an unsigned var of width <= 64, else -1. */
+static int64_t bb_unsigned_var(dvs_bbsolver_t *S, dvs_expr_t e) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+    while (k && *k == EXPR_EXTEND && !((const ExprExtend *)k)->sign_extend)
+        k = (const ExprKind *)POOL_PTR(S->problem,
+                                       ((const ExprExtend *)k)->operand);
+    if (!k || *k != EXPR_VAR) return -1;
+    uint32_t id = ((const ExprVar *)k)->var_id;
+    if (id >= S->n_vars || S->vars[id].is_signed || S->vars[id].width > 64)
+        return -1;
+    return id;
+}
+
+/* `ite(c, 1, 0)`: non-zero exactly when c holds. */
+static int bb_is_bool_ite(dvs_bbsolver_t *S, dvs_expr_t e, dvs_expr_t *cond) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+    uint64_t t, f;
+    if (!k || *k != EXPR_ITE) return 0;
+    const ExprITE *i = (const ExprITE *)k;
+    if (!bb_const_u(S, i->then_e, &t) || !bb_const_u(S, i->else_e, &f) ||
+        t != 1 || f != 0) return 0;
+    if (cond) *cond = i->cond;
+    return 1;
+}
+
+static void bb_tighten(uint64_t *lo, uint64_t *hi, int64_t v,
+                       uint64_t l, uint64_t h) {
+    if (v < 0) return;
+    if (l > lo[v]) lo[v] = l;
+    if (h < hi[v]) hi[v] = h;
+}
+
+/** Unary bound tightening (stats only): intersect each unsigned var's
+ * [lo,hi] with the top-level conjuncts `var cmp const`, `var inside
+ * {consts}` and `var inside [const:const]` of the kept constraints.
+ * Works on the copies lo[]/hi[]; S->vars is untouched. An empty result
+ * (lo > hi) is left as is: a recognizer must then decline, not claim. */
+static void bb_unary_bounds(dvs_bbsolver_t *S, uint64_t *lo, uint64_t *hi) {
+    dvs_expr_t stk[64];
+    uint32_t me = 0;
+    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL;
+         me++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        cur = cs->next;
+        if (S->constraint_skip && S->constraint_skip[me]) continue;
+        size_t n = 0;
+        stk[n++] = cs->root;
+        while (n > 0) {
+            dvs_expr_t r = stk[--n];
+            const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
+            if (!k) continue;
+            uint64_t a, b;
+            dvs_expr_t cond;
+            if (bb_is_bool_ite(S, r, &cond)) {     /* ite(c,1,0) != 0: c */
+                if (n < 64) stk[n++] = cond;
+                continue;
+            }
+            if (*k == EXPR_BINARY) {
+                const ExprBinary *e = (const ExprBinary *)k;
+                /* `a && b`, and `a & b` of two 0/1 ites: both hold. */
+                if (e->op == DVS_BIN_AND ||
+                    (e->op == DVS_BIN_BAND && bb_is_bool_ite(S, e->lhs, NULL) &&
+                     bb_is_bool_ite(S, e->rhs, NULL))) {
+                    if (n + 2 <= 64) { stk[n++] = e->lhs; stk[n++] = e->rhs; }
+                    continue;
+                }
+                /* `1 == x`: x is non-zero (Verilator's (= #b1 ...) wrapper). */
+                if (e->op == DVS_BIN_EQ && bb_const_u(S, e->lhs, &a) && a == 1 &&
+                    bb_unsigned_var(S, e->rhs) < 0) {
+                    if (n < 64) stk[n++] = e->rhs;
+                    continue;
+                }
+                dvs_binop_t op = e->op;
+                int64_t v = bb_unsigned_var(S, e->lhs);
+                int ok = v >= 0 && bb_const_u(S, e->rhs, &a);
+                if (!ok) {      /* const op var: mirror the comparison */
+                    v = bb_unsigned_var(S, e->rhs);
+                    ok = v >= 0 && bb_const_u(S, e->lhs, &a);
+                    if (op == DVS_BIN_LT) op = DVS_BIN_GT;
+                    else if (op == DVS_BIN_GT) op = DVS_BIN_LT;
+                    else if (op == DVS_BIN_LTE) op = DVS_BIN_GTE;
+                    else if (op == DVS_BIN_GTE) op = DVS_BIN_LTE;
+                }
+                if (!ok) continue;
+                switch (op) {
+                case DVS_BIN_EQ:  bb_tighten(lo, hi, v, a, a); break;
+                case DVS_BIN_LT:
+                    if (a == 0) bb_tighten(lo, hi, v, 1, 0);
+                    else bb_tighten(lo, hi, v, 0, a - 1);
+                    break;
+                case DVS_BIN_LTE: bb_tighten(lo, hi, v, 0, a); break;
+                case DVS_BIN_GT:
+                    if (a == UINT64_MAX) bb_tighten(lo, hi, v, 1, 0);
+                    else bb_tighten(lo, hi, v, a + 1, UINT64_MAX);
+                    break;
+                case DVS_BIN_GTE: bb_tighten(lo, hi, v, a, UINT64_MAX); break;
+                default: break;
+                }
+            } else if (*k == EXPR_IN_RANGE) {
+                const ExprInRange *e = (const ExprInRange *)k;
+                int64_t v = bb_unsigned_var(S, e->value);
+                if (v >= 0 && bb_const_u(S, e->lo, &a) && bb_const_u(S, e->hi, &b))
+                    bb_tighten(lo, hi, v, a, b);
+            } else if (*k == EXPR_IN_SET) {
+                const ExprInSet *e = (const ExprInSet *)k;
+                int64_t v = bb_unsigned_var(S, e->value);
+                if (v < 0 || !e->n_elems) continue;
+                const dvs_expr_t *el = expr_in_set_elems(S->problem, r);
+                uint64_t mn = UINT64_MAX, mx = 0;
+                uint32_t i;
+                for (i = 0; i < e->n_elems; i++) {
+                    if (!bb_const_u(S, el[i], &a)) break;
+                    if (a < mn) mn = a;
+                    if (a > mx) mx = a;
+                }
+                if (i == e->n_elems) bb_tighten(lo, hi, v, mn, mx);
+            } else if (*k == EXPR_IN_RANGES) {
+                const ExprInRanges *e = (const ExprInRanges *)k;
+                int64_t v = bb_unsigned_var(S, e->value);
+                if (v < 0 || !e->n_ranges) continue;
+                const dvs_expr_t *ls = expr_in_ranges_los(S->problem, r);
+                const dvs_expr_t *hs = expr_in_ranges_his(S->problem, r);
+                uint64_t mn = UINT64_MAX, mx = 0;
+                uint32_t i;
+                for (i = 0; i < e->n_ranges; i++) {
+                    if (!bb_const_u(S, ls[i], &a) || !bb_const_u(S, hs[i], &b))
+                        break;
+                    if (a < mn) mn = a;
+                    if (b > mx) mx = b;
+                }
+                if (i == e->n_ranges) bb_tighten(lo, hi, v, mn, mx);
+            }
+        }
+    }
+}
 
 /** Small component: product of its vars' domains is <= 2^16, so it could be
- * enumerated and sampled by index (plan 9a). A var's domain is its [lo,hi]
- * range when that is a valid range, else all 2^width values. */
+ * enumerated and sampled by index (plan 9a). A var's domain is its tightened
+ * [lo,hi] (bb_unary_bounds); an empty domain declines. */
 #define BB_COMP_ENUM_LOG2 16
-static int bb_comp_small_domain(dvs_bbsolver_t *S, uint32_t comp) {
+static int bb_comp_small_domain(dvs_bbsolver_t *S, uint32_t comp,
+                                const uint64_t *lo, const uint64_t *hi) {
     double prod = 1.0;
     for (uint32_t i = 0; i < S->comps.n_vars; i++) {
         if (S->comps.var_comp[i] != comp) continue;
-        const bb_var_t *v = &S->vars[i];
-        if (v->width > 64) return 0;
-        double full = ldexp(1.0, (int)v->width);
-        double d = v->hi >= v->lo
-                   ? (double)((uint64_t)v->hi - (uint64_t)v->lo) + 1.0 : full;
-        if (d > full) d = full;
-        prod *= d;
+        if (S->vars[i].width > 64 || lo[i] > hi[i]) return 0;
+        prod *= (double)(hi[i] - lo[i]) + 1.0;
         if (prod > (double)(1u << BB_COMP_ENUM_LOG2)) return 0;
     }
     return 1;
@@ -2846,10 +2989,24 @@ static const bb_comp_recognizer_t bb_comp_ladder[] = {
 
 /** Count components some ladder recognizer claims (stats only). */
 static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S) {
-    uint32_t claimed = 0;
+    uint32_t nv = S->comps.n_vars, claimed = 0;
+    uint64_t *lo = (uint64_t *)malloc((nv ? nv : 1) * 2 * sizeof(uint64_t));
+    if (!lo) return 0;
+    uint64_t *hi = lo + (nv ? nv : 1);
+    for (uint32_t i = 0; i < nv; i++) {
+        const bb_var_t *v = &S->vars[i];
+        uint64_t mask = v->width >= 64 ? UINT64_MAX
+                        : ((uint64_t)1 << v->width) - 1;
+        if (v->hi >= v->lo && v->lo >= 0) {
+            lo[i] = (uint64_t)v->lo;
+            hi[i] = (uint64_t)v->hi < mask ? (uint64_t)v->hi : mask;
+        } else { lo[i] = 0; hi[i] = mask; }
+    }
+    if (S->problem) bb_unary_bounds(S, lo, hi);
     for (uint32_t c = 0; c < S->comps.n_comp; c++)
         for (size_t r = 0; bb_comp_ladder[r]; r++)
-            if (bb_comp_ladder[r](S, c)) { claimed++; break; }
+            if (bb_comp_ladder[r](S, c, lo, hi)) { claimed++; break; }
+    free(lo);
     return claimed;
 }
 
