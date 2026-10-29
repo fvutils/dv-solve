@@ -313,8 +313,10 @@ static void capture(Smt2Frontend *fe, uint32_t call) {
         c->named = calloc(fe->n_vars ? fe->n_vars : 1, sizeof *c->named);
         for (uint32_t k = 0; k < fe->n_vars; k++) {
             const Smt2Var *v = &fe->vars[k];
+            /* Sparse array elements (`__arr<id>_<k>`) are user fields. */
             if (v->var_id >= bound || v->width > 64 || v->name[0] == '\\'
-                || !strncmp(v->name, "__", 2)) continue;
+                || (!strncmp(v->name, "__", 2) && strncmp(v->name, "__arr", 5)))
+                continue;
             c->named[c->n_named].name = strdup(v->name);
             c->named[c->n_named].id = v->var_id;
             c->named[c->n_named++].width = v->width;
