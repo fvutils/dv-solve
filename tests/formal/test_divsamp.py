@@ -424,3 +424,49 @@ def test_extend_definition(kind):
         exp = [h[c] * _N / len(sols) for c in cells]
         p = chisquare([obs[c] for c in cells], exp).pvalue
         assert p > 1e-3, (v, p)
+
+
+# --- zext(v) sides are edges -------------------------------------------------
+# control.solve_before_array: arr[i] <= zext(n), n 4-bit, arr[i] 8-bit; the
+# box draw of arr[i] over 0..255 was always rejected. zext(n) counts as n for
+# the edge, and the edge trims the arr[i] range ("range") or enumerated domain
+# ("set") to n's upper bound.
+@pytest.mark.parametrize("dom", ["range", "set"])
+def test_edge_zext_star(dom):
+    from collections import Counter
+    from itertools import product
+    from scipy.stats import chisquare
+    xs = ["x0", "x1", "x2", "x3"]
+    vals = [1, 3, 7, 12, 40, 200]
+    widths = {"n": 4, **{x: 8 for x in xs}}
+    asserts = ["(bvuge n #x2)"]
+    for x in xs:
+        if dom == "set":
+            asserts.append(_or(x, 8, vals))
+        asserts.append(f"(bvule {x} {_zx('n', 4)})")
+    text = "".join(_session(widths, asserts, 9500 + i) for i in range(_N))
+    verdicts, models, err = _run(text)
+    assert verdicts == ["sat"] * _N
+    xv = range(256) if dom == "range" else vals
+    for m in models:
+        assert m["n"] >= 2 and all(m[x] <= m["n"] and m[x] in xv for x in xs), m
+    hits = re.findall(r"\[bb-divsamp\].* chains=(\d+) .*-> sat", err)
+    assert len(hits) == _N, err[-2000:]
+    # Exact weights: per n, k = #values <= n for each x.
+    wn = {n: sum(1 for v in xv if v <= n) ** 4 for n in range(2, 16)}
+    tot = sum(wn.values())
+    wx = Counter()
+    for n, w in wn.items():
+        k = sum(1 for v in xv if v <= n)
+        for v in xv:
+            if v <= n:
+                wx[v] += w // k
+    for v, h in (("n", wn), ("x0", wx)):
+        cells = sorted(c for c in h if h[c] * _N / tot >= 5)
+        obs = Counter(m[v] for m in models)
+        rest = _N - sum(obs[c] for c in cells)
+        erest = _N - sum(h[c] * _N / tot for c in cells)
+        o = [obs[c] for c in cells] + ([rest] if erest > 1e-9 else [])
+        e = [h[c] * _N / tot for c in cells] + ([erest] if erest > 1e-9 else [])
+        p = chisquare(o, e).pvalue
+        assert p > 1e-3, (v, p, o, [round(x, 1) for x in e])

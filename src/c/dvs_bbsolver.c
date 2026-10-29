@@ -6275,10 +6275,25 @@ static int _ss_aff(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t w, int64_t *v,
     return 1;
 }
 
+/* zext(v) of an unsigned unsubstituted var v as v + 0 (the compare is then
+ * of integers; x and y may differ in width). */
+static int _ss_zx(dvs_bbsolver_t *S, dvs_expr_t e, int64_t *v) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, _ss_strip(S, e));
+    if (!k || *k != EXPR_EXTEND || ((const ExprExtend *)k)->sign_extend) return 0;
+    const ExprExtend *x = (const ExprExtend *)k;
+    k = (const ExprKind *)POOL_PTR(S->problem, _ss_strip(S, x->operand));
+    if (!k || *k != EXPR_VAR) return 0;
+    uint32_t id = ((const ExprVar *)k)->var_id;
+    if (id >= S->n_vars || S->vars[id].is_signed || S->vars[id].width != x->from_bits ||
+        (S->subst && S->subst[id] != EXPR_NULL)) return 0;
+    *v = id;
+    return 1;
+}
+
 /* An edge x >= y + c (c counts the strict +1); *g is the add's const, which
- * must not wrap. */
+ * must not wrap. With zx, either side may be zext(v) (_ss_zx). */
 static int _ss_edge(dvs_bbsolver_t *S, dvs_expr_t r, int64_t *x, int64_t *y,
-                    uint64_t *c, uint64_t *g, uint32_t *w) {
+                    uint64_t *c, uint64_t *g, uint32_t *w, int zx) {
     const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
     if (!k || *k != EXPR_BINARY) return 0;
     const ExprBinary *e = (const ExprBinary *)k;
@@ -6291,8 +6306,8 @@ static int _ss_edge(dvs_bbsolver_t *S, dvs_expr_t r, int64_t *x, int64_t *y,
     uint32_t bw = bb_self_width(S, big, 0);
     uint64_t cb = 0, cs = 0;
     if (bw == 0 || bw > 62 || bb_self_width(S, small, 0) != bw) return 0;
-    if (!_ss_aff(S, big, bw, x, &cb, 0) || cb != 0) return 0;
-    if (!_ss_aff(S, small, bw, y, &cs, 0)) return 0;
+    if (!(zx && _ss_zx(S, big, x)) && (!_ss_aff(S, big, bw, x, &cb, 0) || cb != 0)) return 0;
+    if (!(zx && _ss_zx(S, small, y)) && !_ss_aff(S, small, bw, y, &cs, 0)) return 0;
     *g = cs;
     *c = cs + (e->op == DVS_BIN_GT || e->op == DVS_BIN_LT);
     *w = bw;
@@ -6666,7 +6681,7 @@ static int _sortsamp(dvs_bbsolver_t *S) {
             if (!used[b]) used[b] = 1;
             continue;
         }
-        if (!_ss_edge(S, r, &x, &y, &c, &g, &w)) goto out;
+        if (!_ss_edge(S, r, &x, &y, &c, &g, &w, 0)) goto out;
         why = "path";
         if (x == y || pred[x] >= 0 || succ[y] >= 0) goto out;
         why = "shape";
@@ -7605,28 +7620,37 @@ static int _divsamp(dvs_bbsolver_t *S) {
         int64_t x, y;
         uint64_t c, g;
         uint32_t w;
-        if (loff[li + 1] - loff[li] != 2 || !_ss_edge(S, lf[li], &x, &y, &c, &g, &w)) continue;
+        if (loff[li + 1] - loff[li] != 2 || !_ss_edge(S, lf[li], &x, &y, &c, &g, &w, 1)) continue;
         if (x == y || role[x] != 2 || role[y] != 2 || bias[x] || bias[y] ||
-            S->vars[x].width != S->vars[y].width)
+            (S->vars[x].width != S->vars[y].width && g))
             continue;
         ex[n_e] = (uint32_t)x;
         ey[n_e] = (uint32_t)y;
         ec[n_e] = c;
         eg[n_e++] = g;
     }
-    /* The box vars' ranges, narrowed along the edges that cannot wrap: every
-     * solution keeps x >= y + c as integers there. */
+    /* The box vars' ranges and the enumerated vars' domains (ascending: the
+     * edge vars are unbiased), narrowed along the edges that cannot wrap:
+     * every solution keeps x >= y + c as integers there. */
+#define DS_DLO(v) (kl[v] + dom_all[doff[v]])
+#define DS_DHI(v) (kl[v] + dom_all[doff[v] + dn[v] - 1])
     for (int round = 0, chg = 1; chg && round < 8; round++) {
         chg = 0;
         for (size_t i = 0; i < n_e; i++) {
             uint32_t x = ex[i], y = ey[i];
-            uint64_t c = ec[i];
+            uint64_t c = ec[i], ylo = dn[y] ? DS_DLO(y) : kl[y], xhi = dn[x] ? DS_DHI(x) : kh[x];
             if (eg[i] > bb_eval_mask(S->vars[y].width) - kh[y]) continue;
-            if (kh[x] < c || kh[x] - c < kl[y]) goto out;   /* empty: the normal path decides */
-            if (!dn[x] && !pk[x] && kl[x] < kl[y] + c) { kl[x] = kl[y] + c; chg = 1; }
-            if (!dn[y] && !pk[y] && kh[y] > kh[x] - c) { kh[y] = kh[x] - c; chg = 1; }
+            if (xhi < c || xhi - c < ylo) goto out;   /* empty: the normal path decides */
+            if (pk[x]) ;
+            else if (!dn[x] && kl[x] < ylo + c) { kl[x] = ylo + c; chg = 1; }
+            else if (dn[x]) while (DS_DLO(x) < ylo + c) { doff[x]++; dn[x]--; chg = 1; }
+            if (pk[y]) ;
+            else if (!dn[y] && kh[y] > xhi - c) { kh[y] = xhi - c; chg = 1; }
+            else if (dn[y]) while (DS_DHI(y) > xhi - c) { dn[y]--; chg = 1; }
         }
     }
+#undef DS_DLO
+#undef DS_DHI
     for (size_t i = 0; i < n_e; i++) {
         uint32_t x = ex[i], y = ey[i];
         int64_t z;
