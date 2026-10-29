@@ -35,6 +35,18 @@ typedef struct {
 /** Fill `out`. Returns 0, or -1 on allocation failure. */
 int dvs_shape_compute(dvs_problem_t *p, dvs_shape_t *out);
 
+/**
+ * The engine routing rule for a one-shot solve (piece 3.1). CDCL is built for
+ * randomization: ranges, orderings and a few equalities over a handful of
+ * variables, where it answers in milliseconds and samples near uniformly. On
+ * circuits -- XOR/AND/shift networks, multipliers, miters asserting two
+ * circuits differ -- it stalls until its budget runs out, while bit-blast
+ * answers in milliseconds (fwhdl-core baseline, plan section 1.3).
+ * Returns why `sh` goes to bitblast, or NULL to keep CDCL. Used by the
+ * SMT-LIB front end and by problem handles (dvs_handle.c).
+ */
+const char *dvs_shape_route(const dvs_shape_t *sh);
+
 #ifdef __cplusplus
 }
 #endif

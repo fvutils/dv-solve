@@ -633,6 +633,29 @@ void dvs_handle_free(dvs_handle_t *h);
  *  highest variable id the problem declares. */
 uint32_t dvs_handle_n_vars(const dvs_handle_t *h);
 
+/** Engines a handle can solve on (dvs_handle_set_engine). */
+enum {
+    DVS_ENGINE_AUTO     = 0,   /* the core's routing rule (below)         */
+    DVS_ENGINE_CDCL     = 1,
+    DVS_ENGINE_BITBLAST = 2
+};
+
+/**
+ * Choose the engine before the first dvs_randomize(). AUTO (the default)
+ * bit-blasts a problem whose shape is a circuit (dvs_shape_route), one CDCL
+ * cannot compile whole, and one whose CDCL search gave up; else CDCL. A
+ * problem with STATE or RANDC variables stays on CDCL: the bit-blast engine
+ * has no pins or value exclusion yet.
+ *
+ * @return  0; -1 if `h` is NULL, has already solved, `engine` is unknown, or
+ *          BITBLAST is asked of a problem with STATE or RANDC variables.
+ */
+int dvs_handle_set_engine(dvs_handle_t *h, int engine);
+
+/** The engine the handle solves on: CDCL or BITBLAST once it has solved,
+ *  else what dvs_handle_set_engine() set. */
+int dvs_handle_engine(const dvs_handle_t *h);
+
 /** dvs_randomize() return codes. */
 enum {
     DVS_RANDOMIZE_OK    = 0,   /* RAND and RANDC values were written      */

@@ -6145,22 +6145,6 @@ static void _end_assumptions(Smt2Frontend *fe) {
     if (fe->ctx) dvs_solver_restore(fe->ctx, cp);
 }
 
-/* One-shot QF_BV routing (docs/fw_hdl_implementation_plan.md, piece 3.1).
- * CDCL is built for randomization: ranges, orderings and a few equalities over
- * a handful of variables, where it answers in milliseconds and samples near
- * uniformly. On circuits -- XOR/AND/shift networks, multipliers, miters
- * asserting two circuits differ -- it stalls until its budget runs out, while
- * bit-blast answers in milliseconds (fwhdl-core baseline, plan section 1.3).
- * Returns why this problem goes to bitblast, or NULL to keep CDCL. */
-static const char *_qfbv_route(const dvs_shape_t *sh) {
-    if (sh->n_mul)                                    return "multiplier";
-    /* The front end binds every let and define-fun to a variable through an
-     * equality, so equalities say nothing about the shape; orderings do.
-     * Randomization is mostly orderings, circuits mostly bit operations. */
-    if ((uint64_t)sh->n_bit + sh->n_arith >= 3ull * sh->n_cmp) return "bit-level";
-    return NULL;
-}
-
 /* Pick the engine for a one-shot QF_BV check-sat (sets fe->qfbv_bb). */
 static void _route_qfbv(Smt2Frontend *fe) {
     fe->qfbv_bb  = 0;
@@ -6172,7 +6156,7 @@ static void _route_qfbv(Smt2Frontend *fe) {
     if (_ensure_problem(fe) != 0 || !fe->problem) return;
     dvs_shape_t sh;
     if (dvs_shape_compute(fe->problem, &sh) != 0) return;
-    fe->qfbv_why = _qfbv_route(&sh);
+    fe->qfbv_why = dvs_shape_route(&sh);
     /* An explicit seed asks for a sample. The bit-blast engine's simulation
      * draws one uniformly (dvs_aigsim.h) and its flip-check keeps it uniform;
      * CDCL's decisions skew orderings and disjunctions (a < b: a == 0 at half

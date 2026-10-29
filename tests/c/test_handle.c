@@ -1,5 +1,5 @@
 /* dvs_handle_t / dvs_randomize(): STATE vars pinned from refs, RAND values
- * written through refs, refs untouched when a call fails. */
+ * written through refs, refs untouched when a call fails; CDCL and bitblast routes. */
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -139,6 +139,90 @@ int main(void) {
     CHECK(cperm, "randc under a constraint: each cycle is a permutation");
     CHECK(dperm, "randc over its declared range: each cycle is a permutation");
     dvs_handle_free(hc);
+
+    CHECK(dvs_handle_set_engine(h, DVS_ENGINE_CDCL) == -1, "engine is fixed after the first call");
+    CHECK(dvs_handle_engine(h) == DVS_ENGINE_CDCL, "orderings route to CDCL");
+
+    /* Bitblast: (x * 3) ^ y == 0x55 is a multiplier, so AUTO bit-blasts it
+     * (x, y 8-bit RAND); w (RAND in 5..9) is in no constraint. */
+    b = dvs_builder_create(0, NULL);
+    dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 1, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 2, 8, 0, 5, 9);
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ,
+        dvs_builder_expr_binary(b, DVS_BIN_BXOR,
+            dvs_builder_expr_binary(b, DVS_BIN_MUL, dvs_builder_expr_var(b, 0),
+                                    dvs_builder_expr_const(b, 3, 0)),
+            dvs_builder_expr_var(b, 1)),
+        dvs_builder_expr_const(b, 0x55, 0)));
+    p = dvs_builder_finalize(b, &sz);
+    dvs_handle_t *hb = dvs_handle_new(p, sz);
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
+    uint8_t bx = 0, by = 0, bw = 0;
+    dvs_ref_t brefs[3] = { {&bx, 8, 0, DVS_REF_SCALAR, 0}, {&by, 8, 0, DVS_REF_SCALAR, 0},
+                           {&bw, 8, 0, DVS_REF_SCALAR, 0} };
+    int bseen[256] = {0}, bdistinct = 0;
+    ok = 1;
+    for (uint64_t s = 1; s <= 30; s++) {
+        if (dvs_randomize(hb, brefs, NULL, s) != DVS_RANDOMIZE_OK
+                || ((bx * 3u) ^ by) != 0x55 || bw < 5 || bw > 9)
+            ok = 0;
+        if (!bseen[bx]++) bdistinct++;
+    }
+    CHECK(dvs_handle_engine(hb) == DVS_ENGINE_BITBLAST, "a multiplier routes to bitblast");
+    CHECK(ok, "bitblast: 30 calls ok, (x*3)^y == 0x55, w in its range");
+    CHECK(bdistinct >= 3, "bitblast: x varies across seeds (resample)");
+    dvs_handle_free(hb);
+
+    /* Bitblast UNSAT: x * 2 == 1 (x 8-bit), chosen explicitly. */
+    b = dvs_builder_create(0, NULL);
+    dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ,
+        dvs_builder_expr_binary(b, DVS_BIN_MUL, dvs_builder_expr_var(b, 0),
+                                dvs_builder_expr_const(b, 2, 0)),
+        dvs_builder_expr_const(b, 1, 0)));
+    p = dvs_builder_finalize(b, &sz);
+    hb = dvs_handle_new(p, sz);
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
+    CHECK(dvs_handle_set_engine(hb, DVS_ENGINE_BITBLAST) == 0, "bitblast chosen");
+    bx = 0x5C;
+    ok = dvs_randomize(hb, brefs, NULL, 1) == DVS_RANDOMIZE_UNSAT
+      && dvs_randomize(hb, brefs, NULL, 2) == DVS_RANDOMIZE_UNSAT && bx == 0x5C;
+    CHECK(ok, "bitblast: x*2 == 1 UNSAT on every call, ref untouched");
+    dvs_handle_free(hb);
+
+    /* Bitblast, unsigned 64-bit over its full range (hi = ~0): (x & 0xF) == 5.
+     * The bounds are uint64_t patterns; the model's value is kept, not
+     * redrawn, including values past INT64_MAX. */
+    b = dvs_builder_create(0, NULL);
+    dvs_builder_add_var(b, 0, 64, 0, 0, -1);
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ,
+        dvs_builder_expr_binary(b, DVS_BIN_BAND, dvs_builder_expr_var(b, 0),
+                                dvs_builder_expr_const(b, 0xF, 0)),
+        dvs_builder_expr_const(b, 5, 0)));
+    p = dvs_builder_finalize(b, &sz);
+    hb = dvs_handle_new(p, sz);
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
+    CHECK(dvs_handle_set_engine(hb, DVS_ENGINE_BITBLAST) == 0, "bitblast chosen (64-bit)");
+    uint64_t ux = 0;
+    dvs_ref_t urefs[1] = { {&ux, 64, 0, DVS_REF_SCALAR, 0} };
+    int high = 0;
+    ok = 1;
+    for (uint64_t s = 1; s <= 30; s++) {
+        if (dvs_randomize(hb, urefs, NULL, s) != DVS_RANDOMIZE_OK || (ux & 0xF) != 5) ok = 0;
+        high += ux > (uint64_t)INT64_MAX;
+    }
+    CHECK(ok, "bitblast: unsigned 64-bit, 30 calls ok, (x & 0xF) == 5");
+    CHECK(high > 0 && high < 30, "bitblast: unsigned 64-bit values on both sides of 2^63");
+    dvs_handle_free(hb);
+
+    /* No pins on bitblast: a handle with STATE vars refuses it. */
+    hb = make();
+    CHECK(dvs_handle_set_engine(hb, DVS_ENGINE_BITBLAST) == -1, "bitblast refused with STATE vars");
+    dvs_handle_free(hb);
 
     dvs_handle_free(h);
     printf("%d failure(s)\n", failures);

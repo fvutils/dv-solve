@@ -197,3 +197,12 @@ int dvs_shape_compute(dvs_problem_t *p, dvs_shape_t *out) {
     free(w.seen);
     return rc;
 }
+
+const char *dvs_shape_route(const dvs_shape_t *sh) {
+    if (sh->n_mul)                                    return "multiplier";
+    /* The front end binds every let and define-fun to a variable through an
+     * equality, so equalities say nothing about the shape; orderings do.
+     * Randomization is mostly orderings, circuits mostly bit operations. */
+    if ((uint64_t)sh->n_bit + sh->n_arith >= 3ull * sh->n_cmp) return "bit-level";
+    return NULL;
+}
