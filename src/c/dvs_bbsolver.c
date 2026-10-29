@@ -6916,6 +6916,7 @@ static int _divsamp(dvs_bbsolver_t *S) {
     const char *why = "shape";
     size_t n_lf = 0, cap_lf = 0, n_vs = 0, cap_vs = 0, n_ck = 0;
     uint32_t n_free = 0, n_def = 0, tries = 0, n_res = 0, n_cov = 0;
+    int dcached = -1;
     dvs_expr_t *lf = NULL;
     uint32_t *vs = NULL, *ck = NULL, *dom_all = NULL;
     size_t *loff = NULL;
@@ -7088,6 +7089,7 @@ static int _divsamp(dvs_bbsolver_t *S) {
         size_t cap_d = 0, n_d = 0;
         /* The domains depend only on the assert set: reuse the last ones. */
         int cached = S->ds_dok && S->ds_key == dkey && S->ds_dnv == nv;
+        dcached = cached;
         if (cached && S->ds_n_dom) {
             dom_all = (uint32_t *)malloc(S->ds_n_dom * sizeof(*dom_all));
             if (!dom_all) goto out;
@@ -7425,8 +7427,8 @@ static int _divsamp(dvs_bbsolver_t *S) {
     }
 out:
     if (getenv("DV_BB_STATS"))
-        fprintf(stderr, "[bb-divsamp] free=%u def=%u res=%u cov=%u checks=%zu tries=%u -> %s\n",
-                n_free, n_def, n_res, n_cov, n_ck, tries, rc == DVS_BB_SAT ? "sat" : why);
+        fprintf(stderr, "[bb-divsamp] free=%u def=%u res=%u cov=%u checks=%zu dcache=%d tries=%u -> %s\n",
+                n_free, n_def, n_res, n_cov, n_ck, dcached, tries, rc == DVS_BB_SAT ? "sat" : why);
     free(lf); free(vs); free(ck); free(dom_all); free(loff); free(unext);
     free(def); free(defl); free(uhead); free(order); free(dn); free(doff);
     free(kl); free(kh); free(bias); free(lo); free(hi); free(fmask); free(fval);
@@ -7576,6 +7578,18 @@ static int _en_build(dvs_bbsolver_t *S) {
                 }
                 for (uint32_t q = 0; q < n_ord; q++) sol[n_sol * n_ord + q] = vval[ord[q]];
                 n_sol++;
+                /* Every 1024 models, extrapolate from the share of the box
+                 * the DFS has passed: a table bound to overflow declines now,
+                 * not after DVS_EN_MAX_NODES evaluations. */
+                if ((n_sol & 1023) == 0) {
+                    double done = 0.0, cell = 1.0;
+                    for (uint32_t q = 0; q <= k; q++) {
+                        cell /= (double)(hi[ord[q]] - lo[ord[q]]) + 1.0;
+                        done += (double)(vval[ord[q]] - lo[ord[q]]) * cell;
+                    }
+                    done += cell;
+                    if ((double)n_sol > 2.0 * DVS_EN_MAX_SOL * done) goto out;
+                }
             }
             /* Next value at the deepest level that has one. */
             for (;;) {
