@@ -263,10 +263,19 @@ static uint32_t g_pre_n;
 static size_t   g_ncap, g_capcap;
 static size_t   g_nocap;       /* check-sats with no problem to capture */
 
+/* The cache key is timed, so hash a word at a time: byte-wise FNV over a
+ * few-KB problem was ~15% of a small bench's per-call time. */
 static uint64_t fnv(const void *d, size_t n) {
     const uint8_t *b = d;
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+    uint64_t h = 1469598103934665603ull ^ n;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        memcpy(&w, b + i, 8);
+        h = (h ^ w) * 0x9e3779b97f4a7c15ull;
+        h ^= h >> 32;
+    }
+    for (; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
     return h;
 }
 
