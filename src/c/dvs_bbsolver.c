@@ -775,6 +775,31 @@ static int try_record_slice(dvs_bbsolver_t *S, dvs_expr_t sref, dvs_expr_t eref)
     return 1;
 }
 
+/* `ref` as the constant 0 or 1 (unsized or 1-bit); -1 otherwise. */
+static int const_bit(dvs_bbsolver_t *S, dvs_expr_t ref) {
+    ExprKind *k = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!k || *k != EXPR_CONST) return -1;
+    const ExprConst *c = (const ExprConst *)k;
+    if (c->width > 1 || (c->value != 0 && c->value != 1)) return -1;
+    return (int)c->value;
+}
+
+/* For a leaf `v == (ite c 1 0)` whose 1-bit v is already substituted by 1
+ * (the front end's form of a Boolean assert), the condition c holds in every
+ * model; return it so its equalities can be substituted too. EXPR_NULL
+ * otherwise. The leaf itself stays encoded. */
+static dvs_expr_t forced_ite_cond(dvs_bbsolver_t *S, dvs_expr_t vref, dvs_expr_t eref) {
+    ExprKind *vk = (ExprKind *)POOL_PTR(S->problem, vref);
+    ExprKind *ek = (ExprKind *)POOL_PTR(S->problem, eref);
+    if (!vk || *vk != EXPR_VAR || !ek || *ek != EXPR_ITE) return EXPR_NULL;
+    uint32_t id = ((ExprVar *)vk)->var_id;
+    if (id >= S->n_vars || S->vars[id].width != 1) return EXPR_NULL;
+    if (S->subst[id] == EXPR_NULL || const_bit(S, S->subst[id]) != 1) return EXPR_NULL;
+    const ExprITE *t = (const ExprITE *)ek;
+    if (const_bit(S, t->then_e) != 1 || const_bit(S, t->else_e) != 0) return EXPR_NULL;
+    return t->cond;
+}
+
 /* Walk `root` descending through DVS_BIN_AND chains, looking for DVS_BIN_EQ
  * sub-asserts of the shape (= var expr). Records substitutions. Returns
  * 1 iff every sub-assert under this root was consumed (the whole root
@@ -823,6 +848,9 @@ static int collect_substs_from(dvs_bbsolver_t *S, dvs_expr_t root) {
                 if (try_record_subst(S, b->rhs, b->lhs)) continue;  /* consumed */
                 if (try_record_slice(S, b->lhs, b->rhs)) continue;  /* consumed */
                 if (try_record_slice(S, b->rhs, b->lhs)) continue;  /* consumed */
+                dvs_expr_t c = forced_ite_cond(S, b->lhs, b->rhs);
+                if (c == EXPR_NULL) c = forced_ite_cond(S, b->rhs, b->lhs);
+                if (c != EXPR_NULL) CS_PUSH(c);
             }
         }
         all_consumed = 0;   /* this leaf was not consumable as a substitution */
