@@ -429,17 +429,77 @@ static int _settle(aff_t *a, gauss_t *g, uint32_t n_cl, const uint32_t *cl_start
     return 0;
 }
 
+/* A copy of g in which a row whose pivot is an opaque gate pivots instead on
+ * a free input column of the row, when it has one: one outside every opaque
+ * gate's cone first, else the last. The gate column becomes free, and _model
+ * gives it the value the AIG does; left a pivot, its row never constrains the
+ * inputs (r = q + 1: each carry gate pivots the row r_i + q_i + c_i). The
+ * copy's prow is not kept. Returns 0, or -1 when memory runs out. */
+static int _repivot(const aff_t *a, const gauss_t *g, gauss_t *h) {
+    size_t W = g->W ? g->W : 1, nr = g->n_rows ? g->n_rows : 1;
+    *h = *g;
+    h->prow = NULL;
+    h->rows = (uint64_t *)malloc(nr * W * sizeof(uint64_t));
+    h->rhs = (uint8_t *)malloc(nr);
+    h->pcol = (int32_t *)malloc(nr * sizeof(int32_t));
+    h->pmask = (uint64_t *)malloc(W * sizeof(uint64_t));
+    uint8_t *feeds = (uint8_t *)calloc((size_t)a->N + 1, 1);
+    if (!h->rows || !h->rhs || !h->pcol || !h->pmask || !feeds) {
+        free(h->rows); free(h->rhs); free(h->pcol); free(h->pmask); free(feeds);
+        return -1;
+    }
+    memcpy(h->rows, g->rows, (size_t)g->n_rows * g->W * sizeof(uint64_t));
+    memcpy(h->rhs, g->rhs, g->n_rows);
+    memcpy(h->pcol, g->pcol, (size_t)g->n_rows * sizeof(int32_t));
+    memcpy(h->pmask, g->pmask, g->W * sizeof(uint64_t));
+    for (uint32_t id = a->N; id >= 2; id--) {
+        if (!a->L[id] || !(feeds[id] || a->col[id] >= 0)) continue;
+        feeds[_id(a->L[id])] = feeds[_id(a->R[id])] = 1;
+    }
+    for (uint32_t r = 0; r < h->n_rows; r++) {
+        uint32_t p = (uint32_t)h->pcol[r];
+        if (!a->L[a->col_node[p]]) continue;
+        uint64_t *row = h->rows + (size_t)r * h->W;
+        int32_t k = -1;
+        for (uint32_t c = 0; c < a->n_cols; c++) {
+            uint32_t id = a->col_node[c];
+            if (!(row[c / 64] >> (c % 64) & 1) || a->L[id] || (h->pmask[c / 64] >> (c % 64) & 1))
+                continue;
+            if (k < 0 || !feeds[id] || feeds[a->col_node[k]]) k = (int32_t)c;
+            if (!feeds[id]) break;
+        }
+        if (k < 0) continue;
+        for (uint32_t r2 = 0; r2 < h->n_rows; r2++) {
+            uint64_t *q = h->rows + (size_t)r2 * h->W;
+            if (r2 == r || !(q[k / 64] >> (k % 64) & 1)) continue;
+            for (uint32_t w = 0; w < h->W; w++) q[w] ^= row[w];
+            h->rhs[r2] ^= h->rhs[r];
+        }
+        h->pmask[p / 64] &= ~(1ull << (p % 64));
+        h->pmask[k / 64] |= 1ull << (k % 64);
+        h->pcol[r] = k;
+    }
+    free(feeds);
+    return 0;
+}
+
 /* The model of the system: free input columns take bits drawn from `seed`
  * (0: all 0), the other free columns 0, and a pivot column its row's
  * right-hand side plus the free columns its row still holds; over a pure XOR
  * system a seed draws uniformly from the solutions. The gates are evaluated
- * on the real AIG. Returns the node valuation, or NULL when it violates an
- * assertion (or memory runs out). */
-static int8_t *_model(const aff_t *a, const gauss_t *g, uint64_t seed,
+ * on the real AIG. With a seed, gate pivots are first moved to input columns
+ * (_repivot), and a free gate column then takes the value the AIG gives it,
+ * the pivots recomputed until none changes. Returns the node valuation, or
+ * NULL when it violates an assertion (or memory runs out). */
+static int8_t *_model(const aff_t *a, const gauss_t *g0, uint64_t seed,
                       const dvs_aig_node_t *asserts, uint32_t n_asserts, size_t n1) {
+    gauss_t h;
+    const char *rp = getenv("DV_AFFINE_REPIVOT");   /* =0: off (A/B tests) */
+    int own = seed && !(rp && *rp == '0') && _repivot(a, g0, &h) == 0;
+    const gauss_t *g = own ? &h : g0;
     int8_t *nv = (int8_t *)calloc(n1, 1);
     uint64_t *fv = (uint64_t *)calloc(a->W ? a->W : 1, sizeof(uint64_t));
-    if (!nv || !fv) { free(nv); free(fv); return NULL; }
+    if (!nv || !fv) { nv = (free(nv), NULL); goto out; }
     if (a->N >= 1) nv[1] = 1;
     uint64_t rs = seed;
     for (uint32_t k = 0; seed && k < a->n_cols; k++) {
@@ -454,25 +514,39 @@ static int8_t *_model(const aff_t *a, const gauss_t *g, uint64_t seed,
             nv[id] = 1;
         }
     }
-    for (uint32_t r = 0; r < g->n_rows; r++) {
-        uint32_t id = a->col_node[g->pcol[r]];
-        if (a->L[id]) continue;
-        const uint64_t *p = g->rows + (size_t)r * g->W;
-        uint32_t par = 0;
-        for (uint32_t w = 0; w < g->W; w++) par ^= (uint32_t)__builtin_popcountll(p[w] & fv[w]) & 1u;
-        nv[id] = (int8_t)(g->rhs[r] ^ par);
+    for (uint32_t pass = 0; pass < 16; pass++) {
+        for (uint32_t r = 0; r < g->n_rows; r++) {
+            uint32_t id = a->col_node[g->pcol[r]];
+            if (a->L[id]) continue;
+            const uint64_t *p = g->rows + (size_t)r * g->W;
+            uint32_t par = 0;
+            for (uint32_t w = 0; w < g->W; w++) par ^= (uint32_t)__builtin_popcountll(p[w] & fv[w]) & 1u;
+            nv[id] = (int8_t)(g->rhs[r] ^ par);
+        }
+        for (uint32_t id = 2; id <= a->N; id++) {
+            if (!a->L[id]) continue;
+            dvs_aig_node_t l = a->L[id], r = a->R[id];
+            int lv = l < 0 ? !nv[-l] : nv[l], rv = r < 0 ? !nv[-r] : nv[r];
+            nv[id] = (int8_t)(lv & rv);
+        }
+        int changed = 0;
+        for (uint32_t k = 0; own && k < a->n_cols; k++) {
+            uint32_t id = a->col_node[k];
+            if (!a->L[id] || (g->pmask[k / 64] >> (k % 64) & 1)) continue;
+            if ((int)(fv[k / 64] >> (k % 64) & 1) != nv[id]) {
+                fv[k / 64] ^= 1ull << (k % 64);
+                changed = 1;
+            }
+        }
+        if (!changed) break;
     }
     free(fv);
-    for (uint32_t id = 2; id <= a->N; id++) {
-        if (!a->L[id]) continue;
-        dvs_aig_node_t l = a->L[id], r = a->R[id];
-        int lv = l < 0 ? !nv[-l] : nv[l], rv = r < 0 ? !nv[-r] : nv[r];
-        nv[id] = (int8_t)(lv & rv);
-    }
     for (uint32_t i = 0; i < n_asserts; i++) {
         dvs_aig_node_t lit = asserts[i];
-        if (!(lit < 0 ? !nv[-lit] : nv[lit])) { free(nv); return NULL; }
+        if (!(lit < 0 ? !nv[-lit] : nv[lit])) { nv = (free(nv), NULL); break; }
     }
+out:
+    if (own) { free(h.rows); free(h.rhs); free(h.pcol); free(h.pmask); }
     return nv;
 }
 
