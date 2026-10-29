@@ -3337,7 +3337,8 @@ static const bb_comp_recognizer_t bb_comp_ladder[] = {
  * non-subst vars over [lo,hi] at which each of its constraints is true
  * (stats only; 5b4b slice 1). Returns UINT64_MAX if bb_eval declines. */
 static uint64_t bb_comp_enum_count(dvs_bbsolver_t *S, uint32_t comp,
-                                   const uint64_t *lo, const uint64_t *hi) {
+                                   const uint64_t *lo, const uint64_t *hi,
+                                   uint64_t pick, uint64_t *out) {
     uint32_t nv = S->comps.n_vars, nd = 0;
     uint32_t *dim = (uint32_t *)malloc((nv ? nv : 1) * sizeof(uint32_t));
     uint64_t *val = (uint64_t *)calloc(nv ? nv : 1, sizeof(uint64_t));
@@ -3361,7 +3362,14 @@ static uint64_t bb_comp_enum_count(dvs_bbsolver_t *S, uint32_t comp,
             if (!bb_eval_pred(S, cs->root, val, &t)) { n = UINT64_MAX; goto out; }
             ok = t != 0;
         }
-        if (ok) n++;
+        if (ok) {
+            if (out && n == pick) {   /* the pick-th solution: copy it out */
+                for (uint32_t k = 0; k < nd; k++) out[dim[k]] = val[dim[k]];
+                n++;
+                goto out;
+            }
+            n++;
+        }
         uint32_t d = 0;   /* odometer step */
         for (; d < nd; d++) {
             uint32_t v = dim[d];
@@ -3375,8 +3383,27 @@ out:
     return n;
 }
 
-/** Count components some ladder recognizer claims (stats only). */
-static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S, uint32_t *n_evalable) {
+/** Pin each non-subst var of `comp` to the matching value of out[]
+ * (DV_BB_LADDER, 5b4b slice 2). The comp's constraints stay encoded, so the
+ * pins only select one of their models. */
+static void bb_comp_pin(dvs_bbsolver_t *S, uint32_t comp, const uint64_t *out) {
+    for (uint32_t i = 0; i < S->comps.n_vars; i++) {
+        if (S->comps.var_comp[i] != comp) continue;
+        if (S->subst && S->subst[i] != EXPR_NULL) continue;
+        dvs_bv_t bv = bv_for_var(S, i);
+        for (uint32_t b = 0; b < bv.size; b++) {   /* bits[0] is the MSB */
+            uint32_t bit = bv.size - 1 - b;
+            int one = bit < 64 && ((out[i] >> bit) & 1);
+            assert_top(S, one ? bv.bits[b] : dvs_aig_not(bv.bits[b]));
+        }
+    }
+}
+
+/** Count components some ladder recognizer claims. With `pin` set
+ * (DV_BB_LADDER), each claimed comp with solutions is pinned to one of them,
+ * chosen by a per-comp stream of S->seed. */
+static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S, uint32_t *n_evalable,
+                                      int pin) {
     uint32_t nv = S->comps.n_vars, claimed = 0;
     uint64_t *lo = (uint64_t *)malloc((nv ? nv : 1) * 2 * sizeof(uint64_t));
     if (!lo) return 0;
@@ -3397,8 +3424,16 @@ static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S, uint32_t *n_evalable) {
         for (size_t r = 0; bb_comp_ladder[r]; r++)
             if (bb_comp_ladder[r](S, c, lo, hi)) {
                 claimed++;
-                if (S->problem && bb_comp_enum_count(S, c, lo, hi) == 0)
-                    S->ladder_enum_zero++;
+                uint64_t n = S->problem
+                    ? bb_comp_enum_count(S, c, lo, hi, 0, NULL) : UINT64_MAX;
+                if (n == 0) S->ladder_enum_zero++;
+                if (pin && n != 0 && n != UINT64_MAX) {
+                    uint64_t *out = (uint64_t *)malloc((nv ? nv : 1) * sizeof(uint64_t));
+                    uint64_t k = _free_var_fill(S->seed ^ 0x9E3779B97F4A7C15ULL, c, 0) % n;
+                    if (out && bb_comp_enum_count(S, c, lo, hi, k, out) == k + 1)
+                        bb_comp_pin(S, c, out);
+                    free(out);
+                }
                 break;
             }
     }
@@ -3421,14 +3456,25 @@ static int _bb_encode(dvs_bbsolver_t *S) {
     if (subst_enabled) run_subst_pass(S);
     count_fanout(S);
     /* Component census for the decomposition ladder; stats-only for now. */
+    /* Pins ignore softs/dist/alldiff (bb_eval checks only constraints), so
+     * the ladder stays off for any problem with them; and off in a session
+     * frame, where later frames may constrain the pinned vars. */
+    int ladder = getenv("DV_BB_LADDER") != NULL && !S->assert_frame
+        && S->problem->softs_head == EXPR_NULL
+        && S->problem->dists_head == EXPR_NULL
+        && S->problem->allDiff_head == EXPR_NULL;
+    if (ladder && S->resolving) memset(S->resolving, 0, S->n_vars);
     if (getenv("DV_BB_STATS")) {
         compute_components(S);
         uint32_t n_evalable = 0;
         S->ladder_enum_zero = 0;
-        uint32_t claimed = bb_comp_ladder_claims(S, &n_evalable);
+        uint32_t claimed = bb_comp_ladder_claims(S, &n_evalable, ladder);
         fprintf(stderr, "[bb-comp] n=%u largest=%u vars=%u claimed=%u evalable=%u enum_zero=%u\n",
                 S->comps.n_comp, S->comps.largest, S->n_vars,
                 claimed, n_evalable, S->ladder_enum_zero);
+    } else if (ladder) {
+        compute_components(S);
+        bb_comp_ladder_claims(S, NULL, 1);
     }
     /* bv_for_var uses S->resolving as its recursion guard; start clear. */
     if (S->resolving) memset(S->resolving, 0, S->n_vars);
