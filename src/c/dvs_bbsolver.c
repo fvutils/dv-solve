@@ -140,6 +140,7 @@ struct dvs_bbsolver_s {
 
     /* Independent components of the kept constraints (analysis only). */
     dvs_components_t comps;
+    uint32_t        *cons_comp;   /* constraint -> comp (UINT32_MAX: none/skipped) */
 
     uint64_t        n_substs;    /* statistics */
 
@@ -1142,6 +1143,8 @@ fail:
  * result yet, so answers do not change. */
 static void compute_components(dvs_bbsolver_t *S) {
     dvs_components_free(&S->comps);
+    free(S->cons_comp);
+    S->cons_comp = NULL;
     uint32_t nv = S->n_vars, nc = S->n_constraints, cap = S->cache_cap;
     if (!S->problem || !cap) return;
     dvs_uf_t uf;
@@ -1283,6 +1286,21 @@ static void compute_components(dvs_bbsolver_t *S) {
         a = as->next;
     }
     dvs_components_from_uf(&S->comps, &uf, used, nv);
+    /* Map each kept constraint to the comp of its uf root. */
+    {
+        uint32_t nn = nv + nc + ns;
+        uint32_t *rc = (uint32_t *)malloc((nn ? nn : 1) * sizeof(uint32_t));
+        S->cons_comp = (uint32_t *)malloc((nc ? nc : 1) * sizeof(uint32_t));
+        if (rc && S->cons_comp && S->comps.var_comp) {
+            memset(rc, 0xff, (nn ? nn : 1) * sizeof(uint32_t));
+            for (uint32_t v = 0; v < nv; v++)
+                if (used[v]) rc[dvs_uf_find(&uf, v)] = S->comps.var_comp[v];
+            for (uint32_t i = 0; i < nc; i++)
+                S->cons_comp[i] = (S->constraint_skip && S->constraint_skip[i])
+                    ? UINT32_MAX : rc[dvs_uf_find(&uf, nv + i)];
+        } else { free(S->cons_comp); S->cons_comp = NULL; }
+        free(rc);
+    }
 done:
     #undef CC_EDGE
     #undef CC_VAR
@@ -2297,6 +2315,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     free(S->slices);
     xfree(S->alloc, S->constraint_skip, S->n_constraints * sizeof(uint8_t));
     dvs_components_free(&S->comps);
+    free(S->cons_comp);
     xfree(S->alloc, S->assert_nodes, S->asserts_cap * sizeof(dvs_aig_node_t));
     free(S->node_val);
     free(S->div_L); free(S->div_R); free(S->div_fo_off); free(S->div_fo_adj);
@@ -3272,6 +3291,23 @@ static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
     }
 }
 
+/** Every kept constraint of `comp` can be evaluated by bb_eval: a dry run
+ * with each var at `val` (its lo). No cons_comp map declines. */
+static int bb_comp_evalable(dvs_bbsolver_t *S, uint32_t comp,
+                            const uint64_t *val) {
+    if (!S->cons_comp) return 0;
+    uint32_t i = 0;
+    for (dvs_expr_t cur = S->problem->constraints_head;
+         cur != EXPR_NULL && i < S->n_constraints; i++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        cur = cs->next;
+        if (S->cons_comp[i] != comp) continue;
+        uint64_t t;
+        if (!bb_eval_pred(S, cs->root, val, &t)) return 0;
+    }
+    return 1;
+}
+
 /** Small component: product of its vars' domains is <= 2^16, so it could be
  * enumerated and sampled by index (plan 9a). A var's domain is its tightened
  * [lo,hi] (bb_unary_bounds); an empty domain declines. */
@@ -3287,14 +3323,14 @@ static int bb_comp_small_domain(dvs_bbsolver_t *S, uint32_t comp,
         prod *= (double)(hi[i] - lo[i]) + 1.0;
         if (prod > (double)(1u << BB_COMP_ENUM_LOG2)) return 0;
     }
-    return 1;
+    return bb_comp_evalable(S, comp, lo);
 }
 
 static const bb_comp_recognizer_t bb_comp_ladder[] = {
     bb_comp_small_domain, NULL };
 
 /** Count components some ladder recognizer claims (stats only). */
-static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S) {
+static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S, uint32_t *n_evalable) {
     uint32_t nv = S->comps.n_vars, claimed = 0;
     uint64_t *lo = (uint64_t *)malloc((nv ? nv : 1) * 2 * sizeof(uint64_t));
     if (!lo) return 0;
@@ -3309,9 +3345,12 @@ static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S) {
         } else { lo[i] = 0; hi[i] = mask; }
     }
     if (S->problem) bb_unary_bounds(S, lo, hi);
-    for (uint32_t c = 0; c < S->comps.n_comp; c++)
+    for (uint32_t c = 0; c < S->comps.n_comp; c++) {
+        if (n_evalable && S->problem && bb_comp_evalable(S, c, lo))
+            (*n_evalable)++;
         for (size_t r = 0; bb_comp_ladder[r]; r++)
             if (bb_comp_ladder[r](S, c, lo, hi)) { claimed++; break; }
+    }
     free(lo);
     return claimed;
 }
@@ -3333,9 +3372,11 @@ static int _bb_encode(dvs_bbsolver_t *S) {
     /* Component census for the decomposition ladder; stats-only for now. */
     if (getenv("DV_BB_STATS")) {
         compute_components(S);
-        fprintf(stderr, "[bb-comp] n=%u largest=%u vars=%u claimed=%u\n",
+        uint32_t n_evalable = 0;
+        uint32_t claimed = bb_comp_ladder_claims(S, &n_evalable);
+        fprintf(stderr, "[bb-comp] n=%u largest=%u vars=%u claimed=%u evalable=%u\n",
                 S->comps.n_comp, S->comps.largest, S->n_vars,
-                bb_comp_ladder_claims(S));
+                claimed, n_evalable);
     }
     /* bv_for_var uses S->resolving as its recursion guard; start clear. */
     if (S->resolving) memset(S->resolving, 0, S->n_vars);
