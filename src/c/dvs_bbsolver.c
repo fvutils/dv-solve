@@ -183,6 +183,9 @@ struct dvs_bbsolver_s {
     int             presim;
     /* Record the clauses for dvs_bbsolver_resample (dvs_bbsolver_set_resample). */
     int             resample;
+    /* Rediversify calls over the current base model; every DVS_REDIV_EPOCH
+     * of them draws a fresh base (dvs_bbsolver_rediversify). */
+    uint32_t        redivs_since_base;
     /* The last check's model came from simulation (exhaustive or random). */
     int             base_sim;
     /* The last SAT verdict's model is the assignment of S->sat. Clear when it
@@ -3550,8 +3553,23 @@ int dvs_bbsolver_install_worker_model(dvs_bbsolver_t *S, dvs_sat_t *wsat) {
     return 0;
 }
 
+static int _rediversify_same_base(dvs_bbsolver_t *S, uint64_t seed);
+static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed);
+
+/* A count, never time: a fresh base every 8 calls bounds how long samples stay
+ * flips of one model. */
+#define DVS_REDIV_EPOCH 8u
+
 int dvs_bbsolver_rediversify(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || S->last_result != DVS_BB_SAT) return -1;
+    if (++S->redivs_since_base >= DVS_REDIV_EPOCH && !S->n_frames && seed
+            && (S->resample || (S->base_sim && !S->asserts_lost))
+            && _fresh_base(S, seed) == 0)
+        return 0;
+    return _rediversify_same_base(S, seed);
+}
+
+static int _rediversify_same_base(dvs_bbsolver_t *S, uint64_t seed) {
     /* Drop the prior flip-check result and re-run the diversity pass over the
      * still-valid SAT model with the new seed. _diversify re-reads the base
      * model via dvs_aig_cnf_value() (kissat's assignment persists until
@@ -3632,16 +3650,22 @@ static int _sat_fresh(dvs_bbsolver_t *S) {
 int dvs_bbsolver_resample(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || S->last_result != DVS_BB_SAT) return -1;
     if (S->n_frames || !seed) return dvs_bbsolver_rediversify(S, seed);
+    if (_fresh_base(S, seed) == 0) return 0;
+    /* UNSAT here would contradict the last verdict: never trust it over
+     * the cached model, which is still valid. */
+    return _rediversify_same_base(S, seed);
+}
+
+/* Draw a new base model (simulation, else a seeded fresh SAT search) and
+ * diversify it. Returns 0 on success, -1 leaving the cached model in place. */
+static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
     S->seed = seed;
     int rc = DVS_BB_UNKNOWN;
     if (S->base_sim && !S->asserts_lost) rc = _sim_once(S);
     if (rc != DVS_BB_SAT && S->resample) rc = _sat_fresh(S);
-    if (rc != DVS_BB_SAT) {
-        /* UNSAT here would contradict the last verdict: never trust it over
-         * the cached model, which is still valid. */
-        return dvs_bbsolver_rediversify(S, seed);
-    }
+    if (rc != DVS_BB_SAT) return -1;
     S->last_result = DVS_BB_SAT;
+    S->redivs_since_base = 0;
     _diversify(S);
     return 0;
 }
