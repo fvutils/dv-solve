@@ -9,6 +9,15 @@
  * api-cache pass replays), checks the model, and writes RAND and RANDC
  * values back. There is no bitblast route yet: a solve the CDCL search gives
  * up on is DVS_RANDOMIZE_ERROR.
+ *
+ * randc: each RANDC value returned is excluded (dvs_solver_exclude_value,
+ * which lasts across resets) and kept in the var's history. The cycle ends
+ * when the exclusion would empty the declared range, or when a solve is
+ * UNSAT while some history is held; the context has no way to drop an
+ * exclusion, so it is then compiled again and the histories that go on are
+ * excluded anew. On an UNSAT the call clears every history and solves once
+ * more: only then is it UNSAT (a STATE contradiction thus also restarts the
+ * cycles).
  */
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +31,9 @@ struct dvs_handle_s {
     uint32_t       n_vars;     /* one past the highest declared var_id      */
     uint8_t       *kind;       /* dvs_var_kind_t per var_id                 */
     uint8_t       *declared;   /* 1 when the problem declares the var_id    */
+    int64_t      **hist;       /* per RANDC var: values of this cycle       */
+    uint32_t      *n_hist, *cap_hist;
+    int            stale;      /* recompile before the next solve           */
 };
 
 dvs_handle_t *dvs_handle_new(const void *buf, size_t size) {
@@ -38,7 +50,13 @@ dvs_handle_t *dvs_handle_new(const void *buf, size_t size) {
     }
     h->kind = calloc(h->n_vars ? h->n_vars : 1, 1);
     h->declared = calloc(h->n_vars ? h->n_vars : 1, 1);
-    if (!h->kind || !h->declared) { dvs_handle_free(h); return NULL; }
+    h->hist = calloc(h->n_vars ? h->n_vars : 1, sizeof *h->hist);
+    h->n_hist = calloc(h->n_vars ? h->n_vars : 1, sizeof *h->n_hist);
+    h->cap_hist = calloc(h->n_vars ? h->n_vars : 1, sizeof *h->cap_hist);
+    if (!h->kind || !h->declared || !h->hist || !h->n_hist || !h->cap_hist) {
+        dvs_handle_free(h);
+        return NULL;
+    }
     for (dvs_expr_t r = h->p->vars_head; r != EXPR_NULL;) {
         VarSpec *vs = POOL_PTR(h->p, r);
         h->kind[vs->var_id] = vs->kind;
@@ -51,6 +69,10 @@ dvs_handle_t *dvs_handle_new(const void *buf, size_t size) {
 void dvs_handle_free(dvs_handle_t *h) {
     if (!h) return;
     if (h->ctx) dvs_solver_free(h->ctx);
+    for (uint32_t v = 0; h->hist && v < h->n_vars; v++) free(h->hist[v]);
+    free(h->hist);
+    free(h->n_hist);
+    free(h->cap_hist);
     free(h->kind);
     free(h->declared);
     free(h->p);
@@ -85,19 +107,26 @@ static void ref_write(const dvs_ref_t *rf, size_t n, int64_t v) {
     for (size_t i = 0; i < n; i++) a[i] = (uint8_t)(u >> (8 * i));
 }
 
-int dvs_randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes,
-                  uint64_t seed) {
-    if (!h || (h->n_vars && !refs) || modes) return DVS_RANDOMIZE_ERROR;
-    for (uint32_t v = 0; v < h->n_vars; v++)
-        if (refs[v].addr && !ref_bytes(&refs[v])) return DVS_RANDOMIZE_ERROR;
-
-    if (!h->ctx) {
-        h->ctx = dvs_solver_new(NULL);
-        if (!h->ctx) return DVS_RANDOMIZE_ERROR;
-        h->compile_rc = dvs_solver_compile(h->ctx, h->p);
-    } else {
+/* Compile the context (again, when stale) and exclude the held randc values. */
+static int handle_open(dvs_handle_t *h) {
+    if (h->ctx && !h->stale) {
         dvs_solver_reset(h->ctx);
+        return 0;
     }
+    if (h->ctx) dvs_solver_free(h->ctx);
+    h->stale = 0;
+    h->ctx = dvs_solver_new(NULL);
+    if (!h->ctx) return -1;
+    h->compile_rc = dvs_solver_compile(h->ctx, h->p);
+    if (h->compile_rc != DVS_COMPILE_OK) return 0;
+    for (uint32_t v = 0; v < h->n_vars; v++)
+        for (uint32_t k = 0; k < h->n_hist[v]; k++)
+            if (dvs_solver_exclude_value(h->ctx, v, h->hist[v][k]) != 0) return -1;
+    return 0;
+}
+
+static int solve_once(dvs_handle_t *h, const dvs_ref_t *refs, uint64_t seed) {
+    if (handle_open(h) != 0) return DVS_RANDOMIZE_ERROR;
     if (h->compile_rc == DVS_COMPILE_UNSAT) return DVS_RANDOMIZE_UNSAT;
     if (h->compile_rc != DVS_COMPILE_OK) return DVS_RANDOMIZE_ERROR;
 
@@ -120,11 +149,67 @@ int dvs_randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes,
     if (res == DVS_SOLVE_UNSAT) return DVS_RANDOMIZE_UNSAT;
     if (res != DVS_SOLVE_OK) return DVS_RANDOMIZE_ERROR;
     if (dvs_solver_validate_model(h->ctx, h->p, NULL) != 0) return DVS_RANDOMIZE_ERROR;
-
-    for (uint32_t v = 0; v < h->n_vars; v++) {
-        if (!h->declared[v] || !refs[v].addr) continue;
-        if (h->kind[v] != DVS_VAR_RAND && h->kind[v] != DVS_VAR_RANDC) continue;
-        ref_write(&refs[v], ref_bytes(&refs[v]), dvs_solver_get_value(h->ctx, v));
-    }
     return DVS_RANDOMIZE_OK;
+}
+
+/* Write RAND/RANDC values through the refs; exclude each RANDC value. An
+ * exclusion discards the search, and with it the model, so every value is
+ * read (into the history slot) before the first exclusion. */
+static void write_back(dvs_handle_t *h, const dvs_ref_t *refs) {
+    for (uint32_t v = 0; v < h->n_vars; v++) {
+        if (!h->declared[v]) continue;
+        if (h->kind[v] != DVS_VAR_RAND && h->kind[v] != DVS_VAR_RANDC) continue;
+        int64_t x = dvs_solver_get_value(h->ctx, v);
+        if (refs[v].addr) ref_write(&refs[v], ref_bytes(&refs[v]), x);
+        if (h->kind[v] != DVS_VAR_RANDC) continue;
+        if (h->n_hist[v] == h->cap_hist[v]) {
+            uint32_t cap = h->cap_hist[v] ? 2 * h->cap_hist[v] : 16;
+            int64_t *n = realloc(h->hist[v], cap * sizeof *n);
+            if (!n) {
+                /* No room: drop the history (pass 2 skips cap 0). */
+                free(h->hist[v]);
+                h->hist[v] = NULL;
+                h->n_hist[v] = h->cap_hist[v] = 0;
+                h->stale = 1;
+                continue;
+            }
+            h->hist[v] = n;
+            h->cap_hist[v] = cap;
+        }
+        h->hist[v][h->n_hist[v]] = x;   /* not yet held: n_hist unchanged */
+    }
+    for (uint32_t v = 0; v < h->n_vars; v++) {
+        if (!h->declared[v] || h->kind[v] != DVS_VAR_RANDC) continue;
+        if (h->n_hist[v] == h->cap_hist[v]) continue;   /* realloc failed */
+        int64_t x = h->hist[v][h->n_hist[v]];
+        if (dvs_solver_exclude_value(h->ctx, v, x) == 0) {
+            h->n_hist[v]++;
+        } else {
+            /* The cycle is complete: start the next one. */
+            h->n_hist[v] = 0;
+            h->stale = 1;
+        }
+    }
+}
+
+int dvs_randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes,
+                  uint64_t seed) {
+    if (!h || (h->n_vars && !refs) || modes) return DVS_RANDOMIZE_ERROR;
+    for (uint32_t v = 0; v < h->n_vars; v++)
+        if (refs[v].addr && !ref_bytes(&refs[v])) return DVS_RANDOMIZE_ERROR;
+
+    for (int attempt = 0;; attempt++) {
+        int rc = solve_once(h, refs, seed);
+        if (rc != DVS_RANDOMIZE_UNSAT || attempt) {
+            if (rc == DVS_RANDOMIZE_OK) write_back(h, refs);
+            return rc;
+        }
+        int held = 0;
+        for (uint32_t v = 0; v < h->n_vars; v++) {
+            held |= h->n_hist[v] != 0;
+            h->n_hist[v] = 0;
+        }
+        if (!held) return rc;
+        h->stale = 1;
+    }
 }

@@ -646,7 +646,10 @@ enum {
  * a non-NULL ref is pinned to the value read through it; then the values of
  * the RAND and RANDC variables with a non-NULL ref are written through it,
  * masked to the ref's width. On any return but DVS_RANDOMIZE_OK no ref is
- * written. Calls on one handle must not overlap.
+ * written. A RANDC variable takes each value it can once per cycle; a cycle
+ * ends when no value is left, and an UNSAT call ends every cycle (it is
+ * solved once more before it returns DVS_RANDOMIZE_UNSAT). Calls on one
+ * handle must not overlap.
  *
  * @param refs   dvs_handle_n_vars(h) entries.
  * @param modes  constraint_mode / rand_mode bits. The buffer format has none

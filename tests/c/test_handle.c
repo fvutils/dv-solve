@@ -109,6 +109,37 @@ int main(void) {
     CHECK(ok, "signed STATE -3: -10 < r < -3 each call");
     dvs_handle_free(hs);
 
+    /* randc: c (8-bit RANDC) < 4 ends each cycle by UNSAT; d (2-bit RANDC,
+     * unconstrained) by exhausting its declared range. Each run of 4 calls
+     * is a permutation of 0..3, for 4 cycles. */
+    b = dvs_builder_create(0, NULL);
+    dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 1, 2, 0, 0, 3);
+    dvs_builder_set_var_kind(b, 0, DVS_VAR_RANDC);
+    dvs_builder_set_var_kind(b, 1, DVS_VAR_RANDC);
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_LT,
+        dvs_builder_expr_var(b, 0), dvs_builder_expr_const(b, 4, 0)));
+    p = dvs_builder_finalize(b, &sz);
+    dvs_handle_t *hc = dvs_handle_new(p, sz);
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
+    uint8_t c = 0, d = 0;
+    dvs_ref_t crefs[2] = { {&c, 8, 0, DVS_REF_SCALAR, 0}, {&d, 2, 0, DVS_REF_SCALAR, 0} };
+    int cperm = 1, dperm = 1;
+    for (int cyc = 0; cyc < 4; cyc++) {
+        unsigned cm = 0, dm = 0;
+        for (int k = 0; k < 4; k++) {
+            if (dvs_randomize(hc, crefs, NULL, 100 + 4 * cyc + k) != DVS_RANDOMIZE_OK) cperm = 0;
+            if (c < 4) cm |= 1u << c;
+            if (d < 4) dm |= 1u << d;
+        }
+        if (cm != 0xF) cperm = 0;
+        if (dm != 0xF) dperm = 0;
+    }
+    CHECK(cperm, "randc under a constraint: each cycle is a permutation");
+    CHECK(dperm, "randc over its declared range: each cycle is a permutation");
+    dvs_handle_free(hc);
+
     dvs_handle_free(h);
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
