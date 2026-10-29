@@ -233,6 +233,10 @@ struct dvs_bbsolver_s {
      * matches the assert set; en_state 1 built, 2 declined for that key. */
     uint64_t        en_key;
     int             en_state;
+    /* Tables built and draws taken from them over the instance's life: a
+     * build costs several SAT solves, so it stops when draws do not repay
+     * it (a new assert set per call). */
+    uint32_t        en_builds, en_draws;
     uint32_t       *en_vars, en_n_vars;
     uint64_t       *en_sol, en_n_sol;
 
@@ -6309,6 +6313,19 @@ static int _ss_pure(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v) {
     return 0;
 }
 
+static int _ds_vars(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t **vs, size_t s0,
+                    size_t *n, size_t *cap, int depth);
+
+/* The value of a predicate that reads no var; 0 if it reads one. */
+static int _ss_const_pred(dvs_bbsolver_t *S, dvs_expr_t c, uint64_t *t) {
+    uint32_t *vs = NULL;
+    size_t n = 0, cap = 0;
+    uint64_t none = 0;
+    int ok = _ds_vars(S, c, &vs, 0, &n, &cap, 0) && n == 0;
+    free(vs);
+    return ok && bb_eval_pred(S, c, &none, t);
+}
+
 /* Narrow the key hull [*kl,*kh] of v (key = v ^ *bias) by `t cmp const` where
  * t is v or v ^ bias through substitutions; the first such conjunct fixes the
  * bias. Other conjuncts leave the hull as is (the enumeration checks them). */
@@ -6316,13 +6333,33 @@ static void _ss_hull(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v, uint64_t *bias
                      int *have_bias, uint64_t *kl, uint64_t *kh) {
     const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
     for (int hops = 0; k && hops < 32; hops++) {
-        /* ite(c, 1, 0) is c (the frontend's __Vbv). */
+        /* ite(c, 1, 0) is c (the frontend's __Vbv); an ite on a var-free
+         * cond is its taken arm. */
         uint64_t tv, ev;
+        if (*k == EXPR_BINARY && ((const ExprBinary *)k)->op == DVS_BIN_EQ) {
+            /* 1 == p is p, for a 1-bit p. */
+            const ExprBinary *q = (const ExprBinary *)k;
+            dvs_expr_t p;
+            if (_ss_const_pred(S, q->lhs, &tv)) p = q->rhs;
+            else if (_ss_const_pred(S, q->rhs, &tv)) p = q->lhs;
+            else break;
+            if (tv != 1 || bb_self_width(S, p, 0) != 1) break;
+            p = _ss_strip(S, p);
+            const ExprKind *pk = (const ExprKind *)POOL_PTR(S->problem, p);
+            if (!pk || *pk == EXPR_VAR) break;      /* v == 1 narrows v itself */
+            r = p;
+            k = pk;
+            continue;
+        }
         if (*k != EXPR_ITE) break;
         const ExprITE *ie = (const ExprITE *)k;
-        if (!bb_const_u(S, ie->then_e, &tv) || !bb_const_u(S, ie->else_e, &ev) || tv != 1 || ev != 0)
+        if (_ss_const_pred(S, ie->cond, &tv))
+            r = _ss_strip(S, tv ? ie->then_e : ie->else_e);
+        else if (!bb_const_u(S, ie->then_e, &tv) || !bb_const_u(S, ie->else_e, &ev) || tv != 1 ||
+                 ev != 0)
             return;
-        r = _ss_strip(S, ie->cond);
+        else
+            r = _ss_strip(S, ie->cond);
         k = (const ExprKind *)POOL_PTR(S->problem, r);
     }
     if (!k || *k != EXPR_BINARY) return;
@@ -7484,6 +7521,9 @@ out:
     return ok;
 }
 
+#define DVS_EN_BUILDS 4     /* builds before the repay gate applies */
+#define DVS_EN_REPAY 4      /* draws per build that keep building */
+
 static int _enumsamp(dvs_bbsolver_t *S, int fresh) {
     if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig || S->n_frames)
         return DVS_BB_UNKNOWN;
@@ -7501,6 +7541,11 @@ static int _enumsamp(dvs_bbsolver_t *S, int fresh) {
          * is already there for this assert set. */
         if (fresh) return DVS_BB_UNKNOWN;
         S->en_key = key;
+        if (S->en_builds >= DVS_EN_BUILDS && S->en_draws < DVS_EN_REPAY * S->en_builds) {
+            S->en_state = 2;
+            return DVS_BB_UNKNOWN;
+        }
+        S->en_builds++;
         S->en_state = _en_build(S) ? 1 : 2;
     }
     if (S->en_state != 1) return DVS_BB_UNKNOWN;
@@ -7534,6 +7579,7 @@ static int _enumsamp(dvs_bbsolver_t *S, int fresh) {
     S->node_val = val;
     S->model_in_sat = 0;
     S->base_sim = 1;
+    S->en_draws++;
     return DVS_BB_SAT;
 }
 
