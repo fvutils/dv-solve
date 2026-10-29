@@ -312,7 +312,7 @@ dvs_expr_t problem_add_var(dvs_problem_t *sp, uint32_t var_id,
     v->var_id     = var_id;
     v->width      = width;
     v->is_signed  = is_signed;
-    v->is_aux     = 0;
+    v->kind       = DVS_VAR_RAND;
     v->order      = 0;
     v->lo         = lo;
     v->hi         = hi;

@@ -464,6 +464,19 @@ class SolveProblemBuilder:
                 self._b, ctypes.c_uint32(var_id), ctypes.c_uint8(stage)) != 0:
             raise ValueError("set_var_order: variable %d is not declared" % var_id)
 
+    def set_var_kind(self, var_id: int, kind: int) -> None:
+        """Set what a variable is to the solve: ``VAR_RAND`` (the default),
+        ``VAR_AUX``, ``VAR_RANDC`` or ``VAR_STATE`` (see ``dvs_var_kind_t``).
+
+        Args:
+            var_id: A declared variable.
+            kind: One of the ``VAR_*`` constants in ``dv_solve.problem``.
+        """
+        if self._lib.dvs_builder_set_var_kind(
+                self._b, ctypes.c_uint32(var_id), ctypes.c_int(kind)) != 0:
+            raise ValueError("set_var_kind: variable %d is not declared, or "
+                             "kind %d is not valid" % (var_id, kind))
+
     def add_dist(self, var_id: int, entries) -> int:
         """Give a variable a weighted distribution, like SystemVerilog's ``dist``.
 

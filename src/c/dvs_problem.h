@@ -275,8 +275,7 @@ typedef struct {
     uint32_t width;      /* bit width (1-64 for the CDCL engine; wider
                           * ones are bit-blasted)       */
     uint8_t  is_signed;  /* non-zero = signed          */
-    uint8_t  is_aux;     /* non-zero = compiler-generated aux (never a
-                          * search decision; determined by propagation) */
+    uint8_t  kind;       /* dvs_var_kind_t (DVS_VAR_RAND, ...)          */
     uint8_t  order;      /* solve-order stage: 0 none, else 1.. earliest
                           * first (dvs_builder_set_var_order)          */
     int64_t  lo;         /* initial lower bound        */

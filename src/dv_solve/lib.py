@@ -429,6 +429,8 @@ def _wire_builder_argtypes(lib: ctypes.CDLL) -> None:
 
     lib.dvs_builder_set_var_order.restype  = c.c_int
     lib.dvs_builder_set_var_order.argtypes = [c.c_void_p, c.c_uint32, c.c_uint8]
+    lib.dvs_builder_set_var_kind.restype  = c.c_int
+    lib.dvs_builder_set_var_kind.argtypes = [c.c_void_p, c.c_uint32, c.c_int]
     lib.dvs_builder_add_soft_constraint.restype  = c.c_uint32
     lib.dvs_builder_add_soft_constraint.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32]
 

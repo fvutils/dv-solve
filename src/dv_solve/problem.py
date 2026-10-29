@@ -17,6 +17,14 @@ from typing import Sequence
 from .lib import _load_lib, _library_not_found_error
 
 # ------------------------------------------------------------------ #
+# dvs_var_kind_t constants (must match dv_solve.h)                    #
+# ------------------------------------------------------------------ #
+VAR_RAND  = 0
+VAR_AUX   = 1
+VAR_RANDC = 2
+VAR_STATE = 3
+
+# ------------------------------------------------------------------ #
 # dvs_binop_t / dvs_unop_t constants (must match dv_solve.h)             #
 # ------------------------------------------------------------------ #
 BIN_ADD    = 0

@@ -119,7 +119,7 @@ class VarSpec(ctypes.Structure):
         ("var_id",    ctypes.c_uint32),
         ("width",     ctypes.c_uint32),
         ("is_signed", ctypes.c_uint8),
-        ("is_aux",    ctypes.c_uint8),
+        ("kind",      ctypes.c_uint8),
         ("lo",        ctypes.c_int64),
         ("hi",        ctypes.c_int64),
     ]
@@ -316,6 +316,7 @@ class TestProblem:
         while ref != EXPR_NULL:
             v = VarSpec.from_address(_pool_ptr(pool_base, ref))
             var_ids_seen.append(v.var_id)
+            assert v.kind == 0          # DVS_VAR_RAND
             ref = v.next
 
         assert sorted(var_ids_seen) == [0, 1, 2]

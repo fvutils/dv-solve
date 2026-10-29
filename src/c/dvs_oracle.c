@@ -240,7 +240,7 @@ static void _declare(struct dvs_octx_s *c, const dvs_problem_t *p, DvsOBuf *out)
         v->known = 1;
         v->w = vs->width ? vs->width : 1;
         v->s = vs->is_signed ? 1 : 0;
-        v->aux = vs->is_aux ? 1 : 0;
+        v->aux = vs->kind == DVS_VAR_AUX;
         v->depth = c->depth;
         dvs_smt2_emit_var_decl(out, vs->var_id, v->w, v->s, vs->lo, vs->hi);
     }

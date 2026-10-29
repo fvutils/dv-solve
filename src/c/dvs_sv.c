@@ -1826,7 +1826,7 @@ static dvs_expr_t _fd_add_var(SvE *E, uint32_t id, uint32_t w, uint8_t aux) {
     v->next = E->dst->vars_head;
     v->var_id = id;
     v->width = w;
-    v->is_aux = aux;
+    v->kind = aux ? DVS_VAR_AUX : DVS_VAR_RAND;
     v->lo = 0;
     v->hi = (int64_t)((1ULL << w) - 1);
     E->dst->vars_head = r;
@@ -2024,7 +2024,7 @@ static void _fd_split(SvE *E) {
          * timed out half the time). */
         for (dvs_expr_t c = E->dst->vars_head; c != EXPR_NULL; ) {
             VarSpec *vs = (VarSpec *)_P(E, c);
-            if (vs->var_id == v) { vs->is_aux = 1; break; }
+            if (vs->var_id == v) { vs->kind = DVS_VAR_AUX; break; }
             c = vs->next;
         }
         /* Each extract becomes the variable of its bits. ExprVar fits in the

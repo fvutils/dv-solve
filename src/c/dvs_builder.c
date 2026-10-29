@@ -864,7 +864,7 @@ dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id,
     v->var_id     = var_id;
     v->width      = width;
     v->is_signed  = is_signed;
-    v->is_aux     = 0;
+    v->kind       = DVS_VAR_RAND;
     v->order      = 0;
     v->lo         = lo;
     v->hi         = hi;
@@ -884,10 +884,22 @@ int dvs_builder_set_var_order(dvs_builder_t *b, uint32_t var_id,
     return -1;
 }
 
+int dvs_builder_set_var_kind(dvs_builder_t *b, uint32_t var_id,
+                             dvs_var_kind_t kind) {
+    if ((unsigned)kind > DVS_VAR_STATE) return -1;
+    for (dvs_expr_t r = b->vars_head; r != EXPR_NULL; ) {
+        VarSpec *v = (VarSpec *)dvs_builder_ref_ptr(b, r);
+        if (!v) return -1;
+        if (v->var_id == var_id) { v->kind = (uint8_t)kind; return 0; }
+        r = v->next;
+    }
+    return -1;
+}
+
 void dvs_builder_mark_var_aux(dvs_builder_t *b, dvs_expr_t var_ref) {
     if (var_ref == EXPR_NULL) return;
     VarSpec *v = (VarSpec *)dvs_builder_ref_ptr(b, var_ref);
-    if (v) v->is_aux = 1;
+    if (v) v->kind = DVS_VAR_AUX;
 }
 
 dvs_expr_t dvs_builder_add_constraint(dvs_builder_t *b, dvs_expr_t root) {

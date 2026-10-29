@@ -601,7 +601,7 @@ static dvs_problem_t *rebuild(Rebuild *r, dvs_problem_t *p, size_t *size) {
     for (uint32_t i = n; i-- > 0;) {
         VarSpec *v = POOL_PTR(p, r->tmp[i]);
         dvs_expr_t vr = dvs_builder_add_var(b, v->var_id, v->width, v->is_signed, v->lo, v->hi);
-        if (v->is_aux) dvs_builder_mark_var_aux(b, vr);
+        if (v->kind == DVS_VAR_AUX) dvs_builder_mark_var_aux(b, vr);
     }
     n = walk(p, p->constraints_head, &r->tmp, &r->tmp_cap);
     for (uint32_t i = n; i-- > 0;) {
@@ -1285,7 +1285,7 @@ static void census(void) {
         Comp *comp = calloc(nv + 1, sizeof *comp);
         for (uint32_t v = 0; v < nv; v++) {
             if (c.fixed[v] || !spec[v]) continue;
-            if (!used[v] && spec[v]->is_aux) continue;
+            if (!used[v] && spec[v]->kind == DVS_VAR_AUX) continue;
             uint32_t r = uf_find(c.parent, v);
             if (rep_ix[r] == UINT32_MAX) {
                 rep_ix[r] = (uint32_t)ncomp;
@@ -1296,7 +1296,7 @@ static void census(void) {
             Comp *k = &comp[rep_ix[r]];
             k->site = mix(k->site, v);          /* v ascending: order-independent */
             k->mask |= vmask[v];
-            if (spec[v]->is_aux) k->naux++;
+            if (spec[v]->kind == DVS_VAR_AUX) k->naux++;
             else { k->nvars++; k->box += var_box_log2(spec[v]); }
             k->key = mix(k->key, mix(spec[v]->width, (uint64_t)spec[v]->lo ^ ((uint64_t)spec[v]->hi << 1)));
         }

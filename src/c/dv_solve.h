@@ -230,6 +230,29 @@ dvs_expr_t dvs_builder_add_soft_constraint(dvs_builder_t *b, dvs_expr_t root,
 int dvs_builder_set_var_order(dvs_builder_t *b, uint32_t var_id,
                               uint8_t stage);
 
+/**
+ * What a variable is to the solve (SV terms). The value is stored in the
+ * problem, so the numbers are fixed.
+ */
+typedef enum {
+    DVS_VAR_RAND  = 0,  /* rand: a search decision (the default)          */
+    DVS_VAR_AUX   = 1,  /* compiler-generated: never a search decision; its
+                         * value follows from the constraints that define it */
+    DVS_VAR_RANDC = 2,  /* randc: solved as RAND; dvs_randomize() keeps the
+                         * per-var history                                */
+    DVS_VAR_STATE = 3   /* state: read per call and pinned, never sampled;
+                         * solved as RAND when nothing pins it            */
+} dvs_var_kind_t;
+
+/**
+ * Set the kind of variable `var_id`. Declare the variable first.
+ *
+ * @return 0, or -1 if no variable `var_id` has been declared or `kind` is
+ *         not a dvs_var_kind_t.
+ */
+int dvs_builder_set_var_kind(dvs_builder_t *b, uint32_t var_id,
+                             dvs_var_kind_t kind);
+
 /** Give variable `var_id` a weighted distribution (SV `dist`). */
 dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,
                                 uint32_t n_entries,

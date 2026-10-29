@@ -4312,7 +4312,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         if (v->width != 0) return DVS_COMPILE_BAD_VAR;   /* declared twice */
         uint8_t  flags = VAR_DECLARED;
         if (vs->is_signed) flags |= VAR_SIGNED;
-        if (vs->is_aux)    flags |= VAR_AUX;
+        if (vs->kind == DVS_VAR_AUX) flags |= VAR_AUX;
         if (vs->order) {
             if (!ctx->var_order) {
                 ctx->var_order = (uint8_t *)DVS_ALLOC(ctx->alloc, n);
@@ -5131,7 +5131,7 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
             Variable *v = &ctx->vars[id];
             uint8_t flags = VAR_DECLARED;
             if (vs->is_signed) flags |= VAR_SIGNED;
-            if (vs->is_aux)    flags |= VAR_AUX;
+            if (vs->kind == DVS_VAR_AUX) flags |= VAR_AUX;
 
             int rc;
             if (vs->width < 32) {
