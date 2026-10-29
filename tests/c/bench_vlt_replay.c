@@ -129,6 +129,19 @@ static void load(const char *path) {
         char *e = strchr(p, '\n');
         if (!e) e = p + strlen(p);
         if (e > p && *p == '(') {
+            /* One command per line: an unbalanced line is a broken capture
+             * (e.g. a wrapped log line never joined), which the front end
+             * would reject while the replay still timed the rest. */
+            int depth = 0, quoted = 0;
+            for (const char *q = p; q < e; q++) {
+                if (*q == '|' || *q == '"') quoted ^= 1;
+                else if (!quoted) depth += (*q == '(') - (*q == ')');
+            }
+            if (depth != 0) {
+                fprintf(stderr, "%s: command %zu is not balanced (%d): %.60s...\n",
+                        path, g_ncmd + 1, depth, p);
+                exit(2);
+            }
             if (g_ncmd == cap) g_cmd = realloc(g_cmd, (cap *= 2) * sizeof(Cmd));
             Cmd *c = &g_cmd[g_ncmd++];
             c->txt = p;
