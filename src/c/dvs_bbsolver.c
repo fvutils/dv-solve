@@ -3868,6 +3868,36 @@ void dvs_bbsolver_set_resample(dvs_bbsolver_t *S, int on) {
     if (S) S->resample = on;
 }
 
+/** Stats only (DV_BB_STATS): evaluate every kept constraint with bb_eval at
+ * the SAT model. A constraint that evaluates false is a bb_eval defect
+ * (mismatch); one bb_eval declines is counted apart. */
+static void bb_eval_model_check(dvs_bbsolver_t *S) {
+    if (!S->cons_comp || !S->problem) return;
+    uint32_t nv = S->n_vars;
+    uint64_t *val = (uint64_t *)calloc(nv ? nv : 1, sizeof(uint64_t));
+    if (!val) return;
+    for (uint32_t i = 0; i < nv; i++) {
+        int64_t x;
+        if (!S->vars[i].defined || dvs_bbsolver_value(S, i, &x) != 0) continue;
+        uint32_t w = S->vars[i].width;
+        val[i] = w >= 64 ? (uint64_t)x : (uint64_t)x & (((uint64_t)1 << w) - 1);
+    }
+    uint32_t i = 0, checked = 0, mismatch = 0, declined = 0;
+    for (dvs_expr_t cur = S->problem->constraints_head;
+         cur != EXPR_NULL && i < S->n_constraints; i++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        cur = cs->next;
+        if (S->cons_comp[i] == UINT32_MAX) continue;
+        uint64_t t;
+        if (!bb_eval_pred(S, cs->root, val, &t)) { declined++; continue; }
+        checked++;
+        if (!t) mismatch++;
+    }
+    free(val);
+    fprintf(stderr, "[bb-eval] mismatch=%u checked=%u declined=%u\n",
+            mismatch, checked, declined);
+}
+
 int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || !S->problem) return DVS_BB_ERROR;
 
@@ -3976,6 +4006,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
      * for seed 0). Sound: only flips that keep every assertion true are kept.
      * It starts from the simulation's model when that is the one found. */
     if (rc == DVS_BB_SAT) _diversify(S);
+    if (stats_enabled && rc == DVS_BB_SAT) bb_eval_model_check(S);
     return rc;
 }
 
