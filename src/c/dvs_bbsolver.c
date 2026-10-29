@@ -218,6 +218,8 @@ struct dvs_bbsolver_s {
     uint32_t        us_tries, us_hits;
     /* Sorted sampler (_sortsamp): tries and hits, as for _popsamp. */
     uint32_t        ss_tries, ss_hits;
+    /* Div/mul sampler (_divsamp): tries and hits, as for _popsamp. */
+    uint32_t        ds_tries, ds_hits;
 
     /* Session mode (dvs_bbsolver_sess_*): constraints arrive in batches, each
      * at the depth of its scope, and the instance outlives check-sats. */
@@ -4015,6 +4017,7 @@ static int _sim_split(dvs_bbsolver_t *S) {
 static int _popsamp(dvs_bbsolver_t *S);
 static int _uniqsamp(dvs_bbsolver_t *S);
 static int _sortsamp(dvs_bbsolver_t *S);
+static int _divsamp(dvs_bbsolver_t *S);
 
 /* Simulation, then SAT. Returns the DVS_BB_* verdict. */
 static int _solve_with_sim(dvs_bbsolver_t *S) {
@@ -4247,6 +4250,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     int rc = _popsamp(S);
     if (rc == DVS_BB_UNKNOWN) rc = _uniqsamp(S);
     if (rc == DVS_BB_UNKNOWN) rc = _sortsamp(S);
+    if (rc == DVS_BB_UNKNOWN) rc = _divsamp(S);
     int sampled = rc != DVS_BB_UNKNOWN;
     if (sampled) _sim_check(S, rc);
     else rc = _solve_with_sim(S);
@@ -4815,6 +4819,7 @@ static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
     int rc = _popsamp(S);
     if (rc != DVS_BB_SAT) rc = _uniqsamp(S);
     if (rc != DVS_BB_SAT) rc = _sortsamp(S);
+    if (rc != DVS_BB_SAT) rc = _divsamp(S);
     if (rc == DVS_BB_SAT) {
         S->last_result = DVS_BB_SAT;
         S->redivs_since_base = 0;
@@ -6505,6 +6510,389 @@ out:
     return rc;
 }
 
+/* Append to (*vs)[s0..] the unsubstituted vars `e` reads through
+ * substitutions, each once; 0 for a construct outside the walk or an
+ * allocation failure. */
+static int _ds_vars(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t **vs, size_t s0,
+                    size_t *n, size_t *cap, int depth) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+    if (!k || depth > 64) return 0;
+    switch (*k) {
+    case EXPR_CONST: return 1;
+    case EXPR_VAR: {
+        uint32_t id = ((const ExprVar *)k)->var_id;
+        if (id >= S->n_vars) return 0;
+        if (S->subst && S->subst[id] != EXPR_NULL)
+            return _ds_vars(S, S->subst[id], vs, s0, n, cap, depth + 1);
+        for (size_t i = s0; i < *n; i++) if ((*vs)[i] == id) return 1;
+        if (!_us_grow((void **)vs, cap, *n, sizeof(**vs))) return 0;
+        (*vs)[(*n)++] = id;
+        return 1;
+    }
+    case EXPR_BINARY: {
+        const ExprBinary *b = (const ExprBinary *)k;
+        return _ds_vars(S, b->lhs, vs, s0, n, cap, depth + 1) &&
+               _ds_vars(S, b->rhs, vs, s0, n, cap, depth + 1);
+    }
+    case EXPR_UNARY:
+        return _ds_vars(S, ((const ExprUnary *)k)->operand, vs, s0, n, cap, depth + 1);
+    case EXPR_EXTEND: case EXPR_SV_CAST:
+        return _ds_vars(S, ((const ExprExtend *)k)->operand, vs, s0, n, cap, depth + 1);
+    case EXPR_EXTRACT:
+        return _ds_vars(S, ((const ExprExtract *)k)->operand, vs, s0, n, cap, depth + 1);
+    case EXPR_CONCAT: {
+        const ExprConcat *c = (const ExprConcat *)k;
+        return _ds_vars(S, c->lo, vs, s0, n, cap, depth + 1) &&
+               _ds_vars(S, c->hi, vs, s0, n, cap, depth + 1);
+    }
+    case EXPR_ITE: {
+        const ExprITE *i = (const ExprITE *)k;
+        return _ds_vars(S, i->cond, vs, s0, n, cap, depth + 1) &&
+               _ds_vars(S, i->then_e, vs, s0, n, cap, depth + 1) &&
+               _ds_vars(S, i->else_e, vs, s0, n, cap, depth + 1);
+    }
+    case EXPR_IN_RANGE: {
+        const ExprInRange *r = (const ExprInRange *)k;
+        return _ds_vars(S, r->value, vs, s0, n, cap, depth + 1) &&
+               _ds_vars(S, r->lo, vs, s0, n, cap, depth + 1) &&
+               _ds_vars(S, r->hi, vs, s0, n, cap, depth + 1);
+    }
+    case EXPR_IN_SET: {
+        const ExprInSet *r = (const ExprInSet *)k;
+        dvs_expr_t *el = expr_in_set_elems(S->problem, e);
+        if (!_ds_vars(S, r->value, vs, s0, n, cap, depth + 1)) return 0;
+        for (uint32_t i = 0; i < r->n_elems; i++)
+            if (!_ds_vars(S, el[i], vs, s0, n, cap, depth + 1)) return 0;
+        return 1;
+    }
+    case EXPR_IN_RANGES: {
+        const ExprInRanges *r = (const ExprInRanges *)k;
+        dvs_expr_t *los = expr_in_ranges_los(S->problem, e);
+        dvs_expr_t *his = expr_in_ranges_his(S->problem, e);
+        if (!_ds_vars(S, r->value, vs, s0, n, cap, depth + 1)) return 0;
+        for (uint32_t i = 0; i < r->n_ranges; i++)
+            if (!_ds_vars(S, los[i], vs, s0, n, cap, depth + 1) ||
+                !_ds_vars(S, his[i], vs, s0, n, cap, depth + 1)) return 0;
+        return 1;
+    }
+    default: return 0;
+    }
+}
+
+/* Whether a var of vs[s0..n2) reaches v through the definitions (a cycle
+ * if `v` were defined by them). */
+static int _ds_reaches(dvs_bbsolver_t *S, const uint32_t *vs, size_t s0, size_t n2,
+                       const dvs_expr_t *def, const size_t *dvoff, const uint32_t *dvn,
+                       uint32_t v, uint32_t *stk, uint8_t *seen) {
+    uint32_t sp = 0;
+    memset(seen, 0, S->n_vars);
+    for (size_t j = s0; j < n2; j++) {
+        if (vs[j] == v) return 1;
+        if (!seen[vs[j]]) { seen[vs[j]] = 1; stk[sp++] = vs[j]; }
+    }
+    while (sp) {
+        uint32_t u = stk[--sp];
+        if (def[u] == EXPR_NULL) continue;
+        for (size_t j = dvoff[u]; j < dvoff[u] + dvn[u]; j++) {
+            if (vs[j] == v) return 1;
+            if (!seen[vs[j]]) { seen[vs[j]] = 1; stk[sp++] = vs[j]; }
+        }
+    }
+    return 0;
+}
+
+#define DVS_DS_TRIES 64
+
+/* Div/mul rejection sampler (DV_DIVSAMP=0 off). A var a leaf `v == e`
+ * defines (v a bare unsigned var not in e, the definitions acyclic) is
+ * DEFINED; every other var a leaf reads is FREE. Each free var is drawn
+ * uniform over its unary-leaf hull, or over its domain enumerated when the
+ * hull is small; the defined vars are evaluated in dependency order and every
+ * leaf the draw does not already satisfy is checked. The first draw that
+ * passes is the model. A free assignment has at most one extension, so
+ * rejection keeps the draw uniform over the models. Returns DVS_BB_SAT or
+ * DVS_BB_UNKNOWN (take the normal path). */
+static int _divsamp(dvs_bbsolver_t *S) {
+    if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig) return DVS_BB_UNKNOWN;
+    const char *env = getenv("DV_DIVSAMP");
+    if (env && strcmp(env, "0") == 0) return DVS_BB_UNKNOWN;
+    if (S->ds_tries >= 8 && S->ds_hits * 4 < S->ds_tries) return DVS_BB_UNKNOWN;
+    if (S->problem->softs_head != EXPR_NULL || S->problem->dists_head != EXPR_NULL ||
+        S->problem->allDiff_head != EXPR_NULL)
+        return DVS_BB_UNKNOWN;
+    dvs_aig_t *m = S->aig;
+    uint32_t N = (uint32_t)dvs_aig_num_nodes(m), nv = S->n_vars;
+    if (N < 2 || nv == 0) return DVS_BB_UNKNOWN;
+    int rc = DVS_BB_UNKNOWN;
+    const char *why = "shape";
+    size_t n_lf = 0, cap_lf = 0, n_vs = 0, cap_vs = 0, n_ck = 0;
+    uint32_t n_free = 0, n_def = 0, tries = 0;
+    dvs_expr_t *lf = NULL;
+    uint32_t *vs = NULL, *ck = NULL, *dom_all = NULL;
+    size_t *loff = NULL;
+    dvs_expr_t *def = (dvs_expr_t *)malloc(nv * sizeof(dvs_expr_t));
+    uint32_t *defl = (uint32_t *)malloc(nv * sizeof(uint32_t));
+    uint32_t *uhead = (uint32_t *)malloc(nv * sizeof(uint32_t));
+    uint32_t *order = (uint32_t *)malloc(nv * sizeof(uint32_t));
+    uint32_t *dn = (uint32_t *)calloc(nv, sizeof(uint32_t));
+    size_t *doff = (size_t *)calloc(nv, sizeof(size_t));
+    uint64_t *kl = (uint64_t *)malloc(nv * sizeof(uint64_t));
+    uint64_t *kh = (uint64_t *)malloc(nv * sizeof(uint64_t));
+    uint64_t *bias = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint64_t *lo = (uint64_t *)malloc(nv * sizeof(uint64_t));
+    uint64_t *hi = (uint64_t *)malloc(nv * sizeof(uint64_t));
+    uint64_t *fmask = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint64_t *fval = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint64_t *vval = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint8_t *role = (uint8_t *)calloc(nv, 1);      /* 1 read, 2 free, 3 defined */
+    uint8_t *nmark = (uint8_t *)calloc((size_t)N + 2, 1);
+    int8_t *val = (int8_t *)malloc((size_t)N + 2);
+    size_t *dvoff = (size_t *)calloc(nv, sizeof(size_t));
+    uint32_t *dvn = (uint32_t *)calloc(nv, sizeof(uint32_t));
+    uint32_t *stk = (uint32_t *)malloc(((size_t)nv + 1) * sizeof(uint32_t));
+    uint8_t *seen = (uint8_t *)malloc(nv);
+    uint32_t *unext = NULL;
+    if (!dvoff || !dvn || !stk || !seen || !def || !defl || !uhead || !order || !dn || !doff || !kl || !kh || !bias ||
+        !lo || !hi || !fmask || !fval || !vval || !role || !nmark || !val) goto out;
+    for (uint32_t v = 0; v < nv; v++) {
+        def[v] = EXPR_NULL;
+        uhead[v] = UINT32_MAX;
+        lo[v] = 0;
+        hi[v] = bb_eval_mask(S->vars[v].width);
+    }
+
+    /* The vars of each leaf; a no-var leaf must hold. */
+    if (!_us_leaves(S, &lf, &n_lf, &cap_lf)) goto out;
+    loff = (size_t *)malloc((n_lf + 1) * sizeof(size_t));
+    unext = (uint32_t *)malloc((n_lf + 1) * sizeof(uint32_t));
+    ck = (uint32_t *)malloc((n_lf + 1) * sizeof(uint32_t));
+    if (!loff || !unext || !ck) goto out;
+    for (size_t li = 0; li < n_lf; li++) {
+        uint64_t t;
+        loff[li] = n_vs;
+        if (!_ds_vars(S, lf[li], &vs, n_vs, &n_vs, &cap_vs, 0)) goto out;
+        for (size_t i = loff[li]; i < n_vs; i++) role[vs[i]] = 1;
+        if (n_vs == loff[li]) {
+            if (!bb_eval_pred(S, lf[li], vval, &t) || !t) { why = "const"; goto out; }
+        } else if (n_vs - loff[li] == 1) {
+            uint32_t v = vs[loff[li]];
+            unext[li] = uhead[v];
+            uhead[v] = (uint32_t)li;
+        }
+    }
+    loff[n_lf] = n_vs;
+
+    /* Definitions: `v == e` of two or more vars, v bare and not in e. */
+    for (size_t li = 0; li < n_lf; li++) {
+        if (loff[li + 1] - loff[li] < 2) continue;
+        const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, lf[li]);
+        if (!k || *k != EXPR_BINARY || ((const ExprBinary *)k)->op != DVS_BIN_EQ) continue;
+        const ExprBinary *b = (const ExprBinary *)k;
+        for (int side = 0; side < 2; side++) {
+            dvs_expr_t s = _ss_strip(S, side ? b->rhs : b->lhs);
+            dvs_expr_t o = side ? b->lhs : b->rhs;
+            const ExprKind *sk = (const ExprKind *)POOL_PTR(S->problem, s);
+            if (!sk || *sk != EXPR_VAR) continue;
+            uint32_t v = ((const ExprVar *)sk)->var_id;
+            if (v >= nv || def[v] != EXPR_NULL) continue;
+            size_t s0 = n_vs, n2 = n_vs, j;
+            if (!_ds_vars(S, o, &vs, s0, &n2, &cap_vs, 0)) goto out;
+            if (_ds_reaches(S, vs, s0, n2, def, dvoff, dvn, v, stk, seen)) continue;
+            def[v] = o;
+            dvoff[v] = s0;
+            dvn[v] = (uint32_t)(n2 - s0);
+            n_vs = n2;
+            defl[v] = (uint32_t)li;
+            role[v] = 3;
+            break;
+        }
+    }
+
+    /* Dependency order of the definitions; a cycle declines. */
+    {
+        uint32_t done = 0, total = 0;
+        for (uint32_t v = 0; v < nv; v++) {
+            if (role[v] == 1) { role[v] = 2; n_free++; }
+            else if (role[v] == 3) total++;
+        }
+        uint8_t *rdy = (uint8_t *)calloc(nv, 1);
+        if (!rdy) goto out;
+        while (done < total) {
+            uint32_t was = done;
+            for (uint32_t v = 0; v < nv; v++) {
+                if (role[v] != 3 || rdy[v]) continue;
+                size_t s0 = dvoff[v], n2 = s0 + dvn[v], j;
+                for (j = s0; j < n2; j++)
+                    if (role[vs[j]] == 3 && !rdy[vs[j]]) break;
+                if (j < n2) continue;
+                rdy[v] = 1;
+                order[done++] = v;
+            }
+            if (done == was) { free(rdy); why = "cycle"; goto out; }
+        }
+        free(rdy);
+        n_def = total;
+    }
+
+    /* Each read var: unsigned, own AIG input bits. */
+    why = "var";
+    for (uint32_t v = 0; v < nv; v++) {
+        if (!role[v]) continue;
+        const bb_var_t *bv = &S->vars[v];
+        uint32_t w = bv->width;
+        if (bv->is_signed || w == 0 || w > 64 || !bv->bv_built || bv->bv.size != w
+            || (S->subst && S->subst[v] != EXPR_NULL)) goto out;
+        for (uint32_t i = 0; i < w; i++) {
+            dvs_aig_node_t b = bv->bv.bits[w - 1 - i];
+            if (b == DVS_AIG_TRUE || b == DVS_AIG_FALSE) {
+                fmask[v] |= 1ull << i;
+                if (b == DVS_AIG_TRUE) fval[v] |= 1ull << i;
+                continue;
+            }
+            if (b < 0 || (uint32_t)b > N || !dvs_aig_is_input(m, b) || nmark[b]) goto out;
+            nmark[b] = 1;
+        }
+    }
+    bb_unary_bounds(S, lo, hi);
+
+    /* Free-var proposals: the domain when the hull is small, else the box. */
+    why = "domain";
+    {
+        uint64_t work = 0;
+        size_t cap_d = 0, n_d = 0;
+        for (uint32_t v = 0; v < nv; v++) {
+            if (role[v] != 2) continue;
+            int have = 0;
+            uint64_t t;
+            kl[v] = 0;
+            kh[v] = bb_eval_mask(S->vars[v].width);
+            for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u])
+                _ss_hull(S, lf[u], v, &bias[v], &have, &kl[v], &kh[v]);
+            if (bias[v] == 0) {
+                if (lo[v] > kl[v]) kl[v] = lo[v];
+                if (hi[v] < kh[v]) kh[v] = hi[v];
+            }
+            if (kl[v] > kh[v]) goto out;       /* empty: the normal path decides */
+            if (kh[v] - kl[v] >= DVS_SS_HULL) {
+                for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u]) ck[n_ck++] = u;
+                continue;
+            }
+            uint32_t nuv = 1;
+            for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u]) nuv++;
+            work += (kh[v] - kl[v] + 1) * nuv;
+            if (work > DVS_SS_WORK) goto out;
+            doff[v] = n_d;
+            for (uint64_t key = kl[v]; ; key++) {
+                uint64_t x = key ^ bias[v];
+                if ((x & fmask[v]) == fval[v]) {
+                    int ok = 1;
+                    vval[v] = x;
+                    for (uint32_t u = uhead[v]; ok && u != UINT32_MAX; u = unext[u]) {
+                        if (!bb_eval_pred(S, lf[u], vval, &t)) goto out;
+                        ok = t != 0;
+                    }
+                    if (ok) {
+                        if (!_us_grow((void **)&dom_all, &cap_d, n_d, sizeof(*dom_all)))
+                            goto out;
+                        dom_all[n_d++] = (uint32_t)(key - kl[v]);
+                    }
+                }
+                if (key == kh[v]) break;
+            }
+            vval[v] = 0;
+            dn[v] = (uint32_t)(n_d - doff[v]);
+            if (!dn[v]) { why = "small"; goto out; }
+        }
+    }
+    /* Checks: every leaf of two or more vars, and the unary leaves of the
+     * defined vars (the box vars' were added above). */
+    for (size_t li = 0; li < n_lf; li++)
+        if (loff[li + 1] - loff[li] >= 2) ck[n_ck++] = (uint32_t)li;
+    for (uint32_t v = 0; v < nv; v++)
+        if (role[v] == 3)
+            for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u]) ck[n_ck++] = u;
+    S->ds_tries++;
+
+    /* Draw: seeded fill, then up to DVS_DS_TRIES proposals. */
+    why = "reject";
+    val[0] = 0;
+    val[1] = 1;
+    {
+        uint64_t st = S->seed ^ 0x44495653414D504Cull, bits = 0;
+        uint32_t nb = 0;
+        int hit = 0;
+        for (uint32_t id = 2; id <= N; id++) {
+            if (!dvs_aig_is_input(m, (dvs_aig_node_t)id)) continue;
+            if (!nb) { bits = _ps_next(&st); nb = 64; }
+            val[id] = (int8_t)(bits & 1);
+            bits >>= 1;
+            nb--;
+        }
+        for (; tries < DVS_DS_TRIES && !hit; tries++) {
+            uint32_t v;
+            uint64_t x, t;
+            int ok = 1;
+            for (v = 0; ok && v < nv; v++) {
+                if (role[v] != 2) continue;
+                if (dn[v]) x = (kl[v] + dom_all[doff[v] + _ps_below(&st, dn[v])]) ^ bias[v];
+                else {
+                    uint64_t span = kh[v] - kl[v];
+                    x = (kl[v] + (span == UINT64_MAX ? _ps_next(&st)
+                                                     : _ps_below(&st, span + 1))) ^ bias[v];
+                    ok = (x & fmask[v]) == fval[v];
+                }
+                vval[v] = x;
+            }
+            if (!ok) continue;
+            for (uint32_t i = 0; i < n_def; i++) {
+                v = order[i];
+                uint32_t w = S->vars[v].width;
+                if (!bb_eval(S, def[v], w, vval, &x)) { why = "eval"; goto out; }
+                vval[v] = x & bb_eval_mask(w);
+            }
+            for (size_t c = 0; ok && c < n_ck; c++) {
+                if (!bb_eval_pred(S, lf[ck[c]], vval, &t)) { why = "eval"; goto out; }
+                ok = t != 0;
+            }
+            hit = ok;
+        }
+        if (!hit) goto out;
+        for (uint32_t v = 0; v < nv; v++)
+            if (role[v] >= 2) _ss_write(S, val, v, vval[v]);
+    }
+    why = "assert";
+    for (uint32_t id = 2; id <= N; id++) {
+        if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
+        dvs_aig_node_t l, r;
+        dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
+        val[id] = (int8_t)(_lit_val(val, l) & _lit_val(val, r));
+    }
+    S->aux_work += N;
+    {
+        uint32_t a = 0;
+        while (a < S->n_asserts && _lit_val(val, S->assert_nodes[a])) a++;
+        if (a == S->n_asserts) {
+            free(S->node_val);
+            S->node_val = val;
+            val = NULL;
+            S->model_in_sat = 0;
+            S->base_sim = 1;
+            S->ds_hits++;
+            rc = DVS_BB_SAT;
+        }
+    }
+out:
+    if (getenv("DV_BB_STATS"))
+        fprintf(stderr, "[bb-divsamp] free=%u def=%u checks=%zu tries=%u -> %s\n",
+                n_free, n_def, n_ck, tries, rc == DVS_BB_SAT ? "sat" : why);
+    free(lf); free(vs); free(ck); free(dom_all); free(loff); free(unext);
+    free(def); free(defl); free(uhead); free(order); free(dn); free(doff);
+    free(kl); free(kh); free(bias); free(lo); free(hi); free(fmask); free(fval);
+    free(vval); free(role); free(nmark); free(val);
+    free(dvoff); free(dvn); free(stk); free(seen);
+    return rc;
+}
+
 /* Pinned-constant fast path (DV_PINFAST=0 off). The input bits a live assert
  * forces through its top-level conjunction are fixed; the rest are unknown.
  * If a three-valued evaluation makes every live assert true whatever the
@@ -6589,6 +6977,7 @@ int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
     if (pf == DVS_BB_UNKNOWN) pf = _uniqsamp(S);
     if (pf == DVS_BB_UNKNOWN) pf = _sortsamp(S);
     if (pf == DVS_BB_UNKNOWN) pf = _pinfast(S);
+    if (pf == DVS_BB_UNKNOWN) pf = _divsamp(S);
     if (pf != DVS_BB_UNKNOWN) {
         _sim_check(S, pf);
         S->last_result = pf;
