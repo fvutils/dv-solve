@@ -4117,7 +4117,7 @@ static int _popsamp(dvs_bbsolver_t *S);
 static int _uniqsamp(dvs_bbsolver_t *S);
 static int _sortsamp(dvs_bbsolver_t *S);
 static int _divsamp(dvs_bbsolver_t *S);
-static int _enumsamp(dvs_bbsolver_t *S);
+static int _enumsamp(dvs_bbsolver_t *S, int fresh);
 
 /* Simulation, then SAT. Returns the DVS_BB_* verdict. */
 static int _solve_with_sim(dvs_bbsolver_t *S) {
@@ -4347,7 +4347,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     if (rc == DVS_BB_UNKNOWN) rc = _uniqsamp(S);
     if (rc == DVS_BB_UNKNOWN) rc = _sortsamp(S);
     if (rc == DVS_BB_UNKNOWN) rc = _divsamp(S);
-    if (rc == DVS_BB_UNKNOWN) rc = _enumsamp(S);
+    if (rc == DVS_BB_UNKNOWN) rc = _enumsamp(S, 1);
     int sampled = rc != DVS_BB_UNKNOWN;
     if (sampled) _sim_check(S, rc);
     else rc = _solve_with_sim(S);
@@ -4916,7 +4916,7 @@ static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
     if (rc != DVS_BB_SAT) rc = _uniqsamp(S);
     if (rc != DVS_BB_SAT) rc = _sortsamp(S);
     if (rc != DVS_BB_SAT) rc = _divsamp(S);
-    if (rc != DVS_BB_SAT) rc = _enumsamp(S);
+    if (rc != DVS_BB_SAT) rc = _enumsamp(S, 0);
     if (rc == DVS_BB_SAT) {
         S->last_result = DVS_BB_SAT;
         S->redivs_since_base = 0;
@@ -7331,7 +7331,9 @@ out:
  * against the AIG asserts, so a stale or mis-evaluated table only declines. */
 #define DVS_EN_MAX_SOL   65536u
 #define DVS_EN_MAX_CELLS (1u << 22)
-#define DVS_EN_MAX_NODES 4000000ull
+/* A build pays off only over many draws: 2^22 nodes (cons8, one 2^22 range)
+ * cost 520 us a draw over 210 draws, 148k (nqueens 8) paid back 9x. */
+#define DVS_EN_MAX_NODES (1ull << 19)
 
 static uint64_t _en_key(const dvs_bbsolver_t *S) {
     uint64_t h = 0xcbf29ce484222325ull ^ (uint64_t)(uintptr_t)S->problem;
@@ -7474,11 +7476,11 @@ out:
     return ok;
 }
 
-static int _enumsamp(dvs_bbsolver_t *S) {
+static int _enumsamp(dvs_bbsolver_t *S, int fresh) {
     if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig || S->n_frames)
         return DVS_BB_UNKNOWN;
-    const char *env = getenv("DV_ENUMSAMP");   /* opt-in until measured */
-    if (!env || strcmp(env, "1") != 0) return DVS_BB_UNKNOWN;
+    const char *env = getenv("DV_ENUMSAMP");   /* DV_ENUMSAMP=0 off */
+    if (env && strcmp(env, "0") == 0) return DVS_BB_UNKNOWN;
     if (S->problem->softs_head != EXPR_NULL || S->problem->dists_head != EXPR_NULL ||
         S->problem->allDiff_head != EXPR_NULL)
         return DVS_BB_UNKNOWN;
@@ -7486,6 +7488,10 @@ static int _enumsamp(dvs_bbsolver_t *S) {
     if (N < 2 || S->n_vars == 0) return DVS_BB_UNKNOWN;
     uint64_t key = _en_key(S);
     if (S->en_state == 0 || S->en_key != key) {
+        /* The build costs several SAT solves, so only a resample (which
+         * keeps S for more draws) pays for it; a check uses a table that
+         * is already there for this assert set. */
+        if (fresh) return DVS_BB_UNKNOWN;
         S->en_key = key;
         S->en_state = _en_build(S) ? 1 : 2;
     }
