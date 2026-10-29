@@ -255,6 +255,35 @@ The flip-check is skipped above 200,000 AIG nodes. Bits the circuit never
 uses, and variables no assertion mentions, are filled from the seed when the
 model is read.
 
+### The enumeration table
+
+When a compiled context is reused for many draws (the C API and Python
+resample path), `_enumsamp` tries to list every solution once. A pruned
+depth-first search over the problem's variables, checked against the
+circuit, builds a table of up to 65,536 solutions and stops past 2^19 node
+evaluations or 4 M table cells. Each draw then picks a row uniformly, so a
+reused context draws **exactly uniformly**. The table is built only on that
+path, not for a one-off `check-sat`. Every row drawn is checked against the
+assertions before it is returned; the table is keyed on the assert set, and
+after an incremental assert it fails that check and switches off for the
+session, which falls back to SAT plus the flip-check.
+
+Problems the table declines, and every draw in default SMT-LIB2 mode, which
+solves per call, are only approximately uniform. Measured with
+`tests/uniformity` (2,000 draws; the `uniform` arm is a true RNG over the same
+solutions and gives the noise floor; TV = total-variation distance from
+uniform; ratio = most / least frequent value of one field, against its
+uniform frequency):
+
+| Problem (solutions) | default | reused context | `--mode=verilator` | noise floor |
+|---|---|---|---|---|
+| `magic_square_3` (8) | TV 0.38, ratio 3.38 / 0.04 | TV 0.02 | TV 0.02 | TV 0.02 |
+| `nqueens_8` (92) | TV 0.37, ratio 4.46 | TV 0.08 | TV 0.14, fails the joint test | TV 0.08 |
+| `sudoku_4x4` (288) | TV 0.41, ratio 14.26, 8.7% of solutions never drawn | TV 0.15 | TV 0.15 | TV 0.15 |
+
+These are dense, tightly coupled problems: a SAT witness plus one flip-check
+sweep stays near a few solutions, as the previous section explains.
+
 ### Arrays
 
 Arrays expanded into bit-vectors are diversified like any other variable.
@@ -317,6 +346,7 @@ when the driver set one. Then:
 | Seeded SMT-LIB2, small cone | exhaustive sweep + flip-check | exactly uniform |
 | Seeded SMT-LIB2, dense solutions | random vectors + flip-check | exactly uniform |
 | Seeded SMT-LIB2, otherwise | SAT witness + flip-check | free bits spread; coupled bits follow the witness |
+| Reused compiled context, table built | enumeration table | exactly uniform |
 | C API, Python, DPI (`fair_pick`) | CDCL decisions | uniform per decision; joint skew on orderings |
 | Verilator, CDCL route | CDCL decisions, plus parity rounds | close to uniform (excess JSD 0.003 on `rand-core`) |
 | Verilator, bit-blast route | cached witness + one flip-check per draw | free bits spread; coupled bits concentrated |
@@ -371,6 +401,7 @@ first), and seeding the XOR-reasoning model.
 | Simulation sweep, reservoir | `dvs_aigsim_exhaustive`, `dvs_aigsim_random` | `src/c/dvs_aigsim.c` |
 | Simulation before SAT, race | `_solve_with_sim` | `src/c/dvs_bbsolver.c` |
 | Flip-check | `_diversify`, `dvs_bbsolver_rediversify` | `src/c/dvs_bbsolver.c` |
+| Enumeration table | `_enumsamp` | `src/c/dvs_bbsolver.c` |
 | Flip targets, free-bit fill | `_free_var_fill` | `src/c/dvs_bbsolver.c` |
 | SAT seeding | `ki_set_seed`, `cd_set_seed` | `src/c/dvs_sat_kissat.c`, `src/c/dvs_sat_cadical.c` |
 | Seeded routing | `_route_qfbv` | `src/c/smt2/smt2_frontend.c` |
