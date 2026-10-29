@@ -68,6 +68,9 @@ struct dvs_sat_s {
      * backend, in order; an LZ_ADD op stands for its next `v` literals of
      * lz_lits. lz_failed: the log or the backend could not be made. */
     int                 lz_failed;
+    /* dvs_sat_set_prepare: run once, just before the backend is made. */
+    void              (*prep_fn)(void *);
+    void               *prep_ctx;
     struct lz_op { uint32_t op; uint64_t v; } *lz_ops;
     size_t              lz_nops, lz_capops;
     dvs_sat_lit_t      *lz_lits;
@@ -209,6 +212,11 @@ static void lz_release(dvs_sat_t *s) {
 int dvs_sat_materialize(dvs_sat_t *s) {
     if (!s) return -1;
     if (s->impl) return 0;
+    if (s->prep_fn) {
+        void (*fn)(void *) = s->prep_fn;
+        s->prep_fn = NULL;
+        fn(s->prep_ctx);
+    }
     if (s->lz_failed || sat_create_impl(s, s->backend, 0) != 0) {
         s->lz_failed = 1;
         lz_release(s);
@@ -239,6 +247,16 @@ int dvs_sat_materialize(dvs_sat_t *s) {
     }
     lz_release(s);
     return 0;
+}
+
+void dvs_sat_set_prepare(dvs_sat_t *s, void (*fn)(void *), void *ctx) {
+    if (!s) return;
+    s->prep_fn = fn;
+    s->prep_ctx = ctx;
+}
+
+int dvs_sat_is_lazy(const dvs_sat_t *s) {
+    return s && !s->impl && !s->lz_failed;
 }
 
 dvs_sat_t *dvs_sat_new(dvs_alloc_t *alloc) {

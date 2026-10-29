@@ -179,6 +179,14 @@ struct dvs_bbsolver_s {
     dvs_aig_node_t *assert_nodes;
     uint32_t        n_asserts;
     uint32_t        asserts_cap;
+    /* Top-level asserts not yet CNF-encoded: held back while S->sat has no
+     * backend, so a sampler answer never pays for the CNF. _cnf_flush
+     * encodes them (S->sat's prepare hook, and before any clause count).
+     * light_at_flush: set the light-search gate once they are encoded. */
+    dvs_aig_node_t *cnf_pend;
+    uint32_t        n_cnf_pend;
+    uint32_t        cnf_pend_cap;
+    int             light_at_flush;
     int8_t         *node_val;
     /* _diversify_sweeps' AND children (L/R) and fanout CSR (fo_off/fo_adj), built
      * for the first div_n nodes. The AIG is append-only, so they stay valid until
@@ -269,6 +277,61 @@ static void xfree(dvs_alloc_t *a, void *p, size_t sz) {
  * flip-check can re-verify every assertion after a tentative bit flip. */
 static void assert_top_r(dvs_bbsolver_t *S, dvs_aig_node_t node, dvs_expr_t root);
 
+/* Kissat's light-search gate (failed-literal probing off below 2M clauses);
+ * see the fresh-solve path. */
+static void _light_gate_now(dvs_bbsolver_t *S) {
+    const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
+    uint64_t thresh = mcl && *mcl ? strtoull(mcl, NULL, 10) : 2000000;
+    dvs_sat_set_light_search(S->sat, dvs_aig_cnf_num_clauses(S->cnf) < thresh);
+}
+
+/* CNF-encode the held-back top-level asserts (S->cnf_pend). */
+static void _cnf_flush(dvs_bbsolver_t *S) {
+    uint32_t n = S->n_cnf_pend;
+    S->n_cnf_pend = 0;
+    for (uint32_t i = 0; i < n; i++)
+        dvs_aig_cnf_encode(S->cnf, S->cnf_pend[i], /*top_level=*/1);
+    if (S->light_at_flush) {
+        S->light_at_flush = 0;
+        _light_gate_now(S);
+    }
+}
+
+static void _cnf_flush_cb(void *ctx) { _cnf_flush((dvs_bbsolver_t *)ctx); }
+
+/* Set the light-search gate, or have the flush set it when asserts are
+ * held back (the count is known only then). */
+static void _light_gate(dvs_bbsolver_t *S) {
+    if (S->n_cnf_pend) S->light_at_flush = 1;
+    else _light_gate_now(S);
+}
+
+/* Clause count with every held-back assert encoded. */
+static uint64_t _num_clauses(dvs_bbsolver_t *S) {
+    _cnf_flush(S);
+    return dvs_aig_cnf_num_clauses(S->cnf);
+}
+
+/* Hold top-level `node` back from the CNF while S->sat has no backend
+ * (DV_CNF_DEFER=0: never). 1 when held. */
+static int _cnf_defer(dvs_bbsolver_t *S, dvs_aig_node_t node) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("DV_CNF_DEFER");
+        on = !(e && e[0] == '0');
+    }
+    if (!on || !dvs_sat_is_lazy(S->sat)) return 0;
+    if (S->n_cnf_pend == S->cnf_pend_cap) {
+        uint32_t nc = S->cnf_pend_cap ? 2 * S->cnf_pend_cap : 64;
+        dvs_aig_node_t *t = (dvs_aig_node_t *)realloc(S->cnf_pend, nc * sizeof(*t));
+        if (!t) return 0;
+        S->cnf_pend = t;
+        S->cnf_pend_cap = nc;
+    }
+    S->cnf_pend[S->n_cnf_pend++] = node;
+    return 1;
+}
+
 static void assert_top(dvs_bbsolver_t *S, dvs_aig_node_t node) {
     assert_top_r(S, node, EXPR_NULL);
 }
@@ -282,7 +345,7 @@ static void assert_top_r(dvs_bbsolver_t *S, dvs_aig_node_t node, dvs_expr_t root
         dvs_aig_cnf_encode(S->cnf, DVS_AIG_TRUE, /*top_level=*/0);
         dvs_aig_cnf_encode(S->cnf, node, /*top_level=*/0);
         dvs_sat_add_binary(S->sat, (dvs_sat_lit_t)-sel, (dvs_sat_lit_t)node);
-    } else {
+    } else if (!_cnf_defer(S, node)) {
         dvs_aig_cnf_encode(S->cnf, node, /*top_level=*/1);
     }
     if (S->sess && !S->asserts_lost) {
@@ -2325,6 +2388,7 @@ static dvs_bbsolver_t *bbsolver_new_ex(dvs_alloc_t *alloc, dvs_problem_t *proble
     S->aig = dvs_aig_new(alloc);
     S->sat = bb_new_sat(alloc, prefer_cadical);
     S->cnf = dvs_aig_cnf_new(alloc, S->aig, S->sat);
+    dvs_sat_set_prepare(S->sat, _cnf_flush_cb, S);
     S->bb  = dvs_bitblast_new(alloc, S->aig);
     S->sum = dvs_bbsum_new(alloc);
     S->word = dvs_bbword_new(alloc);
@@ -2389,6 +2453,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     dvs_bbword_free(S->word);
     if (S->cnf) dvs_aig_cnf_free(S->cnf);
     if (S->sat) dvs_sat_free(S->sat);
+    free(S->cnf_pend);
     if (S->aig) dvs_aig_free(S->aig);
     xfree(S->alloc, S->vars, S->n_vars * sizeof(bb_var_t));
     xfree(S->alloc, S->cache, S->cache_cap * sizeof(bb_cache_entry_t));
@@ -4187,6 +4252,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
      * observable even when the solve runs long or never returns (the plain
      * bitblast path is otherwise uncapped — see DV_BB_MAX_CONFLICTS below). */
     if (stats_enabled) {
+        _cnf_flush(S);
         double enc_ms = (t1.tv_sec - t0.tv_sec) * 1000.0
                       + (t1.tv_nsec - t0.tv_nsec) / 1e6;
         fprintf(stderr,
@@ -4237,12 +4303,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
      * So the gate is a HIGH clause threshold (2M): everything below goes light,
      * only the >>1M-clause hardest instances keep probing. Toggling probe never
      * changes sat/unsat — this is a pure schedule/latency lever. */
-    {
-        const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
-        uint64_t thresh = mcl && *mcl ? strtoull(mcl, NULL, 10) : 2000000;
-        uint64_t ncl = dvs_aig_cnf_num_clauses(S->cnf);
-        dvs_sat_set_light_search(S->sat, ncl < thresh);
-    }
+    _light_gate(S);
 
     /* A model the simulation finds is installed as node_val. */
     free(S->node_val);
@@ -4265,7 +4326,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
                 bb_ms, sat_ms,
                 (unsigned long long)dvs_aig_num_ands(S->aig),
                 (unsigned long long)dvs_aig_cnf_num_vars(S->cnf),
-                (unsigned long long)dvs_aig_cnf_num_clauses(S->cnf),
+                (unsigned long long)_num_clauses(S),
                 (unsigned long long)S->n_substs);
     }
     S->last_result = rc;
@@ -4560,9 +4621,7 @@ int dvs_bbsolver_sample(dvs_bbsolver_t *S, const uint32_t *vars,
         if (enc != DVS_BB_ENCODE_READY) return enc;
         S->sample_ready = 1;
         S->sample_base_ands = dvs_aig_num_ands(S->aig);
-        const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
-        uint64_t thresh = mcl && *mcl ? strtoull(mcl, NULL, 10) : 2000000;
-        dvs_sat_set_light_search(S->sat, dvs_aig_cnf_num_clauses(S->cnf) < thresh);
+        _light_gate(S);
     }
     {
         const char *mc = getenv("DV_BB_MAX_CONFLICTS");
@@ -4676,6 +4735,7 @@ const int32_t *dvs_bbsolver_clause_db(dvs_bbsolver_t *S, size_t *n_lits,
     if (n_lits) *n_lits = 0;
     if (max_var) *max_var = 0;
     if (!S || !S->sat) return NULL;
+    _cnf_flush(S);
     if (max_var) *max_var = (int32_t)dvs_sat_max_var(S->sat);
     return dvs_sat_recorded(S->sat, n_lits);
 }
@@ -4793,7 +4853,7 @@ static int _sat_fresh(dvs_bbsolver_t *S) {
     for (size_t i = 0; i < n; i++) dvs_sat_add(w, (dvs_sat_lit_t)db[i]);
     const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
     uint64_t thresh = mcl && *mcl ? strtoull(mcl, NULL, 10) : 2000000;
-    dvs_sat_set_light_search(w, dvs_aig_cnf_num_clauses(S->cnf) < thresh);
+    dvs_sat_set_light_search(w, _num_clauses(S) < thresh);
     int rc = dvs_sat_solve(w);
     if (rc == DVS_BB_SAT && dvs_bbsolver_install_worker_model(S, w) != 0) rc = DVS_BB_UNKNOWN;
     dvs_sat_free(w);
@@ -7336,7 +7396,7 @@ int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
     {
         const char *mcl = getenv("DV_KISSAT_LIGHT_MAXCLAUSES");
         uint64_t thresh = mcl && *mcl ? strtoull(mcl, NULL, 10) : 2000000;
-        dvs_sat_set_light_search(S->sat, dvs_aig_cnf_num_clauses(S->cnf) < thresh);
+        dvs_sat_set_light_search(S->sat, _num_clauses(S) < thresh);
     }
     free(S->node_val);
     S->node_val = NULL;
@@ -7606,8 +7666,9 @@ uint64_t dvs_bbsolver_num_aig_ands(const dvs_bbsolver_t *S) {
     return S ? dvs_aig_num_ands(S->aig) : 0;
 }
 uint64_t dvs_bbsolver_num_sat_clauses(const dvs_bbsolver_t *S) {
-    return S ? dvs_aig_cnf_num_clauses(S->cnf) : 0;
+    return S ? _num_clauses((dvs_bbsolver_t *)S) : 0;
 }
 uint64_t dvs_bbsolver_num_sat_vars(const dvs_bbsolver_t *S) {
+    if (S) _cnf_flush((dvs_bbsolver_t *)S);
     return S ? dvs_aig_cnf_num_vars(S->cnf) : 0;
 }

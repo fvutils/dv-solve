@@ -74,6 +74,13 @@ dvs_sat_t *dvs_sat_new_lazy(dvs_alloc_t *alloc, dvs_sat_backend_t backend);
  *  then answers DVS_SAT_UNKNOWN). */
 int dvs_sat_materialize(dvs_sat_t *s);
 
+/** Call fn(ctx) once, just before a lazy instance's backend is made, so a
+ *  caller can add the clauses it held back. fn may add clauses. */
+void dvs_sat_set_prepare(dvs_sat_t *s, void (*fn)(void *), void *ctx);
+
+/** Nonzero while a lazy instance has no backend yet (and has not failed). */
+int dvs_sat_is_lazy(const dvs_sat_t *s);
+
 /** Return the backend this instance actually uses. */
 dvs_sat_backend_t dvs_sat_backend(const dvs_sat_t *s);
 
