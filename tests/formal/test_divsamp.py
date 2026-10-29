@@ -330,3 +330,54 @@ def test_cov_sub_box_base(sub):
     assert len({m["x"] for m in models}) > 190
     tries = [int(t) for t in re.findall(r"\[bb-divsamp\].*cov=1 .*tries=(\d+) -> sat", err)]
     assert len(tries) == 200 and max(tries) <= 8, err[-2000:]
+
+
+# A partial order the box draw alone rarely hits (construct.cmp_web): the
+# chain a < b < c is drawn jointly, d's range is narrowed along the edges
+# that cannot wrap. "wrap": a + 0xfff0 wraps for every a >= 16, so that edge
+# must not narrow d (d > a - 16 there).
+@pytest.mark.parametrize("g", [10, 0xFFF0], ids=["offset", "wrap"])
+def test_chain_proposal(g):
+    import numpy as np
+    from scipy.stats import chisquare
+    w, C = 16, 1000
+    asserts = [f"(bvugt a {_bv(100, w)})", "(bvult a b)", "(bvult b c)",
+               f"(bvult c {_bv(C, w)})", f"(bvult (bvadd a {_bv(g, w)}) d)",
+               "(bvult d c)"]
+    widths = {"a": w, "b": w, "c": w, "d": w}
+    text = "".join(_session(widths, asserts, 7000 + i) for i in range(_N))
+    verdicts, models, err = _run(text)
+    assert verdicts == ["sat"] * _N
+    for m in models:
+        a, b, c, d = m["a"], m["b"], m["c"], m["d"]
+        assert 100 < a < b < c < C and (a + g) % (1 << w) < d < c, m
+    hits = re.findall(r"\[bb-divsamp\].* chains=(\d+) .*-> sat", err)
+    assert len(hits) == _N and all(h != "0" for h in hits), err[-2000:]
+    # Exact marginals: N[a, c] solutions per (a, c), split over b and d.
+    av = np.arange(C)[:, None]
+    cv = np.arange(C)[None, :]
+    nb = np.clip(cv - av - 1, 0, None)
+    dlo = av + g + 1 if g < 0x8000 else av + g + 1 - (1 << w)
+    nd = np.where(av >= (1 << w) - g if g >= 0x8000 else True,
+                  np.clip(cv - np.maximum(dlo, 0), 0, None), 0)
+    ok = (av > 100) & (cv > av)
+    n = np.where(ok, nb * nd, 0)
+    marg = {"a": n.sum(1), "c": n.sum(0)}
+    for v, other, cnt in (("b", nd, None), ("d", nb, None)):
+        m = np.zeros(C, dtype=np.int64)
+        wt = np.where(ok, other, 0)
+        for x in range(C):
+            if v == "b":
+                inside = (av < x) & (cv > x)
+            else:
+                inside = (np.maximum(dlo, 0) <= x) & (dlo <= x) & (cv > x)
+            m[x] = wt[inside & ok].sum()
+        marg[v] = m
+    for v, h in marg.items():
+        cells = h.reshape(-1, 50).sum(1)
+        obs = np.bincount([mm[v] // 50 for mm in models], minlength=len(cells))
+        keep = cells > 0
+        assert obs[~keep].sum() == 0, v
+        exp = cells[keep] * _N / cells.sum()
+        p = chisquare(obs[keep], exp).pvalue
+        assert p > 1e-3, (v, p, list(obs[keep]), [round(e, 1) for e in exp])

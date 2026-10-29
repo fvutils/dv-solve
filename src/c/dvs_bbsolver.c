@@ -6572,6 +6572,18 @@ static int _ds_proj(dvs_bbsolver_t *S, const dvs_expr_t *lf, size_t n_lf, const 
     return na;
 }
 
+#define DVS_DS_CHAIN 64u
+
+/* k is one of the n ascending keys d. */
+static int _ds_has(const uint32_t *d, uint32_t n, uint32_t k) {
+    uint32_t a = 0, b = n;
+    while (a < b) {
+        uint32_t c = a + (b - a) / 2;
+        if (d[c] < k) a = c + 1; else b = c;
+    }
+    return a < n && d[a] == k;
+}
+
 /* x lies in one of the n sorted intervals (n < 0: no intervals, all do). */
 static int _ds_in(const uint64_t *il, const uint64_t *ih, int n, uint64_t x) {
     if (n < 0) return 1;
@@ -7110,6 +7122,13 @@ static int _divsamp(dvs_bbsolver_t *S) {
     uint32_t *pn = (uint32_t *)calloc(nv, sizeof(uint32_t));
     uint8_t *pdir = (uint8_t *)calloc(nv, 1);     /* pk 2: 0 x = t - pe, 1 x = t + pe, 2 x = pe - t */
     uint8_t *cbase = (uint8_t *)calloc(nv, 1);    /* a box var a pk 2 proposal reads */
+    /* Chain proposals: paths of edge leaves, members cmemb[cst[i]..cst[i + 1]). */
+    int64_t *cpred = NULL, *csucc = NULL;
+    uint64_t *cgap = NULL, *cgrd = NULL, *cL = NULL, *cM = NULL, *csub = NULL;
+    uint32_t *cmemb = NULL, *cst = NULL, n_ch = 0, *ex = NULL, *ey = NULL;
+    uint64_t *ec = NULL, *eg = NULL;
+    size_t n_e = 0;
+    uint8_t *inch = NULL;
     dvs_expr_t *rK = NULL, *rE = NULL, *rC = NULL;
     uint64_t *ivl = NULL, *ivh = NULL;     /* pk 3: interval union, roff/pn, nmx values */
     size_t n_iv = 0, cap_iv = 0, cap_ivh = 0;
@@ -7547,6 +7566,91 @@ static int _divsamp(dvs_bbsolver_t *S) {
         }
     }
 
+    /* Chain proposals: edge leaves x >= y + c over free pk 0 vars (unbiased,
+     * read by no pk 2 proposal) link into paths; each is drawn jointly, as
+     * _sortsamp draws a chain, over the hull [L, H] of its members' ranges,
+     * then each member is checked against its own range and domain. The
+     * proposal is uniform over a superset of the solutions, so rejection
+     * keeps the draw uniform; the leaves stay in the checks. */
+    cpred = (int64_t *)malloc(nv * sizeof(int64_t));
+    csucc = (int64_t *)malloc(nv * sizeof(int64_t));
+    cgap = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    cgrd = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    cL = (uint64_t *)malloc(nv * sizeof(uint64_t));
+    cM = (uint64_t *)malloc(nv * sizeof(uint64_t));
+    csub = (uint64_t *)malloc(DVS_DS_CHAIN * sizeof(uint64_t));
+    cmemb = (uint32_t *)malloc(nv * sizeof(uint32_t));
+    cst = (uint32_t *)malloc(((size_t)nv + 1) * sizeof(uint32_t));
+    inch = (uint8_t *)calloc(nv, 1);
+    if (!cpred || !csucc || !cgap || !cgrd || !cL || !cM || !csub || !cmemb || !cst || !inch)
+        goto out;
+    for (uint32_t v = 0; v < nv; v++) cpred[v] = csucc[v] = -1;
+    ex = (uint32_t *)malloc((n_lf + 1) * sizeof(uint32_t));
+    ey = (uint32_t *)malloc((n_lf + 1) * sizeof(uint32_t));
+    ec = (uint64_t *)malloc((n_lf + 1) * sizeof(uint64_t));
+    eg = (uint64_t *)malloc((n_lf + 1) * sizeof(uint64_t));
+    if (!ex || !ey || !ec || !eg) goto out;
+    for (size_t li = 0; li < n_lf; li++) {
+        int64_t x, y;
+        uint64_t c, g;
+        uint32_t w;
+        if (loff[li + 1] - loff[li] != 2 || !_ss_edge(S, lf[li], &x, &y, &c, &g, &w)) continue;
+        if (x == y || role[x] != 2 || role[y] != 2 || bias[x] || bias[y] ||
+            S->vars[x].width != S->vars[y].width)
+            continue;
+        ex[n_e] = (uint32_t)x;
+        ey[n_e] = (uint32_t)y;
+        ec[n_e] = c;
+        eg[n_e++] = g;
+    }
+    /* The box vars' ranges, narrowed along the edges that cannot wrap: every
+     * solution keeps x >= y + c as integers there. */
+    for (int round = 0, chg = 1; chg && round < 8; round++) {
+        chg = 0;
+        for (size_t i = 0; i < n_e; i++) {
+            uint32_t x = ex[i], y = ey[i];
+            uint64_t c = ec[i];
+            if (eg[i] > bb_eval_mask(S->vars[y].width) - kh[y]) continue;
+            if (kh[x] < c || kh[x] - c < kl[y]) goto out;   /* empty: the normal path decides */
+            if (!dn[x] && !pk[x] && kl[x] < kl[y] + c) { kl[x] = kl[y] + c; chg = 1; }
+            if (!dn[y] && !pk[y] && kh[y] > kh[x] - c) { kh[y] = kh[x] - c; chg = 1; }
+        }
+    }
+    for (size_t i = 0; i < n_e; i++) {
+        uint32_t x = ex[i], y = ey[i];
+        int64_t z;
+        if (pk[x] || pk[y] || cbase[x] || cbase[y] || cpred[x] >= 0 || csucc[y] >= 0 ||
+            eg[i] > bb_eval_mask(S->vars[y].width) - kh[y])
+            continue;
+        for (z = x; z >= 0 && z != (int64_t)y; z = csucc[z]) ;
+        if (z == (int64_t)y) continue;             /* a cycle */
+        cpred[x] = y;
+        csucc[y] = x;
+        cgap[x] = ec[i];
+        cgrd[x] = eg[i];
+    }
+    cst[0] = 0;
+    for (uint32_t h = 0; h < nv; h++) {
+        if (cpred[h] >= 0 || csucc[h] < 0) continue;
+        uint32_t n = 0, *mb = cmemb + cst[n_ch];
+        uint64_t mask = bb_eval_mask(S->vars[h].width);
+        int64_t D = 0;
+        for (int64_t v = h; v >= 0 && n < DVS_DS_CHAIN; v = csucc[v]) mb[n++] = (uint32_t)v;
+        uint64_t L = kl[h], H = kh[mb[n - 1]];     /* the head's least, the tail's most */
+        int fit = n >= 2;
+        for (uint32_t i = 1; i < n; i++) {
+            fit = fit && cgrd[mb[i]] <= mask - H;
+            D += (int64_t)cgap[mb[i]] - 1;
+        }
+        int64_t M = (int64_t)(H - L) - D + 1;
+        if (!fit || L > H || H - L >= (1ull << 62) || M < (int64_t)n) continue;
+        for (uint32_t i = 0; i < n; i++) inch[mb[i]] = 1;
+        cL[n_ch] = L;
+        cM[n_ch] = (uint64_t)M;
+        cst[n_ch + 1] = cst[n_ch] + n;
+        n_ch++;
+    }
+
     /* Checks: every leaf of two or more vars, and the unary leaves of the
      * defined vars (the box vars' were added above). */
     for (size_t li = 0; li < n_lf; li++)
@@ -7575,11 +7679,33 @@ static int _divsamp(dvs_bbsolver_t *S) {
             uint32_t v;
             uint64_t x, t;
             int ok = 1;
-            /* The enumerated vars first: the box proposals read them. */
+            /* The chains first: the Floyd n-subset of [0, M), sorted. */
+            for (uint32_t ch = 0; ok && ch < n_ch; ch++) {
+                const uint32_t *mb = cmemb + cst[ch];
+                uint32_t n = cst[ch + 1] - cst[ch], k = 0;
+                for (uint64_t j = cM[ch] - n; j < cM[ch]; j++) {
+                    uint64_t r = _ps_below(&st, j + 1);
+                    uint32_t q = 0;
+                    while (q < k && csub[q] != r) q++;
+                    csub[k] = q < k ? j : r;
+                    k++;
+                }
+                qsort(csub, n, sizeof(*csub), _ss_u64_cmp);
+                int64_t D = 0;
+                for (uint32_t i = 0; i < n; i++) {
+                    v = mb[i];
+                    if (i) D += (int64_t)cgap[v] - 1;
+                    x = (uint64_t)((int64_t)(cL[ch] + csub[i]) + D);
+                    vval[v] = x;
+                    ok = ok && x >= kl[v] && x <= kh[v] && (x & fmask[v]) == fval[v] &&
+                         (!dn[v] || _ds_has(dom_all + doff[v], dn[v], (uint32_t)(x - kl[v])));
+                }
+            }
+            /* The enumerated vars next: the box proposals read them. */
             /* Then the box vars, the pk 2 ones last: their pe reads the others. */
             for (uint32_t it = 0; ok && it < 3 * nv; it++) {
                 v = it % nv;
-                if (role[v] != 2 || (it < nv) != (dn[v] != 0) ||
+                if (role[v] != 2 || inch[v] || (it < nv) != (dn[v] != 0) ||
                     (it >= nv && (it >= 2 * nv) != (pk[v] == 2)))
                     continue;
                 if (dn[v]) x = (kl[v] + dom_all[doff[v] + _ps_below(&st, dn[v])]) ^ bias[v];
@@ -7654,14 +7780,16 @@ static int _divsamp(dvs_bbsolver_t *S) {
     }
 out:
     if (getenv("DV_BB_STATS"))
-        fprintf(stderr, "[bb-divsamp] free=%u def=%u res=%u cov=%u checks=%zu dcache=%d tries=%u -> %s\n",
-                n_free, n_def, n_res, n_cov, n_ck, dcached, tries, rc == DVS_BB_SAT ? "sat" : why);
+        fprintf(stderr, "[bb-divsamp] free=%u def=%u res=%u cov=%u chains=%u checks=%zu dcache=%d tries=%u -> %s\n",
+                n_free, n_def, n_res, n_cov, n_ch, n_ck, dcached, tries, rc == DVS_BB_SAT ? "sat" : why);
     free(lf); free(vs); free(ck); free(dom_all); free(loff); free(unext);
     free(def); free(defl); free(uhead); free(order); free(dn); free(doff);
     free(kl); free(kh); free(bias); free(lo); free(hi); free(fmask); free(fval);
     free(vval); free(role); free(nmark); free(val);
     free(dvoff); free(dvn); free(stk); free(seen);
     free(pk); free(pc); free(nmx); free(pe); free(pw); free(roff); free(pn); free(pdir); free(cbase);
+    free(cpred); free(csucc); free(cgap); free(cgrd); free(cL); free(cM); free(csub);
+    free(cmemb); free(cst); free(inch); free(ex); free(ey); free(ec); free(eg);
     free(rK); free(rE); free(rW); free(rC); free(rT); free(ivl); free(ivh);
     return rc;
 }
