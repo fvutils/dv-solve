@@ -216,6 +216,8 @@ struct dvs_bbsolver_s {
     uint32_t        ps_tries, ps_hits;
     /* Unique sampler (_uniqsamp): tries and hits, as for _popsamp. */
     uint32_t        us_tries, us_hits;
+    /* Sorted sampler (_sortsamp): tries and hits, as for _popsamp. */
+    uint32_t        ss_tries, ss_hits;
 
     /* Session mode (dvs_bbsolver_sess_*): constraints arrive in batches, each
      * at the depth of its scope, and the instance outlives check-sats. */
@@ -3997,6 +3999,7 @@ static int _sim_split(dvs_bbsolver_t *S) {
 
 static int _popsamp(dvs_bbsolver_t *S);
 static int _uniqsamp(dvs_bbsolver_t *S);
+static int _sortsamp(dvs_bbsolver_t *S);
 
 /* Simulation, then SAT. Returns the DVS_BB_* verdict. */
 static int _solve_with_sim(dvs_bbsolver_t *S) {
@@ -4228,6 +4231,7 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     S->node_val = NULL;
     int rc = _popsamp(S);
     if (rc == DVS_BB_UNKNOWN) rc = _uniqsamp(S);
+    if (rc == DVS_BB_UNKNOWN) rc = _sortsamp(S);
     int sampled = rc != DVS_BB_UNKNOWN;
     if (sampled) _sim_check(S, rc);
     else rc = _solve_with_sim(S);
@@ -4795,6 +4799,7 @@ static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
      * already SAT, and a second kissat solve is not supported.) */
     int rc = _popsamp(S);
     if (rc != DVS_BB_SAT) rc = _uniqsamp(S);
+    if (rc != DVS_BB_SAT) rc = _sortsamp(S);
     if (rc == DVS_BB_SAT) {
         S->last_result = DVS_BB_SAT;
         S->redivs_since_base = 0;
@@ -5766,6 +5771,68 @@ static int64_t _us_domain(dvs_bbsolver_t *S, uint32_t v, const uint64_t *lo,
     return d;
 }
 
+/* The leaf conjuncts of the kept constraints, in the order _uniqsamp has
+ * always classified them: the walk peels &&, a both-bool-ite &, `1 == p` of a
+ * 1-bit p, ite(c,1,0) and `t == ite(c,1,0)` with t substituted by 1. Returns 0
+ * on an allocation failure or a missing node. */
+static int _us_leaves(dvs_bbsolver_t *S, dvs_expr_t **out, size_t *n_out,
+                      size_t *cap_out) {
+    uint32_t nv = S->n_vars, me = 0;
+    size_t cap_s = 0;
+    dvs_expr_t *stk = NULL;
+    int ok = 0;
+    *n_out = 0;
+    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL; me++) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        cur = cs->next;
+        if (S->constraint_skip && S->constraint_skip[me]) continue;
+        size_t n = 0;
+        if (!_us_grow((void **)&stk, &cap_s, n, sizeof(*stk))) goto out;
+        stk[n++] = cs->root;
+        while (n > 0) {
+            dvs_expr_t r = stk[--n];
+            const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
+            if (!k) goto out;
+            if (!_us_grow((void **)&stk, &cap_s, n + 2, sizeof(*stk))) goto out;
+            dvs_expr_t cond;
+            uint64_t a;
+            if (bb_is_bool_ite(S, r, &cond)) { stk[n++] = cond; continue; }
+            if (*k == EXPR_BINARY) {
+                const ExprBinary *e = (const ExprBinary *)k;
+                if (e->op == DVS_BIN_AND ||
+                    (e->op == DVS_BIN_BAND && bb_is_bool_ite(S, e->lhs, NULL) &&
+                     bb_is_bool_ite(S, e->rhs, NULL))) {
+                    stk[n++] = e->lhs;
+                    stk[n++] = e->rhs;
+                    continue;
+                }
+                if (e->op == DVS_BIN_EQ && bb_const_u(S, e->lhs, &a) && a == 1 &&
+                    bb_unsigned_var(S, e->rhs) < 0 && bb_self_width(S, e->rhs, 0) == 1) {
+                    stk[n++] = e->rhs;
+                    continue;
+                }
+                if (e->op == DVS_BIN_EQ && S->subst) {
+                    const ExprKind *lk = (const ExprKind *)POOL_PTR(S->problem, e->lhs);
+                    if (lk && *lk == EXPR_VAR &&
+                        ((const ExprVar *)lk)->var_id < nv &&
+                        S->subst[((const ExprVar *)lk)->var_id] != EXPR_NULL &&
+                        bb_const_u(S, S->subst[((const ExprVar *)lk)->var_id], &a) &&
+                        a == 1 && bb_is_bool_ite(S, e->rhs, &cond)) {
+                        stk[n++] = cond;
+                        continue;
+                    }
+                }
+            }
+            if (!_us_grow((void **)out, cap_out, *n_out, sizeof(**out))) goto out;
+            (*out)[(*n_out)++] = r;
+        }
+    }
+    ok = 1;
+out:
+    free(stk);
+    return ok;
+}
+
 static int _uniqsamp(dvs_bbsolver_t *S) {
     if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig) return DVS_BB_UNKNOWN;
     const char *env = getenv("DV_UNIQSAMP");
@@ -5778,10 +5845,10 @@ static int _uniqsamp(dvs_bbsolver_t *S) {
     if (N < 2 || nv == 0) return DVS_BB_UNKNOWN;
     int rc = DVS_BB_UNKNOWN;
     const char *why = "shape";
-    size_t n_e = 0, cap_e = 0, n_u = 0, cap_u = 0, cap_uv = 0, cap_s = 0;
+    size_t n_e = 0, cap_e = 0, n_u = 0, cap_u = 0, cap_uv = 0, n_lf = 0, cap_lf = 0;
     uint32_t ncomp = 0, nused = 0;
     uint64_t *edge = NULL;
-    dvs_expr_t *un = NULL, *stk = NULL;
+    dvs_expr_t *un = NULL, *lf = NULL;
     uint32_t *unv = NULL, *unext = NULL, *dom = NULL, *dom2 = NULL;
     uint32_t *uhead = (uint32_t *)malloc(nv * sizeof(uint32_t));
     uint32_t *uf = (uint32_t *)malloc(nv * sizeof(uint32_t));
@@ -5806,67 +5873,25 @@ static int _uniqsamp(dvs_bbsolver_t *S) {
     }
 
     /* Classify the top-level conjuncts (bb_unary_bounds' peel). */
-    {
-        uint32_t me = 0;
-        for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL; me++) {
-            ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
-            cur = cs->next;
-            if (S->constraint_skip && S->constraint_skip[me]) continue;
-            size_t n = 0;
-            if (!_us_grow((void **)&stk, &cap_s, n, sizeof(*stk))) goto out;
-            stk[n++] = cs->root;
-            while (n > 0) {
-                dvs_expr_t r = stk[--n];
-                const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
-                if (!k) goto out;
-                if (!_us_grow((void **)&stk, &cap_s, n + 2, sizeof(*stk))) goto out;
-                dvs_expr_t cond;
-                uint64_t a;
-                int64_t x, y;
-                if (bb_is_bool_ite(S, r, &cond)) { stk[n++] = cond; continue; }
-                if (*k == EXPR_BINARY) {
-                    const ExprBinary *e = (const ExprBinary *)k;
-                    if (e->op == DVS_BIN_AND ||
-                        (e->op == DVS_BIN_BAND && bb_is_bool_ite(S, e->lhs, NULL) &&
-                         bb_is_bool_ite(S, e->rhs, NULL))) {
-                        stk[n++] = e->lhs;
-                        stk[n++] = e->rhs;
-                        continue;
-                    }
-                    if (e->op == DVS_BIN_EQ && bb_const_u(S, e->lhs, &a) && a == 1 &&
-                        bb_unsigned_var(S, e->rhs) < 0 && bb_self_width(S, e->rhs, 0) == 1) {
-                        stk[n++] = e->rhs;
-                        continue;
-                    }
-                    if (e->op == DVS_BIN_EQ && S->subst) {
-                        const ExprKind *lk = (const ExprKind *)POOL_PTR(S->problem, e->lhs);
-                        if (lk && *lk == EXPR_VAR &&
-                            ((const ExprVar *)lk)->var_id < nv &&
-                            S->subst[((const ExprVar *)lk)->var_id] != EXPR_NULL &&
-                            bb_const_u(S, S->subst[((const ExprVar *)lk)->var_id], &a) &&
-                            a == 1 && bb_is_bool_ite(S, e->rhs, &cond)) {
-                            stk[n++] = cond;
-                            continue;
-                        }
-                    }
-                }
-                if (_us_edge(S, r, &x, &y)) {
-                    if (x == y) goto out;
-                    if (!_us_grow((void **)&edge, &cap_e, n_e, sizeof(*edge))) goto out;
-                    edge[n_e++] = x < y ? ((uint64_t)x << 32) | (uint64_t)y
-                                        : ((uint64_t)y << 32) | (uint64_t)x;
-                    used[x] = used[y] = 1;
-                    continue;
-                }
-                x = _us_unary_var(S, r);
-                if (x < 0) goto out;
-                if (!_us_grow((void **)&un, &cap_u, n_u, sizeof(*un)) ||
-                    !_us_grow((void **)&unv, &cap_uv, n_u, sizeof(*unv))) goto out;
-                un[n_u] = r;
-                unv[n_u++] = (uint32_t)x;
-                used[x] = 1;
-            }
+    if (!_us_leaves(S, &lf, &n_lf, &cap_lf)) goto out;
+    for (size_t li = 0; li < n_lf; li++) {
+        dvs_expr_t r = lf[li];
+        int64_t x, y;
+        if (_us_edge(S, r, &x, &y)) {
+            if (x == y) goto out;
+            if (!_us_grow((void **)&edge, &cap_e, n_e, sizeof(*edge))) goto out;
+            edge[n_e++] = x < y ? ((uint64_t)x << 32) | (uint64_t)y
+                                : ((uint64_t)y << 32) | (uint64_t)x;
+            used[x] = used[y] = 1;
+            continue;
         }
+        x = _us_unary_var(S, r);
+        if (x < 0) goto out;
+        if (!_us_grow((void **)&un, &cap_u, n_u, sizeof(*un)) ||
+            !_us_grow((void **)&unv, &cap_uv, n_u, sizeof(*unv))) goto out;
+        un[n_u] = r;
+        unv[n_u++] = (uint32_t)x;
+        used[x] = 1;
     }
     for (dvs_expr_t aref = S->problem->allDiff_head; aref != EXPR_NULL; ) {
         AllDiffSpec *as = (AllDiffSpec *)POOL_PTR(S->problem, aref);
@@ -6021,9 +6046,447 @@ out:
     if (getenv("DV_BB_STATS"))
         fprintf(stderr, "[bb-uniqsamp] vars=%u edges=%zu unary=%zu comps=%u -> %s\n",
                 nused, n_e, n_u, ncomp, rc == DVS_BB_SAT ? "sat" : why);
-    free(edge); free(un); free(stk); free(unv); free(unext); free(dom); free(dom2);
+    free(edge); free(un); free(lf); free(unv); free(unext); free(dom); free(dom2);
     free(uhead); free(uf); free(cnt); free(memb); free(lo); free(hi); free(fmask);
     free(fval); free(vval); free(ecnt); free(used); free(nmark); free(val);
+    return rc;
+}
+
+/* Sorted sampler (DV_SORTSAMP=0 off): an exact draw for problems made of
+ * ordered chains and one-var conjuncts. A two-var conjunct must be an edge
+ * `x >= y + c` (or >, <=, <; c a const >= 0; `y + c` may be an aux var
+ * substituted by it) over bare unsigned vars of one width. The edges must form
+ * simple paths whose members share one interval [L,H] from pure interval
+ * conjuncts. With D_0 = 0, D_i = D_{i-1} + c_i - 1 and M = H - L - D_{n-1} + 1,
+ * x_i = L + s_i + D_i maps the n-subsets s of [0,M) one-to-one onto the
+ * chain's solutions, so a Floyd subset, sorted, is uniform. A var in no edge
+ * is uniform over the values its conjuncts allow, enumerated over a hull of at
+ * most 2^16 values (in `x ^ bias` space for the signed-compare form). A
+ * conjunct with no var must be true. Other inputs get a seeded fill; the draw
+ * is checked against every assert before it is installed as node_val.
+ * Returns DVS_BB_SAT or DVS_BB_UNKNOWN (take the normal path). */
+#define DVS_SS_MAXN 512
+#define DVS_SS_HULL (1u << 16)
+#define DVS_SS_WORK (1u << 20)
+
+static int64_t _ss_join(int64_t a, int64_t b) {
+    if (a == -1 || b == -1) return -1;
+    if (a == -2) return b;
+    if (b == -2) return a;
+    return a == b ? a : -1;
+}
+
+/* The one var `e` reads through substitutions; -2 for none, -1 for two or
+ * more or a construct outside the walk. */
+static int64_t _ss_base(dvs_bbsolver_t *S, dvs_expr_t e, int depth) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+    if (!k || depth > 32) return -1;
+    switch (*k) {
+    case EXPR_CONST: return -2;
+    case EXPR_VAR: {
+        uint32_t id = ((const ExprVar *)k)->var_id;
+        if (id >= S->n_vars) return -1;
+        if (S->subst && S->subst[id] != EXPR_NULL)
+            return _ss_base(S, S->subst[id], depth + 1);
+        return id;
+    }
+    case EXPR_BINARY: {
+        const ExprBinary *b = (const ExprBinary *)k;
+        return _ss_join(_ss_base(S, b->lhs, depth + 1), _ss_base(S, b->rhs, depth + 1));
+    }
+    case EXPR_UNARY: return _ss_base(S, ((const ExprUnary *)k)->operand, depth + 1);
+    case EXPR_EXTEND: return _ss_base(S, ((const ExprExtend *)k)->operand, depth + 1);
+    case EXPR_ITE: {
+        const ExprITE *i = (const ExprITE *)k;
+        return _ss_join(_ss_base(S, i->cond, depth + 1),
+                        _ss_join(_ss_base(S, i->then_e, depth + 1),
+                                 _ss_base(S, i->else_e, depth + 1)));
+    }
+    case EXPR_IN_RANGE: {
+        const ExprInRange *r = (const ExprInRange *)k;
+        return _ss_join(_ss_base(S, r->value, depth + 1),
+                        _ss_join(_ss_base(S, r->lo, depth + 1),
+                                 _ss_base(S, r->hi, depth + 1)));
+    }
+    default: return -1;
+    }
+}
+
+/* `e` through var substitutions down to its first non-var node or bare var. */
+static dvs_expr_t _ss_strip(dvs_bbsolver_t *S, dvs_expr_t e) {
+    for (int hops = 0; hops < 32; hops++) {
+        const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+        if (!k || *k != EXPR_VAR) break;
+        uint32_t id = ((const ExprVar *)k)->var_id;
+        if (id >= S->n_vars || !S->subst || S->subst[id] == EXPR_NULL) break;
+        e = S->subst[id];
+    }
+    return e;
+}
+
+/* `e` through substitutions as v + c: v an unsubstituted unsigned var of
+ * width w, every add w wide, c a sum of consts below 2^32. */
+static int _ss_aff(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t w, int64_t *v,
+                   uint64_t *c, int depth) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+    uint64_t a;
+    if (!k || depth > 32) return 0;
+    if (*k == EXPR_VAR) {
+        uint32_t id = ((const ExprVar *)k)->var_id;
+        if (id >= S->n_vars || S->vars[id].width != w) return 0;
+        if (S->subst && S->subst[id] != EXPR_NULL)
+            return _ss_aff(S, S->subst[id], w, v, c, depth + 1);
+        if (S->vars[id].is_signed) return 0;
+        *v = id;
+        return 1;
+    }
+    if (*k != EXPR_BINARY || ((const ExprBinary *)k)->op != DVS_BIN_ADD ||
+        bb_self_width(S, e, 0) != w) return 0;
+    const ExprBinary *b = (const ExprBinary *)k;
+    dvs_expr_t t;
+    if (bb_const_u(S, b->rhs, &a)) t = b->lhs;
+    else if (bb_const_u(S, b->lhs, &a)) t = b->rhs;
+    else return 0;
+    if (a >= (1ull << 32) || !_ss_aff(S, t, w, v, c, depth + 1)) return 0;
+    *c += a;
+    return 1;
+}
+
+/* An edge x >= y + c (c counts the strict +1); *g is the add's const, which
+ * must not wrap. */
+static int _ss_edge(dvs_bbsolver_t *S, dvs_expr_t r, int64_t *x, int64_t *y,
+                    uint64_t *c, uint64_t *g, uint32_t *w) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
+    if (!k || *k != EXPR_BINARY) return 0;
+    const ExprBinary *e = (const ExprBinary *)k;
+    dvs_expr_t big, small;
+    switch (e->op) {
+    case DVS_BIN_GT: case DVS_BIN_GTE: big = e->lhs; small = e->rhs; break;
+    case DVS_BIN_LT: case DVS_BIN_LTE: big = e->rhs; small = e->lhs; break;
+    default: return 0;
+    }
+    uint32_t bw = bb_self_width(S, big, 0);
+    uint64_t cb = 0, cs = 0;
+    if (bw == 0 || bw > 62 || bb_self_width(S, small, 0) != bw) return 0;
+    if (!_ss_aff(S, big, bw, x, &cb, 0) || cb != 0) return 0;
+    if (!_ss_aff(S, small, bw, y, &cs, 0)) return 0;
+    *g = cs;
+    *c = cs + (e->op == DVS_BIN_GT || e->op == DVS_BIN_LT);
+    *w = bw;
+    return 1;
+}
+
+/* `x cmp const` or `x inside [const:const]` of the bare var v. */
+static int _ss_pure(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
+    uint64_t a, b;
+    if (!k) return 0;
+    if (*k == EXPR_BINARY) {
+        const ExprBinary *e = (const ExprBinary *)k;
+        switch (e->op) {
+        case DVS_BIN_EQ: case DVS_BIN_LT: case DVS_BIN_LTE:
+        case DVS_BIN_GT: case DVS_BIN_GTE: break;
+        default: return 0;
+        }
+        return (bb_unsigned_var(S, e->lhs) == v && bb_const_u(S, e->rhs, &a)) ||
+               (bb_unsigned_var(S, e->rhs) == v && bb_const_u(S, e->lhs, &a));
+    }
+    if (*k == EXPR_IN_RANGE) {
+        const ExprInRange *e = (const ExprInRange *)k;
+        return bb_unsigned_var(S, e->value) == v && bb_const_u(S, e->lo, &a) &&
+               bb_const_u(S, e->hi, &b);
+    }
+    return 0;
+}
+
+/* Narrow the key hull [*kl,*kh] of v (key = v ^ *bias) by `t cmp const` where
+ * t is v or v ^ bias through substitutions; the first such conjunct fixes the
+ * bias. Other conjuncts leave the hull as is (the enumeration checks them). */
+static void _ss_hull(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v, uint64_t *bias,
+                     int *have_bias, uint64_t *kl, uint64_t *kh) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
+    if (!k || *k != EXPR_BINARY) return;
+    const ExprBinary *e = (const ExprBinary *)k;
+    dvs_binop_t op = e->op;
+    dvs_expr_t t;
+    uint64_t c, b = 0;
+    if (bb_const_u(S, e->rhs, &c)) t = e->lhs;
+    else if (bb_const_u(S, e->lhs, &c)) {
+        t = e->rhs;
+        if (op == DVS_BIN_LT) op = DVS_BIN_GT;
+        else if (op == DVS_BIN_LTE) op = DVS_BIN_GTE;
+        else if (op == DVS_BIN_GT) op = DVS_BIN_LT;
+        else if (op == DVS_BIN_GTE) op = DVS_BIN_LTE;
+    } else return;
+    uint32_t w = S->vars[v].width;
+    if (bb_self_width(S, t, 0) != w || c > bb_eval_mask(w)) return;
+    t = _ss_strip(S, t);
+    const ExprKind *tk = (const ExprKind *)POOL_PTR(S->problem, t);
+    if (!tk) return;
+    if (*tk == EXPR_BINARY && ((const ExprBinary *)tk)->op == DVS_BIN_BXOR) {
+        const ExprBinary *x = (const ExprBinary *)tk;
+        dvs_expr_t o;
+        if (bb_const_u(S, x->rhs, &b)) o = x->lhs;
+        else if (bb_const_u(S, x->lhs, &b)) o = x->rhs;
+        else return;
+        if (bb_self_width(S, t, 0) != w) return;
+        t = _ss_strip(S, o);
+        tk = (const ExprKind *)POOL_PTR(S->problem, t);
+        if (!tk) return;
+    }
+    if (*tk != EXPR_VAR || ((const ExprVar *)tk)->var_id != v) return;
+    if (!*have_bias) { *bias = b; *have_bias = 1; }
+    if (b != *bias) return;
+    switch (op) {
+    case DVS_BIN_EQ:  if (c > *kl) *kl = c; if (c < *kh) *kh = c; break;
+    case DVS_BIN_LT:  if (c == 0) { *kl = 1; *kh = 0; } else if (c - 1 < *kh) *kh = c - 1; break;
+    case DVS_BIN_LTE: if (c < *kh) *kh = c; break;
+    case DVS_BIN_GT:  if (c == bb_eval_mask(w)) { *kl = 1; *kh = 0; }
+                      else if (c + 1 > *kl) *kl = c + 1; break;
+    case DVS_BIN_GTE: if (c > *kl) *kl = c; break;
+    default: break;
+    }
+}
+
+static int _ss_u64_cmp(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void _ss_write(dvs_bbsolver_t *S, int8_t *val, uint32_t v, uint64_t x) {
+    const bb_var_t *bv = &S->vars[v];
+    for (uint32_t q = 0; q < bv->width; q++) {
+        dvs_aig_node_t b = bv->bv.bits[bv->width - 1 - q];
+        if (b > 1) val[b] = (int8_t)((x >> q) & 1);
+    }
+}
+
+static int _sortsamp(dvs_bbsolver_t *S) {
+    if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig) return DVS_BB_UNKNOWN;
+    const char *env = getenv("DV_SORTSAMP");
+    if (env && strcmp(env, "0") == 0) return DVS_BB_UNKNOWN;
+    if (S->ss_tries >= 8 && S->ss_hits * 4 < S->ss_tries) return DVS_BB_UNKNOWN;
+    if (S->problem->softs_head != EXPR_NULL || S->problem->dists_head != EXPR_NULL ||
+        S->problem->allDiff_head != EXPR_NULL)
+        return DVS_BB_UNKNOWN;
+    dvs_aig_t *m = S->aig;
+    uint32_t N = (uint32_t)dvs_aig_num_nodes(m), nv = S->n_vars;
+    if (N < 2 || nv == 0) return DVS_BB_UNKNOWN;
+    int rc = DVS_BB_UNKNOWN;
+    const char *why = "shape";
+    size_t n_lf = 0, cap_lf = 0, n_u = 0, cap_u = 0, cap_uv = 0, n_e = 0;
+    uint32_t nused = 0, nchain = 0;
+    dvs_expr_t *lf = NULL, *un = NULL;
+    uint32_t *unv = NULL, *unext = NULL, *dom = NULL, *memb = NULL;
+    uint64_t *sub = NULL;
+    int64_t *pred = (int64_t *)malloc(nv * sizeof(int64_t));
+    int64_t *succ = (int64_t *)malloc(nv * sizeof(int64_t));
+    uint64_t *gap = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint64_t *grd = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint32_t *uhead = (uint32_t *)malloc(nv * sizeof(uint32_t));
+    uint64_t *lo = (uint64_t *)malloc(nv * sizeof(uint64_t));
+    uint64_t *hi = (uint64_t *)malloc(nv * sizeof(uint64_t));
+    uint64_t *fmask = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint64_t *fval = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint64_t *vval = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint8_t *used = (uint8_t *)calloc(nv, 1);
+    uint8_t *nmark = (uint8_t *)calloc((size_t)N + 2, 1);
+    int8_t *val = (int8_t *)malloc((size_t)N + 2);
+    if (!pred || !succ || !gap || !grd || !uhead || !lo || !hi || !fmask || !fval ||
+        !vval || !used || !nmark || !val) goto out;
+    for (uint32_t v = 0; v < nv; v++) {
+        pred[v] = succ[v] = -1;
+        uhead[v] = UINT32_MAX;
+        lo[v] = 0;
+        hi[v] = bb_eval_mask(S->vars[v].width);
+    }
+
+    /* Classify the leaves: no var (must hold), one var, or an edge. */
+    if (!_us_leaves(S, &lf, &n_lf, &cap_lf)) goto out;
+    for (size_t li = 0; li < n_lf; li++) {
+        dvs_expr_t r = lf[li];
+        int64_t b = _ss_base(S, r, 0), x, y;
+        uint64_t c, g, t;
+        uint32_t w;
+        if (b == -2) {
+            if (!bb_eval_pred(S, r, vval, &t) || !t) { why = "const"; goto out; }
+            continue;
+        }
+        if (b >= 0) {
+            if (!_us_grow((void **)&un, &cap_u, n_u, sizeof(*un)) ||
+                !_us_grow((void **)&unv, &cap_uv, n_u, sizeof(*unv))) goto out;
+            un[n_u] = r;
+            unv[n_u++] = (uint32_t)b;
+            if (!used[b]) used[b] = 1;
+            continue;
+        }
+        if (!_ss_edge(S, r, &x, &y, &c, &g, &w)) goto out;
+        why = "path";
+        if (x == y || pred[x] >= 0 || succ[y] >= 0) goto out;
+        why = "shape";
+        pred[x] = y;
+        succ[y] = x;
+        gap[x] = c;
+        grd[x] = g;
+        used[x] = used[y] = 2;
+        n_e++;
+    }
+    why = "edges";
+    if (!n_e) goto out;
+    unext = (uint32_t *)malloc((n_u + 1) * sizeof(uint32_t));
+    if (!unext) goto out;
+    for (size_t u = n_u; u-- > 0; ) { unext[u] = uhead[unv[u]]; uhead[unv[u]] = (uint32_t)u; }
+
+    /* Each used var: unsigned, own AIG input bits; a chain var none fixed. */
+    why = "var";
+    for (uint32_t v = 0; v < nv; v++) {
+        if (!used[v]) continue;
+        nused++;
+        const bb_var_t *bv = &S->vars[v];
+        uint32_t w = bv->width;
+        if (bv->is_signed || w == 0 || w > 64 || !bv->bv_built || bv->bv.size != w
+            || (S->subst && S->subst[v] != EXPR_NULL)) goto out;
+        for (uint32_t i = 0; i < w; i++) {
+            dvs_aig_node_t b = bv->bv.bits[w - 1 - i];
+            if (b == DVS_AIG_TRUE || b == DVS_AIG_FALSE) {
+                if (used[v] == 2) goto out;
+                fmask[v] |= 1ull << i;
+                if (b == DVS_AIG_TRUE) fval[v] |= 1ull << i;
+                continue;
+            }
+            if (b < 0 || (uint32_t)b > N || !dvs_aig_is_input(m, b) || nmark[b]) goto out;
+            nmark[b] = 1;
+        }
+        if (used[v] == 2)
+            for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u])
+                if (!_ss_pure(S, un[u], v)) { why = "domain"; goto out; }
+    }
+    S->ss_tries++;
+    bb_unary_bounds(S, lo, hi);
+
+    /* Draw: seeded fill, each chain, then each single var. */
+    val[0] = 0;
+    val[1] = 1;
+    memb = (uint32_t *)malloc(DVS_SS_MAXN * sizeof(uint32_t));
+    sub = (uint64_t *)malloc(DVS_SS_MAXN * sizeof(uint64_t));
+    if (!memb || !sub) goto out;
+    {
+        uint64_t st = S->seed ^ 0x534F525453414D50ull, bits = 0, work = 0;
+        uint32_t nb = 0, seen = 0;
+        for (uint32_t id = 2; id <= N; id++) {
+            if (!dvs_aig_is_input(m, (dvs_aig_node_t)id)) continue;
+            if (!nb) { bits = _ps_next(&st); nb = 64; }
+            val[id] = (int8_t)(bits & 1);
+            bits >>= 1;
+            nb--;
+        }
+        for (uint32_t h = 0; h < nv; h++) {
+            if (used[h] != 2 || pred[h] >= 0) continue;
+            uint32_t n = 0;
+            why = "path";
+            for (int64_t v = h; v >= 0; v = succ[v]) {
+                if (n == DVS_SS_MAXN) goto out;
+                memb[n++] = (uint32_t)v;
+            }
+            seen += n;
+            nchain++;
+            why = "domain";
+            uint64_t L = lo[h], H = hi[h], mask = bb_eval_mask(S->vars[h].width);
+            if (L > H) goto out;               /* empty: the normal path decides */
+            int64_t D = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t v = memb[i];
+                if (lo[v] != L || hi[v] != H || S->vars[v].width != S->vars[h].width)
+                    goto out;
+                if (i) {
+                    if (grd[v] > mask - H) { why = "wrap"; goto out; }
+                    D += (int64_t)gap[v] - 1;
+                }
+            }
+            int64_t M = (int64_t)(H - L) - D + 1;
+            if (M < (int64_t)n) { why = "small"; goto out; }
+            work += (uint64_t)n * n;
+            if (work > DVS_SS_WORK) goto out;
+            uint32_t k = 0;                    /* Floyd n-subset of [0,M) */
+            for (uint64_t j = (uint64_t)M - n; j < (uint64_t)M; j++) {
+                uint64_t t = _ps_below(&st, j + 1);
+                uint32_t q = 0;
+                while (q < k && sub[q] != t) q++;
+                sub[k] = q < k ? j : t;
+                k++;
+            }
+            qsort(sub, n, sizeof(*sub), _ss_u64_cmp);
+            D = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                if (i) D += (int64_t)gap[memb[i]] - 1;
+                _ss_write(S, val, memb[i], (uint64_t)((int64_t)(L + sub[i]) + D));
+            }
+        }
+        why = "path";                              /* a cycle has no head */
+        for (uint32_t v = 0; v < nv; v++) if (used[v] == 2) seen--;
+        if (seen) goto out;
+        why = "domain";
+        for (uint32_t v = 0; v < nv; v++) {
+            if (used[v] != 1) continue;
+            uint64_t kl = 0, kh = bb_eval_mask(S->vars[v].width), bias = 0, t;
+            int have = 0;
+            for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u])
+                _ss_hull(S, un[u], v, &bias, &have, &kl, &kh);
+            if (kl > kh) goto out;
+            if (kh - kl >= DVS_SS_HULL) goto out;
+            uint32_t nuv = 1;
+            for (uint32_t u = uhead[v]; u != UINT32_MAX; u = unext[u]) nuv++;
+            work += (kh - kl + 1) * nuv;
+            if (work > DVS_SS_WORK) goto out;
+            if (!dom) dom = (uint32_t *)malloc(DVS_SS_HULL * sizeof(uint32_t));
+            if (!dom) goto out;
+            uint32_t d = 0;
+            for (uint64_t key = kl; ; key++) {
+                uint64_t x = key ^ bias;
+                if ((x & fmask[v]) == fval[v]) {
+                    int ok = 1;
+                    vval[v] = x;
+                    for (uint32_t u = uhead[v]; ok && u != UINT32_MAX; u = unext[u]) {
+                        if (!bb_eval_pred(S, un[u], vval, &t)) goto out;
+                        ok = t != 0;
+                    }
+                    if (ok) dom[d++] = (uint32_t)(key - kl);
+                }
+                if (key == kh) break;
+            }
+            vval[v] = 0;
+            if (!d) { why = "small"; goto out; }
+            _ss_write(S, val, v, (kl + dom[_ps_below(&st, d)]) ^ bias);
+        }
+    }
+    why = "assert";
+    for (uint32_t id = 2; id <= N; id++) {
+        if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
+        dvs_aig_node_t l, r;
+        dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
+        val[id] = (int8_t)(_lit_val(val, l) & _lit_val(val, r));
+    }
+    S->aux_work += N;
+    {
+        uint32_t a = 0;
+        while (a < S->n_asserts && _lit_val(val, S->assert_nodes[a])) a++;
+        if (a == S->n_asserts) {
+            free(S->node_val);
+            S->node_val = val;
+            val = NULL;
+            S->model_in_sat = 0;
+            S->base_sim = 1;
+            S->ss_hits++;
+            rc = DVS_BB_SAT;
+        }
+    }
+out:
+    if (getenv("DV_BB_STATS"))
+        fprintf(stderr, "[bb-sortsamp] vars=%u edges=%zu unary=%zu chains=%u -> %s\n",
+                nused, n_e, n_u, nchain, rc == DVS_BB_SAT ? "sat" : why);
+    free(lf); free(un); free(unv); free(unext); free(dom); free(memb); free(sub);
+    free(pred); free(succ); free(gap); free(grd); free(uhead); free(lo); free(hi);
+    free(fmask); free(fval); free(vval); free(used); free(nmark); free(val);
     return rc;
 }
 
@@ -6109,6 +6572,7 @@ int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
     S->node_val = NULL;
     int pf = _popsamp(S);
     if (pf == DVS_BB_UNKNOWN) pf = _uniqsamp(S);
+    if (pf == DVS_BB_UNKNOWN) pf = _sortsamp(S);
     if (pf == DVS_BB_UNKNOWN) pf = _pinfast(S);
     if (pf != DVS_BB_UNKNOWN) {
         _sim_check(S, pf);
