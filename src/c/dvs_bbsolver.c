@@ -2203,8 +2203,10 @@ static dvs_sat_t *bb_new_sat(dvs_alloc_t *alloc, int prefer_cadical) {
             prefer_cadical = 0;
         }
     }
-    dvs_sat_t *sat = dvs_sat_new_backend(alloc, prefer_cadical ? DVS_SAT_BACKEND_CADICAL
-                                                               : DVS_SAT_BACKEND_KISSAT);
+    /* Lazy: a check answered by simulation or a fast path never builds the
+     * backend. */
+    dvs_sat_t *sat = dvs_sat_new_lazy(alloc, prefer_cadical ? DVS_SAT_BACKEND_CADICAL
+                                                            : DVS_SAT_BACKEND_KISSAT);
     if (sat && prefer_cadical == 2) dvs_sat_set_sampling(sat, 1);
     return sat;
 }
@@ -3967,6 +3969,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
     /* Race the sweep against SAT. */
     dvs_thread_t th;
     bb_sweep_arg arg = { sim, S->sat, 0, 0, DVS_AIGSIM_UNDECIDED, S->seed };
+    dvs_sat_materialize(S->sat);   /* the sweep thread may interrupt it */
     int raced = work <= _env_u64("DV_SIM_RACE_WORK", 6000000000ull)
              && dvs_thread_create(&th, bb_sweep_worker, &arg) == 0;
     if (raced) dvs_sat_set_terminate(S->sat, (void *)&arg.sat_stop, bb_sweep_terminate);

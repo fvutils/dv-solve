@@ -62,7 +62,20 @@ struct dvs_sat_s {
     dvs_sat_lit_t      *rec_buf;
     size_t              rec_n;
     size_t              rec_cap;
+
+    /* Lazy instance (dvs_sat_new_lazy): impl stays NULL until
+     * dvs_sat_materialize. Meanwhile lz_ops logs the calls bound for the
+     * backend, in order; an LZ_ADD op stands for its next `v` literals of
+     * lz_lits. lz_failed: the log or the backend could not be made. */
+    int                 lz_failed;
+    struct lz_op { uint32_t op; uint64_t v; } *lz_ops;
+    size_t              lz_nops, lz_capops;
+    dvs_sat_lit_t      *lz_lits;
+    size_t              lz_nlits, lz_caplits;
 };
+
+enum { LZ_ADD, LZ_RESERVE, LZ_SEED, LZ_CONFLICTS, LZ_DECISIONS, LZ_LIGHT,
+       LZ_SAMPLING, LZ_PHASE };
 
 /* Append a literal to the assumption buffer without touching var bookkeeping
  * (used for both user assumptions and internal selector assumptions). Returns
@@ -87,39 +100,143 @@ int dvs_sat_has_cadical(void) {
 #endif
 }
 
-dvs_sat_t *dvs_sat_new_backend(dvs_alloc_t *alloc, dvs_sat_backend_t backend) {
+static dvs_sat_t *sat_alloc(dvs_alloc_t *alloc) {
     dvs_sat_t *s = (dvs_sat_t *)xalloc(alloc, sizeof(*s));
     if (!s) return NULL;
     memset(s, 0, sizeof(*s));
     s->alloc = alloc;
     s->last_lit_was_zero = 1; /* no clause in progress */
-
-    void *impl = NULL;
-    const dvs_sat_vtbl *vt = NULL;
-
-#ifdef DVS_WITH_CADICAL
-    if (backend == DVS_SAT_BACKEND_CADICAL) {
-        impl = dvs_sat_cadical_create(alloc, &vt);
-        s->backend = DVS_SAT_BACKEND_CADICAL;
-    }
-#endif
-    if (!impl) {
-        /* Default, or fallback when the requested backend is not compiled in. */
-        impl = dvs_sat_kissat_create(alloc, &vt);
-        s->backend = DVS_SAT_BACKEND_KISSAT;
-    }
-    if (!impl) {
-        xfree(alloc, s, sizeof(*s));
-        return NULL;
-    }
-    s->impl        = impl;
-    s->vt          = vt;
-    s->incremental = vt->incremental;
-    s->sel_next    = 0; /* set to max_var+1 lazily at first push */
+    s->sel_next = 0;          /* set to max_var+1 lazily at first push */
     /* DV_DUMP_CNF=path: record the clause log and write it as DIMACS at the
      * first solve (a diagnostic for comparing SAT backends offline). */
     if (getenv("DV_DUMP_CNF")) s->recording = 1;
     return s;
+}
+
+/* Create the backend impl into s: `backend`, or kissat when that is not
+ * compiled in (or, when `fallback`, fails). Returns 0 on success. */
+static int sat_create_impl(dvs_sat_t *s, dvs_sat_backend_t backend, int fallback) {
+    void *impl = NULL;
+    const dvs_sat_vtbl *vt = NULL;
+    dvs_sat_backend_t got = DVS_SAT_BACKEND_KISSAT;
+#ifdef DVS_WITH_CADICAL
+    if (backend == DVS_SAT_BACKEND_CADICAL) {
+        impl = dvs_sat_cadical_create(s->alloc, &vt);
+        got = DVS_SAT_BACKEND_CADICAL;
+        if (!impl && !fallback) return -1;
+    }
+#else
+    (void)backend; (void)fallback;
+#endif
+    if (!impl) {
+        /* Default, or fallback when the requested backend is not compiled in. */
+        impl = dvs_sat_kissat_create(s->alloc, &vt);
+        got = DVS_SAT_BACKEND_KISSAT;
+    }
+    if (!impl) return -1;
+    s->impl        = impl;
+    s->vt          = vt;
+    s->backend     = got;
+    s->incremental = vt->incremental;
+    return 0;
+}
+
+dvs_sat_t *dvs_sat_new_backend(dvs_alloc_t *alloc, dvs_sat_backend_t backend) {
+    dvs_sat_t *s = sat_alloc(alloc);
+    if (!s) return NULL;
+    if (sat_create_impl(s, backend, 1) != 0) {
+        xfree(alloc, s, sizeof(*s));
+        return NULL;
+    }
+    return s;
+}
+
+dvs_sat_t *dvs_sat_new_lazy(dvs_alloc_t *alloc, dvs_sat_backend_t backend) {
+    dvs_sat_t *s = sat_alloc(alloc);
+    if (!s) return NULL;
+    /* Fix the backend now: the dispatcher's push/pop scheme depends on it. */
+    s->backend = backend == DVS_SAT_BACKEND_CADICAL && dvs_sat_has_cadical()
+               ? DVS_SAT_BACKEND_CADICAL : DVS_SAT_BACKEND_KISSAT;
+    s->incremental = s->backend == DVS_SAT_BACKEND_CADICAL;
+    return s;
+}
+
+/* Grow a log array to hold one more element; 0 on success. */
+static int lz_grow(dvs_sat_t *s, void **buf, size_t *cap, size_t n, size_t elem) {
+    if (n < *cap) return 0;
+    size_t nc = *cap ? *cap * 2 : 64;
+    void *nb = xalloc(s->alloc, nc * elem);
+    if (!nb) { s->lz_failed = 1; return -1; }
+    if (*buf) {
+        memcpy(nb, *buf, n * elem);
+        xfree(s->alloc, *buf, *cap * elem);
+    }
+    *buf = nb;
+    *cap = nc;
+    return 0;
+}
+
+static void lz_log(dvs_sat_t *s, uint32_t op, uint64_t v) {
+    if (s->lz_failed) return;
+    if (lz_grow(s, (void **)&s->lz_ops, &s->lz_capops, s->lz_nops, sizeof(*s->lz_ops)))
+        return;
+    s->lz_ops[s->lz_nops].op = op;
+    s->lz_ops[s->lz_nops].v = v;
+    s->lz_nops++;
+}
+
+/* A literal (0 ends the clause) for the backend's add(). */
+static void vt_add(dvs_sat_t *s, dvs_sat_lit_t lit) {
+    if (s->impl) { s->vt->add(s->impl, lit); return; }
+    if (s->lz_failed) return;
+    if (lz_grow(s, (void **)&s->lz_lits, &s->lz_caplits, s->lz_nlits, sizeof(*s->lz_lits)))
+        return;
+    s->lz_lits[s->lz_nlits++] = lit;
+    if (s->lz_nops && s->lz_ops[s->lz_nops - 1].op == LZ_ADD) s->lz_ops[s->lz_nops - 1].v++;
+    else lz_log(s, LZ_ADD, 1);
+}
+
+static void lz_release(dvs_sat_t *s) {
+    if (s->lz_ops) xfree(s->alloc, s->lz_ops, s->lz_capops * sizeof(*s->lz_ops));
+    if (s->lz_lits) xfree(s->alloc, s->lz_lits, s->lz_caplits * sizeof(*s->lz_lits));
+    s->lz_ops = NULL;
+    s->lz_lits = NULL;
+    s->lz_nops = s->lz_capops = s->lz_nlits = s->lz_caplits = 0;
+}
+
+int dvs_sat_materialize(dvs_sat_t *s) {
+    if (!s) return -1;
+    if (s->impl) return 0;
+    if (s->lz_failed || sat_create_impl(s, s->backend, 0) != 0) {
+        s->lz_failed = 1;
+        lz_release(s);
+        return -1;
+    }
+    const dvs_sat_vtbl *vt = s->vt;
+    size_t li = 0;
+    for (size_t i = 0; i < s->lz_nops; i++) {
+        uint64_t v = s->lz_ops[i].v;
+        switch (s->lz_ops[i].op) {
+        case LZ_ADD:
+            for (uint64_t k = 0; k < v; k++) vt->add(s->impl, s->lz_lits[li++]);
+            break;
+        case LZ_RESERVE:   vt->reserve(s->impl, (dvs_sat_var_t)v); break;
+        case LZ_SEED:      vt->set_seed(s->impl, v); break;
+        case LZ_CONFLICTS: vt->set_conflict_limit(s->impl, (uint32_t)v); break;
+        case LZ_DECISIONS: vt->set_decision_limit(s->impl, (uint32_t)v); break;
+        case LZ_LIGHT:
+            if (vt->set_light_search) vt->set_light_search(s->impl, (int)v);
+            break;
+        case LZ_SAMPLING:
+            if (vt->set_sampling) vt->set_sampling(s->impl, (int)v);
+            break;
+        case LZ_PHASE:
+            if (vt->phase) vt->phase(s->impl, (dvs_sat_lit_t)(int64_t)v);
+            break;
+        }
+    }
+    lz_release(s);
+    return 0;
 }
 
 dvs_sat_t *dvs_sat_new(dvs_alloc_t *alloc) {
@@ -137,6 +254,7 @@ int dvs_sat_is_incremental(const dvs_sat_t *s) {
 void dvs_sat_free(dvs_sat_t *s) {
     if (!s) return;
     if (s->vt && s->impl) s->vt->destroy(s->impl, s->alloc);
+    lz_release(s);
     if (s->assume_buf) {
         xfree(s->alloc, s->assume_buf, s->assume_cap * sizeof(dvs_sat_lit_t));
     }
@@ -148,7 +266,8 @@ void dvs_sat_free(dvs_sat_t *s) {
 
 void dvs_sat_reserve(dvs_sat_t *s, dvs_sat_var_t max_var) {
     if (max_var > 0) {
-        s->vt->reserve(s->impl, max_var);
+        if (s->impl) s->vt->reserve(s->impl, max_var);
+        else lz_log(s, LZ_RESERVE, (uint64_t)max_var);
         if (max_var > s->max_var) s->max_var = max_var;
     }
 }
@@ -190,14 +309,14 @@ void dvs_sat_add(dvs_sat_t *s, dvs_sat_lit_t lit) {
          * their UNSAT meaning. */
         if (!s->last_lit_was_zero) {
             if (s->incremental && s->push_depth > 0) {
-                s->vt->add(s->impl, -(dvs_sat_lit_t)s->sel_stack[s->push_depth - 1]);
+                vt_add(s, -(dvs_sat_lit_t)s->sel_stack[s->push_depth - 1]);
             }
             s->num_clauses++;
         }
-        s->vt->add(s->impl, 0);
+        vt_add(s, 0);
         s->last_lit_was_zero = 1;
     } else {
-        s->vt->add(s->impl, lit);
+        vt_add(s, lit);
         s->last_lit_was_zero = 0;
         dvs_sat_var_t v = lit < 0 ? -lit : lit;
         if (v > s->max_var) s->max_var = v;
@@ -226,6 +345,7 @@ int dvs_sat_solve(dvs_sat_t *s) {
     /* Tainted instance: a popped frame added clauses the stub cannot roll
      * back. Caller must rebuild. */
     if (s->tainted) return DVS_SAT_UNKNOWN;
+    if (dvs_sat_materialize(s) != 0) { s->assume_n = 0; return DVS_SAT_UNKNOWN; }
 
     /* Incremental path: assume every open frame's selector true so that
      * frame's clauses `(C | ~sel)` are active for this solve. Appended after
@@ -262,36 +382,46 @@ int dvs_sat_solve(dvs_sat_t *s) {
 }
 
 dvs_sat_lit_t dvs_sat_value(dvs_sat_t *s, dvs_sat_var_t var) {
+    if (dvs_sat_materialize(s) != 0) return 0;
     return s->vt->value(s->impl, var);
 }
 
 void dvs_sat_set_conflict_limit(dvs_sat_t *s, uint32_t limit) {
-    s->vt->set_conflict_limit(s->impl, limit);
+    if (s->impl) s->vt->set_conflict_limit(s->impl, limit);
+    else lz_log(s, LZ_CONFLICTS, limit);
 }
 
 void dvs_sat_set_decision_limit(dvs_sat_t *s, uint32_t limit) {
-    s->vt->set_decision_limit(s->impl, limit);
+    if (s->impl) s->vt->set_decision_limit(s->impl, limit);
+    else lz_log(s, LZ_DECISIONS, limit);
 }
 
 void dvs_sat_set_light_search(dvs_sat_t *s, int on) {
-    if (s && s->vt->set_light_search) s->vt->set_light_search(s->impl, on);
+    if (!s) return;
+    if (!s->impl) lz_log(s, LZ_LIGHT, (uint64_t)on);
+    else if (s->vt->set_light_search) s->vt->set_light_search(s->impl, on);
 }
 
 void dvs_sat_phase(dvs_sat_t *s, dvs_sat_lit_t lit) {
-    if (s && s->vt->phase) s->vt->phase(s->impl, lit);
+    if (!s) return;
+    if (!s->impl) lz_log(s, LZ_PHASE, (uint64_t)(int64_t)lit);
+    else if (s->vt->phase) s->vt->phase(s->impl, lit);
 }
 
 void dvs_sat_set_sampling(dvs_sat_t *s, int on) {
-    if (s && s->vt->set_sampling) s->vt->set_sampling(s->impl, on);
+    if (!s) return;
+    if (!s->impl) lz_log(s, LZ_SAMPLING, (uint64_t)on);
+    else if (s->vt->set_sampling) s->vt->set_sampling(s->impl, on);
 }
 
 void dvs_sat_set_seed(dvs_sat_t *s, uint64_t seed) {
     if (!s) return;
-    s->vt->set_seed(s->impl, seed);
+    if (!s->impl) lz_log(s, LZ_SEED, seed);
+    else s->vt->set_seed(s->impl, seed);
 }
 
 void dvs_sat_set_terminate(dvs_sat_t *s, void *state, int (*fn)(void *)) {
-    if (!s || !s->vt || !s->vt->set_terminate) return;
+    if (!s || dvs_sat_materialize(s) != 0 || !s->vt->set_terminate) return;
     s->vt->set_terminate(s->impl, state, fn);
 }
 
@@ -301,7 +431,7 @@ void dvs_sat_interrupt(dvs_sat_t *s) {
 }
 
 uint64_t dvs_sat_work(const dvs_sat_t *s) {
-    return s && s->vt->work ? s->vt->work(s->impl) : 0;
+    return s && s->impl && s->vt->work ? s->vt->work(s->impl) : 0;
 }
 
 uint64_t dvs_sat_num_clauses(const dvs_sat_t *s) {
@@ -313,15 +443,15 @@ dvs_sat_var_t dvs_sat_max_var(const dvs_sat_t *s) {
 }
 
 size_t dvs_sat_arena_size_bytes(dvs_sat_t *s) {
-    return s ? s->vt->arena_size_bytes(s->impl) : 0;
+    return s && dvs_sat_materialize(s) == 0 ? s->vt->arena_size_bytes(s->impl) : 0;
 }
 
 size_t dvs_sat_arena_capacity_bytes(dvs_sat_t *s) {
-    return s ? s->vt->arena_capacity_bytes(s->impl) : 0;
+    return s && dvs_sat_materialize(s) == 0 ? s->vt->arena_capacity_bytes(s->impl) : 0;
 }
 
 dvs_sat_arena_mark_t dvs_sat_arena_save_mark(dvs_sat_t *s) {
-    return s ? s->vt->arena_save_mark(s->impl) : 0;
+    return s && dvs_sat_materialize(s) == 0 ? s->vt->arena_save_mark(s->impl) : 0;
 }
 
 void dvs_sat_push(dvs_sat_t *s) {
@@ -349,8 +479,8 @@ void dvs_sat_pop(dvs_sat_t *s) {
         /* Permanently falsify the frame's selector: `(~sel)` unit forces
          * every `(C | ~sel)` clause of this frame to true → disabled. */
         uint32_t sel = s->sel_stack[--s->push_depth];
-        s->vt->add(s->impl, -(dvs_sat_lit_t)sel);
-        s->vt->add(s->impl, 0);
+        vt_add(s, -(dvs_sat_lit_t)sel);
+        vt_add(s, 0);
     } else {
         uint64_t snap = s->push_num_clauses[--s->push_depth];
         /* Clauses added in the popped frame cannot be removed in stub mode. */
@@ -392,6 +522,6 @@ void dvs_sat_assume(dvs_sat_t *s, dvs_sat_lit_t lit) {
 }
 
 int dvs_sat_failed(dvs_sat_t *s, dvs_sat_lit_t lit) {
-    if (!s) return 0;
+    if (!s || dvs_sat_materialize(s) != 0) return 0;
     return s->vt->failed(s->impl, lit);
 }

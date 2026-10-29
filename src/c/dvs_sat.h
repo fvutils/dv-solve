@@ -60,6 +60,20 @@ dvs_sat_t *dvs_sat_new(dvs_alloc_t *alloc);
  *  dvs_sat_backend() to see what was actually created. */
 dvs_sat_t *dvs_sat_new_backend(dvs_alloc_t *alloc, dvs_sat_backend_t backend);
 
+/** As dvs_sat_new_backend, but the backend is created only when first needed
+ *  (solve, value, failed, set_terminate, arena queries or
+ *  dvs_sat_materialize). Until then clauses and settings are logged and
+ *  replayed in order, so the backend sees the same call sequence. Saves the
+ *  backend's setup and teardown for an instance that is never solved. Not
+ *  thread-safe before materialization: materialize before another thread may
+ *  touch it (dvs_sat_interrupt on an unmaterialized instance is a no-op). */
+dvs_sat_t *dvs_sat_new_lazy(dvs_alloc_t *alloc, dvs_sat_backend_t backend);
+
+/** Create the backend of a lazy instance now and replay its log. Returns 0 on
+ *  success or when the backend exists already, -1 on failure (the instance
+ *  then answers DVS_SAT_UNKNOWN). */
+int dvs_sat_materialize(dvs_sat_t *s);
+
 /** Return the backend this instance actually uses. */
 dvs_sat_backend_t dvs_sat_backend(const dvs_sat_t *s);
 
