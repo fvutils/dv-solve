@@ -3004,7 +3004,43 @@ static uint64_t bb_eval_ext(uint64_t x, uint32_t from, uint32_t to, int sg) {
  * id), sized to context width w (1..64) as bb_expr would size it. A var with a
  * substitution evaluates its S->subst entry. Returns 0 (decline) on any
  * construct it does not model or a width above 64; the ladder then leaves the
- * component to the SAT path. Slice 1: CONST, VAR, BINARY (no DIV/MOD). */
+ * component to the SAT path. Covers CONST, VAR, BINARY (no DIV/MOD), UNARY,
+ * ITE, IN_RANGE, IN_SET, IN_RANGES. */
+static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
+                   const uint64_t *val, uint64_t *out);
+
+/* Truth of `ref` as bb_predicate reads it: (ref at its own width) != 0. */
+static int bb_eval_pred(dvs_bbsolver_t *S, dvs_expr_t ref, const uint64_t *val,
+                        uint64_t *out) {
+    uint32_t sw = bb_self_width(S, ref, 0);
+    if (sw == 0) sw = 1;
+    uint64_t x;
+    if (sw > 64 || !bb_eval(S, ref, sw, val, &x)) return 0;
+    *out = x != 0;
+    return 1;
+}
+
+/* lo <= v <= hi at the widest of the three, ordered by v's signedness
+ * (bb_in_range / bb_in_ranges; IN_SET uses lo == hi == elem). */
+static int bb_eval_in(dvs_bbsolver_t *S, dvs_expr_t v, dvs_expr_t lo,
+                      dvs_expr_t hi, const uint64_t *val, int *in) {
+    uint32_t cw = bb_self_width(S, v, 0), lw = bb_self_width(S, lo, 0),
+             hw = bb_self_width(S, hi, 0);
+    if (lw > cw) cw = lw;
+    if (hw > cw) cw = hw;
+    if (cw == 0) cw = 64;
+    if (cw > 64) return 0;
+    uint64_t x, l, h;
+    if (!bb_eval(S, v, cw, val, &x) || !bb_eval(S, lo, cw, val, &l)
+        || !bb_eval(S, hi, cw, val, &h)) return 0;
+    if (bb_signed(S, v, 0)) {
+        uint64_t sb = (uint64_t)1 << (cw - 1);
+        x ^= sb; l ^= sb; h ^= sb;
+    }
+    *in = l <= x && x <= h;
+    return 1;
+}
+
 static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
                    const uint64_t *val, uint64_t *out) {
     if (ref == EXPR_NULL || w == 0 || w > 64) return 0;
@@ -3042,9 +3078,9 @@ static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
         uint64_t x, y;
         switch (b->op) {
         case DVS_BIN_AND: case DVS_BIN_OR:
-            if (!bb_eval(S, b->lhs, 1, val, &x)) return 0;
-            if (!bb_eval(S, b->rhs, 1, val, &y)) return 0;
-            *out = (b->op == DVS_BIN_AND) ? (x & y & 1) : ((x | y) & 1);
+            if (!bb_eval_pred(S, b->lhs, val, &x)) return 0;
+            if (!bb_eval_pred(S, b->rhs, val, &y)) return 0;
+            *out = (b->op == DVS_BIN_AND) ? (x & y) : (x | y);
             return 1;
         case DVS_BIN_EQ: case DVS_BIN_NEQ:
         case DVS_BIN_LT: case DVS_BIN_LTE: case DVS_BIN_GT: case DVS_BIN_GTE: {
@@ -3105,6 +3141,68 @@ static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
         default:
             return 0; /* DIV/MOD (zero-divisor rule), anything new */
         }
+    }
+    case EXPR_UNARY: {
+        const ExprUnary *u = (const ExprUnary *)kp;
+        uint64_t x;
+        if (u->op == DVS_UN_NOT) {
+            if (!bb_eval_pred(S, u->operand, val, &x)) return 0;
+            *out = !x;
+            return 1;
+        }
+        if (u->op != DVS_UN_NEG && u->op != DVS_UN_INVERT) return 0;
+        uint32_t ow = bb_self_width(S, u->operand, 0);
+        if (w > ow) ow = w;
+        if (ow > 64) return 0;
+        if (!bb_eval(S, u->operand, ow, val, &x)) return 0;
+        *out = (u->op == DVS_UN_NEG ? (uint64_t)0 - x : ~x) & bb_eval_mask(w);
+        return 1;
+    }
+    case EXPR_ITE: {
+        const ExprITE *e = (const ExprITE *)kp;
+        uint64_t c;
+        if (!bb_eval_pred(S, e->cond, val, &c)) return 0;
+        dvs_expr_t arm = c ? e->then_e : e->else_e;
+        uint32_t tw = bb_self_width(S, e->then_e, 0), fw = bb_self_width(S, e->else_e, 0);
+        uint32_t ow = tw > fw ? tw : fw;
+        if (w > ow) ow = w;
+        if (ow > 64) return 0;
+        uint64_t x;
+        if (!bb_eval(S, arm, ow, val, &x)) return 0;
+        *out = x & bb_eval_mask(w);
+        return 1;
+    }
+    case EXPR_IN_RANGE: {
+        const ExprInRange *r = (const ExprInRange *)kp;
+        int in;
+        if (!bb_eval_in(S, r->value, r->lo, r->hi, val, &in)) return 0;
+        *out = (uint64_t)in;
+        return 1;
+    }
+    case EXPR_IN_SET: {
+        const ExprInSet *n = (const ExprInSet *)kp;
+        dvs_expr_t *el = expr_in_set_elems(S->problem, ref);
+        int any = 0;
+        for (uint32_t i = 0; i < n->n_elems; i++) {
+            int in;
+            if (!bb_eval_in(S, n->value, el[i], el[i], val, &in)) return 0;
+            any |= in;
+        }
+        *out = (uint64_t)any; /* empty set -> false */
+        return 1;
+    }
+    case EXPR_IN_RANGES: {
+        const ExprInRanges *n = (const ExprInRanges *)kp;
+        dvs_expr_t *los = expr_in_ranges_los(S->problem, ref);
+        dvs_expr_t *his = expr_in_ranges_his(S->problem, ref);
+        int any = 0;
+        for (uint32_t i = 0; i < n->n_ranges; i++) {
+            int in;
+            if (!bb_eval_in(S, n->value, los[i], his[i], val, &in)) return 0;
+            any |= in;
+        }
+        *out = (uint64_t)any;
+        return 1;
     }
     default:
         return 0;
