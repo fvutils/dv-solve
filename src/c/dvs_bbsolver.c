@@ -2655,17 +2655,11 @@ static int _diversify_memo(int8_t *nv, const dvs_aig_node_t *L, const dvs_aig_no
     return 1;
 }
 
-/* `sweeps` flip sweeps (at least one; see DVS_DIVERSIFY_SWEEPS). */
-static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
-    if (S->seed == 0 || !S->aig || S->no_diversify) return;
-    uint32_t N = (uint32_t)dvs_aig_num_nodes(S->aig);
-    if (N == 0 || N > DVS_DIVERSIFY_MAX_NODES) return;
-
+/* The cached AND children (S->div_L/div_R, 0 = input/const) and fanout CSR
+ * for the first N nodes; rebuilt when N changes. Returns 0 on allocation
+ * failure (the arrays are then NULL). */
+static int _div_arrays(dvs_bbsolver_t *S, uint32_t N) {
     dvs_aig_t *m = S->aig;
-    /* Plain malloc for these transient per-solve buffers: node_val (nv) is freed
-     * in dvs_bbsolver_free, the rest here -- all independent of the arena. */
-    int8_t *nv = (int8_t *)malloc((size_t)(N + 1));
-    if (!nv) return;
     if (S->div_n != N) {
         /* (Re)build the cached AND children (0 = input/const) and the fanout
          * index (CSR): fo_adj[fo_off[c]..fo_off[c+1]) lists the AND nodes that
@@ -2713,10 +2707,43 @@ static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
         if (!adj) {
             free(S->div_L); free(S->div_R); free(S->div_fo_off);
             S->div_L = S->div_R = NULL; S->div_fo_off = NULL;
-            free(nv); return;
+            return 0;
         }
         S->div_n = N;
     }
+    return 1;
+}
+
+/* Recompute every AND node of val[] (ids 2..N, ascending) from its children,
+ * through the cached child arrays when they can be had. */
+static void _eval_ands(dvs_bbsolver_t *S, int8_t *val, uint32_t N) {
+    if (_div_arrays(S, N)) {
+        const dvs_aig_node_t *L = S->div_L, *R = S->div_R;
+        for (uint32_t id = 2; id <= N; id++)
+            if (L[id]) val[id] = (int8_t)(_lit_val(val, L[id]) & _lit_val(val, R[id]));
+        return;
+    }
+    dvs_aig_t *m = S->aig;
+    for (uint32_t id = 2; id <= N; id++) {
+        if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
+        dvs_aig_node_t l, r;
+        dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
+        val[id] = (int8_t)(_lit_val(val, l) & _lit_val(val, r));
+    }
+}
+
+/* `sweeps` flip sweeps (at least one; see DVS_DIVERSIFY_SWEEPS). */
+static void _diversify_sweeps(dvs_bbsolver_t *S, uint32_t sweeps) {
+    if (S->seed == 0 || !S->aig || S->no_diversify) return;
+    uint32_t N = (uint32_t)dvs_aig_num_nodes(S->aig);
+    if (N == 0 || N > DVS_DIVERSIFY_MAX_NODES) return;
+
+    dvs_aig_t *m = S->aig;
+    /* Plain malloc for these transient per-solve buffers: node_val (nv) is freed
+     * in dvs_bbsolver_free, the rest here -- all independent of the arena. */
+    int8_t *nv = (int8_t *)malloc((size_t)(N + 1));
+    if (!nv) return;
+    if (!_div_arrays(S, N)) { free(nv); return; }
     const dvs_aig_node_t *L = S->div_L, *R = S->div_R;
     const uint32_t *fo_off = S->div_fo_off, *fo_adj = S->div_fo_adj;
     S->aux_work += N;
@@ -5703,12 +5730,7 @@ static int _popsamp(dvs_bbsolver_t *S) {
             for (uint32_t q = 0; q < C->nfree; q++)
                 val[C->xb[C->free_pos[q]]] = (int8_t)chosen[q];
         }
-        for (uint32_t id = 2; id <= N; id++) {
-            if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
-            dvs_aig_node_t l, r;
-            dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
-            val[id] = (int8_t)(_lit_val(val, l) & _lit_val(val, r));
-        }
+        _eval_ands(S, val, N);
         S->aux_work += N;
         uint32_t a = 0;
         while (a < S->n_asserts && _lit_val(val, S->assert_nodes[a])) a++;
@@ -6066,13 +6088,15 @@ static int _uniqsamp(dvs_bbsolver_t *S) {
     }
 
     /* Draw: seeded fill, then each component. */
+    if (!_div_arrays(S, N)) goto out;
+    const dvs_aig_node_t *L = S->div_L, *R = S->div_R;
     val[0] = 0;
     val[1] = 1;
     {
         uint64_t st = S->seed ^ 0x554E495153414D50ull, bits = 0;
         uint32_t nb = 0;
         for (uint32_t id = 2; id <= N; id++) {
-            if (!dvs_aig_is_input(m, (dvs_aig_node_t)id)) continue;
+            if (L[id]) continue;                     /* inputs have no children */
             if (!nb) { bits = _ps_next(&st); nb = 64; }
             val[id] = (int8_t)(bits & 1);
             bits >>= 1;
@@ -6102,12 +6126,8 @@ static int _uniqsamp(dvs_bbsolver_t *S) {
         }
     }
     why = "assert";
-    for (uint32_t id = 2; id <= N; id++) {
-        if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
-        dvs_aig_node_t l, r;
-        dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
-        val[id] = (int8_t)(_lit_val(val, l) & _lit_val(val, r));
-    }
+    for (uint32_t id = 2; id <= N; id++)
+        if (L[id]) val[id] = (int8_t)(_lit_val(val, L[id]) & _lit_val(val, R[id]));
     S->aux_work += N;
     {
         uint32_t a = 0;
@@ -6568,12 +6588,7 @@ static int _sortsamp(dvs_bbsolver_t *S) {
         }
     }
     why = "assert";
-    for (uint32_t id = 2; id <= N; id++) {
-        if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
-        dvs_aig_node_t l, r;
-        dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
-        val[id] = (int8_t)(_lit_val(val, l) & _lit_val(val, r));
-    }
+    _eval_ands(S, val, N);
     S->aux_work += N;
     {
         uint32_t a = 0;
@@ -7268,12 +7283,7 @@ static int _divsamp(dvs_bbsolver_t *S) {
             if (role[v] >= 2) _ss_write(S, val, v, vval[v]);
     }
     why = "assert";
-    for (uint32_t id = 2; id <= N; id++) {
-        if (!dvs_aig_is_and(m, (dvs_aig_node_t)id)) continue;
-        dvs_aig_node_t l, r;
-        dvs_aig_get_children(m, (dvs_aig_node_t)id, &l, &r);
-        val[id] = (int8_t)(_lit_val(val, l) & _lit_val(val, r));
-    }
+    _eval_ands(S, val, N);
     S->aux_work += N;
     {
         uint32_t a = 0;
