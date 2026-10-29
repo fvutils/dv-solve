@@ -2662,6 +2662,97 @@ static SMT2_NOINLINE TaggedExpr _tr_binop(Smt2Frontend *fe, const Sexpr *s, cons
     return _tagged(a.ref, a.width, 0, NULL);
 }
 
+/* `e` is written as a literal: `#b..`, `#x..` or `(_ bvN w)`. */
+static int _popcnt_is_lit(const Sexpr *e) {
+    return e->kind == SEXPR_BITVEC || _is_app(e, "_");
+}
+
+/* The var id of `e`, a plain declared-var symbol of width `w`, or -1. */
+static int64_t _popcnt_sym_var(Smt2Frontend *fe, const Sexpr *e, uint16_t w) {
+    if (e->kind != SEXPR_SYMBOL) return -1;
+    TaggedExpr t = _translate_tagged(fe, e);
+    if (t.ref == EXPR_NULL || t.array || t.leaf_kind != 1 || t.width != w) return -1;
+    const ExprVar *v = (const ExprVar *)dvs_builder_ref_ptr(fe->builder, t.ref);
+    return v && v->kind == EXPR_VAR ? (int64_t)v->var_id : -1;
+}
+
+/* The literal value of `e` at width `w` (`w` 0: any width, set). */
+static int _popcnt_const(Smt2Frontend *fe, const Sexpr *e, uint16_t *w, uint64_t *val) {
+    if (!_popcnt_is_lit(e)) return 0;
+    TaggedExpr t = _translate_tagged(fe, e);
+    if (t.ref == EXPR_NULL || t.width == 0 || (*w && t.width != *w)) return 0;
+    if (!_lit_value(fe, t, val)) return 0;
+    *w = t.width;
+    return 1;
+}
+
+/* Bit i of x as Verilator writes it: `(bvand x 2^i)` for i == 0 (either
+ * operand order), else `(bvlshr (bvand x 2^i) i)`. Returns i and sets
+ * *var to x's var id, or returns -1. A zero *w is set from the mask. */
+static int _popcnt_leaf(Smt2Frontend *fe, const Sexpr *e, uint16_t *w, int64_t *var) {
+    uint64_t sh = 0, m;
+    const Sexpr *sh_e = NULL;
+    if (_is_app(e, "bvlshr") && e->list.count == 3) {
+        sh_e = e->list.items[2];
+        e = e->list.items[1];
+    }
+    if (!_is_app(e, "bvand") || e->list.count != 3) return -1;
+    for (int k = 1; k <= 2; k++) {
+        if (!_popcnt_const(fe, e->list.items[3 - k], w, &m)) continue;
+        if (*w > 64) return -1;
+        if (sh_e && (!_popcnt_const(fe, sh_e, w, &sh) || sh == 0 || sh >= *w)) return -1;
+        if (m != (1ull << sh)) return -1;
+        *var = _popcnt_sym_var(fe, e->list.items[k], *w);
+        return *var < 0 ? -1 : (int)sh;
+    }
+    return -1;
+}
+
+/* `$countones(x)` as Verilator lowers it: a bvadd tree (any shape) whose
+ * leaves are each bit of the declared var x exactly once, at x's width w.
+ * The sum is <= w < 2^w, so it never wraps and equals popcount(x). Becomes
+ * an aux r with the constraint r == countones(x): one propagator for CDCL,
+ * a direct popcount for bitblast, and a construct a sampler can recognise.
+ * Literal structure only (no let-bound sub-terms); else TAGGED_NULL and the
+ * caller translates the sum as written. DV_POPCNT=0 turns it off. */
+static TaggedExpr _tr_popcount(Smt2Frontend *fe, const Sexpr *s) {
+    static int off = -1;
+    if (off < 0) { const char *e = getenv("DV_POPCNT"); off = e && e[0] == '0'; }
+    if (off || s->list.count < 3) return TAGGED_NULL;
+    /* Cheap reject: the last operand must look like a leaf or a sum. */
+    const Sexpr *last = s->list.items[s->list.count - 1];
+    if (!_is_app(last, "bvlshr") && !_is_app(last, "bvand") && !_is_app(last, "bvadd"))
+        return TAGGED_NULL;
+    enum { MAXN = 130 };
+    const Sexpr *stack[MAXN];
+    uint32_t sp = 0, n_leaves = 0;
+    uint64_t seen = 0;
+    int64_t x = -1;
+    uint16_t w = 0;
+    stack[sp++] = s;
+    while (sp) {
+        const Sexpr *e = stack[--sp];
+        if (_is_app(e, "bvadd") && e->list.count >= 3) {
+            if (sp + e->list.count > MAXN) return TAGGED_NULL;
+            for (uint32_t i = 1; i < e->list.count; i++) stack[sp++] = e->list.items[i];
+            continue;
+        }
+        if (++n_leaves > 64) return TAGGED_NULL;
+        int64_t v = -1;
+        int i = _popcnt_leaf(fe, e, &w, &v);
+        if (i < 0 || (x >= 0 && v != x) || (seen >> i & 1)) return TAGGED_NULL;
+        x = v;
+        seen |= 1ull << i;
+    }
+    if (w == 0 || n_leaves != w || seen != (w == 64 ? ~0ull : (1ull << w) - 1))
+        return TAGGED_NULL;
+    uint32_t r_id = _fresh_aux(fe, w);
+    dvs_expr_t r = dvs_builder_expr_var(fe->builder, r_id);
+    dvs_expr_t xv = dvs_builder_expr_var(fe->builder, (uint32_t)x);
+    dvs_builder_add_constraint(fe->builder, dvs_builder_expr_countones(fe->builder, r, xv));
+    return _tagged(r, w, 1, NULL);
+}
+
 /* (op a b) for an unsigned comparison `name`. */
 static SMT2_NOINLINE TaggedExpr _tr_cmpop(Smt2Frontend *fe, const Sexpr *s, const char *name,
                                            dvs_binop_t binop) {
@@ -3162,7 +3253,11 @@ static SMT2_NOINLINE TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const S
         return _tr_band_bor(fe, s, OP_IS("bvand"));
     if (OP_IS("bvudiv")) return _tr_udivrem(fe, s, 0);
     if (OP_IS("bvurem")) return _tr_udivrem(fe, s, 1);
-    if (OP_IS("bvadd"))  return _tr_binop(fe, s, "bvadd", DVS_BIN_ADD);
+    if (OP_IS("bvadd")) {
+        TaggedExpr pc = _tr_popcount(fe, s);
+        if (pc.ref != EXPR_NULL) return pc;
+        return _tr_binop(fe, s, "bvadd", DVS_BIN_ADD);
+    }
     if (OP_IS("bvsub"))  return _tr_binop(fe, s, "bvsub", DVS_BIN_SUB);
     if (OP_IS("bvmul"))  return _tr_binop(fe, s, "bvmul", DVS_BIN_MUL);
     if (OP_IS("bvand"))  return _tr_binop(fe, s, "bvand", DVS_BIN_BAND);
