@@ -212,18 +212,36 @@ _PIN = ({"x": _XW, "y": 4},
         lambda x, y: _in(y, (1, 2, 4)) & (x & 3 == 0) & ((x >> 9) & 1 == 1) &
         (x >= 1000) & (x <= 200001))
 
+# Interval union (construct.inside_ranges): x inside two ranges and a value,
+# 0.2% of its hull, so a box draw misses; a second leaf cuts one range.
+def _rng(lo, hi):
+    return f"(and (bvuge x {_bv(lo, _XW)}) (bvule x {_bv(hi, _XW)}))"
+
+
+_IVS = ({"x": _XW, "y": 4},
+        [_or("y", 4, (1, 2, 4)),
+         f"(or (or {_rng(1000, 1099)} {_rng(100000, 100499)}) (= x {_bv(250000, _XW)}))",
+         f"(not {_rng(100100, 100199)})"],
+        lambda x, y: _in(y, (1, 2, 4)) &
+        (((x >= 1000) & (x <= 1099)) | ((x >= 100000) & (x <= 100499)) | (x == 250000)) &
+        ~((x >= 100100) & (x <= 100199)))
+
 
 @pytest.mark.parametrize("case,key", [
-    ("res", "res"), ("zg", "res"), ("cov", "cov"), ("or", None), ("pin", None)])
+    ("res", "res"), ("zg", "res"), ("cov", "cov"), ("or", None), ("pin", None),
+    ("ivs", None)])
 def test_box_proposals(case, key):
     widths, asserts, pred = {"res": _RES, "zg": _ZG, "cov": _COV, "or": _ORH,
-                             "pin": _PIN}[case]
+                             "pin": _PIN, "ivs": _IVS}[case]
     models, err = _check(widths, asserts, pred)
     if key:
         assert _fires(err, key), err[-2000:]
     if case == "pin":
         tries = re.findall(r"\[bb-divsamp\].*tries=(\d+) -> sat", err)
         assert tries == ["1"] * _N, err[-2000:]
+    if case == "ivs":
+        tries = [int(t) for t in re.findall(r"\[bb-divsamp\].*tries=(\d+) -> sat", err)]
+        assert len(tries) == _N and max(tries) <= 16, err[-2000:]
 
 
 # Shapes the proposals must decline: a signed compare, and an add narrower
