@@ -1,6 +1,7 @@
 # Verilator problem buffers: design (V1)
 
-Status: draft, 2026-10-28. Plan item V1 of the simbench speed plan.
+Status: V1 final, 2026-10-29 (draft 2026-10-28). Plan item V1 of the simbench speed
+plan. Decisions on the former open questions are at the end; V2 is next.
 
 ## Goal
 
@@ -99,6 +100,29 @@ State-dependent structure therefore never reaches the buffer:
 
 One buffer serves every call on a site. The compiled context is reused as long as the
 buffer's handle lives (see Lifecycle).
+
+#### Construct identity
+
+SV constructs arrive as constructs, not as the expressions Verilator lowers them to
+today. The samplers then recognise them exactly and for free, instead of
+pattern-matching a lowered form (the pipe path re-derives `distinct`, dist bucket
+chains and sorted chains from text).
+
+| SV construct | Buffer form | Today on the pipe |
+|---|---|---|
+| `unique {..}`, `unique` over an array | `AllDiffSpec` | `distinct`, re-recognised |
+| `arr.sum()` | `EXPR_SUM`, result width = element width (SV); `with (int'(item))` widens the elements first | bvadd chain |
+| `$countones(x)` | `EXPR_COUNTONES` | adder tree |
+| `$clog2(x)` | `EXPR_CLOG2` | ite chain |
+| `x inside {a, [b:c]}` | `EXPR_IN_SET` / `EXPR_IN_RANGES` | or of compares |
+| `dist` | `DistSpec` (with guard and weight expressions, above); the solver draws the bucket | C++ bucket pick + soft chain |
+| `foreach (a[i]) if (i > 0) a[i] OP a[i-1]` (sorted/ordered chain) | new `ChainSpec {vars, op, signed}` | n separate compares |
+| `solve a before b` | `VarSpec.order` | per-stage solve |
+
+Every construct keeps SV sizing and signedness from elaboration (`dvs_sv.h`): unsized
+constants are 32-bit, signed `%` and `/` follow the dividend's sign, and the sampler for
+a construct uses the same semantics as its SMT encoding. Only `ChainSpec` is new; it
+is a recognition hint, and the core also accepts the same chain as plain compares.
 
 ### 2. Analysis section (optional, versioned)
 
@@ -230,16 +254,22 @@ The SMT front end's Verilator-mode logic falls into three kinds:
   - The buffer path fuzzed against z3 by emitting the same buffer as SMT-LIB
     (`dvs_smt2_emit`).
 
-## Open questions
+## Decisions (former open questions)
 
-1. Dist with state-dependent weights, or under a guard: keep Verilator's C++ bucket
-   pick for the first version, or go native from the start? Native removes a
-   per-call soft chain and gives exact weights.
-2. Size-class templates: is a symbolic index in the problem format worth it, or should
-   Verilator emit one buffer per size seen at compile time and fall back to per-call
-   build otherwise?
-3. Global constraints across sub-objects (`set_var_disabled`, null handles): these
-   probably map to rand_mode-style bits plus per-object refs, but this needs checking
-   against `V3Randomize`'s global-constraint paths.
-4. Buffer ABI stability: the analysis section is versioned. Does the problem section
-   also need a version, or is it pinned to the library the simulation links?
+1. **Dist goes native from the start.** State-dependent weights and guards are
+   expressions in `DistSpec`; the solver draws the bucket. This removes the per-call
+   soft chain and gives exact weights. Verilator's C++ bucket pick stays only on the
+   pipe fallback.
+2. **Size classes: concrete sizes first, templates later.** V2 and the first V3 build one
+   context per concrete size seen (from the capture or at run time), held in a small
+   per-handle LRU (start at 4 entries; count misses). A symbolic index in the problem
+   format is added only if the miss count shows queues that grow every call.
+3. **Global constraints across sub-objects** map to mode bits plus per-object refs:
+   a disabled var (`set_var_disabled`) is a rand_mode bit that is clear, and a null
+   handle clears the mode bits of everything under it. Still unchecked against
+   `V3Randomize`'s global-constraint paths; V3 verifies it, and sites it does not
+   cover stay on the pipe.
+4. **Both sections carry a version.** The problem section's version is checked on
+   load. On a mismatch the handle refuses the buffer and the call takes the pipe
+   fallback (the generated code always keeps it), so a simulation linked against a
+   newer library still runs. The analysis section is ignored on a mismatch, as above.
