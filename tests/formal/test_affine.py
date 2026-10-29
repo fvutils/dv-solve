@@ -136,7 +136,8 @@ class _Gen:
 
 def _dv(path: Path, extra: dict) -> tuple[str, str, int]:
     env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
-    env.update({"DV_ENGINE": "bitblast", "DV_LOG": "1", "DV_SIM_CHECK": "1"}, **extra)
+    env.update({"DV_ENGINE": "bitblast", "DV_LOG": "1", "DV_SIM_CHECK": "1",
+                "DV_AFFINE_MIN_INPUTS": "0"}, **extra)
     p = subprocess.run([str(_EXE), str(path)], capture_output=True,
                        text=True, timeout=120, env=env)
     out = next((l.strip() for l in p.stdout.splitlines()
@@ -193,7 +194,7 @@ def test_affine_seeded_models_hold(seed: int, tmp_path: Path) -> None:
         f.write_text(f"(set-option :random-seed {rs})\n" + smt2
                      + f"(get-value ({' '.join(g.vars)}))\n")
         env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
-        env.update({"DV_ENGINE": "bitblast", "DV_LOG": "1"})
+        env.update({"DV_ENGINE": "bitblast", "DV_LOG": "1", "DV_AFFINE_MIN_INPUTS": "0"})
         p = subprocess.run([str(_EXE), str(f)], capture_output=True, text=True,
                            timeout=120, env=env)
         if "sat" not in p.stdout.split():

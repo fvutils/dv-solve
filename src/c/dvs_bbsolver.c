@@ -4132,14 +4132,23 @@ static int _divsamp(dvs_bbsolver_t *S);
 static uint64_t _en_key(const dvs_bbsolver_t *S);
 static int _enumsamp(dvs_bbsolver_t *S, int fresh);
 
+/* The affine check runs unless DV_AFFINE=0 or the cone has fewer than
+ * DV_AFFINE_MIN_INPUTS inputs: the exhaustive sweep is then at most 64 passes,
+ * exact, and cheaper than the elimination. */
+static int _affine_worth(const dvs_aigsim_t *sim) {
+    const char *e = getenv("DV_AFFINE");
+    if (e && strcmp(e, "0") == 0) return 0;
+    return !sim || dvs_aigsim_inputs(sim) >= _env_u64("DV_AFFINE_MIN_INPUTS", 13);
+}
+
 /* Simulation, then SAT. Returns the DVS_BB_* verdict. */
 static int _solve_with_sim(dvs_bbsolver_t *S) {
     if (!S->presim || S->asserts_lost || !S->n_asserts) return bb_sat_solve(S);
     int log = getenv("DV_LOG") != NULL;
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    const char *aff_env = getenv("DV_AFFINE");
-    if (!aff_env || strcmp(aff_env, "0") != 0) {
+    dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
+    if (_affine_worth(sim)) {
         dvs_affine_stats_t ast;
         int8_t *nv = NULL;
         int ar = dvs_affine_check(S->aig, S->assert_nodes, S->n_asserts,
@@ -4153,6 +4162,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
         if (ar != DVS_AFFINE_UNDECIDED) {
             int rc = ar == DVS_AFFINE_UNSAT ? DVS_BB_UNSAT : DVS_BB_SAT;
             if (nv) { free(S->node_val); S->node_val = nv; S->model_in_sat = 0; S->base_sim = 1; }
+            dvs_aigsim_free(sim);
             _sim_check(S, rc);
             return rc;
         }
@@ -4162,10 +4172,10 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
         if (log)
             fprintf(stderr, "bb-sim: split -> %s in %.2f ms\n",
                     src == DVS_BB_SAT ? "sat" : "unsat", _ms_since(&t0));
+        dvs_aigsim_free(sim);
         _sim_check(S, src);
         return src;
     }
-    dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
     if (!sim) return bb_sat_solve(S);
     uint64_t work = dvs_aigsim_exhaustive_work(sim);
     uint64_t per_pass = (uint64_t)dvs_aigsim_gates(sim) + S->n_asserts;
@@ -4852,8 +4862,8 @@ static int _rediversify_same_base(dvs_bbsolver_t *S, uint64_t seed) {
  * affine check, then one simulation pass (exhaustive when small enough, else
  * budgeted random). */
 static int _sim_once(dvs_bbsolver_t *S) {
-    const char *aff_env = getenv("DV_AFFINE");
-    if (!aff_env || strcmp(aff_env, "0") != 0) {
+    dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
+    if (_affine_worth(sim)) {
         dvs_affine_stats_t ast;
         int8_t *nv = NULL;
         int ar = dvs_affine_check(S->aig, S->assert_nodes, S->n_asserts,
@@ -4862,15 +4872,19 @@ static int _sim_once(dvs_bbsolver_t *S) {
             free(S->node_val);
             S->node_val = nv;
             S->model_in_sat = 0;
+            dvs_aigsim_free(sim);
             return DVS_BB_SAT;
         }
         free(nv);
-        if (ar == DVS_AFFINE_UNSAT) return DVS_BB_UNKNOWN;   /* never trust it over the last verdict */
+        if (ar == DVS_AFFINE_UNSAT) {
+            dvs_aigsim_free(sim);
+            return DVS_BB_UNKNOWN;   /* never trust it over the last verdict */
+        }
     }
     int src = _sim_split(S);
+    if (src != DVS_BB_UNKNOWN) dvs_aigsim_free(sim);
     if (src == DVS_BB_SAT) return src;
     if (src == DVS_BB_UNSAT) return DVS_BB_UNKNOWN;   /* never trust it over the last verdict */
-    dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
     if (!sim) return DVS_BB_UNKNOWN;
     uint64_t work = dvs_aigsim_exhaustive_work(sim);
     uint64_t per_pass = (uint64_t)dvs_aigsim_gates(sim) + S->n_asserts;
