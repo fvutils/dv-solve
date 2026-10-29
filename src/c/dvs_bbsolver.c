@@ -2989,6 +2989,128 @@ static void bb_unary_bounds(dvs_bbsolver_t *S, uint64_t *lo, uint64_t *hi) {
     }
 }
 
+static uint64_t bb_eval_mask(uint32_t w) {
+    return w >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
+}
+
+/* Extend the low `from` bits of x to `to` bits (sign-extend if sg). */
+static uint64_t bb_eval_ext(uint64_t x, uint32_t from, uint32_t to, int sg) {
+    x &= bb_eval_mask(from);
+    if (sg && from && from < 64 && ((x >> (from - 1)) & 1)) x |= ~bb_eval_mask(from);
+    return x & bb_eval_mask(to);
+}
+
+/** Concrete value of `ref` under the var assignment val[] (bit patterns by var
+ * id), sized to context width w (1..64) as bb_expr would size it. A var with a
+ * substitution evaluates its S->subst entry. Returns 0 (decline) on any
+ * construct it does not model or a width above 64; the ladder then leaves the
+ * component to the SAT path. Slice 1: CONST, VAR, BINARY (no DIV/MOD). */
+static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
+                   const uint64_t *val, uint64_t *out) {
+    if (ref == EXPR_NULL || w == 0 || w > 64) return 0;
+    if (dvs_stack_low(&S->sg)) return 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp) return 0;
+    switch (*kp) {
+    case EXPR_CONST: {
+        const ExprConst *c = (const ExprConst *)kp;
+        if (c->width > 64) return 0;
+        *out = c->width ? bb_eval_ext((uint64_t)c->value, c->width, w, c->is_signed)
+                        : ((uint64_t)c->value & bb_eval_mask(w));
+        return 1;
+    }
+    case EXPR_VAR: {
+        uint32_t id = ((const ExprVar *)kp)->var_id;
+        if (id >= S->n_vars) return 0;
+        uint32_t vw = S->vars[id].width;
+        if (vw == 0 || vw > 64) return 0;
+        uint64_t x;
+        if (S->subst && S->subst[id] != EXPR_NULL) {
+            if (S->resolving[id]) return 0;
+            S->resolving[id] = 1;
+            int ok = bb_eval(S, S->subst[id], vw, val, &x);
+            S->resolving[id] = 0;
+            if (!ok) return 0;
+        } else {
+            x = val[id];
+        }
+        *out = bb_eval_ext(x, vw, w, S->vars[id].is_signed);
+        return 1;
+    }
+    case EXPR_BINARY: {
+        const ExprBinary *b = (const ExprBinary *)kp;
+        uint64_t x, y;
+        switch (b->op) {
+        case DVS_BIN_AND: case DVS_BIN_OR:
+            if (!bb_eval(S, b->lhs, 1, val, &x)) return 0;
+            if (!bb_eval(S, b->rhs, 1, val, &y)) return 0;
+            *out = (b->op == DVS_BIN_AND) ? (x & y & 1) : ((x | y) & 1);
+            return 1;
+        case DVS_BIN_EQ: case DVS_BIN_NEQ:
+        case DVS_BIN_LT: case DVS_BIN_LTE: case DVS_BIN_GT: case DVS_BIN_GTE: {
+            uint32_t lw = bb_self_width(S, b->lhs, 0), rw = bb_self_width(S, b->rhs, 0);
+            uint32_t cw = lw > rw ? lw : rw;
+            if (cw == 0) cw = 64;
+            if (cw > 64) return 0;
+            int sg = bb_signed(S, b->lhs, 0) && bb_signed(S, b->rhs, 0);
+            if (!bb_eval(S, b->lhs, cw, val, &x)) return 0;
+            if (!bb_eval(S, b->rhs, cw, val, &y)) return 0;
+            int r;
+            if (b->op == DVS_BIN_EQ) r = x == y;
+            else if (b->op == DVS_BIN_NEQ) r = x != y;
+            else {
+                if (sg) { /* flip the sign bit: signed order as unsigned */
+                    uint64_t sb = (uint64_t)1 << (cw - 1);
+                    x ^= sb; y ^= sb;
+                }
+                r = b->op == DVS_BIN_LT ? x < y : b->op == DVS_BIN_LTE ? x <= y
+                  : b->op == DVS_BIN_GT ? x > y : x >= y;
+            }
+            *out = (uint64_t)r;
+            return 1;
+        }
+        case DVS_BIN_LSHIFT: case DVS_BIN_RSHIFT: case DVS_BIN_ASHR: {
+            uint32_t lw = bb_self_width(S, b->lhs, 0);
+            uint32_t ow = lw > w ? lw : w;
+            uint32_t rw = bb_self_width(S, b->rhs, 0);
+            if (rw == 0) rw = 64;
+            if (ow > 64 || rw > 64) return 0;
+            int sg = bb_signed(S, b->lhs, 0);
+            if (!bb_eval(S, b->lhs, ow, val, &x)) return 0;
+            if (!bb_eval(S, b->rhs, rw, val, &y)) return 0;
+            uint64_t r;
+            if (b->op == DVS_BIN_LSHIFT) r = y >= ow ? 0 : x << y;
+            else if (b->op == DVS_BIN_ASHR && sg) {
+                int neg = (x >> (ow - 1)) & 1;
+                r = y >= ow ? (neg ? ~(uint64_t)0 : 0)
+                            : bb_eval_ext(x >> y, ow - (uint32_t)y, ow, 1);
+            } else r = y >= ow ? 0 : x >> y;
+            *out = r & bb_eval_mask(w);
+            return 1;
+        }
+        case DVS_BIN_ADD: case DVS_BIN_SUB: case DVS_BIN_MUL:
+        case DVS_BIN_BAND: case DVS_BIN_BOR: case DVS_BIN_BXOR: {
+            uint32_t lw = bb_self_width(S, b->lhs, 0), rw = bb_self_width(S, b->rhs, 0);
+            uint32_t ow = lw > rw ? lw : rw;
+            if (w > ow) ow = w;
+            if (ow > 64) return 0;
+            if (!bb_eval(S, b->lhs, ow, val, &x)) return 0;
+            if (!bb_eval(S, b->rhs, ow, val, &y)) return 0;
+            uint64_t r = b->op == DVS_BIN_ADD ? x + y : b->op == DVS_BIN_SUB ? x - y
+                       : b->op == DVS_BIN_MUL ? x * y : b->op == DVS_BIN_BAND ? x & y
+                       : b->op == DVS_BIN_BOR ? x | y : x ^ y;
+            *out = r & bb_eval_mask(w);
+            return 1;
+        }
+        default:
+            return 0; /* DIV/MOD (zero-divisor rule), anything new */
+        }
+    }
+    default:
+        return 0;
+    }
+}
+
 /** Small component: product of its vars' domains is <= 2^16, so it could be
  * enumerated and sampled by index (plan 9a). A var's domain is its tightened
  * [lo,hi] (bb_unary_bounds); an empty domain declines. */
