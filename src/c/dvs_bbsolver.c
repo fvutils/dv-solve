@@ -237,7 +237,8 @@ struct dvs_bbsolver_s {
     uint8_t        *ds_dbox;
     /* Enumeration sampler (_enumsamp): the solutions of the leaves over
      * en_vars (en_n_sol rows of en_n_vars values), valid while en_key
-     * matches the assert set; en_state 1 built, 2 declined for that key. */
+     * matches the assert set; en_state 1 built, 2 declined for that key.
+     * en_free[q]: bits of en_vars[q] no leaf reads, drawn at random. */
     uint64_t        en_key;
     int             en_state;
     /* Tables built and draws taken from them over the instance's life: a
@@ -245,7 +246,7 @@ struct dvs_bbsolver_s {
      * it (a new assert set per call). */
     uint32_t        en_builds, en_draws;
     uint32_t       *en_vars, en_n_vars;
-    uint64_t       *en_sol, en_n_sol;
+    uint64_t       *en_sol, en_n_sol, *en_free;
 
     /* Session mode (dvs_bbsolver_sess_*): constraints arrive in batches, each
      * at the depth of its scope, and the instance outlives check-sats. */
@@ -2531,7 +2532,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     free(S->assert_roots);
     free(S->node_val);
     free(S->psk);
-    free(S->en_vars); free(S->en_sol);
+    free(S->en_vars); free(S->en_sol); free(S->en_free);
     free(S->ds_dom); free(S->ds_dn); free(S->ds_doff); free(S->ds_dbox);
     free(S->div_L); free(S->div_R); free(S->div_fo_off); free(S->div_fo_adj);
     xfree(S->alloc, S, sizeof(*S));
@@ -8016,9 +8017,93 @@ static uint64_t _en_key(const dvs_bbsolver_t *S) {
     return h;
 }
 
-/* Build S->en_* for the current assert set; 1 on a table with models. */
+/* Mark in fm[v] the bits of v that `e` reads, and in cut[v] (bit i) where a
+ * field of v starts: a constant extract of an unsubstituted var reads its
+ * slice, any other read reads all of v. The walk is _ds_vars's. */
+static int _en_bits(dvs_bbsolver_t *S, dvs_expr_t e, uint64_t *fm, uint64_t *cut,
+                    int depth) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, e);
+    if (!k || depth > 64) return 0;
+    switch (*k) {
+    case EXPR_CONST: return 1;
+    case EXPR_VAR: {
+        uint32_t id = ((const ExprVar *)k)->var_id;
+        if (id >= S->n_vars) return 0;
+        if (S->subst && S->subst[id] != EXPR_NULL)
+            return _en_bits(S, S->subst[id], fm, cut, depth + 1);
+        fm[id] = bb_eval_mask(S->vars[id].width);
+        cut[id] |= 1;
+        return 1;
+    }
+    case EXPR_BINARY: {
+        const ExprBinary *b = (const ExprBinary *)k;
+        return _en_bits(S, b->lhs, fm, cut, depth + 1) &&
+               _en_bits(S, b->rhs, fm, cut, depth + 1);
+    }
+    case EXPR_UNARY:
+        return _en_bits(S, ((const ExprUnary *)k)->operand, fm, cut, depth + 1);
+    case EXPR_EXTEND: case EXPR_SV_CAST:
+        return _en_bits(S, ((const ExprExtend *)k)->operand, fm, cut, depth + 1);
+    case EXPR_EXTRACT: {
+        const ExprExtract *x = (const ExprExtract *)k;
+        const ExprKind *ok = (const ExprKind *)POOL_PTR(S->problem, x->operand);
+        if (ok && *ok == EXPR_VAR) {
+            uint32_t id = ((const ExprVar *)ok)->var_id;
+            if (id < S->n_vars && !(S->subst && S->subst[id] != EXPR_NULL) &&
+                x->hi_bit >= x->lo_bit && x->hi_bit < S->vars[id].width) {
+                fm[id] |= bb_eval_mask(x->hi_bit - x->lo_bit + 1) << x->lo_bit;
+                cut[id] |= 1ull << x->lo_bit;
+                if (x->hi_bit + 1 < S->vars[id].width) cut[id] |= 1ull << (x->hi_bit + 1);
+                return 1;
+            }
+        }
+        return _en_bits(S, x->operand, fm, cut, depth + 1);
+    }
+    case EXPR_CONCAT: {
+        const ExprConcat *c = (const ExprConcat *)k;
+        return _en_bits(S, c->lo, fm, cut, depth + 1) &&
+               _en_bits(S, c->hi, fm, cut, depth + 1);
+    }
+    case EXPR_ITE: {
+        const ExprITE *i = (const ExprITE *)k;
+        return _en_bits(S, i->cond, fm, cut, depth + 1) &&
+               _en_bits(S, i->then_e, fm, cut, depth + 1) &&
+               _en_bits(S, i->else_e, fm, cut, depth + 1);
+    }
+    case EXPR_IN_RANGE: {
+        const ExprInRange *r = (const ExprInRange *)k;
+        return _en_bits(S, r->value, fm, cut, depth + 1) &&
+               _en_bits(S, r->lo, fm, cut, depth + 1) &&
+               _en_bits(S, r->hi, fm, cut, depth + 1);
+    }
+    case EXPR_IN_SET: {
+        const ExprInSet *r = (const ExprInSet *)k;
+        dvs_expr_t *el = expr_in_set_elems(S->problem, e);
+        if (!_en_bits(S, r->value, fm, cut, depth + 1)) return 0;
+        for (uint32_t i = 0; i < r->n_elems; i++)
+            if (!_en_bits(S, el[i], fm, cut, depth + 1)) return 0;
+        return 1;
+    }
+    case EXPR_IN_RANGES: {
+        const ExprInRanges *r = (const ExprInRanges *)k;
+        dvs_expr_t *los = expr_in_ranges_los(S->problem, e);
+        dvs_expr_t *his = expr_in_ranges_his(S->problem, e);
+        if (!_en_bits(S, r->value, fm, cut, depth + 1)) return 0;
+        for (uint32_t i = 0; i < r->n_ranges; i++)
+            if (!_en_bits(S, los[i], fm, cut, depth + 1) ||
+                !_en_bits(S, his[i], fm, cut, depth + 1)) return 0;
+        return 1;
+    }
+    default: return 0;
+    }
+}
+
+/* Build S->en_* for the current assert set; 1 on a table with models. The
+ * DFS runs over slots: a var whose leaves read it only through constant
+ * extracts (a packed struct) splits into its fields, each its own level,
+ * and the bits no leaf reads are left out and drawn at random. */
 static int _en_build(dvs_bbsolver_t *S) {
-    uint32_t nv = S->n_vars, n_ord = 0;
+    uint32_t nv = S->n_vars, n_ord = 0, n_sl = 0;
     size_t n_lf = 0, cap_lf = 0, n_vs = 0, cap_vs = 0, n_sol = 0, cap_sol = 0;
     dvs_expr_t *lf = NULL;
     uint32_t *vs = NULL;
@@ -8028,10 +8113,17 @@ static int _en_build(dvs_bbsolver_t *S) {
     uint64_t *lo = (uint64_t *)malloc(nv * sizeof(uint64_t));
     uint64_t *hi = (uint64_t *)malloc(nv * sizeof(uint64_t));
     uint64_t *vval = (uint64_t *)calloc(nv, sizeof(uint64_t));
-    uint32_t *dhead = NULL, *dlf = NULL;
+    uint64_t *fm = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint64_t *cut = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint64_t *lfm = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint64_t *lcut = (uint64_t *)calloc(nv, sizeof(uint64_t));
+    uint32_t *s0 = (uint32_t *)malloc(((size_t)nv + 1) * sizeof(uint32_t));
+    uint32_t *dhead = NULL, *dlf = NULL, *ldep = NULL;
+    uint32_t *sv = NULL, *sl = NULL, *spos = NULL, *dord = NULL;
+    uint64_t *sm = NULL, *slo = NULL, *shi = NULL;
     uint64_t *sol = NULL, nodes = 0;
     int ok = 0;
-    if (!pos || !ord || !lo || !hi || !vval) goto out;
+    if (!pos || !ord || !lo || !hi || !vval || !fm || !cut || !lfm || !lcut || !s0) goto out;
     for (uint32_t v = 0; v < nv; v++) {
         pos[v] = UINT32_MAX;
         lo[v] = 0;
@@ -8044,9 +8136,12 @@ static int _en_build(dvs_bbsolver_t *S) {
     for (size_t li = 0; li < n_lf; li++) {
         loff[li] = n_vs;
         if (!_ds_vars(S, lf[li], &vs, n_vs, &n_vs, &cap_vs, 0)) goto out;
+        if (!_en_bits(S, lf[li], fm, cut, 0)) goto out;
         for (size_t i = loff[li]; i < n_vs; i++) {
             uint32_t v = vs[i];
             if (S->vars[v].width == 0 || S->vars[v].width > 64) goto out;
+            /* A slice substitution holds a consumed constraint no leaf shows. */
+            if (S->slice_head && S->slice_head[v] != BB_NO_SLICE) goto out;
             if (pos[v] == UINT32_MAX) { pos[v] = n_ord; ord[n_ord++] = v; }
         }
     }
@@ -8069,43 +8164,96 @@ static int _en_build(dvs_bbsolver_t *S) {
         if ((uint64_t)bv->lo > lo[ord[k]]) lo[ord[k]] = (uint64_t)bv->lo;
         if ((uint64_t)bv->hi < hi[ord[k]]) hi[ord[k]] = (uint64_t)bv->hi;
     }
-    for (uint32_t k = 0; k < n_ord; k++)
-        if (lo[ord[k]] > hi[ord[k]] || hi[ord[k]] - lo[ord[k]] >= DVS_EN_MAX_NODES) goto out;
-    /* Leaves by the depth of their last var (CSR); a no-var leaf must hold. */
-    dhead = (uint32_t *)calloc((size_t)n_ord + 1, sizeof(uint32_t));
+    /* Slots: a var with a narrowed hull stays whole (its range is a value
+     * range, not per field), else one slot per field a leaf reads. */
+    for (uint32_t k = 0; k < n_ord; k++) {
+        uint32_t v = ord[k], w = S->vars[v].width;
+        uint64_t m = bb_eval_mask(w);
+        if (lo[v] > hi[v]) goto out;
+        if (lo[v] != 0 || hi[v] != m) { fm[v] = m; cut[v] = 1; }
+        cut[v] |= 1;
+        s0[k] = n_sl;
+        for (uint32_t b = 0; b < w; b++)
+            if (((cut[v] >> b) & 1) && ((fm[v] >> b) & 1)) n_sl++;
+    }
+    s0[n_ord] = n_sl;
+    sv = (uint32_t *)malloc(n_sl * sizeof(uint32_t));
+    sl = (uint32_t *)malloc(n_sl * sizeof(uint32_t));
+    spos = (uint32_t *)malloc(n_sl * sizeof(uint32_t));
+    dord = (uint32_t *)malloc(n_sl * sizeof(uint32_t));
+    sm = (uint64_t *)malloc(n_sl * sizeof(uint64_t));
+    slo = (uint64_t *)malloc(n_sl * sizeof(uint64_t));
+    shi = (uint64_t *)malloc(n_sl * sizeof(uint64_t));
+    if (!sv || !sl || !spos || !dord || !sm || !slo || !shi) goto out;
+    for (uint32_t k = 0, s = 0; k < n_ord; k++) {
+        uint32_t v = ord[k], w = S->vars[v].width;
+        for (uint32_t b = 0; b < w; b++) {
+            if (!((cut[v] >> b) & 1) || !((fm[v] >> b) & 1)) continue;
+            uint32_t e = b + 1;
+            while (e < w && !((cut[v] >> e) & 1)) e++;
+            sv[s] = v;
+            sl[s] = b;
+            sm[s] = bb_eval_mask(e - b);
+            spos[s] = UINT32_MAX;
+            slo[s] = b == 0 && e == w ? lo[v] : 0;
+            shi[s] = b == 0 && e == w ? hi[v] : sm[s];
+            if (shi[s] - slo[s] >= DVS_EN_MAX_NODES) goto out;
+            s++;
+        }
+    }
+    /* Each leaf's depth is the last slot it reads; slots in order of first use. */
+    ldep = (uint32_t *)malloc((n_lf + 1) * sizeof(uint32_t));
+    if (!ldep) goto out;
+    {
+        uint32_t np = 0;
+        for (size_t li = 0; li < n_lf; li++) {
+            uint32_t d = 0;
+            if (!_en_bits(S, lf[li], lfm, lcut, 0)) goto out;
+            for (size_t i = loff[li]; i < loff[li + 1]; i++) {
+                uint32_t v = vs[i], k = pos[v];
+                for (uint32_t s = s0[k]; s < s0[k + 1]; s++) {
+                    if (!(lfm[v] & (sm[s] << sl[s]))) continue;
+                    if (spos[s] == UINT32_MAX) { spos[s] = np; dord[np++] = s; }
+                    if (spos[s] > d) d = spos[s];
+                }
+                lfm[v] = 0;
+                lcut[v] = 0;
+            }
+            ldep[li] = d;
+        }
+        if (np != n_sl) goto out;
+    }
+    /* Leaves by depth (CSR); a no-var leaf must hold. */
+    dhead = (uint32_t *)calloc((size_t)n_sl + 1, sizeof(uint32_t));
     dlf = (uint32_t *)malloc((n_lf + 1) * sizeof(uint32_t));
     if (!dhead || !dlf) goto out;
     for (size_t li = 0; li < n_lf; li++) {
-        uint32_t d = 0;
         if (loff[li + 1] == loff[li]) {
             uint64_t t;
             if (!bb_eval_pred(S, lf[li], vval, &t) || !t) goto out;
             continue;
         }
-        for (size_t i = loff[li]; i < loff[li + 1]; i++)
-            if (pos[vs[i]] > d) d = pos[vs[i]];
-        dhead[d + 1]++;
+        dhead[ldep[li] + 1]++;
     }
-    for (uint32_t k = 0; k < n_ord; k++) dhead[k + 1] += dhead[k];
+    for (uint32_t k = 0; k < n_sl; k++) dhead[k + 1] += dhead[k];
     {
-        uint32_t *fill = (uint32_t *)malloc(((size_t)n_ord + 1) * sizeof(uint32_t));
+        uint32_t *fill = (uint32_t *)malloc(((size_t)n_sl + 1) * sizeof(uint32_t));
         if (!fill) goto out;
-        memcpy(fill, dhead, ((size_t)n_ord + 1) * sizeof(uint32_t));
+        memcpy(fill, dhead, ((size_t)n_sl + 1) * sizeof(uint32_t));
         for (size_t li = 0; li < n_lf; li++) {
             if (loff[li + 1] == loff[li]) continue;
-            uint32_t d = 0;
-            for (size_t i = loff[li]; i < loff[li + 1]; i++)
-                if (pos[vs[i]] > d) d = pos[vs[i]];
-            dlf[fill[d]++] = (uint32_t)li;
+            dlf[fill[ldep[li]]++] = (uint32_t)li;
         }
         free(fill);
     }
-    /* DFS: vval[ord[k]] runs lo..hi; a failed leaf at depth k prunes. */
+#define EN_GET(s) ((vval[sv[s]] >> sl[s]) & sm[s])
+#define EN_SET(s, x) (vval[sv[s]] = (vval[sv[s]] & ~(sm[s] << sl[s])) | ((x) << sl[s]))
+    /* DFS: slot dord[k] runs slo..shi; a failed leaf at depth k prunes. */
     {
         uint32_t k = 0;
-        vval[ord[0]] = lo[ord[0]];
+        EN_SET(dord[0], slo[dord[0]]);
         for (;;) {
-            uint32_t v = ord[k];
+            uint32_t s;
             int hold = 1;
             nodes++;
             for (uint32_t j = dhead[k]; hold && j < dhead[k + 1]; j++) {
@@ -8115,9 +8263,9 @@ static int _en_build(dvs_bbsolver_t *S) {
                 hold = t != 0;
             }
             if (nodes > DVS_EN_MAX_NODES) goto out;
-            if (hold && k + 1 < n_ord) {
+            if (hold && k + 1 < n_sl) {
                 k++;
-                vval[ord[k]] = lo[ord[k]];
+                EN_SET(dord[k], slo[dord[k]]);
                 continue;
             }
             if (hold) {
@@ -8137,8 +8285,9 @@ static int _en_build(dvs_bbsolver_t *S) {
                 if ((n_sol & 1023) == 0) {
                     double done = 0.0, cell = 1.0;
                     for (uint32_t q = 0; q <= k; q++) {
-                        cell /= (double)(hi[ord[q]] - lo[ord[q]]) + 1.0;
-                        done += (double)(vval[ord[q]] - lo[ord[q]]) * cell;
+                        s = dord[q];
+                        cell /= (double)(shi[s] - slo[s]) + 1.0;
+                        done += (double)(EN_GET(s) - slo[s]) * cell;
                     }
                     done += cell;
                     if ((double)n_sol > 2.0 * DVS_EN_MAX_SOL * done) goto out;
@@ -8146,19 +8295,30 @@ static int _en_build(dvs_bbsolver_t *S) {
             }
             /* Next value at the deepest level that has one. */
             for (;;) {
-                v = ord[k];
-                if (vval[v] < hi[v]) { vval[v]++; break; }
+                s = dord[k];
+                uint64_t x = EN_GET(s);
+                if (x < shi[s]) { EN_SET(s, x + 1); break; }
                 if (k == 0) goto done;
                 k--;
             }
         }
     }
+#undef EN_GET
+#undef EN_SET
 done:
     if (n_sol == 0) goto out;   /* SAT decides an empty table */
-    free(S->en_vars); free(S->en_sol);
+    free(S->en_vars); free(S->en_sol); free(S->en_free);
+    S->en_sol = NULL;
     S->en_vars = (uint32_t *)malloc(n_ord * sizeof(uint32_t));
-    if (!S->en_vars) { free(sol); sol = NULL; S->en_sol = NULL; goto out; }
+    S->en_free = (uint64_t *)malloc(n_ord * sizeof(uint64_t));
+    if (!S->en_vars || !S->en_free) {
+        free(S->en_vars); free(S->en_free);
+        S->en_vars = NULL; S->en_free = NULL;
+        goto out;
+    }
     memcpy(S->en_vars, ord, n_ord * sizeof(uint32_t));
+    for (uint32_t q = 0; q < n_ord; q++)
+        S->en_free[q] = bb_eval_mask(S->vars[ord[q]].width) & ~fm[ord[q]];
     S->en_n_vars = n_ord;
     S->en_sol = sol;
     S->en_n_sol = n_sol;
@@ -8167,10 +8327,12 @@ done:
 out:
     S->aux_work += nodes;
     if (getenv("DV_LOG"))
-        fprintf(stderr, "bb-enumsamp: vars=%u leaves=%zu nodes=%llu sols=%zu -> %s\n",
-                n_ord, n_lf, (unsigned long long)nodes, n_sol, ok ? "table" : "decline");
+        fprintf(stderr, "bb-enumsamp: vars=%u slots=%u leaves=%zu nodes=%llu sols=%zu -> %s\n",
+                n_ord, n_sl, n_lf, (unsigned long long)nodes, n_sol, ok ? "table" : "decline");
     free(lf); free(vs); free(loff); free(pos); free(ord); free(lo); free(hi);
-    free(vval); free(dhead); free(dlf); free(sol);
+    free(vval); free(fm); free(cut); free(lfm); free(lcut); free(s0);
+    free(dhead); free(dlf); free(ldep); free(sv); free(sl); free(spos); free(dord);
+    free(sm); free(slo); free(shi); free(sol);
     return ok;
 }
 
@@ -8214,7 +8376,14 @@ static int _enumsamp(dvs_bbsolver_t *S) {
         nb--;
     }
     const uint64_t *row = S->en_sol + _ps_below(&st, S->en_n_sol) * S->en_n_vars;
-    for (uint32_t q = 0; q < S->en_n_vars; q++) _ss_write(S, val, S->en_vars[q], row[q]);
+    for (uint32_t q = 0; q < S->en_n_vars; q++) {
+        /* Bits no leaf reads keep their random input values. */
+        const bb_var_t *bv = &S->vars[S->en_vars[q]];
+        for (uint32_t b = 0; b < bv->width; b++) {
+            dvs_aig_node_t n = bv->bv.bits[bv->width - 1 - b];
+            if (n > 1 && !((S->en_free[q] >> b) & 1)) val[n] = (int8_t)((row[q] >> b) & 1);
+        }
+    }
     _eval_ands(S, val, N);
     S->aux_work += N;
     uint32_t a = 0;
