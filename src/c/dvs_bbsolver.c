@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -2819,7 +2820,29 @@ static int _bb_encode_alldiff(dvs_bbsolver_t *S) {
  * through to the whole-problem bit-blast. None yet, so every component falls
  * through and the SAT call is unchanged. */
 typedef int (*bb_comp_recognizer_t)(dvs_bbsolver_t *S, uint32_t comp);
-static const bb_comp_recognizer_t bb_comp_ladder[] = { NULL };
+
+/** Small component: product of its vars' domains is <= 2^16, so it could be
+ * enumerated and sampled by index (plan 9a). A var's domain is its [lo,hi]
+ * range when that is a valid range, else all 2^width values. */
+#define BB_COMP_ENUM_LOG2 16
+static int bb_comp_small_domain(dvs_bbsolver_t *S, uint32_t comp) {
+    double prod = 1.0;
+    for (uint32_t i = 0; i < S->comps.n_vars; i++) {
+        if (S->comps.var_comp[i] != comp) continue;
+        const bb_var_t *v = &S->vars[i];
+        if (v->width > 64) return 0;
+        double full = ldexp(1.0, (int)v->width);
+        double d = v->hi >= v->lo
+                   ? (double)((uint64_t)v->hi - (uint64_t)v->lo) + 1.0 : full;
+        if (d > full) d = full;
+        prod *= d;
+        if (prod > (double)(1u << BB_COMP_ENUM_LOG2)) return 0;
+    }
+    return 1;
+}
+
+static const bb_comp_recognizer_t bb_comp_ladder[] = {
+    bb_comp_small_domain, NULL };
 
 /** Count components some ladder recognizer claims (stats only). */
 static uint32_t bb_comp_ladder_claims(dvs_bbsolver_t *S) {
