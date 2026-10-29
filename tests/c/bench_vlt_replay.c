@@ -1654,17 +1654,29 @@ int main(int argc, char **argv) {
             if (!strcmp(m, "verilator")) g_vlt_mode = 1;
             else if (strcmp(m, "default")) { fprintf(stderr, "--mode: default or verilator\n"); return 2; }
         }
+        else if (!strcmp(argv[i], "--engine") && i + 1 < argc) {
+            /* As dv-solve-smt2 --engine: sets DV_ENGINE, which the front end's
+             * check-sat routing reads; the api passes replay the engine it
+             * picked, and the pipe pass's solver inherits it. */
+            const char *e = argv[++i];
+            if (!strcmp(e, "auto")) unsetenv("DV_ENGINE");
+            else if (!strcmp(e, "cdcl") || !strcmp(e, "bitblast")) setenv("DV_ENGINE", e, 1);
+            else { fprintf(stderr, "--engine: auto, cdcl or bitblast\n"); return 2; }
+        }
         else path = argv[i];
     }
     if (!path) {
         fprintf(stderr, "usage: %s <cmds.smt2> [--solver PATH] [--reps N] [--passes LIST]\n"
                         "         [--calls N] [--warmup N] [--mode default|verilator]\n"
+                        "         [--engine auto|cdcl|bitblast]\n"
                         "         [--dump-values FILE] [--quality] [--census]\n"
                         "         [--reuse resample|rediversify]\n"
                         "       %s --build-info | --calib\n"
                         "  --mode     the front end's mode for the text pass, which also captures\n"
                         "             the problems the api passes replay; use the capture's mode\n"
                         "             (default: default, as dv-solve-smt2 without --mode)\n"
+                        "  --engine   the engine every pass uses, as dv-solve-smt2 --engine\n"
+                        "             (default: auto, the front end's routing)\n"
                         "  --warmup   randomize() calls after the start-up check not timed in the\n"
                         "             per-call figure\n"
                         "  --calls    randomize() calls in the session, warm-up included (default:\n"
