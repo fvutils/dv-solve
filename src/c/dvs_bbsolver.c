@@ -3474,6 +3474,20 @@ static int _bb_encode(dvs_bbsolver_t *S) {
         fprintf(stderr, "[bb-comp] n=%u largest=%u vars=%u claimed=%u evalable=%u enum_zero=%u\n",
                 S->comps.n_comp, S->comps.largest, S->n_vars,
                 claimed, n_evalable, S->ladder_enum_zero);
+        /* Referenced vars: pinned (subst to a constant), derived (subst to
+         * an expression), free (no subst). free=0 => no search needed. */
+        uint32_t n_pin = 0, n_der = 0, n_free = 0;
+        for (uint32_t i = 0; S->comps.var_comp && i < S->comps.n_vars; i++) {
+            if (S->comps.var_comp[i] == UINT32_MAX) continue;
+            dvs_expr_t e = S->subst ? S->subst[i] : EXPR_NULL;
+            const ExprKind *k = e != EXPR_NULL
+                ? (const ExprKind *)POOL_PTR(S->problem, e) : NULL;
+            if (e == EXPR_NULL) n_free++;
+            else if (k && *k == EXPR_CONST) n_pin++;
+            else n_der++;
+        }
+        fprintf(stderr, "[bb-pin] pinned=%u derived=%u free=%u\n",
+                n_pin, n_der, n_free);
     } else if (ladder) {
         compute_components(S);
         bb_comp_ladder_claims(S, NULL, 1);
