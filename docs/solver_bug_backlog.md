@@ -50,6 +50,17 @@ A 2026-07-10 generative fuzz sweep (`tests/formal/test_fuzz_cross_check.py`,
 
 ## 🟥 OPEN
 
+- **B128: affine seeded model ignored rows pivoted on a gate — FIXED 2026-10-29 (DIVERSITY: 3 distinct models of 200).**
+  A parity base plus `r = q + 1`: each carry AND gate is the lowest column
+  of its row `r_i + q_i + c_i`, so it took the pivot; `_model` evaluates
+  gate pivots from the AIG instead of the row, so the row never
+  constrained q/r, the seeded draw failed on the AIG and the seed-0 model
+  (data 2, q 0) stood for every call, under api and api-cache alike. No
+  single-bit flip moves it. Fixed (`dvs_affine.c`, `_repivot`): the seeded
+  draw moves a gate pivot to a free input column of its row, and a free
+  gate column takes its AIG value, pivots recomputed to a fixed point.
+  q/r 3 → 140 distinct. `DV_AFFINE_REPIVOT=0` = old. Test
+  `test_carry_repivot` (test_affine_exact.py). Found by hand in step 101.
 - **B127: `bb_word_eq` cut list read uninitialised stack and could write past it — FIXED 2026-10-28 (memory safety, performance).**
   The right side's concat cuts were collected with `cuts + n` as the base
   AND `&n` as the running index, so they landed at `2*n` on: slots
