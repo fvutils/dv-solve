@@ -90,7 +90,11 @@ static int distinct(dvs_bbsolver_t *S, uint64_t seed0) {
     return n;
 }
 
-/* Table built, then an incremental assert narrows the set (CaDiCaL only). */
+/* Table built, then an incremental assert narrows the set (CaDiCaL only).
+ * The new key rebuilds the table from the problem's constraints, which do not
+ * hold the assert, so its first draw fails the assert check and the table turns
+ * off; the narrowed draws come from the other samplers. A table that skipped
+ * the check or kept the old key fails "honour q0<2". */
 static void test_assert_after_table(void) {
     char label[128];
     dvs_builder_t *b = dvs_builder_create(4096, NULL);
