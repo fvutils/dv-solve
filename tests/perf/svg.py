@@ -3,7 +3,7 @@
 Hand-written rather than matplotlib: the output is byte-stable for the same
 data (no embedded dates or ids), and the docs build gains no dependency.
 Only what the pages draw: steps on a log-x axis, a strip plot, a scatter, a
-dot plot and small multiples.
+dot plot, small multiples and a trend over time.
 """
 from __future__ import annotations
 
@@ -212,5 +212,54 @@ def dotplot(rows: dict, title_x: str) -> str:
                 s.append(f'<circle cx="{X(v):.1f}" cy="{y:.1f}" r="4.5" fill="{c}" '
                          f'fill-opacity="0.8"/>')
     s += _legend(names)
+    s.append("</svg>")
+    return "\n".join(s) + "\n"
+
+
+def trend(series: dict, xticks: list, marks: list, title_y: str, log_y: bool = False) -> str:
+    """series: {name: [(day, value)]}, day = days since some epoch, sorted.
+    xticks: [(day, label)] date labels; marks: [(day, label)] drawn as dashed
+    vertical lines labelled at the top (release tags)."""
+    pts = [(x, v) for ps in series.values() for x, v in ps if v is not None and (v > 0 or not log_y)]
+    if not pts:
+        return ""
+    x0, x1 = min(x for x, _ in pts), max(x for x, _ in pts)
+    x0, x1 = min([x0] + [x for x, _ in marks]), max([x1] + [x for x, _ in marks])
+    if x1 - x0 < 1:
+        x0, x1 = x0 - 1, x1 + 1
+    pw, ph = W - ML - MR, H - MT - MB
+    X = lambda x: ML + pw * (x - x0) / (x1 - x0)
+    if log_y:
+        lo = 10 ** math.floor(math.log10(min(v for _, v in pts)))
+        hi = 10 ** math.ceil(math.log10(max(v for _, v in pts)))
+        f = lambda v: math.log10(max(v, lo))
+        Y = lambda v: MT + ph - ph * (f(v) - f(lo)) / (f(hi) - f(lo))
+        yt = [(Y(t), _fmt(t)) for t in _log_ticks(lo, hi)]
+    else:
+        lo, hi = min(0.0, min(v for _, v in pts)), max(v for _, v in pts) * 1.1 or 1.0
+        Y = lambda v: MT + ph - ph * (v - lo) / (hi - lo)
+        step = 10 ** math.floor(math.log10((hi - lo) / 2)) if hi > lo else 1
+        k, yt = 0, []
+        while lo + k * step <= hi:
+            yt.append((Y(lo + k * step), _fmt(lo + k * step)))
+            k += 1
+        if len(yt) > 8:
+            yt = yt[::2]
+    s = _frame("date", title_y, [(X(x), lab) for x, lab in xticks], yt)
+    for x, lab in marks:
+        s.append(f'<line x1="{X(x):.1f}" y1="{MT}" x2="{X(x):.1f}" y2="{MT + ph}" stroke="#bbb" '
+                 f'stroke-dasharray="4,3"/>')
+        s.append(f'<text x="{X(x):.1f}" y="{MT + 12}" text-anchor="middle" fill="#555">'
+                 f'{escape(lab)}</text>')
+    for i, (name, ps) in enumerate(series.items()):
+        c = PALETTE[i % len(PALETTE)]
+        ps = [(x, v) for x, v in ps if v is not None and (v > 0 or not log_y)]
+        if not ps:
+            continue
+        d = "".join(f"{'M' if j == 0 else 'L'}{X(x):.1f},{Y(v):.1f}" for j, (x, v) in enumerate(ps))
+        s.append(f'<path d="{d}" fill="none" stroke="{c}" stroke-width="2"/>')
+        for x, v in ps:
+            s.append(f'<circle cx="{X(x):.1f}" cy="{Y(v):.1f}" r="3" fill="{c}"/>')
+    s += _legend(list(series))
     s.append("</svg>")
     return "\n".join(s) + "\n"

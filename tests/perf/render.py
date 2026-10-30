@@ -5,9 +5,11 @@
 Inputs: the committed history (tests/perf/history/) and any full run records
 in --records (fetched artifacts: `python3 -m tests.perf.history fetch`). The
 "current" numbers come from the newest valid run record that has SAT data.
-Writes index.md, sat.md and randomization.md plus _gen/*.svg and _gen/*.csv
+Writes index.md, sat.md, randomization.md, trends.md and releases.md plus
+_gen/*.svg and _gen/*.csv
 (randomization comes from the newest valid record with rand-core data, which
-may be a different run); methodology.md is
+may be a different run; trends come from the committed history lines and
+releases from tests/perf/history/releases/); methodology.md is
 hand-written and tracked. With no SAT record at all, writes placeholder pages
 so the site still builds.
 """
@@ -20,6 +22,7 @@ import io
 import json
 import math
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import history, normalize, svg
@@ -171,7 +174,7 @@ def page_index(rec: dict, s: dict, rrec=None, rs=None) -> str:
                  "per randomize() than z3, Verilator's default solver."
                  if rs["speedup"] else ""), "",
               "Details per benchmark, with the distributions: {doc}`randomization`.", ""]
-    L += ["```{toctree}", ":hidden:", "", "sat", "randomization", "methodology", "```", ""]
+    L += last_release() + TOCTREE
     return "\n".join(L)
 
 
@@ -482,10 +485,130 @@ def page_rand(rec: dict, rs: dict, gen: Path) -> str:
     return "\n".join(L)
 
 
+# ---- trends and releases ----------------------------------------------------
+
+TOCTREE = ["```{toctree}", ":hidden:", "", "sat", "randomization", "trends", "releases",
+           "methodology", "```", ""]
+TREF = "bitwuzla@ref"
+RHEAD = "dv-swizzle@head"
+
+
+def _day(utc: str) -> float:
+    t = datetime.strptime(utc, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    return t.timestamp() / 86400
+
+
+def release_records() -> list:
+    """[(tag, record)] for each release snapshot, oldest release first."""
+    out = []
+    for p in (history.HISTORY / "releases").glob("*.json.gz"):
+        out.append((p.name[:-len(".json.gz")], json.loads(gzip.decompress(p.read_bytes()))))
+    return sorted(out, key=lambda tr: history._vkey(tr[0]))
+
+
+def last_release() -> list:
+    rel = release_records()
+    if not rel:
+        return []
+    tag, r = rel[-1]
+    return [f"Last measured release: **{tag}** ({_when(r['run']['utc'])}); every measured "
+            "release is listed in {doc}`releases`, and the nightly history is in {doc}`trends`.", ""]
+
+
+def _gm(xs: list):
+    xs = [x for x in xs if x]
+    return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else None
+
+
+def _rand_gm(line: dict, arms: list) -> dict:
+    """Geometric-mean CPU ms per call of each arm, over the benches all of them answered."""
+    b = line.get("rand", {}).get(RAND, {}).get("b", {})
+    both = [n for n, v in b.items() if all(a in v and v[a][0] for a in arms)]
+    return {a: _gm([b[n][a][0] for n in both]) for a in arms} if both else {}
+
+
+def page_trends(lines: list, gen: Path) -> str:
+    lines = sorted((l for l in lines if l.get("valid") and l["kind"] in ("nightly", "release")),
+                   key=lambda l: l["utc"])
+    L = ["# Trends", "",
+         "How the nightly numbers have moved over time, one point per valid "
+         "nightly or release run. Dashed lines mark runs of a released "
+         "version; {doc}`releases` lists those runs.", ""]
+    if not lines:
+        return "\n".join(L + ["No nightly run has been recorded yet.", ""])
+    marks = [(_day(l["utc"]), l["release"]) for l in lines if l.get("release")]
+    days = [_day(l["utc"]) for l in lines]
+    picks = sorted({days[0], days[-1]} | {days[i] for i in range(0, len(days), max(1, len(days) // 5))})
+    xticks = []
+    for d in picks:
+        if all(abs(d - x) > (days[-1] - days[0]) / 12 for x, _ in xticks):
+            xticks.append((d, datetime.fromtimestamp(d * 86400, timezone.utc).strftime("%m-%d")))
+    sat = [l for l in lines if SUITE in l.get("sat", {})]
+    names = {HEAD: "dv-solve", TREF: "bitwuzla"}
+    for key, title, f in (("solved", "Fixtures answered correctly", "trend-solved.svg"),
+                          ("par2_s", "PAR-2 score, s (log scale; lower is better)", "trend-par2.svg")):
+        series = {n: [(_day(l["utc"]), l["sat"][SUITE][key].get(k)) for l in sat]
+                  for k, n in names.items()}
+        (gen / f).write_text(svg.trend(series, xticks, marks, title, log_y=key == "par2_s"),
+                             encoding="utf-8")
+    L += [f"## SMT-LIB2 solving ({SUITE})", "",
+          f"![Fixtures answered over time](_gen/trend-solved.svg)", "",
+          f"![PAR-2 over time](_gen/trend-par2.svg)", "",
+          "PAR-2 adds up the CPU time of every fixture, counting an unanswered "
+          "or wrong one as twice the time limit.", ""]
+    rarms = [RHEAD, RREF]
+    rl = [(l, _rand_gm(l, rarms)) for l in lines]
+    rl = [(l, g) for l, g in rl if g]
+    if rl:
+        series = {"Verilator + dv-solve": [(_day(l["utc"]), g[RHEAD]) for l, g in rl],
+                  "Verilator + z3": [(_day(l["utc"]), g[RREF]) for l, g in rl]}
+        (gen / "trend-rand.svg").write_text(svg.trend(
+            series, xticks, marks, "CPU per randomize(), ms (log scale)", log_y=True), encoding="utf-8")
+        L += [f"## Randomization ({RAND})", "",
+              "![CPU per randomize() over time](_gen/trend-rand.svg)", "",
+              "Geometric mean over the benchmarks both solvers answered in that run.", ""]
+    L += ["| Date | Commit | Release | dv-solve answered | bitwuzla answered | dv-solve PAR-2, s | "
+          "bitwuzla PAR-2, s |", "|---|---|---|---|---|---|---|"]
+    for l in reversed(sat):
+        v = l["sat"][SUITE]
+        L.append(f"| {_when(l['utc'])} | `{l['commit'][:7]}` | {l.get('release') or ''} | "
+                 f"{v['solved'].get(HEAD, '–')} | {v['solved'].get(TREF, '–')} | "
+                 f"{v['par2_s'].get(HEAD, '–')} | {v['par2_s'].get(TREF, '–')} |")
+    L.append("")
+    return "\n".join(L)
+
+
+def page_releases(rel: list) -> str:
+    L = ["# Releases", "",
+         "The nightly run of each released version, newest first: a nightly "
+         "that ran on a release commit is kept as that release's snapshot. "
+         "{doc}`trends` shows the runs in between.", ""]
+    if not rel:
+        return "\n".join(L + ["No release has been measured yet.", ""])
+    L += [f"| Release | Measured | dv-solve answered | bitwuzla answered | dv-solve PAR-2, s | "
+          "bitwuzla PAR-2, s | Verilator + dv-solve, CPU per call | Verilator + z3, CPU per call |",
+          "|---|---|---|---|---|---|---|---|"]
+    for tag, r in reversed(rel):
+        sv, pv = {}, {}
+        if any(x["suite"] == SUITE for x in r.get("sat", [])):
+            sv = normalize.solved(r, SUITE)
+            pv = normalize.par2(r, SUITE, r["budgets"][SUITE])
+        rs = rand_summary(r) if r.get("rand") and RAND in r.get("manifests", {}) else None
+        cpu = lambda a: _cpu((rs["arm"].get(a) or {}).get("cpu_ms")) if rs else "–"
+        L.append(f"| {tag} | {_when(r['run']['utc'])} | {sv.get(HEAD, '–')} | {sv.get(TREF, '–')} | "
+                 f"{pv.get(HEAD, '–')} | {pv.get(TREF, '–')} | {cpu(RHEAD)} | {cpu(RREF)} |")
+    L += ["", f"Answered counts and PAR-2 are over {SUITE}; the randomize() columns are the "
+          "geometric mean of CPU ms per call over the benchmarks each arm answered "
+          "({doc}`randomization`).", ""]
+    return "\n".join(L)
+
+
 def render(records_dir, out: Path) -> str:
     gen = out / "_gen"
     gen.mkdir(parents=True, exist_ok=True)
     records = load_records(records_dir)
+    (out / "trends.md").write_text(page_trends(history.committed_lines(), gen), encoding="utf-8")
+    (out / "releases.md").write_text(page_releases(release_records()), encoding="utf-8")
     rec, rrec = current(records), current_rand(records)
     rs = rand_summary(rrec) if rrec else None
     if rrec:
@@ -493,8 +616,8 @@ def render(records_dir, out: Path) -> str:
     else:
         (out / "randomization.md").write_text(RAND_PLACEHOLDER, encoding="utf-8")
     if rec is None:
-        (out / "index.md").write_text(PLACEHOLDER.format(title="Results") +
-                                      "\n```{toctree}\n:hidden:\n\nsat\nrandomization\nmethodology\n```\n", encoding="utf-8")
+        (out / "index.md").write_text(PLACEHOLDER.format(title="Results") + "\n" +
+                                      "\n".join(TOCTREE), encoding="utf-8")
         (out / "sat.md").write_text(PLACEHOLDER.format(title="SMT-LIB2 solving"), encoding="utf-8")
         return "placeholder"
     s = summary(rec)

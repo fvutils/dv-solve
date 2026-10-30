@@ -234,6 +234,8 @@ docs/site/_build/
 docs/site/results/index.md
 docs/site/results/sat.md
 docs/site/results/randomization.md
+docs/site/results/trends.md
+docs/site/results/releases.md
 docs/site/results/_gen/
 # Perf runs: tag builds, riscv-dv generators and work dirs; local run records
 perf-builds/
