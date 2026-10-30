@@ -126,7 +126,7 @@ def _rand(rec: dict, name: str, a) -> None:
     head = builds.head_bin(a.head_bin)
     anchor = _anchor(rec, a)
     paths = {n: tools.path(n) for n in ("z3", "bitwuzla")}
-    arms = run_rand.make_arms(head, anchor, paths)
+    arms = run_rand.make_arms(head, anchor, paths, api=not getattr(a, "release", None))
     res = run_rand.run_suite(spec, arms, a.rand_workers)
     rec["manifests"][name] = {"hash": spec["hash"], "suite": name, "kind": "rand",
                               "protocol": PROTOCOL, "benches": spec["benches"]}

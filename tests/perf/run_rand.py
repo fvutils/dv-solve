@@ -51,21 +51,26 @@ class Arm:
     build: str = "ref"        # head | anchor | ref
 
 
-def make_arms(head: Path, anchor: Path | None, tools: dict) -> list:
+def make_arms(head: Path, anchor: Path | None, tools: dict, api: bool = True) -> list:
+    """api=False leaves out the arms that load the head build's library from
+    this checkout's Python/C bench code: a release build's library predates
+    that code (missing symbols, no bench_rand_capi), so a release run has
+    only the arms that drive its dv-solve-smt2."""
     lib = {"DVS_SOLVER_PATH": str(Path(head).resolve().parent)}
-    arms = [Arm("uniform", "uniform"),
-            Arm("dv-api@head", "api", env=lib, build="head"),
-            Arm("dv-capi@head", "capi", [str(Path(head).resolve().parent / "bench_rand_capi")],
-                env=lib, build="head"),
-            Arm("dv-swizzle@head", "swizzle",
-                [str(head), "--interactive", "--mode=verilator"], build="head"),
-            # The same build told to skip Verilator's parity asserts: both
-            # settings are measured, so a benchmark where dv-solve's own spread
-            # is worse than the parity constraints' shows on the page.
-            Arm("dv-swizzle-nohash@head", "swizzle",
-                [str(head), "--interactive", "--mode=verilator", "--verilator-hash=ignore"],
-                build="head"),
-            Arm("dv-seed@head", "seed", [str(head)], build="head")]
+    arms = [Arm("uniform", "uniform")]
+    if api:
+        arms += [Arm("dv-api@head", "api", env=lib, build="head"),
+                 Arm("dv-capi@head", "capi", [str(Path(head).resolve().parent / "bench_rand_capi")],
+                     env=lib, build="head")]
+    arms += [Arm("dv-swizzle@head", "swizzle",
+                 [str(head), "--interactive", "--mode=verilator"], build="head"),
+             # The same build told to skip Verilator's parity asserts: both
+             # settings are measured, so a benchmark where dv-solve's own spread
+             # is worse than the parity constraints' shows on the page.
+             Arm("dv-swizzle-nohash@head", "swizzle",
+                 [str(head), "--interactive", "--mode=verilator", "--verilator-hash=ignore"],
+                 build="head"),
+             Arm("dv-seed@head", "seed", [str(head)], build="head")]
     if anchor is not None:
         arms.append(Arm("dv-swizzle@anchor", "swizzle",
                         [str(anchor), "--interactive", "--mode=verilator"], build="anchor"))
