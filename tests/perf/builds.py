@@ -7,11 +7,13 @@ dv-solve-smt2 CLI, and the CLI target builds in a couple of seconds.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[2]
 ANCHOR = "v0.1.0"
+TAG_REMOTE = os.environ.get("DVS_PERF_TAG_REMOTE", "https://github.com/fvutils/dv-solve")
 
 
 def _git(*args, cwd=_REPO, **kw):
@@ -22,9 +24,16 @@ def tag_commit(tag: str) -> str:
     try:
         return _git("rev-list", "-n", "1", tag).stdout.strip()
     except subprocess.CalledProcessError:
-        # CI checkouts are shallow and carry no tags.
-        _git("fetch", "-q", "--depth", "1", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
-        return _git("rev-list", "-n", "1", tag).stdout.strip()
+        pass
+    # CI checkouts are shallow and carry no tags, and the Forgejo mirror lacks
+    # the newer ones: try origin, then the GitHub repo the tags are made in.
+    for remote in ("origin", TAG_REMOTE):
+        try:
+            _git("fetch", "-q", "--depth", "1", remote, f"refs/tags/{tag}:refs/tags/{tag}")
+            return _git("rev-list", "-n", "1", tag).stdout.strip()
+        except subprocess.CalledProcessError:
+            continue
+    raise RuntimeError(f"release tag {tag} not found on origin or {TAG_REMOTE}")
 
 
 def build_tag(tag: str, root: Path, jobs: int = 8) -> Path:
@@ -38,8 +47,11 @@ def build_tag(tag: str, root: Path, jobs: int = 8) -> Path:
     archive = subprocess.run(["git", "archive", tag], cwd=_REPO, check=True,
                              capture_output=True).stdout
     subprocess.run(["tar", "x", "-C", str(src)], input=archive, check=True)
+    # A tag's tree has no packages/: point it at the checkout's (cadical,
+    # needed from v0.2.0 on), which also beats a stray $IVPM_PACKAGES.
+    pkgs = [f"-DPACKAGES_DIR={_REPO / 'packages'}"] if (_REPO / "packages").is_dir() else []
     subprocess.run(["cmake", "-S", str(src), "-B", str(src / "build"), "-G", "Ninja",
-                    "-DCMAKE_BUILD_TYPE=Release"], check=True, capture_output=True)
+                    "-DCMAKE_BUILD_TYPE=Release", *pkgs], check=True, capture_output=True)
     subprocess.run(["cmake", "--build", str(src / "build"), f"-j{jobs}",
                     "--target", "dv-solve-smt2"], check=True, capture_output=True)
     return exe

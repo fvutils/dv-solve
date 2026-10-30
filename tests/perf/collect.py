@@ -2,7 +2,8 @@
 
     python3 -m tests.perf.collect --kind manual --suites calib,sat-core,rand-core --out perf-out
 
-The head build is build/dv-solve-smt2 (--head-bin to override); the anchor
+The head build is build/dv-solve-smt2 (--head-bin to override; --release TAG
+measures that release's build instead, as a kind=release run); the anchor
 release is built from its tag under --build-root. Pinned solvers come from
 $DVS_PERF_TOOLS or a developer checkout's packages/ (tests/perf/tools.py).
 
@@ -158,13 +159,18 @@ def collect(kind: str, suite_names: list, a=None) -> dict:
     utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_number = os.environ.get("GITHUB_RUN_NUMBER")
     commit = _commit()
+    release, version = _release(commit), _dv_version()
+    if a is not None and getattr(a, "release", None):
+        # Measure a release: its build is the head arm; the run is on its commit.
+        commit, release, version = builds.tag_commit(a.release), a.release, a.release[1:]
+        a.head_bin = a.head_bin or str(builds.build_tag(a.release, Path(a.build_root)))
     rec = {
         "schema": schema.SCHEMA, "valid": True, "kind": kind,
         "run": {"utc": utc, "commit": commit,
                 "ref": os.environ.get("GITHUB_REF", "local"),
-                "dv_version": _dv_version(),
-                "describe": _git("describe", "--tags", "--always", commit) or None,
-                "release": _release(commit),
+                "dv_version": version,
+                "describe": (release or _git("describe", "--tags", "--always", commit) or None),
+                "release": release,
                 "workflow_run": int(run_number) if run_number else None},
         "tools": calib.tool_versions(),
         "anchor": None,
@@ -209,6 +215,8 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default="perf-out")
     ap.add_argument("--github-output", action="store_true")
     ap.add_argument("--head-bin", help="head dv-solve-smt2 (default build/dv-solve-smt2)")
+    ap.add_argument("--release", help="measure this release tag (built under --build-root) "
+                    "in place of the head build; the record's commit is the tag's")
     ap.add_argument("--anchor", default=builds.ANCHOR, help="anchor release tag, or 'none'")
     ap.add_argument("--build-root", default="perf-builds",
                     help="where tag builds, riscv-dv generators and app work dirs go")

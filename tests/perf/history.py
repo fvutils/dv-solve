@@ -161,8 +161,60 @@ def measured(commit: str, kind: str, max_age_days: float) -> bool:
     return False
 
 
+# Releases are tagged on GitHub; the Forgejo mirror does not receive new tags
+# (its sync blocks tags in repos with a tag-publish workflow), so the list of
+# releases comes from there. Public, read-only.
+from .builds import TAG_REMOTE
+
+
+def _vkey(tag: str) -> tuple:
+    try:
+        return tuple(int(x) for x in tag[1:].split("."))
+    except ValueError:
+        return (1 << 30,)
+
+
+def release_tags(remote: str = TAG_REMOTE) -> list:
+    """v* tags of `remote`, oldest version first: [(tag, commit)]."""
+    import subprocess
+    try:
+        out = subprocess.run(["git", "ls-remote", "--tags", remote], capture_output=True,
+                             text=True, check=True, timeout=120).stdout
+    except Exception as e:
+        raise AccessError(f"cannot list release tags ({type(e).__name__})") from None
+    tags = {}
+    for row in out.splitlines():
+        sha, ref = row.split("\t")
+        tag = ref[len("refs/tags/"):]
+        peeled = tag.endswith("^{}")
+        tag = tag[:-3] if peeled else tag
+        if tag.startswith("v") and (peeled or tag not in tags):
+            tags[tag] = sha                  # the peeled (commit) sha wins
+    return sorted(tags.items(), key=lambda t: _vkey(t[0]))
+
+
+def release_pending(tags: list, lines: list, arts: list) -> list:
+    """Release tags with no measurement yet: [(tag, commit)], oldest first.
+
+    A release counts as measured when a committed trend line names it, or a
+    committed line or an artifact of kind release or nightly is on its commit
+    (a nightly on a release commit is that release's snapshot). A release
+    artifact counts even when invalid, so a release that cannot be measured
+    is not retried every night.
+    """
+    done = set()
+    for l in lines:
+        if l.get("release"):
+            done.add(l["release"])
+    commits = [l["commit"] for l in lines if l["kind"] in ("release", "nightly") and l["valid"]]
+    commits += [schema.ARTIFACT_RE.match(n)["sha"] for n, _ in arts
+                if schema.ARTIFACT_RE.match(n)["kind"] in ("release", "nightly")]
+    return [(t, c) for t, c in tags
+            if t not in done and not any(c.startswith(x) or x.startswith(c) for x in commits)]
+
+
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="perf history: status of, or fetch, unconsolidated runs")
+    ap = argparse.ArgumentParser(description="perf history: status of, or fetch, unconsolidated runs; releases not measured")
     sub = ap.add_subparsers(dest="cmd", required=True)
     st = sub.add_parser("status")
     st.add_argument("--warn-after", type=float, default=60)
@@ -174,6 +226,9 @@ def main(argv=None) -> int:
     me.add_argument("--commit", required=True)
     me.add_argument("--kind", default="nightly")
     me.add_argument("--max-age-days", type=float, default=7)
+    rp = sub.add_parser("release-pending", help="release tags not measured yet")
+    rp.add_argument("--anchor-ok", action="store_true",
+                    help="also list the anchor release (every run measures it as an arm)")
     a = ap.parse_args(argv)
 
     lines = committed_lines()
@@ -188,6 +243,18 @@ def main(argv=None) -> int:
             if os.environ.get("GITHUB_OUTPUT"):
                 with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
                     f.write(f"measured={'true' if yes else 'false'}\n")
+            return 0
+        if a.cmd == "release-pending":
+            from .builds import ANCHOR
+            todo = release_pending(release_tags(), lines, Forgejo().perf_artifacts())
+            if not a.anchor_ok:
+                todo = [(t, c) for t, c in todo if t != ANCHOR]
+            for t, c in todo:
+                print(f"{t} {c}")
+            print(f"{len(todo)} release(s) not measured")
+            if os.environ.get("GITHUB_OUTPUT"):
+                with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+                    f.write(f"tag={todo[0][0] if todo else ''}\n")
             return 0
         pending = unconsolidated(Forgejo().perf_artifacts(), lines)
     except AccessError as e:

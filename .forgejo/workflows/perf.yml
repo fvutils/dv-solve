@@ -14,8 +14,16 @@
 # Nightly at 05:00 UTC, after the soundness campaign (02:30, about 2 h 15 min)
 # has released the machine: measured alongside it, timings are 15-30% off
 # (docs/results_publishing_design.md §10). A nightly is skipped when main's
-# HEAD already has a valid nightly record under 7 days old. The tag trigger
-# and the ladder arrive with R5.
+# HEAD already has a valid nightly record under 7 days old. The ladder
+# arrives with R5.
+#
+# Releases: there is no tag trigger. Releases are tagged on GitHub and the
+# Forgejo mirror does not receive the new tags, so the `release` job asks
+# GitHub for the v* tags each night and measures the oldest one with no
+# record yet (one per night; this also backfilled the releases made before
+# it existed). A nightly that ran on a release commit counts as that
+# release's record. workflow_dispatch with kind=release and a tag measures
+# that tag now.
 
 name: Perf
 
@@ -29,6 +37,9 @@ on:
         default: manual
         type: choice
         options: [manual, nightly, ladder, release]
+      tag:
+        description: "Release tag to measure (kind=release only; default: oldest unmeasured)"
+        default: ""
 
 concurrency:
   group: perf          # one perf job at a time: two would measure each other
@@ -36,6 +47,7 @@ concurrency:
 
 jobs:
   perf:
+    if: github.event_name == 'schedule' || inputs.kind != 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
@@ -116,4 +128,76 @@ jobs:
         if: steps.seen.outputs.measured != 'true' && steps.collect.outputs.rc != '0'
         run: |
           echo "::error::the run record is invalid (collect exited ${{ steps.collect.outputs.rc }})"
+          exit 1
+
+  release:
+    # After the nightly (never beside it: it would measure it), measure one
+    # release tag that has no record yet. The release's build is the head arm;
+    # the harness is main's, so every release is measured the same way.
+    needs: perf
+    if: always() && (github.event_name == 'schedule' || inputs.kind == 'release')
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      FORGEJO_API_URL: ${{ github.server_url }}/api/v1
+      FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release to measure
+        id: pick
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            python3 -m tests.perf.history release-pending
+          fi
+
+      - name: Install pinned tools
+        if: steps.pick.outputs.tag != ''
+        run: |
+          pip_install() {
+            python3 -m pip install -q "$@" && return 0
+            python3 -m pip install -q --break-system-packages "$@"
+          }
+          pip_install cmake ninja scipy -r tests/perf/solvers.lock
+          python3 -m tests.perf.tools fetch --dest perf-tools --suites calib,sat-core,rand-core
+          [ -d packages/cadical ] || git clone -q --depth 1 -b rel-3.0.1 \
+              https://github.com/arminbiere/cadical.git packages/cadical
+
+      - name: Collect
+        id: collect
+        if: steps.pick.outputs.tag != ''
+        # The tag is built under perf-builds/ (tests/perf/builds.py fetches it
+        # from GitHub when this mirror lacks it).
+        run: |
+          set +e
+          DVS_PERF_TOOLS=perf-tools python3 -m tests.perf.collect --kind release \
+            --release "${{ steps.pick.outputs.tag }}" \
+            --suites calib,sat-core,rand-core --out perf-out --github-output
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check the record for internal identifiers
+        if: steps.pick.outputs.tag != ''
+        run: |
+          pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          if zcat perf-out/*.json.gz | grep -nE "$pattern" ; then
+            echo "::error::internal identifier in the run record"
+            exit 1
+          fi
+
+      - name: Upload the run record
+        # Uploaded even when invalid, so a release that cannot be measured is
+        # not picked again every night (history.release_pending).
+        if: steps.pick.outputs.tag != '' && steps.collect.outputs.name != ''
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: ${{ steps.collect.outputs.name }}
+          path: perf-out/*.json.gz
+          if-no-files-found: error
+
+      - name: Fail on an invalid record
+        if: steps.pick.outputs.tag != '' && steps.collect.outputs.rc != '0'
+        run: |
+          echo "::error::the release record is invalid (collect exited ${{ steps.collect.outputs.rc }})"
           exit 1
