@@ -5,7 +5,8 @@
 
 Writes, under tests/perf/history/:
   <year>.jsonl              trend lines appended, kept sorted by utc, deduplicated
-  releases/<tag>.json.gz    the full record of a release run (earliest valid wins)
+  releases/<tag>.json.gz    the full record of a release run, or of a nightly on a
+                            release commit (earliest valid wins)
   machines/<id>.json        a machine class the history has not seen before
   manifests/<hash>.json     a resolved suite (fixture order of the ratio arrays)
 It never commits: review the diff, run the internal-identifier grep, and
@@ -28,8 +29,25 @@ def _write_jsonl(path: Path, lines: list) -> None:
                             for l in lines), encoding="utf-8")
 
 
-def consolidate(records: list, root: Path = history.HISTORY) -> dict:
-    """records: [(artifact name, run record)]. Returns a summary."""
+def _release_of(rec: dict, tags: list) -> str | None:
+    """The release a valid record measures: run.release, a refs/tags/ ref of a
+    release run, or (any kind) a commit that is a release tag's commit."""
+    run = rec["run"]
+    if run.get("release"):
+        return run["release"]
+    if rec["kind"] == "release" and run["ref"].startswith("refs/tags/"):
+        return run["ref"][len("refs/tags/"):]
+    if rec["kind"] in ("release", "nightly"):
+        c = run["commit"]
+        for tag, sha in tags:
+            if c.startswith(sha) or sha.startswith(c):
+                return tag
+    return None
+
+
+def consolidate(records: list, root: Path = history.HISTORY, tags: list = ()) -> dict:
+    """records: [(artifact name, run record)]; tags: [(tag, commit)] of the
+    releases (history.release_tags()). Returns a summary."""
     summary = {"runs": 0, "lines": 0, "invalid": 0, "noisy": 0, "releases": [],
                "machines": [], "manifests": [], "rejected": [], "range": None}
     by_year = {}
@@ -45,7 +63,10 @@ def consolidate(records: list, root: Path = history.HISTORY) -> dict:
         summary["invalid"] += not rec["valid"]
         summary["noisy"] += rec["machine"]["noisy"]
         utcs.append(rec["run"]["utc"])
+        release = _release_of(rec, tags) if rec["valid"] else None
         for line in schema.trend_lines(rec, art):
+            if release and not line.get("release"):
+                line["release"] = release
             year = by_year.setdefault(line["utc"][:4], {})
             if schema.line_key(line) not in year:
                 year[schema.line_key(line)] = line
@@ -63,9 +84,8 @@ def consolidate(records: list, root: Path = history.HISTORY) -> dict:
                 mp.parent.mkdir(parents=True, exist_ok=True)
                 mp.write_text(json.dumps(man, indent=1, sort_keys=True) + "\n", encoding="utf-8")
                 summary["manifests"].append(man["hash"])
-        ref = rec["run"]["ref"]
-        if rec["kind"] == "release" and rec["valid"] and ref.startswith("refs/tags/"):
-            tag = ref[len("refs/tags/"):]
+        if release:
+            tag = release
             rp = root / "releases" / f"{tag}.json.gz"
             if not rp.exists():        # earliest valid one wins: records arrive oldest first
                 rp.parent.mkdir(parents=True, exist_ok=True)
@@ -92,6 +112,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--from-dir", help="consolidate records already downloaded here")
     a = ap.parse_args(argv)
+    try:
+        tags = history.release_tags()
+    except history.AccessError as e:
+        print(f"warning: {e}; nightlies on release commits are not snapshotted", file=sys.stderr)
+        tags = []
     if a.from_dir:
         records = _from_dir(Path(a.from_dir))
     else:
@@ -104,7 +129,7 @@ def main(argv=None) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 1
         records.sort(key=lambda r: r[1].get("run", {}).get("utc", ""))
-    s = consolidate(records)
+    s = consolidate(records, tags=tags)
     rng = f" ({s['range'][0]} .. {s['range'][1]})" if s["range"] else ""
     print(f"runs: {s['runs']}{rng}; trend lines added: {s['lines']}; "
           f"invalid: {s['invalid']}; noisy: {s['noisy']}")
