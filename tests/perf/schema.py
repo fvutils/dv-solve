@@ -73,6 +73,7 @@ def trend_lines(rec: dict, artifact: str) -> list:
         "noisy": m["noisy"], "machine": m["id"],
         "calib": rec["calib"].get("kernel_cpu_ms", {}),
         "anchor": (rec.get("anchor") or {}).get("tag"),
+        "release": rec["run"].get("release"),
         "lock": rec["tools"].get("lock_sha"), "artifact": artifact,
     }
     if not rec["valid"]:

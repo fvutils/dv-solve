@@ -39,12 +39,49 @@ def _commit() -> str:
                           text=True, check=True).stdout.strip()
 
 
+REPO = Path(__file__).resolve().parents[2]
+
+
+def _git(*args) -> str:
+    try:
+        return subprocess.run(["git", "-C", str(REPO), *args], capture_output=True,
+                              text=True, check=True).stdout.strip()
+    except Exception:
+        return ""
+
+
 def _dv_version():
+    """The package version: the installed one, else src/dv_solve/__version__.py.
+
+    CI never pip-installs dv-solve, so the source file is what nightly runs see.
+    """
     try:
         from importlib.metadata import version
         return version("dv-solve")
     except Exception:
+        pass
+    ns = {}
+    try:
+        exec((REPO / "src" / "dv_solve" / "__version__.py").read_text(), ns)
+        return ns["_pkg_version"]
+    except Exception:
         return None
+
+
+def _release(commit: str):
+    """The v* release tag this run measures, or None.
+
+    A tag ref (refs/tags/v*) names it; else $DVS_PERF_RELEASE (set by a job
+    that knows the tag the checkout lacks); else a local v* tag on the commit.
+    """
+    ref = os.environ.get("GITHUB_REF", "")
+    if ref.startswith("refs/tags/v"):
+        return ref[len("refs/tags/"):]
+    env = os.environ.get("DVS_PERF_RELEASE")
+    if env:
+        return env
+    tags = sorted(t for t in _git("tag", "--points-at", commit).split() if t.startswith("v"))
+    return tags[-1] if tags else None
 
 
 def _refs(name: str) -> tuple:
@@ -120,11 +157,14 @@ def collect(kind: str, suite_names: list, a=None) -> dict:
     load0 = calib.loadavg()
     utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_number = os.environ.get("GITHUB_RUN_NUMBER")
+    commit = _commit()
     rec = {
         "schema": schema.SCHEMA, "valid": True, "kind": kind,
-        "run": {"utc": utc, "commit": _commit(),
+        "run": {"utc": utc, "commit": commit,
                 "ref": os.environ.get("GITHUB_REF", "local"),
                 "dv_version": _dv_version(),
+                "describe": _git("describe", "--tags", "--always", commit) or None,
+                "release": _release(commit),
                 "workflow_run": int(run_number) if run_number else None},
         "tools": calib.tool_versions(),
         "anchor": None,
