@@ -166,6 +166,25 @@ typedef struct dvs_ctx_s {
     uint64_t           stats_class;   /* the compiled problem's shape class
                                        * (dvs_stats), 0 if not computed  */
     dvs_class_track_t  stats_track;   /* its variables the stats follow  */
+    /* Signal 3 (dvs_stats_root_t), measured at the first solve's root: the
+     * compiled problem's rand and randc variables up to 64 bits wide, and
+     * the declared side; wider ones count whole on both sides. */
+    uint32_t          *stats_root_ids;
+    uint32_t           stats_root_n, stats_root_vars;
+    uint64_t           stats_root_bits16, stats_root_wide16;
+    uint8_t            stats_root_pending;
+    /* Signal 5 (binding constraints), CDCL: per propagator id, the 1-based
+     * position of the problem constraint it was compiled from (0: none, as
+     * for unique, dist, soft and later adds); per position, its narrowings
+     * and conflicts ([2 * pos], [2 * pos + 1]) on the solve being counted. */
+    uint32_t          *stats_prop_pos;
+    uint32_t           stats_prop_n;
+    uint32_t           stats_cons_n;       /* constraints compiled          */
+    uint32_t           stats_cons_quiet;   /* compiled into no propagator   */
+    uint32_t           stats_cons_dropped; /* not compiled                  */
+    uint32_t           stats_cons_seen;    /* solves since compile          */
+    uint64_t          *stats_cons_hits;
+    uint8_t            stats_cons_on;      /* counting on this solve        */
     uint64_t           ok_fires_max;  /* most firings a solve that answered
                                        * (sat or unsat) needed               */
     uint64_t           thrash_limit;  /* prop_fires past which this solve
@@ -675,5 +694,13 @@ uint32_t analyze_conflict(dvs_ctx_t *ctx);
 /* Record a bound established in the current checkpoint scope (see
  * dvs_ctx_t.scope_log_*). Returns -1 when out of memory. */
 int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t bound);
+
+/* Signal 5: a propagator narrowed `k` bounds (what 0) or took part in a
+ * conflict (what 1). Call only while ctx->stats_cons_on. */
+static inline void dvs_stats_cons_hit(dvs_ctx_t *ctx, uint32_t prop_id, unsigned what,
+                                      uint64_t k) {
+    uint32_t pos = prop_id < ctx->stats_prop_n ? ctx->stats_prop_pos[prop_id] : 0;
+    ctx->stats_cons_hits[2u * pos + what] += k;
+}
 
 #endif /* DVS_CTX_H */

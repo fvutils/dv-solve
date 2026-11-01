@@ -469,6 +469,84 @@ static void test_values(void) {
     free(js);
 }
 
+/* Signals 3, 5 and 6: constrainedness at the root, binding constraints, and
+ * time outside the solves and repeats. */
+static void test_signals(void) {
+    size_t sz;
+    dvs_problem_t *p = pinned_problem(&sz);
+    dvs_stats_enable(1);
+    dvs_stats_reset();
+    dvs_ctx_t *ctx = dvs_solver_new(NULL);
+    dvs_solver_compile(ctx, p);
+    dvs_solve_opts_t o;
+    memset(&o, 0, sizeof o);
+    for (int i = 0; i < 70; i++) {
+        o.seed = (uint64_t)i + 1;
+        dvs_solver_reset(ctx);
+        dvs_solver_solve(ctx, &o);
+    }
+    dvs_solver_free(ctx);
+    free(p);
+    char *js = snap();
+    /* 24 declared bits; x < y leaves 255 values each, z == 5 one */
+    CHECK(J(js, "classes", "root", "count") == 1, "root: measured once per compile");
+    CHECK(J(js, "classes", "root", "vars") == 3 && J(js, "classes", "root", "fixed") == 1
+          && J(js, "classes", "root", "tied") == 0, "root: three vars, z fixed");
+    CHECK(J(js, "classes", "root", "bits") == 24 && J(js, "classes", "root", "free_bits") == 16,
+          "root: 2^24 declared, 2^16 at the root");
+    CHECK(J(js, "classes", "root", "constraints") == 2 && J(js, "classes", "root", "quiet") == 1
+          && J(js, "classes", "root", "dropped") == 0, "root: z == 5 compiled to a bound");
+    /* sampled: the first 64 solves, then one in 16 (the 65th) */
+    CHECK(J(js, "classes", "binding", "solves") == 65, "binding: 65 of 70 solves sampled");
+    CHECK(J(js, "classes", "binding", "narrowed") == 65
+          && J(js, "classes", "binding", "busy") == 65
+          && J(js, "classes", "binding", "top_share") == 65000
+          && J(js, "classes", "binding", "other_share") == 0,
+          "binding: x < y does all the narrowing");
+    CHECK(J(js, "classes", "previous", "same") == 69
+          && J(js, "classes", "previous", "shape") == 1, "previous: 69 repeats");
+    CHECK(J(js, "classes", "time_ns", "compile") > 0, "time: compile timed");
+    free(js);
+
+    /* two instances of one class, solved in turn: other constants each time */
+    dvs_stats_reset();
+    dvs_problem_t *pa = lt_const_problem(3, &sz), *pb = lt_const_problem(9, &sz);
+    dvs_ctx_t *a = dvs_solver_new(NULL), *b = dvs_solver_new(NULL);
+    dvs_solver_compile(a, pa);
+    dvs_solver_compile(b, pb);
+    for (int i = 0; i < 4; i++) {
+        dvs_ctx_t *c = i & 1 ? b : a;
+        dvs_solver_reset(c);
+        dvs_solver_solve(c, NULL);
+    }
+    dvs_solver_free(a);
+    dvs_solver_free(b);
+    free(pa);
+    free(pb);
+    js = snap();
+    CHECK(J(js, "classes", "previous", "same") == 0
+          && J(js, "classes", "previous", "constants") == 3
+          && J(js, "classes", "previous", "shape") == 1, "previous: constants changed");
+    CHECK(J(js, "classes", "root", "count") == 2, "root: two compiles");
+    free(js);
+
+    /* SMT2: parse time goes to the next solve, read-back to the last one */
+    dvs_stats_reset();
+    Smt2Frontend *fe = malloc(sizeof *fe);
+    FILE *sink = tmpfile();
+    smt2_frontend_init(fe, sink, sink);
+    smt2_run(fe, "(set-logic QF_BV)\n(declare-const a (_ BitVec 8))\n"
+                 "(declare-const b (_ BitVec 8))\n(assert (bvult a b))\n(check-sat)\n"
+                 "(get-value (a b))\n(get-value (a))\n");
+    smt2_frontend_destroy(fe);
+    free(fe);
+    fclose(sink);
+    js = snap();
+    CHECK(J(js, "classes", "time_ns", "parse") > 0, "time: SMT2 parse time");
+    CHECK(J(js, "classes", "time_ns", "read") > 0, "time: SMT2 read-back time");
+    free(js);
+}
+
 #define N_THREADS 4
 #define N_PER     150
 
@@ -519,6 +597,7 @@ int main(void) {
     test_smt2();
     test_instances();
     test_values();
+    test_signals();
     test_threads();
     test_truncation();
     printf(failures ? "%d FAILED\n" : "all passed\n", failures);

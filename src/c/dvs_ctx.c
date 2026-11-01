@@ -436,6 +436,15 @@ int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t boun
 void dvs_solver_destroy(dvs_ctx_t *ctx) {
     if (!ctx) return;
     dvs_oracle_on_destroy(ctx);
+    free(ctx->stats_root_ids);
+    ctx->stats_root_ids = NULL;
+    ctx->stats_root_pending = 0;
+    free(ctx->stats_prop_pos);
+    free(ctx->stats_cons_hits);
+    ctx->stats_prop_pos = NULL;
+    ctx->stats_cons_hits = NULL;
+    ctx->stats_prop_n = 0;
+    ctx->stats_cons_on = 0;
     if (ctx->lcg) {
         lcg_destroy((LCGCtx *)ctx->lcg);
         dvs_ctx_free(ctx, ctx->lcg, sizeof(LCGCtx));

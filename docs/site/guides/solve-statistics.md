@@ -46,6 +46,13 @@ constraint the solver could not see at compile time (a `soft x == 0`, a `dist`
 with a zero weight) or a sampling bug. The statistics hold only what the
 values spanned, never the values themselves.
 
+The report also says, per class, how constrained the problem was before the
+solver's first decision (how many variables were fixed, and how far the
+domains shrank), how many constraints did the narrowing, and the time spent
+outside the solves: compiling, and on the SMT2 path stating the problem and
+reading the answers back. A class whose solves mostly repeat the previous
+problem is one where caching the compiled problem pays.
+
 ## Sharing a bundle
 
 A bundle holds only statistics. It is made from your stats files in three
@@ -143,3 +150,24 @@ The keys, each with what it means:
 | `varies` | bits that took both values |
 | `max_bias` | the largest bias of a bit that varied, in thousandths off one half |
 | `stuck` | 1 if the variable is free but never changed over 16 or more models |
+| `time_ns` | time outside the solves, in nanoseconds: `parse`, `compile` and `read`; on the SMT2 and handle paths, compile time is also part of `wall_ns` |
+| `parse` | SMT2 commands that state the problem (`declare-const`, `assert`, ...); reading the text is not counted, because in a pipe it includes waiting for the simulator |
+| `compile` | compiling the problem for the CDCL engine |
+| `read` | SMT2 commands that read a model back (`get-value`) |
+| `previous` | each solve against the previous solve on the same thread |
+| `same` | the same problem as the previous solve |
+| `constants` | the same class as the previous solve, with other constants |
+| `shape` | another class than the previous solve, or the thread's first solve |
+| `root` | how constrained the problem was before the CDCL engine's first decision, summed over compiles (`count`) |
+| `fixed` | `rand` variables fixed to one value |
+| `tied` | `rand` variables compile made equal to another variable |
+| `bits` | log2 of the product of the `rand` variables' declared domain sizes |
+| `free_bits` | the same, before the first decision: after compile, propagation and shaving |
+| `quiet` | constraints compiled into no propagator: into root bounds, or into equal variables |
+| `dropped` | constraints compile could not handle |
+| `binding` | which constraints did the work, summed over the CDCL solves of the values sample |
+| `narrowed` | constraints that narrowed a variable's range in the solve |
+| `conflicted` | constraints that took part in a conflict in the solve |
+| `busy` | solves in which any constraint narrowed a range |
+| `top_share` | the share of the narrowing done by the busiest constraint, in thousandths, summed over busy solves |
+| `other_share` | the share done by `unique`, `dist` and soft constraints, and by constraints added after compile, in thousandths, summed over busy solves |

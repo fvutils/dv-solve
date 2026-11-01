@@ -1901,6 +1901,30 @@ static int _enum_sample(dvs_ctx_t *ctx, uint32_t base) {
     return 0;
 }
 
+/* Signal 3, the root side (dvs_stats_root_t; the declared side is from
+ * compile): the first solve after a compile, before its first decision. */
+static void _stats_root(dvs_ctx_t *ctx) {
+    ctx->stats_root_pending = 0;
+    dvs_stats_root_t r;
+    memset(&r, 0, sizeof r);
+    r.vars = ctx->stats_root_vars;
+    r.bits16 = ctx->stats_root_bits16 + ctx->stats_root_wide16;
+    r.free_bits16 = ctx->stats_root_wide16;
+    r.cons = ctx->stats_cons_n;
+    r.cons_quiet = ctx->stats_cons_quiet;
+    r.cons_dropped = ctx->stats_cons_dropped;
+    for (uint32_t i = 0; i < ctx->stats_root_n; i++) {
+        uint32_t id = ctx->stats_root_ids[i];
+        if (id >= ctx->n_vars) continue;    /* a list from an earlier compile */
+        if (ctx->var_alias && ctx->var_alias[id] != id) { r.tied++; continue; }
+        const Variable *v = &ctx->vars[id];
+        int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
+        if (lo == hi) r.fixed++;
+        else r.free_bits16 += dvs_stats_bits16(lo, hi, v->width);
+    }
+    dvs_stats_note_root(ctx->stats_class, &r);
+}
+
 static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     ctx->bail_reason = DVS_BAIL_NONE;
     /* An answer before the search loop comes from propagation or shaving. */
@@ -2086,6 +2110,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (ABORTED()) return DVS_SOLVE_TIMEOUT;   /* a probe's verdict is void */
         if (sr == PROP_CONFLICT) return DVS_SOLVE_UNSAT;
     }
+    if (ctx->stats_root_pending) _stats_root(ctx);
 
     /* Box-rejection tier: uniform over solutions when it succeeds. With a
      * solve order, the search decides the ordered stages first, and the
@@ -2240,6 +2265,10 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
             if (ABORTED()) return DVS_SOLVE_TIMEOUT;
             ctx->conflict_count++;
             ctx->conflicts_ever++;
+            if (ctx->stats_cons_on && ctx->conflict_prop_ref != EXPR_NULL
+                    && ctx->conflict_clause_idx == EXPR_NULL)
+                dvs_stats_cons_hit(ctx, ((const Propagator *)dvs_spool_ptr(
+                    &ctx->pool, ctx->conflict_prop_ref))->prop_id, 1, 1);
             local_conflicts++;
 
             /* Wall-clock budget check (conflict loop). This loop learns a
@@ -2540,6 +2569,30 @@ static dvs_result_t _solver_solve_oracle(dvs_ctx_t *ctx, const dvs_solve_opts_t 
     return r;
 }
 
+/* Signal 5: this solve's per-constraint counts, summarised, then cleared. */
+static void _stats_binding(dvs_ctx_t *ctx) {
+    ctx->stats_cons_on = 0;
+    uint64_t *h = ctx->stats_cons_hits;
+    dvs_stats_binding_t b;
+    memset(&b, 0, sizeof b);
+    b.cons = ctx->stats_cons_n;
+    uint64_t total = h[0], top = 0;
+    for (uint32_t k = 1; k <= ctx->stats_cons_n; k++) {
+        uint64_t nk = h[2u * k], ck = h[2u * k + 1];
+        total += nk;
+        if (nk > top) top = nk;
+        if (nk) b.narrowed++;
+        if (ck) b.conflicted++;
+    }
+    if (total) {
+        b.busy = 1;
+        b.top_pm = (uint32_t)((top * 1000 + total / 2) / total);
+        b.other_pm = (uint32_t)((h[0] * 1000 + total / 2) / total);
+    }
+    memset(h, 0, 2 * ((size_t)ctx->stats_cons_n + 1) * sizeof *h);
+    dvs_stats_note_binding(&b);
+}
+
 /* With statistics on: a solve of its own when called directly, a CDCL run
  * inside the caller's solve otherwise (dvs_stats.h). */
 static dvs_result_t _solver_solve_stats(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
@@ -2547,7 +2600,10 @@ static dvs_result_t _solver_solve_stats(dvs_ctx_t *ctx, const dvs_solve_opts_t *
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_CDCL);
     if (ctx) dvs_stats_note_class(ctx->stats_class, ctx->problem_fp);
     uint64_t fires = ctx ? ctx->prop_fires : 0, confl = ctx ? ctx->conflicts_ever : 0;
+    if (ctx) ctx->stats_cons_on = ctx->stats_cons_hits && dvs_stats_want_values()
+                                  && dvs_stats_take_sample(&ctx->stats_cons_seen);
     dvs_result_t r = _solver_solve_oracle(ctx, opts);
+    if (ctx && ctx->stats_cons_on) _stats_binding(ctx);
     if (ctx) {
         dvs_stats_add_work((ctx->prop_fires - fires)
             + (uint64_t)DVS_WORK_PER_CONFLICT * (ctx->conflicts_ever - confl));

@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
+#include <math.h>
 #include <string.h>
 #include <time.h>
 #if defined(_WIN32)
@@ -67,6 +68,9 @@ typedef struct {
     uint64_t cls;           /* shape class, 0 not known */
     uint64_t inst;          /* instance fingerprint, 0 not known */
     uint8_t  has_vals;      /* vals holds this solve's model */
+    uint8_t  read;          /* an SMT2_AUX record that reads a model back */
+    uint8_t  has_bind;      /* bind holds this solve's binding counts */
+    dvs_stats_binding_t bind;
     uint64_t t0;
     uint64_t work[DVS_STATS_N_ENGINES];
     /* The values of the last model noted in the solve. Last, so that
@@ -80,6 +84,13 @@ typedef struct {
 } Rec;
 
 static DVS__TLS Rec tl_rec;
+
+/* Per thread, across records (signal 6): parse time waiting for the next
+ * solve, and the class and instance of the last one. */
+static DVS__TLS struct { uint64_t parse_ns, cls, inst; } tl_thr;
+
+enum { PREV_SAME, PREV_CONSTANTS, PREV_SHAPE, N_PREV };
+static const char *const k_prev[N_PREV] = { "same", "constants", "shape" };
 
 /* The counters kept per class, and summed for the run. All uint64_t. */
 typedef struct {
@@ -95,6 +106,17 @@ typedef struct {
     uint64_t wall_ns;
     uint64_t hist_wall_ns[N_HIST];
     uint64_t hist_work[DVS_STATS_N_ENGINES][N_HIST];  /* engines that ran */
+    /* Signal 3, summed over the class's roots (dvs_stats_root_t). */
+    uint64_t compiles, compile_ns;
+    uint64_t roots, root_vars, root_fixed, root_tied, root_bits16, root_free_bits16;
+    uint64_t root_cons, root_quiet, root_dropped;
+    /* Signal 5, summed over the sampled CDCL solves (dvs_stats_binding_t). */
+    uint64_t bind_solves, bind_cons, bind_narrowed, bind_conflicted;
+    uint64_t bind_busy, bind_top_pm, bind_other_pm;
+    /* Signal 6: time stating the problem (SMT2) and reading models back, and
+     * each solve against the previous one on its thread. */
+    uint64_t parse_ns, read_ns;
+    uint64_t prev[N_PREV];
 } Counts;
 
 /* The values a class's models took (signals 4 and 7). The layout is the
@@ -325,7 +347,9 @@ uint64_t dvs_stats_class_of(const dvs_problem_t *p, uint64_t fp,
 
 /* The record for `cls`, made if new; class 0's when the table is full. Called
  * with g_mu held. NULL only when memory ran out. */
-static ClassRec *_class_rec(uint64_t cls) {
+/* The record of class `cls`, made if new. A full table puts a solve under
+ * class 0 (`solve` set: counted as dropped) and anything else nowhere. */
+static ClassRec *_class_rec(uint64_t cls, int solve) {
     if ((g_cls_n + 1) * 2 > g_cls_cap) {
         uint32_t nc = g_cls_cap ? g_cls_cap * 2 : 64;
         ClassRec **nt = (ClassRec **)calloc(nc, sizeof *nt);
@@ -345,6 +369,7 @@ static ClassRec *_class_rec(uint64_t cls) {
         while (g_cls[i] && g_cls[i]->cls != cls) i = (i + 1) & (g_cls_cap - 1);
         if (g_cls[i]) return g_cls[i];
         if (cls != 0 && g_cls_n >= MAX_CLASSES) {
+            if (!solve) return NULL;
             g_cls_dropped++;
             cls = 0;
             continue;
@@ -411,15 +436,26 @@ void dvs_stats_end(dvs_stats_result_t res) {
     uint64_t wall = _now_ns() - r->t0;
     r->open = 0;
     if (r->path == DVS_STATS_PATH_SMT2_AUX) {
-        if (!r->ran) return;
+        if (!r->read) tl_thr.parse_ns += wall;
+        if (!r->ran && !(r->read && tl_thr.cls)) return;
         dvs_mutex_lock(&g_mu);
-        g_run.aux_calls++;
-        for (int e = 0; e < DVS_STATS_N_ENGINES; e++) g_run.aux_work[e] += r->work[e];
+        if (r->ran) {
+            g_run.aux_calls++;
+            for (int e = 0; e < DVS_STATS_N_ENGINES; e++) g_run.aux_work[e] += r->work[e];
+        }
+        ClassRec *c = r->read && tl_thr.cls ? _class_rec(tl_thr.cls, 0) : NULL;
+        if (c) c->n.read_ns += wall;
         dvs_mutex_unlock(&g_mu);
         return;
     }
+    unsigned prev = !tl_thr.cls || tl_thr.cls != r->cls ? PREV_SHAPE
+                  : tl_thr.inst == r->inst && r->inst ? PREV_SAME : PREV_CONSTANTS;
+    uint64_t parse_ns = tl_thr.parse_ns;
+    tl_thr.parse_ns = 0;
+    tl_thr.cls = r->cls;
+    tl_thr.inst = r->inst;
     dvs_mutex_lock(&g_mu);
-    ClassRec *c = _class_rec(r->cls);
+    ClassRec *c = _class_rec(r->cls, 1);
     if (c) {
         Counts *n = &c->n;
         unsigned n_ran = 0;
@@ -439,6 +475,18 @@ void dvs_stats_end(dvs_stats_result_t res) {
         for (uint64_t m = r->reasons; m; m &= m - 1) n->reasons[__builtin_ctzll(m)]++;
         n->wall_ns += wall;
         n->hist_wall_ns[_bucket(wall)]++;
+        n->parse_ns += parse_ns;
+        if (r->has_bind) {
+            const dvs_stats_binding_t *b = &r->bind;
+            n->bind_solves++;
+            n->bind_cons += b->cons;
+            n->bind_narrowed += b->narrowed;
+            n->bind_conflicted += b->conflicted;
+            n->bind_busy += b->busy;
+            n->bind_top_pm += b->top_pm;
+            n->bind_other_pm += b->other_pm;
+        }
+        if (r->cls) n->prev[prev]++;
         if (r->inst) _hll_add(c->hll_inst, r->inst);
         if (r->has_vals && res == DVS_STATS_RES_SAT) _add_vals(c, r);
     }
@@ -547,10 +595,53 @@ void dvs_stats_note_bail(unsigned bail) {
     if (tl_rec.open && bail && bail < N_BAIL) tl_rec.bail = (uint8_t)bail;
 }
 
-void dvs_stats_note_compile(void) {
+uint64_t dvs_stats_clock(void) { return _now_ns(); }
+
+uint64_t dvs_stats_bits16(int64_t lo, int64_t hi, uint32_t width) {
+    uint64_t d = (uint64_t)hi - (uint64_t)lo;
+    double b = d == UINT64_MAX ? 64.0 : log2((double)d + 1.0);
+    if (b > (double)width) b = (double)width;
+    return (uint64_t)(b * 16.0 + 0.5);
+}
+
+void dvs_stats_note_compile(uint64_t cls, uint64_t ns) {
     dvs_mutex_lock(&g_mu);
     g_run.compiles++;
+    ClassRec *c = cls ? _class_rec(cls, 0) : NULL;
+    if (c) {
+        c->n.compiles++;
+        c->n.compile_ns += ns;
+    }
     dvs_mutex_unlock(&g_mu);
+}
+
+void dvs_stats_note_root(uint64_t cls, const dvs_stats_root_t *root) {
+    if (!cls) return;
+    dvs_mutex_lock(&g_mu);
+    ClassRec *c = _class_rec(cls, 0);
+    if (c) {
+        Counts *n = &c->n;
+        n->roots++;
+        n->root_vars += root->vars;
+        n->root_fixed += root->fixed;
+        n->root_tied += root->tied;
+        n->root_bits16 += root->bits16;
+        n->root_free_bits16 += root->free_bits16;
+        n->root_cons += root->cons;
+        n->root_quiet += root->cons_quiet;
+        n->root_dropped += root->cons_dropped;
+    }
+    dvs_mutex_unlock(&g_mu);
+}
+
+void dvs_stats_note_binding(const dvs_stats_binding_t *b) {
+    if (!tl_rec.open) return;
+    tl_rec.has_bind = 1;
+    tl_rec.bind = *b;
+}
+
+void dvs_stats_note_read(void) {
+    if (tl_rec.open && tl_rec.path == DVS_STATS_PATH_SMT2_AUX) tl_rec.read = 1;
 }
 
 dvs_stats_result_t dvs_stats_result_of(dvs_result_t r) {
@@ -654,6 +745,27 @@ static void _put_counts(Out *o, const Counts *n) {
     _put_named(o, "bail", n->bail, N_BAIL, k_bail, 0);
     _put_named(o, "via", n->via, DVS_STATS_N_VIA, k_via, 0);
     _put_named(o, "reasons", n->reasons, DVS_STATS_N_REASONS, k_reason, 0);
+    _put(o, ",\"time_ns\":{\"parse\":%llu,\"compile\":%llu,\"read\":%llu}",
+         (unsigned long long)n->parse_ns, (unsigned long long)n->compile_ns,
+         (unsigned long long)n->read_ns);
+    _put_named(o, "previous", n->prev, N_PREV, k_prev, 1);
+    if (n->roots)
+        _put(o, ",\"root\":{\"count\":%llu,\"vars\":%llu,\"fixed\":%llu,"
+                "\"tied\":%llu,\"bits\":%llu,\"free_bits\":%llu,\"constraints\":%llu,"
+                "\"quiet\":%llu,\"dropped\":%llu}",
+             (unsigned long long)n->roots, (unsigned long long)n->root_vars,
+             (unsigned long long)n->root_fixed, (unsigned long long)n->root_tied,
+             (unsigned long long)((n->root_bits16 + 8) / 16),
+             (unsigned long long)((n->root_free_bits16 + 8) / 16),
+             (unsigned long long)n->root_cons, (unsigned long long)n->root_quiet,
+             (unsigned long long)n->root_dropped);
+    if (n->bind_solves)
+        _put(o, ",\"binding\":{\"solves\":%llu,\"constraints\":%llu,\"narrowed\":%llu,"
+                "\"conflicted\":%llu,\"busy\":%llu,\"top_share\":%llu,\"other_share\":%llu}",
+             (unsigned long long)n->bind_solves, (unsigned long long)n->bind_cons,
+             (unsigned long long)n->bind_narrowed, (unsigned long long)n->bind_conflicted,
+             (unsigned long long)n->bind_busy, (unsigned long long)n->bind_top_pm,
+             (unsigned long long)n->bind_other_pm);
     _put(o, ",\"hist\":{");
     _put_hist(o, "", "wall_ns", n->hist_wall_ns);
     for (int e = 0; e < DVS_STATS_N_ENGINES; e++) {

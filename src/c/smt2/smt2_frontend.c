@@ -8634,6 +8634,14 @@ static int _is_check_sat(const Sexpr *cmd) {
     return sexpr_is_symbol(head, "check-sat") || sexpr_is_symbol(head, "check-sat-assuming");
 }
 
+/* A command that reads the model back (statistics: read-back time). */
+static int _is_model_read(const Sexpr *cmd) {
+    if (!cmd || cmd->kind != SEXPR_LIST || cmd->list.count == 0) return 0;
+    const Sexpr *head = cmd->list.items[0];
+    return sexpr_is_symbol(head, "get-value") || sexpr_is_symbol(head, "get-model")
+        || sexpr_is_symbol(head, "get-assignment");
+}
+
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     fe->model_reused = 0;
     fe->cmd_dropped = 0;
@@ -8645,9 +8653,11 @@ int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     uint32_t n_named = fe->n_named;
     uint32_t n_errors = fe->n_input_errors;
     /* Statistics: check-sat opens its own record (_check_sat_checked); any
-     * engine work another command does is counted as auxiliary. */
+     * engine work another command does is counted as auxiliary. Its time is
+     * read-back for a command that reads the model, else parse time. */
     int aux = dvs_stats_on() && !_is_check_sat(cmd)
            && dvs_stats_begin(DVS_STATS_PATH_SMT2_AUX);
+    if (aux && _is_model_read(cmd)) dvs_stats_note_read();
     int rc = _dispatch(fe, cmd);
     if (aux) dvs_stats_end(DVS_STATS_RES_SAT);
     if (fe->print_success && rc >= 0 && fe->n_input_errors == n_errors && cmd

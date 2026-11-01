@@ -135,6 +135,35 @@ SCHEMA.update({
     "varies": "bits that took both values",
     "max_bias": "the largest bias of a bit that varied, per mille off one half",
     "stuck": "1 if the variable is free but never changed over 16 or more models",
+    "time_ns": "time outside the solves, nanoseconds: parse (SMT2 commands stating "
+               "the problem), compile, read (reading models back); on the SMT2 and "
+               "handle paths compile time is also part of wall_ns",
+    "parse": "SMT2 commands that state the problem, from the parsed command (reading "
+             "the text is not counted: in a pipe it includes waiting for the simulator)",
+    "compile": "compiling the problem for the CDCL engine",
+    "read": "SMT2 commands that read a model back (get-value)",
+    "previous": "each solve against the previous one on its thread",
+    "same": "the same problem as the previous solve",
+    "constants": "the same class as the previous solve, other constants",
+    "shape": "another class than the previous solve, or the thread's first",
+    "root": "how constrained the problem is at the first solve's root (CDCL), summed "
+            "over compiles: count is how many",
+    "fixed": "rand variables the root fixed to one value",
+    "tied": "rand variables compile made equal to another variable",
+    "bits": "log2 of the product of the rand variables' declared domain sizes",
+    "free_bits": "the same, at the root: after compile, level-0 propagation and "
+                 "shaving",
+    "quiet": "constraints compiled into no propagator (root bounds, equal variables)",
+    "dropped": "constraints compile could not handle",
+    "binding": "which constraints did the work, summed over the sampled CDCL solves "
+               "(the values sample)",
+    "narrowed": "constraints that narrowed a bound in the solve",
+    "conflicted": "constraints that took part in a conflict in the solve",
+    "busy": "solves in which anything narrowed a bound",
+    "top_share": "per mille of the bounds narrowed by the busiest constraint, summed "
+                 "over busy solves",
+    "other_share": "per mille of the bounds narrowed by propagators of no one "
+                   "constraint (unique, dist, soft, later adds), summed over busy solves",
 })
 
 _NAME_MAPS = {
@@ -499,6 +528,36 @@ def _values_note(c: dict) -> str:
     return "; ".join(parts)
 
 
+def _shape_note(c: dict) -> str:
+    """Class `c`'s constrainedness, binding constraints and time outside the
+    solves (signals 3, 5 and 6)."""
+    parts = []
+    r = c.get("root")
+    if r and r.get("count"):
+        n = r["count"]
+        parts.append(f"root: {r['vars'] / n:.0f} vars, {r['fixed'] / n:.0f} fixed, "
+                     f"domain 2^{r['bits'] / n:.0f} -> 2^{r['free_bits'] / n:.0f}")
+        if r.get("quiet") or r.get("dropped"):
+            parts[-1] += f"; {r['quiet'] / n:.0f} constraints quiet, " \
+                         f"{r['dropped'] / n:.0f} dropped"
+    b = c.get("binding")
+    if b and b.get("solves"):
+        n = b["solves"]
+        s = f"binding: {b['narrowed'] / n:.1f} of {b['constraints'] / n:.0f} constraints " \
+            f"narrow per solve"
+        if b.get("busy"):
+            s += f", busiest {b['top_share'] / b['busy'] / 10:.0f}% of narrowing"
+        parts.append(s)
+    tm = c.get("time_ns", {})
+    if any(tm.values()):
+        parts.append("outside solves: " + ", ".join(
+            f"{k} {_ms(v)}" for k, v in tm.items() if v))
+    p = c.get("previous", {})
+    if sum(p.values()) and p.get("same", 0) * 2 > sum(p.values()):
+        parts.append(f"{100 * p['same'] // sum(p.values())}% repeat the previous problem")
+    return "; ".join(parts)
+
+
 def report(data: dict, top: int = 10) -> str:
     s = data["snapshot"]
     total = s["wall_ns"] or 1
@@ -527,6 +586,9 @@ def report(data: dict, top: int = 10) -> str:
         note = _values_note(c)
         if note:
             lines.append(f"      values: {note}")
+        note = _shape_note(c)
+        if note:
+            lines.append(f"      {note}")
     if s.get("motifs"):
         lines.append("  motifs by the solver time of the classes holding them:")
         for m, e in sorted(s["motifs"].items(), key=lambda kv: -kv[1]["wall_ns"])[:8]:

@@ -4273,16 +4273,61 @@ static int _solver_compile_oracle(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     return rc;
 }
 
+/* Signal 3, the declared side (dvs_stats_root_t): the rand and randc
+ * variables, and their domains as declared. The root side is measured at
+ * the first solve (_stats_root in dvs_search.c). */
+static void _stats_root_decl(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    free(ctx->stats_root_ids);
+    ctx->stats_root_ids = NULL;
+    ctx->stats_root_n = ctx->stats_root_vars = 0;
+    ctx->stats_root_bits16 = ctx->stats_root_wide16 = 0;
+    ctx->stats_root_pending = 0;
+    uint32_t n = 0;
+    for (dvs_expr_t cur = sp->vars_head; cur != EXPR_NULL; ) {
+        const VarSpec *vs = (const VarSpec *)dvs_pool_ptr(&sp->pool, cur);
+        cur = vs->next;
+        n++;
+    }
+    if (n && !(ctx->stats_root_ids = (uint32_t *)malloc((size_t)n * sizeof(uint32_t)))) return;
+    for (dvs_expr_t cur = sp->vars_head; cur != EXPR_NULL; ) {
+        const VarSpec *vs = (const VarSpec *)dvs_pool_ptr(&sp->pool, cur);
+        cur = vs->next;
+        if (vs->kind != DVS_VAR_RAND && vs->kind != DVS_VAR_RANDC) continue;
+        ctx->stats_root_vars++;
+        if (vs->width > 64) {               /* bit-level only: not narrowed */
+            ctx->stats_root_wide16 += 16ull * vs->width;
+            continue;
+        }
+        ctx->stats_root_bits16 += dvs_stats_bits16(vs->lo, vs->hi, vs->width);
+        if (vs->var_id < ctx->n_vars) ctx->stats_root_ids[ctx->stats_root_n++] = vs->var_id;
+    }
+    ctx->stats_root_pending = 1;
+}
+
 int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
-    if (!dvs_stats_on()) return _solver_compile_oracle(ctx, sp);
-    dvs_stats_note_compile();
+    if (!dvs_stats_on()) {
+        /* Statistics turned off since an earlier compile: forget its maps. */
+        if (ctx) {
+            ctx->stats_root_pending = 0;
+            ctx->stats_prop_n = ctx->stats_cons_n = 0;
+        }
+        return _solver_compile_oracle(ctx, sp);
+    }
+    uint64_t t0 = dvs_stats_clock();
     int rc = _solver_compile_oracle(ctx, sp);
+    uint64_t ns = dvs_stats_clock() - t0;
+    if (!ctx) {
+        dvs_stats_note_compile(0, ns);
+        return rc;
+    }
     /* The class, once per compile: every solve of this context counts under it. */
-    if (!ctx) return rc;
     ctx->stats_class = dvs_stats_class_of(sp, ctx->problem_fp, &ctx->stats_track);
-    /* Compile propagated to a fixpoint: a variable whose domain is now one
-     * value is pinned by the constraints, and is not free (stuck means
-     * never changing although free). */
+    dvs_stats_note_compile(ctx->stats_class, ns);
+    if (rc >= 0 && sp) _stats_root_decl(ctx, sp);
+    else ctx->stats_root_pending = 0;
+    /* Compile's direct narrowing: a variable whose domain is now one value is
+     * pinned by the constraints, and is not free (stuck means never changing
+     * although free). */
     dvs_class_track_t *t = &ctx->stats_track;
     for (uint32_t i = 0; rc >= 0 && i < t->n; i++) {
         uint32_t id = t->var_id[i];
@@ -4293,6 +4338,36 @@ int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         if (var_lo64(ctx, v) == var_hi64(ctx, v)) t->free[i] = 0;
     }
     return rc;
+}
+
+/* Signal 5: map each propagator made so far to the constraint it came from
+ * (constraint k's start at start[k]; dvs_stats_cons_hit). */
+static void _stats_cons_map(dvs_ctx_t *ctx, const uint32_t *start, uint32_t n,
+                            uint32_t quiet, uint32_t dropped) {
+    free(ctx->stats_prop_pos);
+    free(ctx->stats_cons_hits);
+    ctx->stats_prop_pos = NULL;
+    ctx->stats_cons_hits = NULL;
+    ctx->stats_prop_n = 0;
+    ctx->stats_cons_on = 0;
+    ctx->stats_cons_seen = 0;
+    ctx->stats_cons_n = n;
+    ctx->stats_cons_quiet = quiet;
+    ctx->stats_cons_dropped = dropped;
+    uint32_t end = ctx->n_props;
+    ctx->stats_prop_pos = (uint32_t *)calloc(end ? end : 1, sizeof(uint32_t));
+    ctx->stats_cons_hits = (uint64_t *)calloc(2 * ((size_t)n + 1), sizeof(uint64_t));
+    if (!ctx->stats_prop_pos || !ctx->stats_cons_hits) {
+        free(ctx->stats_prop_pos);
+        free(ctx->stats_cons_hits);
+        ctx->stats_prop_pos = NULL;
+        ctx->stats_cons_hits = NULL;
+        return;
+    }
+    for (uint32_t k = 0; k < n; k++)
+        for (uint32_t pi = start[k], e = k + 1 < n ? start[k + 1] : end; pi < e; pi++)
+            ctx->stats_prop_pos[pi] = k + 1;
+    ctx->stats_prop_n = end;
 }
 
 static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
@@ -4540,13 +4615,25 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 
     /* ---- Walk ConstraintSpec list → create propagators ---- */
     int n_uncompiled = 0;
+    /* Signal 5: where each constraint's propagators start. */
+    const int stats5 = dvs_stats_on();
+    uint32_t *c_start = NULL, c_n = 0, c_cap = 0, c_quiet = 0;
     dvs_expr_t cref = sp->constraints_head;
     while (cref != EXPR_NULL) {
         ConstraintSpec *cs = (ConstraintSpec *)dvs_pool_ptr(&sp->pool, cref);
         uint32_t props_before_c = ctx->n_props;
         int r = _compile_constraint(ctx, sp, cs->root);
-        if (r < 0) return -2;  /* -2 = UNSAT detected at compile time */
+        if (r < 0) { free(c_start); return -2; }  /* -2 = UNSAT detected at compile time */
         if (r == 0) { n_uncompiled++; _log_uncompiled(ctx, sp, cs->root); }
+        if (stats5) {
+            if (c_n == c_cap) {
+                uint32_t nc = c_cap ? 2 * c_cap : 64;
+                uint32_t *g = (uint32_t *)realloc(c_start, (size_t)nc * sizeof *g);
+                if (g) { c_start = g; c_cap = nc; }
+            }
+            if (c_n < c_cap) c_start[c_n++] = props_before_c;
+            if (r == 1 && ctx->n_props == props_before_c) c_quiet++;
+        }
         /* Tag all newly created propagators with this constraint's ID */
         if (cs->constraint_id && ctx->prop_constraint_id) {
             for (uint32_t pi = props_before_c;
@@ -4556,6 +4643,8 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         }
         cref = cs->next;
     }
+    if (stats5) _stats_cons_map(ctx, c_start, c_n, c_quiet, (uint32_t)n_uncompiled);
+    free(c_start);
 
 
     /* ---- Walk AllDiffSpec list -> create AllDifferent propagators ---- */

@@ -199,8 +199,52 @@ static inline int dvs_stats_take_values(dvs_class_track_t *t) {
 
 /* A CDCL solve ended with bail reason `bail` (DVS_BAIL_*, 0 = none). */
 void dvs_stats_note_bail(unsigned bail);
-/* A problem was compiled (CDCL). Counted whether or not a record is open. */
-void dvs_stats_note_compile(void);
+/* How constrained a problem is at the root (signal 3): over its rand and
+ * randc variables, the log2 of the product of their domain sizes (as
+ * intervals) as declared and at the first solve's root, after level-0
+ * propagation and shaving, in 1/16 bits; how many variables the root fixed
+ * to one value, and how many compile tied to another variable. */
+typedef struct {
+    uint32_t vars, fixed, tied;
+    uint64_t bits16, free_bits16;
+    /* Signal 5, at compile (CDCL): the problem's constraints, those compiled
+     * into no propagator (root bounds, aliases), and those not compiled. */
+    uint32_t cons, cons_quiet, cons_dropped;
+} dvs_stats_root_t;
+
+/* log2 of the size of [lo, hi] as `width`-bit values (at most `width`), in
+ * 1/16 bits. */
+uint64_t dvs_stats_bits16(int64_t lo, int64_t hi, uint32_t width);
+/* The monotonic clock, in ns, for timing a step outside a record. */
+uint64_t dvs_stats_clock(void);
+/* A problem of class `cls` (0 if not known) was compiled (CDCL) in `ns`.
+ * Counted whether or not a record is open. */
+void dvs_stats_note_compile(uint64_t cls, uint64_t ns);
+/* The root of the first solve after a compile of class `cls`. */
+void dvs_stats_note_root(uint64_t cls, const dvs_stats_root_t *root);
+/* Binding constraints (signal 5), from one CDCL solve's per-constraint
+ * counts: the constraints, how many narrowed a bound and how many took part
+ * in a conflict, and the share of the narrowings (per mille) made by the
+ * busiest constraint and by propagators of no one constraint (unique, dist,
+ * soft, later adds); the shares only if anything narrowed (`busy`). */
+typedef struct {
+    uint32_t cons, narrowed, conflicted;
+    uint32_t busy, top_pm, other_pm;
+} dvs_stats_binding_t;
+void dvs_stats_note_binding(const dvs_stats_binding_t *b);
+/* Count binding constraints on this solve? The values schedule (every solve
+ * of the first DVS_STATS_VALUES_ALL after a compile, then one in
+ * DVS_STATS_VALUES_STRIDE) on its own counter. */
+static inline int dvs_stats_take_sample(uint32_t *seen) {
+    uint32_t k = (*seen)++;
+    return k < DVS_STATS_VALUES_ALL || k % DVS_STATS_VALUES_STRIDE == 0;
+}
+
+/* The open DVS_STATS_PATH_SMT2_AUX record is a command that reads a model
+ * back (get-value): its time counts as read-back for the class last solved
+ * on this thread. Any other such command states the problem, and its time
+ * counts as parse time for the next solve on the thread (signal 6). */
+void dvs_stats_note_read(void);
 
 /* Map a CDCL or bit-level verdict to a stats result. */
 dvs_stats_result_t dvs_stats_result_of(dvs_result_t r);

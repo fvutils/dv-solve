@@ -114,6 +114,11 @@ def test_merge_is_exact(files):
     assert [x["width"] for x in by[12]["values"]["vars"]] == [8, 8]
     assert all(x["varies"] and not x["stuck"] for x in by[12]["values"]["vars"])
     assert s["motifs"]["var-cmp-var"]["count"] == 1 + 2
+    # signals 3, 5 and 6 add up over the runs
+    assert by[12]["root"]["count"] == 2 and by[12]["root"]["bits"] == 2 * 16
+    assert by[12]["binding"]["solves"] == 12 and by[12]["binding"]["narrowed"] == 12
+    assert by[12]["previous"]["same"] == 4 + 6 and by[12]["time_ns"]["compile"] > 0
+    assert "root: 2 vars, 0 fixed, domain 2^16 -> 2^16" in S.report(m)
     # merge is associative and order-free
     assert S.merge([b, a])["snapshot"]["solves"] == s["solves"]
     assert S.merge([S.merge([a]), b])["snapshot"]["classes"] == s["classes"]

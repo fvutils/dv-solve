@@ -359,8 +359,11 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
          * non-propagation tightenings (e.g. decision pushes, level-0
          * compile-time clamps) record reason=EXPR_NULL. */
         ctx->current_prop_ref = prop_ref;
+        const uint32_t trail0 = ctx->trail_count;
         PropResult r = p->fire(p, ctx);
         ctx->current_prop_ref = EXPR_NULL;
+        if (ctx->stats_cons_on && ctx->trail_count != trail0)
+            dvs_stats_cons_hit(ctx, p->prop_id, 0, ctx->trail_count - trail0);
         /* A clause conflict leaves conflict_clause_idx set for analysis. An
          * entailment holds through the clauses' tightenings: they only
          * narrow the domains it held over. */

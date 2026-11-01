@@ -855,6 +855,7 @@ static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *ou
         /* Resolve through propagator explanation, asking for exactly the
          * literal the working set needs. */
         Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, e->prop_ref);
+        if (ctx->stats_cons_on) dvs_stats_cons_hit(ctx, p->prop_id, 1, 1);
         if (!p->explain) { lcg_dbg_bail[7]++; return -1; }
         if (_rewind_before(lcg, ctx, &applied, e) != 0) { lcg_dbg_bail[14]++; return -1; }
         Explanation expl;

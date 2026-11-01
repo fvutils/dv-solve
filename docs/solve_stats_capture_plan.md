@@ -57,9 +57,9 @@ add fidelity where they're allowed.
 
 | # | Step | Status | Result |
 |---|---|---|---|
-| S0 | Stats core: counters, reason enum, hooks on every path | in progress | S0a–S0c: hooks on every path, exact counts, answer path, routing reasons, per-class records keyed by the S1 hash; ~50 ns on, none off. S0d: value quality (signals 4 and 7) and the distinct-model count, sampled; within noise on svcorpus. Signals 3, 5 and the signal 6 time split still to do |
-| S1 | Canonical shape hash and feature vector | done (rand-core sweep left) | Class hash: invariant and mutation-tested over svcorpus, no collisions between cases. Feature vector, 22 motifs, 0.2% `other` on svcorpus |
-| S2 | Local stats file and end-of-run report | in progress | S2a done: exit-time stats file, `python -m dv_solve.stats` report/merge/explain/bundle/audit; svcorpus stats pass the audit against all corpus names |
+| S0 | Stats core: counters, reason enum, hooks on every path | in progress | S0a–S0c: hooks on every path, exact counts, answer path, routing reasons, per-class records keyed by the S1 hash; ~50 ns on, none off. S0d: value quality (signals 4 and 7) and the distinct-model count, sampled; within noise on svcorpus. S0e: signals 3, 5 and 6 (root constrainedness, binding constraints, time outside the solves and repeats); within noise. S0a–d committed (817c946) |
+| S1 | Canonical shape hash and feature vector | done (rand-core sweep left; committed 5b63cdc) | Class hash: invariant and mutation-tested over svcorpus, no collisions between cases. Feature vector, 22 motifs, 0.2% `other` on svcorpus |
+| S2 | Local stats file and end-of-run report | in progress | S2a done (committed 38849ba): exit-time stats file, `python -m dv_solve.stats` report/merge/explain/bundle/audit; svcorpus stats pass the audit against all corpus names |
 | S3 | Versioned capture format, anonymizer, reproduction check | open | |
 | S4 | Corpus ingestion: replay a capture as a perf and distribution case | open | |
 | S5 | Representativeness: the corpus gap report and shape-faithful synthesis | open | |
@@ -335,9 +335,11 @@ in N) rather than dropped.
     set bit of the OR), `varies` (bits that took both values), `max_bias`
     (per mille, over bits that varied) and `stuck`; per class `models`,
     `solutions` (capped at `models`) and the registers, so files merge.
-  - `free` starts as the declared range and is narrowed after compile: compile
-    propagates to a fixpoint, so a variable whose domain is then one value
-    (a hard `x == 5`) is not free. Variables pinned by a soft constraint or a
+  - `free` starts as the declared range and is narrowed after compile:
+    compile applies variable-against-constant constraints as bounds, so a
+    variable whose domain is then one value (a hard `x == 5`) is not free.
+    (Compile does not propagate to a fixpoint; that happens at the first
+    solve's root, which signal 3 measures.) Variables pinned by a soft constraint or a
     zero-weight `dist` still show as stuck: on svcorpus all five such are
     (`soft d_error == 0`, the jtag knobs, aes `sideload_en`).
   - **Cost and sampling.** Unsampled, the values cost ~30 ns on the 220 ns
@@ -363,10 +365,54 @@ in N) rather than dropped.
     merge to 31.3M solves in 12,383 classes and 30.8M sampled models;
     23,303 models were `mismatched` (classes whose tracked layout differs
     between instances, not yet looked into).
+- **S0e, signals 3, 5 and 6:**
+  - **Signal 3, constrainedness** (`root`). Compile records the rand and
+    randc variables and the log2 of their declared domain product; the first
+    solve after a compile measures, before its first decision (after level-0
+    propagation and shaving): variables fixed, variables tied by an alias,
+    and the log2 domain product left (`bits` → `free_bits`, intervals only,
+    holes ignored). Variables over 64 bits count whole on both sides. CDCL
+    only; a class solved only by bitblast has no `root`. The estimated
+    solution count of the plan is left at these bounds: `free_bits` is an
+    upper bound, the `values` HLL an observed lower one.
+  - **Signal 5, binding constraints** (`binding`, and `constraints`/`quiet`/
+    `dropped` under `root`). Compile maps each propagator id to the position
+    of the problem constraint it came from (0: unique, dist, soft, later
+    adds). On a sampled CDCL solve (the values schedule, its own counter)
+    the propagate loop counts bounds narrowed per constraint, and the
+    conflicting propagator plus every LCG reason count a conflict. The solve
+    is then summarised and the counters cleared: constraints that narrowed,
+    that took part in a conflict, the busiest constraint's share and the
+    no-one-constraint share. No per-position array leaves the library, so
+    the canonical constraint order the plan assumed is not needed (the class
+    walk has none per constraint). `quiet` counts constraints compiled into
+    no propagator (root bounds, aliases), `dropped` the uncompiled ones.
+  - **Signal 6** (`time_ns`, `previous`). Compile is timed per class.
+    SMT2 commands other than check-sat already open an aux record; its wall
+    time now goes to the next solve on the thread as `parse` (declare,
+    assert, push, ...) or, for get-value/get-model, to the last solved class
+    as `read`. Reading the command text is not counted: in a pipe it
+    includes waiting for the simulator. `previous` compares each solve with
+    the previous one on its thread: the `same` problem, the same class with
+    other `constants`, or another `shape`. Per thread, not per handle: an
+    interleaved randomize of two objects shows as `shape`.
+  - **Cost** (svcorpus, sum of medians of 3 runs against the committed
+    build 38849ba): stats off −1.8%, stats on +0.3%; per case within about
+    ±4% (the ~1 us cases), i.e. run noise. Stats off adds one trail-count
+    load and one flag test per propagator fire.
+  - Tests: `test_stats` `signals` (x<y with z==5: 24 → 16 bits, z fixed,
+    z == 5 quiet, 65 of 70 solves sampled, x<y all the narrowing, 69
+    repeats; two instances solved in turn: `constants`; SMT2 parse and
+    read time); the guide's key table is the schema.
+  - Full pytest with `DV_STATS` on: no new failures (the 5 beyond the
+    earlier set come from pointing `DVS_SOLVER_PATH` at a build directory,
+    which has no headers, and pass without it). 26,816 stats files audit
+    clean and merge to 31.6M solves in 12,385 classes; 1,491 classes have a
+    `root` and 1,621 a `binding` record (the rest never reached a CDCL root:
+    bitblast, or answered before it). `parse` and `read` are 0 there: the
+    SMT2 tests run the dv-solve-smt2 binary of the default build, without
+    these changes.
 - **Still to do in S0:**
-  - signal 3 (constrainedness at the root) and signal 5 (binding
-    constraints);
-  - the time split of signal 6;
   - values for answers no engine gave (SMT2 model reuse), and from the cube
     engine;
   - SAT work on cube and portfolio worker threads.
