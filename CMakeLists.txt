@@ -243,6 +243,7 @@ set(DVS_SOURCES
     src/c/dvs_components.c
     src/c/dvs_cube.c
     src/c/dvs_shape.c
+    src/c/dvs_class.c
     src/c/dvs_aigsim.c
     src/c/dvs_affine.c
     src/c/dvs_bbsum.c
