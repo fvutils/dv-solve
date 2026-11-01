@@ -1,5 +1,9 @@
 # Verilator Integration Guide
 
+> **Not the user guide.** This is an early design note on mapping SV
+> constraints onto the C API; Verilator does not use dv-solve this way today.
+> To use dv-solve with Verilator, see `docs/site/guides/verilator.md`.
+
 How to use zuspec-solver as a SystemVerilog constraint backend for
 Verilator.  Maps SV constraint constructs to solver C API calls.
 

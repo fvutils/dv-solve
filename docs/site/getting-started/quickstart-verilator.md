@@ -26,16 +26,21 @@ Point `VERILATOR_SOLVER` at dv-solve when you run the simulation:
 
 ```bash
 export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"
-./obj_dir/Vpacket
+./obj_dir/Vpacket +verilator+rand+sampler+solver
 ```
 
 ```text
-addr=00000a1c len=5 kind=14
-addr=000000e0 len=10 kind=9
-addr=00000a44 len=3 kind=4
-addr=00000cb4 len=1 kind=5
-addr=00000b14 len=16 kind=5
+addr=0000088c len=3 kind=14
+addr=00000580 len=13 kind=11
+addr=00000dd4 len=14 kind=2
+addr=00000e98 len=16 kind=10
+addr=000000d8 len=12 kind=2
 ```
+
+`+verilator+rand+sampler+solver` lets dv-solve pick each value from the seed
+Verilator passes it. Verilator 5.052 and earlier don't have it and stop with
+`Unknown runtime argument`; leave it out there, and Verilator samples the
+values itself (see {ref}`verilator-sampler`).
 
 If the environment dv-solve is installed in is not active, name the
 executable by its full path, which `python -c "import dv_solve;
@@ -48,8 +53,14 @@ it, and `--mode=verilator` tells dv-solve that its job is randomization (see
 ## Reproducing a run
 
 Values follow Verilator's seed. The same `+verilator+seed+N` reproduces the
-same values, and a different seed gives different ones:
+same values:
 
 ```bash
-./obj_dir/Vpacket +verilator+seed+1
+./obj_dir/Vpacket +verilator+rand+sampler+solver +verilator+seed+1
 ```
+
+## Next
+
+{doc}`../guides/verilator` covers choosing the sampler, building dv-solve in
+as the model's default solver, checking that dv-solve is the one answering, and capturing a testcase
+to report a problem.
