@@ -50,6 +50,7 @@ concepts/engines
 guides/smt2-solver
 guides/verilator
 guides/systemverilog-dpi
+guides/solve-statistics
 guides/packaging
 ```
 

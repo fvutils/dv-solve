@@ -14,5 +14,11 @@
   standard error as part of the response stream); any other value, such as
   `1`, prints them to standard error. Unset, they are not printed.
 
+`DV_STATS`
+: Count solves and write a stats file at process exit. The value is the file
+  (`%p` is replaced by the process id), or `1` for
+  `dv_solve_stats.<pid>.json`. Unset or `0`, nothing is counted. See
+  {doc}`../guides/solve-statistics`.
+
 Only the variables on this page are supported. dv-solve reads others for
 internal testing and diagnosis; they can change or disappear without notice.

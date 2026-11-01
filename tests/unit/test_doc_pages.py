@@ -103,6 +103,11 @@ def _block(page: str, first: str) -> Block:
 
 # Blocks checked by a test in this module: (page, first line) -> test name.
 _COVERED = {
+    ("guides/solve-statistics.md", "python -m dv_solve.stats report stats.*.json"):
+        "test_stats_guide",
+    ("guides/solve-statistics.md",
+     "python -m dv_solve.stats bundle -o bundle.json --salt-file salt.bin stats.*.json"):
+        "test_stats_guide",
     ("getting-started/install.md", "import dv_solve"): "test_install_python_block",
     ("getting-started/install.md", "build/dv-solve-smt2 --version"): "test_install_source_commands",
     ("getting-started/install.md",
@@ -149,6 +154,8 @@ _COVERED = {
 
 # Blocks that cannot run in the test suite.
 _NOT_RUN = {
+    ("guides/solve-statistics.md", "DV_STATS=stats.%p.json ./run_my_tests"):
+        "runs the user's own tests",
     ("getting-started/install.md", "pip install dv-solve"): "installs from PyPI",
     ("getting-started/install.md", "git clone https://github.com/fvutils/dv-solve.git"):
         "clones and builds the whole project; CI's build does the same",
@@ -626,3 +633,37 @@ def test_readme_links_reach_pages() -> None:
     for path in links:
         if path:
             assert (_SITE / (path + ".md")).is_file(), f"README links to a missing page: {path}"
+
+
+def test_stats_guide(shell_env: dict, tmp_path: Path) -> None:
+    """The solve statistics guide: its commands run on stats files a real run
+    wrote, and its key table is the schema (dv_solve.stats.SCHEMA)."""
+    from dv_solve import stats
+    env = dict(shell_env, DV_STATS=str(tmp_path / "stats.%p.json"))
+    run = ("from dv_solve.builder import SolveProblemBuilder\n"
+           "from dv_solve.ctx import SolveCtx\n"
+           "from dv_solve.problem import BIN_LT\n"
+           "b = SolveProblemBuilder()\n"
+           "for i in (0, 1): b.add_var(i, 8, False, 0, 255)\n"
+           "b.add_constraint(b.expr_binary(BIN_LT, b.expr_var(0), b.expr_var(1)))\n"
+           "with SolveCtx(b.finalize()[0]) as c:\n"
+           "    for s in range(8): c.reset(); c.solve(seed=s + 1)\n")
+    for _ in range(2):
+        r = subprocess.run([sys.executable, "-c", run], env=env, cwd=tmp_path,
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+    (tmp_path / "rtl").mkdir()
+    (tmp_path / "rtl" / "pkt.sv").write_text(
+        "class my_pkt; rand bit [7:0] addr_lo; constraint c { addr_lo < 10; } endclass\n")
+    env.pop("DV_STATS")
+    page = "guides/solve-statistics.md"
+    r = _sh(_block(page, "python -m dv_solve.stats report stats.*.json").text, tmp_path, env,
+            timeout=60)
+    assert r.returncode == 0 and "16 solves" in r.stdout, r.stdout + r.stderr
+    r = _sh(_block(page, "python -m dv_solve.stats bundle -o bundle.json --salt-file salt.bin "
+                         "stats.*.json").text, tmp_path, env, timeout=60)
+    assert r.returncode == 0 and "ok" in r.stdout, r.stdout + r.stderr
+    text = (_SITE / page).read_text(encoding="utf-8")
+    table = set(re.findall(r"^\| `(\w+)` \|", text, re.M))
+    assert table == set(stats.SCHEMA), (sorted(set(stats.SCHEMA) - table),
+                                        sorted(table - set(stats.SCHEMA)))
