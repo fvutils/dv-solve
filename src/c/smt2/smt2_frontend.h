@@ -93,6 +93,7 @@ typedef struct {
     uint16_t width;
     uint8_t  is_signed;
     uint8_t  is_bool;    /* declared Bool: get-value prints true/false */
+    uint8_t  vlt_defined; /* Verilator mode: a fresh-Bool definition was asserted */
 } Smt2Var;
 
 /* One recorded command for get-unsat-core replay: a deep copy of the command
@@ -452,6 +453,12 @@ typedef struct {
     int                  vlt_hash_ignore;
     int                  vlt_hash_pending;  /* a hash was skipped since the last check-sat */
     int                  vlt_enum;          /* session holds UniGen2 enumeration asserts: bitblast */
+    /* A check-sat-assuming may reuse the previous model only while it still
+     * satisfies every assert. vlt_asserted: an assert other than a definition
+     * of a fresh Bool was made since the last solve. vlt_solve_nvars: n_vars
+     * at the last solve; variables at or above it are fresh. */
+    int                  vlt_asserted;
+    uint32_t             vlt_solve_nvars;
     const char          *vlt_route;         /* DV_LOG: route of the current check-sat */
 
     /* Per-command facts for the oracle check (smt2_oracle.c), cleared at the

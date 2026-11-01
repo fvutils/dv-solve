@@ -223,10 +223,6 @@ def test_honoured_parity_assert_is_checked(tmp_path):
 
 
 @needs_z3
-@pytest.mark.xfail(strict=True, reason=(
-    "dv-solve bug found by the oracle: in verilator mode check-sat-assuming "
-    "re-emits the previous model even when a blocking clause asserted since "
-    "excludes it (Verilator 5.053 bsat), so UniGen2 gets duplicate witnesses"))
 def test_verilator_diversity_after_blocking_clause(tmp_path):
     e = dict(os.environ)
     e.update({"DV_ORACLE": "z3", "DV_ORACLE_BIN": Z3, "DV_ORACLE_OUT": str(tmp_path / "run"),

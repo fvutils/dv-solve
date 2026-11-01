@@ -44,3 +44,40 @@ def test_verilator_check_sat_assuming_reuses_previous_model():
     assert out[0] == "sat" and out[2] == "sat"
     assert out[1] == out[3]                       # same model, re-announced
     assert int(out[1].split("#b")[1].rstrip("))"), 2) > 0x10
+
+
+def _bits(line: str) -> int:
+    return int(line.split("#b")[1].rstrip("))"), 2)
+
+
+def test_verilator_check_sat_assuming_reuses_model_past_assumption_definitions():
+    # Verilator's first randomize() pass: define one Bool per pinned bit, then
+    # assume them. The definitions don't constrain x, so one solve serves.
+    out = _run("(set-logic QF_ABV)\n(declare-fun x () (_ BitVec 8))\n"
+               "(assert (bvugt x #x10))\n(check-sat)\n(get-value (x))\n"
+               "(declare-fun a0 () Bool)\n"
+               "(assert (= a0 (= ((_ extract 0 0) x) #b1)))\n"
+               "(check-sat-assuming (a0))\n(get-value (x))\n", "--mode=verilator")
+    assert out[0] == "sat" and out[2] == "sat"
+    assert out[1] == out[3]
+
+
+def test_verilator_check_sat_assuming_after_blocking_assert_solves_again():
+    # Verilator 5.052's enumeration blocks each answer, then asks for another.
+    # Re-announcing the blocked model was a wrong model, and made every later
+    # randomize() call return the same values.
+    script = ("(set-logic QF_ABV)\n(declare-fun x () (_ BitVec 8))\n"
+              "(assert (bvult x #x04))\n(check-sat)\n(get-value (x))\n")
+    seen = []
+    for n in range(4):
+        out = _run(script, "--mode=verilator")
+        assert out[-2] == "sat"
+        v = _bits(out[-1])
+        assert v < 4 and v not in seen
+        seen.append(v)
+        script += (f"(assert (not (= x #b{v:08b})))\n"
+                   f"(declare-fun d{n} () Bool)\n"
+                   f"(assert (= d{n} (not (= x #b{v:08b}))))\n"
+                   f"(check-sat-assuming (d{n}))\n(get-value (x))\n")
+    out = _run(script, "--mode=verilator")
+    assert out[-2] == "unsat"                     # every value blocked

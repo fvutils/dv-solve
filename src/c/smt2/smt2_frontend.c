@@ -224,6 +224,7 @@ static int _add_var(Smt2Frontend *fe, const char *name, uint32_t len,
     v->width    = width;
     v->is_signed = 0;
     v->is_bool  = 0;
+    v->vlt_defined = 0;
     /* Any >64-bit variable is bitblast-only: the CDCL bounds engine models a
      * variable's domain with an int64 [lo,hi], which cannot represent a wide
      * value. Routing here is central — it covers scalar, aux, array-element,
@@ -4593,6 +4594,34 @@ static void _record_checked(Smt2Frontend *fe, const Sexpr *t) {
     fe->checked[fe->n_checked++] = copy;
 }
 
+/* Does `e` mention the symbol `name`? */
+static int _sexpr_mentions(const Sexpr *e, const char *name, uint32_t len) {
+    if (e->kind == SEXPR_SYMBOL)
+        return e->sym.len == len && memcmp(e->sym.str, name, len) == 0;
+    if (e->kind != SEXPR_LIST) return 0;
+    for (uint32_t i = 0; i < e->list.count; i++)
+        if (_sexpr_mentions(e->list.items[i], name, len)) return 1;
+    return 0;
+}
+
+/* Verilator names each assumption with a definition, (= aN <term>), of a Bool
+ * declared since the last solve. Any model extends to one that satisfies it, so
+ * it does not stop a check-sat-assuming from reusing that solve's model. Marks
+ * the Bool defined: a second definition would constrain <term>. */
+static int _is_vlt_fresh_def(Smt2Frontend *fe, const Sexpr *e) {
+    if (e->kind != SEXPR_LIST || e->list.count != 3 || !sexpr_is_symbol(e->list.items[0], "="))
+        return 0;
+    const Sexpr *sym = e->list.items[1];
+    if (sym->kind != SEXPR_SYMBOL) return 0;
+    Smt2Var *v = _find_var(fe, sym->sym.str, sym->sym.len);
+    if (!v || !v->is_bool || v->vlt_defined || v->var_id == UINT32_MAX ||
+        v->var_id < fe->vlt_solve_nvars)
+        return 0;
+    if (_sexpr_mentions(e->list.items[2], sym->sym.str, sym->sym.len)) return 0;
+    v->vlt_defined = 1;
+    return 1;
+}
+
 static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
     if (cmd->list.count != 2) {
         _input_error(fe, "assert requires exactly one expression");
@@ -4607,6 +4636,7 @@ static int _cmd_assert(Smt2Frontend *fe, const Sexpr *cmd) {
         return 0;
     }
     fe->vlt_hash_pending = 0;      /* any other assert: solve for real */
+    if (fe->verilator_mode && !_is_vlt_fresh_def(fe, cmd->list.items[1])) fe->vlt_asserted = 1;
     _record_checked(fe, cmd->list.items[1]);
     if (fe->verilator_mode && !fe->vlt_enum && _is_vlt_enum(fe, cmd->list.items[1])) fe->vlt_enum = 1;
     _record_named(fe, cmd->list.items[1]);
@@ -6289,6 +6319,8 @@ static const char *_cdcl_unknown_why(Smt2Frontend *fe) {
 
 static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     if (!fe->verilator_mode) return _cmd_check_sat_body(fe, cmd);
+    fe->vlt_asserted = 0;
+    fe->vlt_solve_nvars = fe->n_vars;
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     fe->vlt_route = "other";
@@ -8120,9 +8152,10 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
          * solve already produced a freshly-seeded model still held in the engine
          * (bb_solver / CDCL ctx), which the following (get-value) will read. So
          * reuse it: just re-emit the cached result -- one solve per randomize().
-         * Only re-solve if there is no valid prior result (a check-sat-assuming
-         * arriving without a preceding check-sat). */
-        if (fe->has_result) {
+         * Re-solve if there is no valid prior result (a check-sat-assuming
+         * arriving without a preceding check-sat), or if something other than
+         * a fresh-Bool definition was asserted since (see _is_vlt_fresh_def). */
+        if (fe->has_result && !fe->vlt_asserted) {
             DVS_STATS_VIA(DVS_STATS_VIA_MODEL_REUSE);
             fe->model_reused = 1;
             switch (fe->last_result) {
@@ -8133,6 +8166,9 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
             fflush(fe->out);
             return 0;
         }
+        /* No prior result, or an assert since that solve may rule its model
+         * out (Verilator 5.052's enumeration blocks each answer, then asks
+         * for another): solve again, still without the assumption pins. */
         return _cmd_check_sat(fe, cmd);
     }
     /* Standard path: this solves afresh, so any earlier bit-blast model is not

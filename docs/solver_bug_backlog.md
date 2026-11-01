@@ -50,6 +50,30 @@ A 2026-07-10 generative fuzz sweep (`tests/formal/test_fuzz_cross_check.py`,
 
 ## 🟥 OPEN
 
+- **B129: verilator-mode check-sat-assuming re-announced a model a later assert excluded — FIXED 2026-11-01 (WRONG MODEL; DIVERSITY: every randomize() after the first returned the same values on Verilator 5.052).**
+  `_cmd_check_sat_assuming` in `--mode=verilator` re-printed the previous
+  `sat` and model whenever one existed, on the premise that every
+  check-sat-assuming is Verilator's bit-pin pass right after its check-sat.
+  Verilator 5.052's UniGen2 batch (`bsat`) instead asserts
+  `(not (and (= x v) ...))` to block each answer and then sends
+  `(check-sat-assuming (dN))`: dv-solve answered with the blocked model, so
+  all 16 batch entries were one value and `docs/examples/verilator/packet.sv`
+  printed the same packet four times. The oracle had found it on 2026-10-07
+  (strict xfail `test_verilator_diversity_after_blocking_clause`); it was
+  never fixed. Fixed (`smt2_frontend.c`): the reuse now needs no assert since
+  the last solve other than a definition `(= aN term)` of a Bool declared
+  since then (`_is_vlt_fresh_def`), so the bit-pin pass still costs one solve;
+  otherwise the call re-solves via check-sat (assumptions still ignored, as
+  designed). Guards: `tests/formal/test_stale_model.py`, the xfail removed.
+  Follow-ups: (1) the standard assumption-honouring path, reached in verilator
+  mode while developing this fix, produced models that failed model
+  validation (downgraded to `unknown`, so not wrong answers) -- unreachable
+  again, but latent; (2) with Verilator's DEFAULT sampler the first
+  randomize() of a run is the same for every `+verilator+seed`, since the bit
+  pins are the seed's only way in and they are ignored. The solver sampler
+  (`+verilator+rand+sampler+solver`, Verilator #8899, after 5.052) passes
+  `:random-seed` and has no such gap; it is the recommended setup.
+
 - **B128: affine seeded model ignored rows pivoted on a gate — FIXED 2026-10-29 (DIVERSITY: 3 distinct models of 200).**
   A parity base plus `r = q + 1`: each carry AND gate is the lowest column
   of its row `r_i + q_i + c_i`, so it took the pivot; `_model` evaluates
