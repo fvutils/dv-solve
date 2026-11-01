@@ -430,15 +430,16 @@ in N) rather than dropped.
     binding, compile/build/read time and 99% repeats. pyvsc sent only the
     `dist` variable to the solver; it solved the range and inline `with`
     fields itself, so the stats see only what pyvsc hands over, and its own
-    translation time only if pyvsc reports it (`stats.timed`; a pyvsc
-    change, not made).
+    translation time only if pyvsc reports it. Done in pyvsc-dv-solve
+    5a58869: `_populate_builder` is build time, the Python readback read time
+    (leaving out the library-timed finalize and get_values). pyvsc ve/unit:
+    758 pass with stats off, as before; with stats on, 168k solves (api and
+    bvsat paths) audit clean.
   - The report no longer flags "few distinct models" when the root allows
     about that many solutions (`2^free_bits`).
   - Tests: `test_stats` (reported and library build/read time on the API
     path), `test_front_end_time` (Python `stats.timed`).
 - **Still to do in S0:**
-  - pyvsc: report its translation time with `stats.timed("build")` (in
-    pyvsc);
   - values for answers no engine gave (SMT2 model reuse), and from the cube
     engine;
   - SAT work on cube and portfolio worker threads.
