@@ -186,7 +186,7 @@ execute_process(COMMAND git rev-parse --short HEAD
 if(NOT _dvs_git_rc EQUAL 0 OR DVS_GIT_COMMIT STREQUAL "")
     set(DVS_GIT_COMMIT "unknown")
 endif()
-set_source_files_properties(src/c/dvs_oracle_core.c
+set_source_files_properties(src/c/dvs_oracle_core.c src/c/dvs_stats.c
     PROPERTIES COMPILE_DEFINITIONS
     "DVS_VERSION=\"${DVS_VERSION}\";DVS_GIT_COMMIT=\"${DVS_GIT_COMMIT}\"")
 # dvs_build_info(): commit and dirty state regenerated on every build (a
@@ -244,6 +244,7 @@ set(DVS_SOURCES
     src/c/dvs_cube.c
     src/c/dvs_shape.c
     src/c/dvs_class.c
+    src/c/dvs_stats.c
     src/c/dvs_aigsim.c
     src/c/dvs_affine.c
     src/c/dvs_bbsum.c
@@ -596,6 +597,18 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_link_options(test_smt2_frontend PRIVATE -fsanitize=address)
 endif()
 add_test(NAME test_smt2_frontend COMMAND test_smt2_frontend)
+
+# Solve statistics: every path counted once (docs/solve_stats_capture_plan.md).
+add_executable(test_stats
+    tests/c/test_stats.c
+    src/c/smt2/smt2_lexer.c
+    src/c/smt2/smt2_parser.c
+    src/c/smt2/smt2_frontend.c
+    src/c/smt2/smt2_eval.c
+)
+target_link_libraries(test_stats PRIVATE dv_solve)
+target_include_directories(test_stats PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_stats COMMAND test_stats)
 
 endif()  # DV_SOLVE_BUILD_TOOLS
 

@@ -32,6 +32,7 @@
 #include "dvs_problem.h"
 #include "dvs_bbsolver.h"
 #include "dvs_shape.h"
+#include "dvs_stats.h"
 
 struct dvs_handle_s {
     dvs_problem_t *p;          /* the copied image                          */
@@ -46,6 +47,7 @@ struct dvs_handle_s {
     int            engine;     /* DVS_ENGINE_*; AUTO until the first call   */
     int            chosen;     /* dvs_handle_set_engine() named the engine  */
     int            routed;     /* the first call has settled the engine     */
+    const char    *route_why;  /* the shape rule that chose bitblast, or NULL */
     int            pinned;     /* the problem has STATE or RANDC variables  */
     int64_t       *lo, *hi;    /* declared bounds per var_id                */
     dvs_bbsolver_t *bb;        /* the bitblast engine, after its first check */
@@ -289,23 +291,42 @@ static void handle_route(dvs_handle_t *h) {
     h->engine = DVS_ENGINE_CDCL;
     if (h->pinned) return;
     dvs_shape_t sh;
-    if (dvs_shape_compute(h->p, &sh) == 0 && dvs_shape_route(&sh))
+    if (dvs_shape_compute(h->p, &sh) == 0 && (h->route_why = dvs_shape_route(&sh)))
         h->engine = DVS_ENGINE_BITBLAST;
 }
 
+static int _randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes,
+                      uint64_t seed);
+
 int dvs_randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes,
                   uint64_t seed) {
+    if (!dvs_stats_on()) return _randomize(h, refs, modes, seed);
+    int outer = dvs_stats_begin(DVS_STATS_PATH_HANDLE);
+    int rc = _randomize(h, refs, modes, seed);
+    if (outer)
+        dvs_stats_end(rc == DVS_RANDOMIZE_OK ? DVS_STATS_RES_SAT
+                      : rc == DVS_RANDOMIZE_UNSAT ? DVS_STATS_RES_UNSAT
+                      : DVS_STATS_RES_ERROR);
+    return rc;
+}
+
+static int _randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes,
+                      uint64_t seed) {
     if (!h || (h->n_vars && !refs) || modes) return DVS_RANDOMIZE_ERROR;
     for (uint32_t v = 0; v < h->n_vars; v++)
         if (refs[v].addr && !ref_bytes(&refs[v])) return DVS_RANDOMIZE_ERROR;
 
     handle_route(h);
+    if (h->route_why && dvs_stats_on())
+        dvs_stats_note_reason(dvs_stats_reason_of(h->route_why));
     if (h->engine == DVS_ENGINE_BITBLAST) return bb_randomize(h, refs, seed);
 
     for (int attempt = 0;; attempt++) {
         int rc = solve_once(h, refs, seed);
         if (rc == DVS_RANDOMIZE_ERROR && !h->chosen && !h->pinned) {
             /* CDCL cannot answer this problem: bitblast from now on. */
+            h->route_why = "cdcl-error";
+            if (dvs_stats_on()) dvs_stats_note_reason(DVS_STATS_REASON_CDCL_ERROR);
             dvs_solver_free(h->ctx);
             h->ctx = NULL;
             h->engine = DVS_ENGINE_BITBLAST;

@@ -4,6 +4,7 @@
 #include "dvs_ctx.h"
 #include "dvs_search.h"
 #include "dvs_oracle_hooks.h"
+#include "dvs_stats.h"
 #include "dvs_diffcycle.h"
 #include "dvs_propagator.h"
 #include "dvs_problem.h"
@@ -4264,11 +4265,33 @@ static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     return rc;
 }
 
-int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+static int _solver_compile_oracle(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     if (!ctx || !ctx->oracle) return _solver_compile(ctx, sp);
     double t0 = dvs_oracle_clock_ms();
     int rc = _solver_compile(ctx, sp);
     dvs_oracle_on_compile(ctx, sp, rc, dvs_oracle_clock_ms() - t0);
+    return rc;
+}
+
+int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    if (!dvs_stats_on()) return _solver_compile_oracle(ctx, sp);
+    dvs_stats_note_compile();
+    int rc = _solver_compile_oracle(ctx, sp);
+    /* The class, once per compile: every solve of this context counts under it. */
+    if (!ctx) return rc;
+    ctx->stats_class = dvs_stats_class_of(sp, ctx->problem_fp, &ctx->stats_track);
+    /* Compile propagated to a fixpoint: a variable whose domain is now one
+     * value is pinned by the constraints, and is not free (stuck means
+     * never changing although free). */
+    dvs_class_track_t *t = &ctx->stats_track;
+    for (uint32_t i = 0; rc >= 0 && i < t->n; i++) {
+        uint32_t id = t->var_id[i];
+        if (!t->free[i] || id >= ctx->n_vars) continue;
+        if (ctx->var_alias)
+            while (ctx->var_alias[id] != id) id = ctx->var_alias[id];
+        const Variable *v = &ctx->vars[id];
+        if (var_lo64(ctx, v) == var_hi64(ctx, v)) t->free[i] = 0;
+    }
     return rc;
 }
 

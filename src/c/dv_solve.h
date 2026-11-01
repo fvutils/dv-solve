@@ -699,6 +699,47 @@ const char *dvs_build_info(void);
  */
 const char *dvs_build_library_path(void);
 
+/* ------------------------------------------------------------------ */
+/* Solve statistics (docs/solve_stats_capture_plan.md)                 */
+/* ------------------------------------------------------------------ */
+/*
+ * Process-wide counters over every solve, on every path: how many, how each
+ * ended, which engines ran and how much work they did. They hold no problem
+ * content. Off unless the DV_STATS environment variable is set (to anything
+ * but "" or "0") or dvs_stats_enable(1) is called. The library never sends
+ * them anywhere.
+ */
+
+/** Turn statistics on (1) or off (0), overriding DV_STATS. */
+void dvs_stats_enable(int on);
+
+/** 1 if statistics are being collected. */
+int dvs_stats_enabled(void);
+
+/** Zero every counter. */
+void dvs_stats_reset(void);
+
+/**
+ * The counters so far, exact, as one JSON object (schema
+ * "dv-solve-stats-snapshot/0"). Writes at most `cap` bytes including the
+ * terminating NUL; `buf` may be NULL when `cap` is 0.
+ *
+ * @return  The length of the whole text, excluding the NUL: if it is >= cap,
+ *          the text was truncated, and a buffer of return+1 bytes holds it.
+ */
+size_t dvs_stats_snapshot_json(char *buf, size_t cap);
+
+/**
+ * Write the stats file: a header (schema "dv-solve-stats/1", the dv-solve
+ * version and commit, the CPU count) and the snapshot. `%p` in `path` is
+ * replaced by the process id. The file is written whole, then renamed into
+ * place. With DV_STATS set to a path (or to 1, for
+ * dv_solve_stats.<pid>.json), the library writes it at process exit.
+ *
+ * @return  0, or -1 if the file could not be written.
+ */
+int dvs_stats_write(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

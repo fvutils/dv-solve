@@ -1,4 +1,5 @@
 #include "dvs_bbsolver.h"
+#include "dvs_stats.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -85,6 +86,9 @@ struct dvs_bbsolver_s {
      * (dvs_sv_elaborate); NULL when `problem` is the caller's. */
     dvs_problem_t   *orig_problem;
     uint32_t        orig_synced;   /* orig_problem->pool.used already copied */
+    uint64_t        stats_class;   /* shape class for dvs_stats, 0 not yet */
+    uint64_t        stats_inst;    /* and the problem's fingerprint */
+    dvs_class_track_t stats_track; /* its variables the stats follow */
     dvs_aig_t      *aig;
     dvs_sat_t      *sat;
     dvs_aig_cnf_t  *cnf;
@@ -4206,6 +4210,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
                     ar == DVS_AFFINE_SAT ? "sat" : ar == DVS_AFFINE_UNSAT ? "unsat" : "undecided",
                     ast.why, _ms_since(&t0));
         if (ar != DVS_AFFINE_UNDECIDED) {
+            DVS_STATS_VIA(DVS_STATS_VIA_BB_AFFINE);
             int rc = ar == DVS_AFFINE_UNSAT ? DVS_BB_UNSAT : DVS_BB_SAT;
             if (nv) { free(S->node_val); S->node_val = nv; S->model_in_sat = 0; S->base_sim = 1; }
             dvs_aigsim_free(sim);
@@ -4215,6 +4220,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
     }
     int src = _sim_split(S);
     if (src != DVS_BB_UNKNOWN) {
+        DVS_STATS_VIA(DVS_STATS_VIA_BB_SIM_SPLIT);
         if (log)
             fprintf(stderr, "bb-sim: split -> %s in %.2f ms\n",
                     src == DVS_BB_SAT ? "sat" : "unsat", _ms_since(&t0));
@@ -4240,6 +4246,8 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
     S->aux_work += dvs_aigsim_vectors(sim) / 64u * per_pass;
     rc = _sim_result(S, sim, r);
     if (rc != DVS_BB_UNKNOWN) {
+        DVS_STATS_VIA(how[0] == 'e' ? DVS_STATS_VIA_BB_SIM_EXHAUSTIVE
+                                    : DVS_STATS_VIA_BB_SIM_RANDOM);
         if (log)
             fprintf(stderr, "bb-sim: %s inputs=%u gates=%u vectors=%llu -> %s in %.2f ms\n",
                     how, dvs_aigsim_inputs(sim), dvs_aigsim_gates(sim),
@@ -4276,6 +4284,7 @@ static int _solve_with_sim(dvs_bbsolver_t *S) {
             } else {
                 winner = "sweep";
                 rc = _sim_result(S, sim, arg.verdict);
+                DVS_STATS_VIA(DVS_STATS_VIA_BB_SIM_RACE);
             }
         }
     }
@@ -4328,7 +4337,47 @@ static void bb_eval_model_check(dvs_bbsolver_t *S) {
             mismatch, checked, declined, S->ladder_enum_zero);
 }
 
+/* Note the problem's shape class on the open stats record, computed once. */
+static void _bb_note_class(dvs_bbsolver_t *S) {
+    if (!S || !dvs_stats_want_values()) return;
+    const dvs_problem_t *p = S->orig_problem ? S->orig_problem : S->problem;
+    if (!S->stats_class && p) {
+        S->stats_inst = dvs_problem_fingerprint(p);
+        S->stats_class = dvs_stats_class_of(p, S->stats_inst, &S->stats_track);
+    }
+    dvs_stats_note_class(S->stats_class, S->stats_inst);
+}
+
+/* With a model: the tracked variables' values, as the caller reads them. */
+static void _bb_note_values(dvs_bbsolver_t *S, int rc) {
+    if (rc != DVS_BB_SAT || !S || !dvs_stats_want_values()
+            || !dvs_stats_take_values(&S->stats_track))
+        return;
+    const dvs_class_track_t *t = &S->stats_track;
+    uint64_t v[DVS_CLASS_TRACK];
+    for (uint32_t i = 0; i < t->n; i++) {
+        int64_t x = 0;
+        (void)dvs_bbsolver_value(S, t->var_id[i], &x);
+        v[i] = (uint64_t)x;
+    }
+    dvs_stats_note_values(t, v);
+}
+
+static int _bb_check_body(dvs_bbsolver_t *S, uint64_t seed);
+
 int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
+    if (!dvs_stats_on()) return _bb_check_body(S, seed);
+    int outer = dvs_stats_begin(DVS_STATS_PATH_BVSAT);
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
+    _bb_note_class(S);
+    int rc = _bb_check_body(S, seed);
+    _bb_note_values(S, rc);
+    dvs_stats_engine_leave(eng);
+    if (outer) dvs_stats_end(dvs_stats_result_of_bb(rc));
+    return rc;
+}
+
+static int _bb_check_body(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || !S->problem) return DVS_BB_ERROR;
 
     S->seed = seed;
@@ -4412,14 +4461,15 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     /* A model the simulation finds is installed as node_val. */
     free(S->node_val);
     S->node_val = NULL;
+    dvs_stats_via_t via = DVS_STATS_VIA_BB_POPCOUNT;
     int rc = _popsamp(S);
-    if (rc == DVS_BB_UNKNOWN) rc = _uniqsamp(S);
-    if (rc == DVS_BB_UNKNOWN) rc = _sortsamp(S);
-    if (rc == DVS_BB_UNKNOWN && _pinfast_first()) rc = _pinfast(S);
-    if (rc == DVS_BB_UNKNOWN) rc = _divsamp(S);
-    if (rc == DVS_BB_UNKNOWN) rc = _enumsamp(S);
+    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_UNIQUE; rc = _uniqsamp(S); }
+    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_SORTED; rc = _sortsamp(S); }
+    if (rc == DVS_BB_UNKNOWN && _pinfast_first()) { via = DVS_STATS_VIA_BB_PINFAST; rc = _pinfast(S); }
+    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_DIVMUL; rc = _divsamp(S); }
+    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_ENUM; rc = _enumsamp(S); }
     int sampled = rc != DVS_BB_UNKNOWN;
-    if (sampled) _sim_check(S, rc);
+    if (sampled) { DVS_STATS_VIA(via); _sim_check(S, rc); }
     else rc = _solve_with_sim(S);
     if (stats_enabled) {
         clock_gettime(CLOCK_MONOTONIC, &t2);
@@ -4598,8 +4648,21 @@ uint32_t dvs_bbsolver_or_groups(dvs_bbsolver_t *S,
     return ngroups;
 }
 
+static int _bb_solve_assuming_body(dvs_bbsolver_t *S, const int32_t *lits,
+                                   uint32_t n, uint32_t conflict_limit);
+
 int dvs_bbsolver_solve_assuming(dvs_bbsolver_t *S, const int32_t *lits,
                                 uint32_t n, uint32_t conflict_limit) {
+    if (!dvs_stats_on()) return _bb_solve_assuming_body(S, lits, n, conflict_limit);
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
+    _bb_note_class(S);
+    int rc = _bb_solve_assuming_body(S, lits, n, conflict_limit);
+    dvs_stats_engine_leave(eng);
+    return rc;
+}
+
+static int _bb_solve_assuming_body(dvs_bbsolver_t *S, const int32_t *lits,
+                                   uint32_t n, uint32_t conflict_limit) {
     if (!S || !S->sat) return DVS_BB_ERROR;
     /* Per-solve assumptions are retracted after each solve on the incremental
      * backend, so each call solves original ∧ cube in isolation. On a
@@ -4715,8 +4778,24 @@ int dvs_bbsolver_sample_stale(const dvs_bbsolver_t *S) {
     return planes > S->sample_base_ands + 8192u;
 }
 
+static int _bb_sample_body(dvs_bbsolver_t *S, const uint32_t *vars,
+                           uint32_t n_vars, uint64_t seed);
+
 int dvs_bbsolver_sample(dvs_bbsolver_t *S, const uint32_t *vars,
                         uint32_t n_vars, uint64_t seed) {
+    if (!dvs_stats_on()) return _bb_sample_body(S, vars, n_vars, seed);
+    int outer = dvs_stats_begin(DVS_STATS_PATH_BVSAT);
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
+    _bb_note_class(S);
+    int rc = _bb_sample_body(S, vars, n_vars, seed);
+    _bb_note_values(S, rc);
+    dvs_stats_engine_leave(eng);
+    if (outer) dvs_stats_end(dvs_stats_result_of_bb(rc));
+    return rc;
+}
+
+static int _bb_sample_body(dvs_bbsolver_t *S, const uint32_t *vars,
+                           uint32_t n_vars, uint64_t seed) {
     if (!S || !S->problem || !S->sat) return DVS_BB_ERROR;
     if (!dvs_sat_is_incremental(S->sat)) return DVS_BB_ERROR;
 
@@ -4876,7 +4955,19 @@ static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed);
  * flips of one model. */
 #define DVS_REDIV_EPOCH 8u
 
+static int _bb_rediversify_body(dvs_bbsolver_t *S, uint64_t seed);
+
 int dvs_bbsolver_rediversify(dvs_bbsolver_t *S, uint64_t seed) {
+    if (!dvs_stats_on()) return _bb_rediversify_body(S, seed);
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
+    _bb_note_class(S);
+    int rc = _bb_rediversify_body(S, seed);
+    _bb_note_values(S, rc);
+    dvs_stats_engine_leave(eng);
+    return rc;
+}
+
+static int _bb_rediversify_body(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || S->last_result != DVS_BB_SAT) return -1;
     if (++S->redivs_since_base >= DVS_REDIV_EPOCH && !S->n_frames && seed
             && (S->resample || (S->base_sim && !S->asserts_lost))
@@ -4886,6 +4977,7 @@ int dvs_bbsolver_rediversify(dvs_bbsolver_t *S, uint64_t seed) {
 }
 
 static int _rediversify_same_base(dvs_bbsolver_t *S, uint64_t seed) {
+    DVS_STATS_VIA(DVS_STATS_VIA_BB_REDIVERSIFY);
     /* Drop the prior flip-check result and re-run the diversity pass over the
      * still-valid SAT model with the new seed. _diversify re-reads the base
      * model via dvs_aig_cnf_value() (kissat's assignment persists until
@@ -5008,7 +5100,19 @@ static int _sat_fresh(dvs_bbsolver_t *S) {
     return rc;
 }
 
+static int _bb_resample_body(dvs_bbsolver_t *S, uint64_t seed);
+
 int dvs_bbsolver_resample(dvs_bbsolver_t *S, uint64_t seed) {
+    if (!dvs_stats_on()) return _bb_resample_body(S, seed);
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
+    _bb_note_class(S);
+    int rc = _bb_resample_body(S, seed);
+    _bb_note_values(S, rc);
+    dvs_stats_engine_leave(eng);
+    return rc;
+}
+
+static int _bb_resample_body(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || S->last_result != DVS_BB_SAT) return -1;
     if (S->n_frames || !seed) return dvs_bbsolver_rediversify(S, seed);
     if (_fresh_base(S, seed) == 0) return 0;
@@ -5024,22 +5128,30 @@ static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
     /* The popcount sampler draws a model that needs no diversify; a miss
      * leaves the cached model in place. (No _sim_check: the verdict is
      * already SAT, and a second kissat solve is not supported.) */
+    dvs_stats_via_t via = DVS_STATS_VIA_BB_POPCOUNT;
     int rc = _popsamp(S);
-    if (rc != DVS_BB_SAT) rc = _uniqsamp(S);
-    if (rc != DVS_BB_SAT) rc = _sortsamp(S);
-    if (rc != DVS_BB_SAT && _pinfast_first()) rc = _pinfast(S);
-    if (rc != DVS_BB_SAT) rc = _divsamp(S);
-    if (rc != DVS_BB_SAT) rc = _enumsamp(S);
+    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_UNIQUE; rc = _uniqsamp(S); }
+    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_SORTED; rc = _sortsamp(S); }
+    if (rc != DVS_BB_SAT && _pinfast_first()) { via = DVS_STATS_VIA_BB_PINFAST; rc = _pinfast(S); }
+    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_DIVMUL; rc = _divsamp(S); }
+    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_ENUM; rc = _enumsamp(S); }
     if (rc == DVS_BB_SAT) {
+        DVS_STATS_VIA(via);
         S->last_result = DVS_BB_SAT;
         S->redivs_since_base = 0;
         return 0;
     }
     rc = DVS_BB_UNKNOWN;
     int exact = 0;
+    via = DVS_STATS_VIA_BB_SIM_ONCE;
     if (S->base_sim && !S->asserts_lost) rc = _sim_once(S, &exact);
-    if (rc != DVS_BB_SAT && S->resample) { exact = 0; rc = _sat_fresh(S); }
+    if (rc != DVS_BB_SAT && S->resample) {
+        exact = 0;
+        via = DVS_STATS_VIA_BB_SAT_FRESH;
+        rc = _sat_fresh(S);
+    }
     if (rc != DVS_BB_SAT) return -1;
+    DVS_STATS_VIA(via);
     S->last_result = DVS_BB_SAT;
     S->redivs_since_base = 0;
     /* A uniform draw over every variable bit needs no flip sweep: each of its
@@ -5249,7 +5361,19 @@ int dvs_bbsolver_assert(dvs_bbsolver_t *S, dvs_expr_t pred_ref) {
 /* Re-solve the live instance, reusing the accumulated clause DB (and, on
  * CaDiCaL, the retained learned clauses). Mirrors the solve tail of
  * dvs_bbsolver_check. Returns DVS_BB_SAT/UNSAT/UNKNOWN/ERROR. */
+static int _bb_resolve_body(dvs_bbsolver_t *S, uint64_t seed);
+
 int dvs_bbsolver_resolve(dvs_bbsolver_t *S, uint64_t seed) {
+    if (!dvs_stats_on()) return _bb_resolve_body(S, seed);
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
+    _bb_note_class(S);
+    int rc = _bb_resolve_body(S, seed);
+    _bb_note_values(S, rc);
+    dvs_stats_engine_leave(eng);
+    return rc;
+}
+
+static int _bb_resolve_body(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || !S->problem) return DVS_BB_ERROR;
     /* Re-solving a live instance requires an incremental backend; kissat is
      * one-shot per lifetime. */
@@ -5271,7 +5395,19 @@ int dvs_bbsolver_resolve(dvs_bbsolver_t *S, uint64_t seed) {
  * a seeded-random fill of free bits). The lazy array refinement loop must see the
  * true model: a lazily-unconstrained read var is a don't-care bit that diversify
  * would randomize, corrupting the array-consistency check into a spurious SAT. */
+static int _bb_resolve_raw_body(dvs_bbsolver_t *S);
+
 int dvs_bbsolver_resolve_raw(dvs_bbsolver_t *S) {
+    if (!dvs_stats_on()) return _bb_resolve_raw_body(S);
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
+    _bb_note_class(S);
+    int rc = _bb_resolve_raw_body(S);
+    _bb_note_values(S, rc);
+    dvs_stats_engine_leave(eng);
+    return rc;
+}
+
+static int _bb_resolve_raw_body(dvs_bbsolver_t *S) {
     if (!S || !S->problem) return DVS_BB_ERROR;
     if (!dvs_sat_is_incremental(S->sat)) return DVS_BB_ERROR;
     S->seed = 0;
@@ -8660,7 +8796,19 @@ out:
     return rc;
 }
 
+static int _bb_sess_solve_body(dvs_bbsolver_t *S, uint64_t seed);
+
 int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
+    if (!dvs_stats_on()) return _bb_sess_solve_body(S, seed);
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
+    _bb_note_class(S);
+    int rc = _bb_sess_solve_body(S, seed);
+    _bb_note_values(S, rc);
+    dvs_stats_engine_leave(eng);
+    return rc;
+}
+
+static int _bb_sess_solve_body(dvs_bbsolver_t *S, uint64_t seed) {
     if (!S || !S->sess) return DVS_BB_ERROR;
     if (S->had_error)       return DVS_BB_ERROR;
     if (S->had_unsupported) return DVS_BB_UNKNOWN;
@@ -8709,9 +8857,32 @@ int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
  * model.  On UNSAT/UNKNOWN/ERROR, *out_bb is NULL.  A hard-UNSAT problem
  * (UNSAT even with every soft dropped) returns DVS_BB_UNSAT.
  * ------------------------------------------------------------------------- */
+static int _bb_check_maxsat_body(dvs_alloc_t *alloc, dvs_problem_t *problem,
+                                 uint64_t seed, dvs_bbsolver_t **out_bb,
+                                 uint8_t *out_keep, uint32_t keep_cap);
+
 int dvs_bbsolver_check_maxsat(dvs_alloc_t *alloc, dvs_problem_t *problem,
                               uint64_t seed, dvs_bbsolver_t **out_bb,
                               uint8_t *out_keep, uint32_t keep_cap) {
+    if (!dvs_stats_on()) return _bb_check_maxsat_body(alloc, problem, seed, out_bb, out_keep, keep_cap);
+    int outer = dvs_stats_begin(DVS_STATS_PATH_BVSAT);
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
+    int rc = _bb_check_maxsat_body(alloc, problem, seed, out_bb, out_keep, keep_cap);
+    if (rc == DVS_BB_SAT && out_bb && *out_bb) {
+        _bb_note_class(*out_bb);
+        _bb_note_values(*out_bb, rc);
+    } else if (problem && dvs_stats_need_class()) {
+        uint64_t fp = dvs_problem_fingerprint(problem);
+        dvs_stats_note_class(dvs_stats_class_of(problem, fp, NULL), fp);
+    }
+    dvs_stats_engine_leave(eng);
+    if (outer) dvs_stats_end(dvs_stats_result_of_bb(rc));
+    return rc;
+}
+
+static int _bb_check_maxsat_body(dvs_alloc_t *alloc, dvs_problem_t *problem,
+                                 uint64_t seed, dvs_bbsolver_t **out_bb,
+                                 uint8_t *out_keep, uint32_t keep_cap) {
     if (!problem || !out_bb) return DVS_BB_ERROR;
     *out_bb = NULL;
 

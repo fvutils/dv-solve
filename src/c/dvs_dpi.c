@@ -5,6 +5,7 @@
 #include "dvs_ctx.h"
 #include "dvs_search.h"
 #include "dvs_block_alloc.h"
+#include "dvs_stats.h"
 
 /* ------------------------------------------------------------------ */
 /* Base64 decoder                                                      */
@@ -157,7 +158,20 @@ int dvs_dpi_n_uncompiled_h(void *ctx) {
     return ((DpiHandle *)ctx)->n_uncompiled;
 }
 
+static int _dpi_solve(void *ctx, long long seed);
+
 int dvs_dpi_solve_h(void *ctx, long long seed) {
+    if (!dvs_stats_on()) return _dpi_solve(ctx, seed);
+    int outer = dvs_stats_begin(DVS_STATS_PATH_DPI);
+    int rc = _dpi_solve(ctx, seed);
+    /* 3: solved, but the model violates a constraint compile dropped. */
+    if (outer)
+        dvs_stats_end(rc == 0 ? DVS_STATS_RES_SAT : rc == 1 ? DVS_STATS_RES_UNSAT
+                      : rc == 2 ? DVS_STATS_RES_UNKNOWN : DVS_STATS_RES_ERROR);
+    return rc;
+}
+
+static int _dpi_solve(void *ctx, long long seed) {
     if (!ctx) return -1;
     DpiHandle *h = (DpiHandle *)ctx;
 

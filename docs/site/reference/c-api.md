@@ -681,3 +681,43 @@ SystemVerilog sizing rules by its own reading of them.
 :returns: 0; −1 if part of the problem could not be translated (the script
   says what) or the write failed.
 ```
+
+## Solve statistics
+
+Process-wide counters over every solve on every path: how many solves there
+were, how each ended, which engines ran and how much work they did, and what
+produced each answer. They hold no problem content. Statistics are off unless
+the `DV_STATS` environment variable is set to anything but `""` or `0`, or
+{c:func}`dvs_stats_enable` is called. With statistics off, a solve costs one
+extra test. The library never sends the counters anywhere.
+
+```{c:function} void dvs_stats_enable(int on)
+Turn statistics on (1) or off (0), overriding `DV_STATS`.
+```
+
+```{c:function} int dvs_stats_enabled(void)
+1 if statistics are being collected.
+```
+
+```{c:function} void dvs_stats_reset(void)
+Zero every counter.
+```
+
+```{c:function} size_t dvs_stats_snapshot_json(char *buf, size_t cap)
+The counters so far, exact, as one JSON object. Writes at most `cap` bytes,
+including the terminating NUL. `buf` may be NULL when `cap` is 0.
+
+:returns: the length of the whole text, excluding the NUL. If it is at least
+  `cap`, the text was truncated, and a buffer of the returned length plus one
+  byte holds it.
+```
+
+```{c:function} int dvs_stats_write(const char *path)
+Write the stats file. It holds a header (schema `dv-solve-stats/1`, the
+dv-solve version and commit, and the CPU count) and the snapshot. `%p` in
+`path` is replaced by the process id. The file is written whole, then renamed
+into place. When `DV_STATS` is set to a path, or to `1` for
+`dv_solve_stats.<pid>.json`, the library writes this file at process exit.
+
+:returns: 0, or −1 if the file could not be written.
+```

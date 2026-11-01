@@ -13,6 +13,7 @@
 #include "dvs_bbsolver.h"
 #include "dvs_cube.h"
 #include "dvs_shape.h"
+#include "dvs_stats.h"
 
 
 /* ------------------------------------------------------------------ */
@@ -5669,6 +5670,7 @@ static int _check_sat_bitblast_body(Smt2Frontend *fe, dvs_problem_t *p,
                             (fe->div_counter % fe->reseed_period == 0);
         if (!force_resolve) {
             if (fe->cached_result == 0) {              /* cached UNSAT */
+                DVS_STATS_VIA(DVS_STATS_VIA_CACHE_UNSAT);
                 fprintf(fe->out, "unsat\n");
                 fflush(fe->out);
                 fe->last_result = DVS_SOLVE_UNSAT;
@@ -6324,12 +6326,34 @@ static int _cmd_check_sat(Smt2Frontend *fe, const Sexpr *cmd) {
     return rc;
 }
 
+/* Statistics: every rule that routed this check-sat (dvs_stats_reason_t). The
+ * Verilator part mirrors the vlt-route trace above. */
+static void _stats_note_route(const Smt2Frontend *fe, int cdcl_probing, int route_cdcl,
+                              int shape_slow) {
+    if (fe->needs_bitblast)
+        dvs_stats_note_reason(dvs_stats_reason_of(fe->nb_why));
+    if (fe->qfbv_why) dvs_stats_note_reason(dvs_stats_reason_of(fe->qfbv_why));
+    if (fe->logic == SMT2_LOGIC_QF_UFBV || fe->logic == SMT2_LOGIC_QF_ABV
+            || fe->logic == SMT2_LOGIC_QF_AUFBV)
+        dvs_stats_note_reason(DVS_STATS_REASON_LOGIC);
+    if (getenv("DV_ENGINE")) dvs_stats_note_reason(DVS_STATS_REASON_ENGINE_FORCED);
+    /* (The trace's last case, "logic", is the default route: no reason.) */
+    if (!fe->verilator_mode || fe->needs_bitblast) return;
+    if (cdcl_probing)               dvs_stats_note_reason(DVS_STATS_REASON_VLT_PROBE);
+    else if (route_cdcl)            dvs_stats_note_reason(DVS_STATS_REASON_VLT_STICKY);
+    else if (fe->vlt_enum)          dvs_stats_note_reason(DVS_STATS_REASON_VLT_ENUM);
+    else if (!fe->verilator_cdcl)   dvs_stats_note_reason(DVS_STATS_REASON_VLT_OPT_OUT);
+    else if (shape_slow)            dvs_stats_note_reason(DVS_STATS_REASON_VLT_CDCL_SLOW);
+    else if (fe->cdcl_route == 2)   dvs_stats_note_reason(DVS_STATS_REASON_VLT_CDCL_DECLINED);
+}
+
 static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
     /* Only skipped parity asserts since the last `sat`: the model stands. */
     if (fe->vlt_hash_pending) {
         fe->vlt_hash_pending = 0;
         fe->vlt_route = "hash-skip";
         if (fe->has_result && fe->last_result == DVS_SOLVE_OK) {
+            DVS_STATS_VIA(DVS_STATS_VIA_HASH_SKIP);
             fe->model_reused = 1;
             fprintf(fe->out, "sat\n");
             fflush(fe->out);
@@ -6347,6 +6371,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
      * was malformed: answer honestly with `unknown` rather than solve a problem
      * that is missing constraints. */
     if (fe->incomplete || fe->input_poisoned) {
+        DVS_STATS_VIA(DVS_STATS_VIA_TAINTED);
         if (fe->print_stats || getenv("DV_LOG"))
             fprintf(fe->err, "cdcl-unknown: tainted at %s:%u -- %s\n",
                     "smt2_frontend.c", fe->incomplete_line,
@@ -6377,6 +6402,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
         /* (DV_ARRAY=eager emits its axioms once, before the first finalize.) */
         if (!fe->array_eager && !fe->compiled && (!fe->problem || fe->builder_retained)) {
             fe->vlt_route = "bitblast/array";
+            if (dvs_stats_on()) dvs_stats_note_reason(DVS_STATS_REASON_ARRAY);
             return _check_sat_array(fe);
         }
         if (fe->print_stats || getenv("DV_LOG"))
@@ -6472,6 +6498,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
     }
 
     _route_qfbv(fe);
+    if (dvs_stats_on()) _stats_note_route(fe, cdcl_probing, route_cdcl, shape_slow);
 
     /* Routing trace for the other paths: the engine this check-sat starts on
      * and every rule that pointed it there. nb = first needs_bitblast trigger,
@@ -6533,6 +6560,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
     int crc = _ensure_compiled(fe);
     if (crc == -2) {
         /* UNSAT detected at compile time (propagation contradiction). */
+        DVS_STATS_VIA(DVS_STATS_VIA_COMPILE_UNSAT);
         fprintf(fe->out, "unsat\n");
         fflush(fe->out);
         fe->last_result = DVS_SOLVE_UNSAT;
@@ -6544,6 +6572,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
         if (fe->print_stats || getenv("DV_LOG"))
             fprintf(fe->err, "cdcl-compile-failed (rc=%d): escalating to bitblast\n", crc);
         fe->vlt_route = "bitblast/compile-failed";
+        if (dvs_stats_on()) dvs_stats_note_reason(DVS_STATS_REASON_COMPILE_FAILED);
         if (cdcl_probing) fe->cdcl_route = 2;
         if (_check_sat_session(fe)) return 0;
         return _check_sat_bitblast(fe);
@@ -6575,6 +6604,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
     /* flush_unsat: an earlier flush in a live scope met a root conflict. The
      * reset above forgot it, so a later flush and solve answered `sat`. */
     if (frc == -2 || fe->flush_unsat) {
+        DVS_STATS_VIA(DVS_STATS_VIA_COMPILE_UNSAT);
         fprintf(fe->out, "unsat\n");
         fflush(fe->out);
         fe->last_result = DVS_SOLVE_UNSAT;
@@ -6597,6 +6627,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
         if (fe->print_stats || getenv("DV_LOG"))
             fprintf(fe->err, "cdcl-pool-overflow: escalating to bitblast\n");
         fe->vlt_route = "bitblast/pool-overflow";
+        if (dvs_stats_on()) dvs_stats_note_reason(DVS_STATS_REASON_POOL_OVERFLOW);
         if (fe->cdcl_retained && !fe->has_aux) {
             size_t full_sz = 0;
             dvs_problem_t *full = _explicit(dvs_builder_finalize(fe->builder, &full_sz));
@@ -6793,6 +6824,7 @@ static int _cmd_check_sat_body(Smt2Frontend *fe, const Sexpr *cmd) {
 
     if (fe->last_result == DVS_SOLVE_TIMEOUT
         && !getenv("DV_NO_BITBLAST")) {   /* audit mode: keep pure-CDCL unknown */
+        if (dvs_stats_on()) dvs_stats_note_reason(DVS_STATS_REASON_CDCL_UNKNOWN);
         if (fe->vlt_route) {
             static char ebuf[80];
             snprintf(ebuf, sizeof ebuf, "%s->bitblast", fe->vlt_route);
@@ -8091,6 +8123,7 @@ static int _cmd_check_sat_assuming(Smt2Frontend *fe, const Sexpr *cmd) {
          * Only re-solve if there is no valid prior result (a check-sat-assuming
          * arriving without a preceding check-sat). */
         if (fe->has_result) {
+            DVS_STATS_VIA(DVS_STATS_VIA_MODEL_REUSE);
             fe->model_reused = 1;
             switch (fe->last_result) {
             case DVS_SOLVE_OK:      fprintf(fe->out, "sat\n");     break;
@@ -8595,6 +8628,12 @@ static int _cmd_reset_assertions(Smt2Frontend *fe) {
 
 static int _silent_command(const Sexpr *head);
 
+static int _is_check_sat(const Sexpr *cmd) {
+    if (!cmd || cmd->kind != SEXPR_LIST || cmd->list.count == 0) return 0;
+    const Sexpr *head = cmd->list.items[0];
+    return sexpr_is_symbol(head, "check-sat") || sexpr_is_symbol(head, "check-sat-assuming");
+}
+
 int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
     fe->model_reused = 0;
     fe->cmd_dropped = 0;
@@ -8605,7 +8644,12 @@ int smt2_frontend_dispatch(Smt2Frontend *fe, const Sexpr *cmd) {
             && fe->push_depth == 0 && _survives_reset_assertions(cmd->list.items[0]);
     uint32_t n_named = fe->n_named;
     uint32_t n_errors = fe->n_input_errors;
+    /* Statistics: check-sat opens its own record (_check_sat_checked); any
+     * engine work another command does is counted as auxiliary. */
+    int aux = dvs_stats_on() && !_is_check_sat(cmd)
+           && dvs_stats_begin(DVS_STATS_PATH_SMT2_AUX);
     int rc = _dispatch(fe, cmd);
+    if (aux) dvs_stats_end(DVS_STATS_RES_SAT);
     if (fe->print_success && rc >= 0 && fe->n_input_errors == n_errors && cmd
             && cmd->kind == SEXPR_LIST && cmd->list.count > 0
             && _silent_command(cmd->list.items[0])) {
@@ -8675,8 +8719,30 @@ static void _note_answer(Smt2Frontend *fe, int rc) {
     fe->answered_result = rc == 0 && fe->has_result ? fe->last_result : DVS_SOLVE_TIMEOUT;
 }
 
+static int _check_sat_checked_body(Smt2Frontend *fe, const Sexpr *cmd,
+                                   int (*run)(Smt2Frontend *, const Sexpr *));
+
+/* One solve for statistics (dvs_stats.h), whatever engines it runs. */
 static int _check_sat_checked(Smt2Frontend *fe, const Sexpr *cmd,
                               int (*run)(Smt2Frontend *, const Sexpr *)) {
+    if (!dvs_stats_on()) return _check_sat_checked_body(fe, cmd, run);
+    int outer = dvs_stats_begin(fe->verilator_mode ? DVS_STATS_PATH_VERILATOR
+                                                   : DVS_STATS_PATH_SMT2);
+    int rc = _check_sat_checked_body(fe, cmd, run);
+    /* An answer no engine gave (hash-skip, compile-time unsat, ...). */
+    if (outer && fe->problem && dvs_stats_need_class()) {
+        uint64_t fp = dvs_problem_fingerprint(fe->problem);
+        dvs_stats_note_class(dvs_stats_class_of(fe->problem, fp, NULL), fp);
+    }
+    if (outer)
+        dvs_stats_end(rc != 0 ? DVS_STATS_RES_ERROR
+                      : !fe->has_result ? DVS_STATS_RES_UNKNOWN
+                      : dvs_stats_result_of(fe->last_result));
+    return rc;
+}
+
+static int _check_sat_checked_body(Smt2Frontend *fe, const Sexpr *cmd,
+                                   int (*run)(Smt2Frontend *, const Sexpr *)) {
     fe->model_check_why[0] = '\0';
     fe->unknown_why[0] = '\0';
     Smt2MemOut m;

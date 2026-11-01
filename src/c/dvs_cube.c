@@ -29,6 +29,7 @@
 
 #include "dvs_cube.h"
 #include "dvs_thread.h"
+#include "dvs_stats.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -911,7 +912,16 @@ static int run_parallel(dvs_bbsolver_t *bb, cube_q *q0, uint32_t total_cubes,
     return result;
 }
 
+static int _cube_check(dvs_bbsolver_t *bb, uint64_t seed);
+
 int dvs_cube_check(dvs_bbsolver_t *bb, uint64_t seed) {
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_CUBE);
+    int rc = _cube_check(bb, seed);
+    dvs_stats_engine_leave(eng);
+    return rc;
+}
+
+static int _cube_check(dvs_bbsolver_t *bb, uint64_t seed) {
     if (!bb) return DVS_BB_ERROR;
 
     int verbose = getenv("DV_CUBE_VERBOSE") != NULL;

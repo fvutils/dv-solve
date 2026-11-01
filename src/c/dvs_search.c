@@ -8,6 +8,7 @@
 #include "dvs_thread.h"
 #include "dvs_ctx.h"
 #include "dvs_oracle_hooks.h"
+#include "dvs_stats.h"
 #include "dvs_propagator.h"
 #include "dvs_trail.h"
 #include "dvs_shave.h"
@@ -1426,6 +1427,7 @@ static int _box_sample(dvs_ctx_t *ctx, uint32_t base, int last_stage, uint32_t t
     }
     uint8_t st0 = ctx->box_state;
     int r = _box_sample_inner(ctx, base, last_stage, tries);
+    if (r) DVS_STATS_VIA(DVS_STATS_VIA_CDCL_BOX);
     if (stats) {
         _bx_calls++;
         if (st0 == BOX_UNPROBED && ctx->box_state == BOX_ON) _bx_probe_on++;
@@ -1901,6 +1903,8 @@ static int _enum_sample(dvs_ctx_t *ctx, uint32_t base) {
 
 static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     ctx->bail_reason = DVS_BAIL_NONE;
+    /* An answer before the search loop comes from propagation or shaving. */
+    DVS_STATS_VIA(DVS_STATS_VIA_CDCL_ROOT);
     /* Seed or preserve RNG. Sequential seeds must be avalanched first. */
     if (opts && opts->seed != 0) ctx->rng_state = _seed_mix64(opts->seed);
     if (ctx->rng_state == 0)     ctx->rng_state = 0xDEADBEEF12345678ULL;
@@ -2102,6 +2106,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (listed) {
             int er = _enum_sample(ctx, base);
             if (ABORTED()) return DVS_SOLVE_TIMEOUT;
+            if (er) DVS_STATS_VIA(DVS_STATS_VIA_CDCL_ENUM);
             if (er == 1) return DVS_SOLVE_OK;
             if (er == 2) return DVS_SOLVE_UNSAT;
         }
@@ -2113,6 +2118,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (!listed && !ctx->var_order && ctx->box_state != BOX_UNPROBED) {
             int er = _enum_sample(ctx, base);
             if (ABORTED()) return DVS_SOLVE_TIMEOUT;
+            if (er) DVS_STATS_VIA(DVS_STATS_VIA_CDCL_ENUM);
             if (er == 1) return DVS_SOLVE_OK;
             if (er == 2) return DVS_SOLVE_UNSAT;
         }
@@ -2123,6 +2129,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         }
     }
 
+    DVS_STATS_VIA(DVS_STATS_VIA_CDCL_SEARCH);
     for (;;) {
         /* Wall-clock budget check (decision loop). */
         if (_deadline > 0.0 && (++_tick & 0x3FF) == 0 && _now_sec() > _deadline) {
@@ -2232,6 +2239,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
             /* An aborted propagation proves nothing: no unsat, no learning. */
             if (ABORTED()) return DVS_SOLVE_TIMEOUT;
             ctx->conflict_count++;
+            ctx->conflicts_ever++;
             local_conflicts++;
 
             /* Wall-clock budget check (conflict loop). This loop learns a
@@ -2524,12 +2532,42 @@ static dvs_result_t _solver_solve_relax(dvs_ctx_t *ctx, const dvs_solve_opts_t *
 
 static dvs_result_t _solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts);
 
-dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
+static dvs_result_t _solver_solve_oracle(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     if (!ctx || !ctx->oracle) return _solver_solve(ctx, opts);
     double t0 = dvs_oracle_clock_ms();
     dvs_result_t r = _solver_solve(ctx, opts);
     dvs_oracle_on_solve(ctx, opts, r, dvs_oracle_clock_ms() - t0);
     return r;
+}
+
+/* With statistics on: a solve of its own when called directly, a CDCL run
+ * inside the caller's solve otherwise (dvs_stats.h). */
+static dvs_result_t _solver_solve_stats(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
+    int outer = dvs_stats_begin(DVS_STATS_PATH_API);
+    int eng = dvs_stats_engine_enter(DVS_STATS_ENG_CDCL);
+    if (ctx) dvs_stats_note_class(ctx->stats_class, ctx->problem_fp);
+    uint64_t fires = ctx ? ctx->prop_fires : 0, confl = ctx ? ctx->conflicts_ever : 0;
+    dvs_result_t r = _solver_solve_oracle(ctx, opts);
+    if (ctx) {
+        dvs_stats_add_work((ctx->prop_fires - fires)
+            + (uint64_t)DVS_WORK_PER_CONFLICT * (ctx->conflicts_ever - confl));
+        if (r == DVS_SOLVE_TIMEOUT) dvs_stats_note_bail(ctx->bail_reason);
+        const dvs_class_track_t *t = &ctx->stats_track;
+        if (r == DVS_SOLVE_OK && dvs_stats_take_values(&ctx->stats_track)) {
+            uint64_t v[DVS_CLASS_TRACK];
+            for (uint32_t i = 0; i < t->n; i++)
+                v[i] = (uint64_t)dvs_solver_get_value(ctx, t->var_id[i]);
+            dvs_stats_note_values(t, v);
+        }
+    }
+    dvs_stats_engine_leave(eng);
+    if (outer) dvs_stats_end(dvs_stats_result_of(r));
+    return r;
+}
+
+dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
+    if (dvs_stats_on()) return _solver_solve_stats(ctx, opts);
+    return _solver_solve_oracle(ctx, opts);
 }
 
 void dvs_search_discard(dvs_ctx_t *ctx) {

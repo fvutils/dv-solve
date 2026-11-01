@@ -11,6 +11,7 @@
 #include "dvs_stack.h"
 #include "dvs_block_alloc.h"
 #include "dvs_problem.h"
+#include "dvs_class.h"
 #include "dvs_trail.h"   /* TrailEntry, LevelMark */
 #include "dvs_propagator.h"  /* PropQueue */
 #include "dvs_search.h"      /* DecisionRecord */
@@ -160,6 +161,11 @@ typedef struct dvs_ctx_s {
      * keeps it, so a randomize() loop that re-solves the problem pays a
      * search that cannot finish once, not on every call; a compile clears it. */
     uint64_t           prop_fires;    /* propagator firings, ever: the work count */
+    uint64_t           conflicts_ever; /* conflicts, ever (conflict_count is
+                                       * cleared by reset); for dvs_stats */
+    uint64_t           stats_class;   /* the compiled problem's shape class
+                                       * (dvs_stats), 0 if not computed  */
+    dvs_class_track_t  stats_track;   /* its variables the stats follow  */
     uint64_t           ok_fires_max;  /* most firings a solve that answered
                                        * (sat or unsat) needed               */
     uint64_t           thrash_limit;  /* prop_fires past which this solve

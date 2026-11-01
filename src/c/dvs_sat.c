@@ -8,6 +8,7 @@
  */
 
 #include "dvs_sat.h"
+#include "dvs_stats.h"
 #include "dvs_sat_backend.h"
 
 #include <stdio.h>
@@ -396,7 +397,13 @@ int dvs_sat_solve(dvs_sat_t *s) {
         }
     }
 
+    int stats = dvs_stats_on();
+    uint64_t w0 = stats ? dvs_sat_work(s) : 0;
     int rc = s->vt->solve(s->impl, s->assume_buf, s->assume_n);
+    if (stats) {
+        uint64_t w1 = dvs_sat_work(s);
+        if (w1 > w0) dvs_stats_add_work(w1 - w0);
+    }
     s->assume_n = 0; /* user + selector assumptions consumed by this solve */
     return rc;
 }
