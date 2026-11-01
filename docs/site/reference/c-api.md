@@ -721,3 +721,24 @@ into place. When `DV_STATS` is set to a path, or to `1` for
 
 :returns: 0, or −1 if the file could not be written.
 ```
+
+````{c:enum} dvs_stats_time_t
+Kinds of time spent outside the solves, for {c:func}`dvs_stats_add_time`.
+
+```{c:enumerator} DVS_STATS_TIME_BUILD
+Stating a problem. Charged to the next solve on the calling thread.
+```
+
+```{c:enumerator} DVS_STATS_TIME_READ
+Reading a model back. Charged to the problem last solved on the thread.
+```
+````
+
+```{c:function} void dvs_stats_add_time(dvs_stats_time_t kind, uint64_t ns)
+Add `ns` nanoseconds that the caller spent outside the solves. A front end
+that drives the library directly reports this way the time it spends
+translating its constraints (build) or copying values back (read). The library
+counts its own such time already: {c:func}`dvs_builder_finalize` as build and
+{c:func}`dvs_solver_get_values` as read, when called outside a solve. Does
+nothing when statistics are off.
+```

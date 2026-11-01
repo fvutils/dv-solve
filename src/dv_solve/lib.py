@@ -200,6 +200,12 @@ def _wire_argtypes(lib: ctypes.CDLL) -> None:
     lib.dvs_solver_set_seed.restype  = None
     lib.dvs_solver_set_seed.argtypes = [c.c_void_p, c.c_uint64]
 
+    # Solve statistics (dv_solve.stats): a front end's own time outside solves.
+    lib.dvs_stats_enabled.restype  = c.c_int
+    lib.dvs_stats_enabled.argtypes = []
+    lib.dvs_stats_add_time.restype  = None
+    lib.dvs_stats_add_time.argtypes = [c.c_int, c.c_uint64]
+
     lib.dvs_solver_get_values.restype  = None
     lib.dvs_solver_get_values.argtypes = [c.c_void_p, c.c_uint32,
                                       c.POINTER(c.c_uint32),

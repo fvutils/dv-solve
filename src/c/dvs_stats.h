@@ -240,10 +240,19 @@ static inline int dvs_stats_take_sample(uint32_t *seen) {
     return k < DVS_STATS_VALUES_ALL || k % DVS_STATS_VALUES_STRIDE == 0;
 }
 
+/* Time outside the solves (signal 6, dvs_stats_add_time): build time is
+ * charged to the next solve on the thread, read time to class `cls`, or if 0
+ * to the class last solved on the thread. */
+void dvs_stats_time(dvs_stats_time_t kind, uint64_t cls, uint64_t ns);
+/* Timing a library step that is build or read time: dvs_stats_step_begin
+ * returns 0 (do not time) when statistics are off, a solve is open on the
+ * thread (its time is the solve's), or a step is already being timed (a
+ * nested one); else a start for dvs_stats_step_end, which must follow. */
+uint64_t dvs_stats_step_begin(void);
+void     dvs_stats_step_end(uint64_t t0, dvs_stats_time_t kind, uint64_t cls);
 /* The open DVS_STATS_PATH_SMT2_AUX record is a command that reads a model
- * back (get-value): its time counts as read-back for the class last solved
- * on this thread. Any other such command states the problem, and its time
- * counts as parse time for the next solve on the thread (signal 6). */
+ * back (get-value): its time is read time. Any other such command states the
+ * problem: build time. */
 void dvs_stats_note_read(void);
 
 /* Map a CDCL or bit-level verdict to a stats result. */

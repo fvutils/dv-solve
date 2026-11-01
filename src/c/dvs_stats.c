@@ -85,9 +85,10 @@ typedef struct {
 
 static DVS__TLS Rec tl_rec;
 
-/* Per thread, across records (signal 6): parse time waiting for the next
- * solve, and the class and instance of the last one. */
-static DVS__TLS struct { uint64_t parse_ns, cls, inst; } tl_thr;
+/* Per thread, across records (signal 6): build time waiting for the next
+ * solve, the class and instance of the last one, and whether a library step
+ * is being timed (dvs_stats_step_begin). */
+static DVS__TLS struct { uint64_t build_ns, cls, inst; int in_step; } tl_thr;
 
 enum { PREV_SAME, PREV_CONSTANTS, PREV_SHAPE, N_PREV };
 static const char *const k_prev[N_PREV] = { "same", "constants", "shape" };
@@ -115,7 +116,7 @@ typedef struct {
     uint64_t bind_busy, bind_top_pm, bind_other_pm;
     /* Signal 6: time stating the problem (SMT2) and reading models back, and
      * each solve against the previous one on its thread. */
-    uint64_t parse_ns, read_ns;
+    uint64_t build_ns, read_ns;
     uint64_t prev[N_PREV];
 } Counts;
 
@@ -436,22 +437,18 @@ void dvs_stats_end(dvs_stats_result_t res) {
     uint64_t wall = _now_ns() - r->t0;
     r->open = 0;
     if (r->path == DVS_STATS_PATH_SMT2_AUX) {
-        if (!r->read) tl_thr.parse_ns += wall;
-        if (!r->ran && !(r->read && tl_thr.cls)) return;
+        dvs_stats_time(r->read ? DVS_STATS_TIME_READ : DVS_STATS_TIME_BUILD, 0, wall);
+        if (!r->ran) return;
         dvs_mutex_lock(&g_mu);
-        if (r->ran) {
-            g_run.aux_calls++;
-            for (int e = 0; e < DVS_STATS_N_ENGINES; e++) g_run.aux_work[e] += r->work[e];
-        }
-        ClassRec *c = r->read && tl_thr.cls ? _class_rec(tl_thr.cls, 0) : NULL;
-        if (c) c->n.read_ns += wall;
+        g_run.aux_calls++;
+        for (int e = 0; e < DVS_STATS_N_ENGINES; e++) g_run.aux_work[e] += r->work[e];
         dvs_mutex_unlock(&g_mu);
         return;
     }
     unsigned prev = !tl_thr.cls || tl_thr.cls != r->cls ? PREV_SHAPE
                   : tl_thr.inst == r->inst && r->inst ? PREV_SAME : PREV_CONSTANTS;
-    uint64_t parse_ns = tl_thr.parse_ns;
-    tl_thr.parse_ns = 0;
+    uint64_t build_ns = tl_thr.build_ns;
+    tl_thr.build_ns = 0;
     tl_thr.cls = r->cls;
     tl_thr.inst = r->inst;
     dvs_mutex_lock(&g_mu);
@@ -475,7 +472,7 @@ void dvs_stats_end(dvs_stats_result_t res) {
         for (uint64_t m = r->reasons; m; m &= m - 1) n->reasons[__builtin_ctzll(m)]++;
         n->wall_ns += wall;
         n->hist_wall_ns[_bucket(wall)]++;
-        n->parse_ns += parse_ns;
+        n->build_ns += build_ns;
         if (r->has_bind) {
             const dvs_stats_binding_t *b = &r->bind;
             n->bind_solves++;
@@ -640,6 +637,36 @@ void dvs_stats_note_binding(const dvs_stats_binding_t *b) {
     tl_rec.bind = *b;
 }
 
+void dvs_stats_time(dvs_stats_time_t kind, uint64_t cls, uint64_t ns) {
+    if (kind == DVS_STATS_TIME_BUILD) {
+        tl_thr.build_ns += ns;
+        return;
+    }
+    if (!cls) cls = tl_thr.cls;
+    if (!cls) return;
+    dvs_mutex_lock(&g_mu);
+    ClassRec *c = _class_rec(cls, 0);
+    if (c) c->n.read_ns += ns;
+    dvs_mutex_unlock(&g_mu);
+}
+
+void dvs_stats_add_time(dvs_stats_time_t kind, uint64_t ns) {
+    if (dvs_stats_on() && (kind == DVS_STATS_TIME_BUILD || kind == DVS_STATS_TIME_READ))
+        dvs_stats_time(kind, 0, ns);
+}
+
+uint64_t dvs_stats_step_begin(void) {
+    if (!dvs_stats_on() || tl_rec.open || tl_thr.in_step) return 0;
+    tl_thr.in_step = 1;
+    return _now_ns() | 1u;          /* never 0 */
+}
+
+void dvs_stats_step_end(uint64_t t0, dvs_stats_time_t kind, uint64_t cls) {
+    if (!t0) return;
+    tl_thr.in_step = 0;
+    dvs_stats_time(kind, cls, _now_ns() - t0);
+}
+
 void dvs_stats_note_read(void) {
     if (tl_rec.open && tl_rec.path == DVS_STATS_PATH_SMT2_AUX) tl_rec.read = 1;
 }
@@ -745,8 +772,8 @@ static void _put_counts(Out *o, const Counts *n) {
     _put_named(o, "bail", n->bail, N_BAIL, k_bail, 0);
     _put_named(o, "via", n->via, DVS_STATS_N_VIA, k_via, 0);
     _put_named(o, "reasons", n->reasons, DVS_STATS_N_REASONS, k_reason, 0);
-    _put(o, ",\"time_ns\":{\"parse\":%llu,\"compile\":%llu,\"read\":%llu}",
-         (unsigned long long)n->parse_ns, (unsigned long long)n->compile_ns,
+    _put(o, ",\"time_ns\":{\"build\":%llu,\"compile\":%llu,\"read\":%llu}",
+         (unsigned long long)n->build_ns, (unsigned long long)n->compile_ns,
          (unsigned long long)n->read_ns);
     _put_named(o, "previous", n->prev, N_PREV, k_prev, 1);
     if (n->roots)

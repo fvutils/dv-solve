@@ -206,3 +206,34 @@ def test_merge_values():
     c = {**a, "models": 3, "vars": [dict(var, width=16)]}
     m = S._merge_values(a, c)
     assert m["vars"][0]["width"] == 8 and m["models"] == 10 and m["mismatched"] == 3
+
+
+_TIMED = r"""
+import time
+from dv_solve import stats
+from dv_solve.builder import SolveProblemBuilder
+from dv_solve.ctx import SolveCtx
+from dv_solve.problem import BIN_LT
+assert stats.enabled()
+with stats.timed("build"):          # a front end translating its constraints
+    time.sleep(0.02)
+    b = SolveProblemBuilder()
+    for i in (0, 1):
+        b.add_var(i, 8, False, 0, 255)
+    b.add_constraint(b.expr_binary(BIN_LT, b.expr_var(0), b.expr_var(1)))
+    buf, _ = b.finalize()
+with SolveCtx(buf) as ctx:
+    ctx.solve(seed=1)
+"""
+
+
+def test_front_end_time(tmp_path):
+    """A front end driving the API directly (pyvsc) reports its own time."""
+    out = tmp_path / "t.json"
+    r = subprocess.run([sys.executable, "-c", _TIMED], env=_env(DV_STATS=str(out)),
+                       cwd=REPO, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    (c,) = S.load(str(out))["snapshot"]["classes"]
+    assert c["paths"]["api"]["sat"] == 1
+    assert c["time_ns"]["build"] >= 20_000_000 and c["time_ns"]["compile"] > 0
+    assert c.get("root") and c.get("binding") and c.get("values")

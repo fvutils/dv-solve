@@ -530,7 +530,28 @@ static void test_signals(void) {
     CHECK(J(js, "classes", "root", "count") == 2, "root: two compiles");
     free(js);
 
-    /* SMT2: parse time goes to the next solve, read-back to the last one */
+    /* API: the builder's finalize is build time and get_values read time,
+     * both outside a solve; a caller adds its own with dvs_stats_add_time */
+    dvs_stats_reset();
+    dvs_stats_add_time(DVS_STATS_TIME_BUILD, 1000000000ull);
+    p = pinned_problem(&sz);                /* finalize: build time */
+    ctx = dvs_solver_new(NULL);
+    dvs_solver_compile(ctx, p);
+    dvs_solver_solve(ctx, NULL);
+    uint32_t ids[3] = { 0, 1, 2 };
+    int64_t vals[3];
+    dvs_solver_get_values(ctx, 3, ids, vals);
+    dvs_stats_add_time(DVS_STATS_TIME_READ, 1000000000ull);
+    dvs_solver_free(ctx);
+    free(p);
+    js = snap();
+    CHECK(J(js, "classes", "time_ns", "build") > 1000000000ll,
+          "time: reported build time plus the builder's, on the next solve");
+    CHECK(J(js, "classes", "time_ns", "read") > 1000000000ll,
+          "time: get_values plus reported read time, on the last solved class");
+    free(js);
+
+    /* SMT2: build time goes to the next solve, read-back to the last one */
     dvs_stats_reset();
     Smt2Frontend *fe = malloc(sizeof *fe);
     FILE *sink = tmpfile();
@@ -542,7 +563,7 @@ static void test_signals(void) {
     free(fe);
     fclose(sink);
     js = snap();
-    CHECK(J(js, "classes", "time_ns", "parse") > 0, "time: SMT2 parse time");
+    CHECK(J(js, "classes", "time_ns", "build") > 0, "time: SMT2 build time");
     CHECK(J(js, "classes", "time_ns", "read") > 0, "time: SMT2 read-back time");
     free(js);
 }

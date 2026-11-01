@@ -135,13 +135,16 @@ SCHEMA.update({
     "varies": "bits that took both values",
     "max_bias": "the largest bias of a bit that varied, per mille off one half",
     "stuck": "1 if the variable is free but never changed over 16 or more models",
-    "time_ns": "time outside the solves, nanoseconds: parse (SMT2 commands stating "
-               "the problem), compile, read (reading models back); on the SMT2 and "
-               "handle paths compile time is also part of wall_ns",
-    "parse": "SMT2 commands that state the problem, from the parsed command (reading "
-             "the text is not counted: in a pipe it includes waiting for the simulator)",
+    "time_ns": "time outside the solves, nanoseconds: build (stating the problem), "
+               "compile, read (reading models back); time inside a solve (an SMT2 "
+               "check-sat or a handle randomize that compiles) is part of wall_ns",
+    "build": "stating the problem: the library's builder finalize, SMT2 commands "
+             "that state it (reading the text is not counted: in a pipe it includes "
+             "waiting for the simulator), and time a front end reports "
+             "(dvs_stats_add_time)",
     "compile": "compiling the problem for the CDCL engine",
-    "read": "SMT2 commands that read a model back (get-value)",
+    "read": "reading a model back: dvs_solver_get_values, SMT2 get-value, and time a "
+            "front end reports",
     "previous": "each solve against the previous one on its thread",
     "same": "the same problem as the previous solve",
     "constants": "the same class as the previous solve, other constants",
@@ -165,6 +168,53 @@ SCHEMA.update({
     "other_share": "per mille of the bounds narrowed by propagators of no one "
                    "constraint (unique, dist, soft, later adds), summed over busy solves",
 })
+
+# ---------------------------------------------------------------------------
+# Recording, for front ends (pyvsc, ...) that drive the library directly
+# ---------------------------------------------------------------------------
+
+_TIME_KINDS = {"build": 0, "read": 1}
+
+
+def enabled() -> bool:
+    """Whether the library is collecting statistics (DV_STATS set)."""
+    from dv_solve.lib import _load_lib
+    lib = _load_lib()
+    return bool(lib is not None and lib.dvs_stats_enabled())
+
+
+def add_time(kind: str, ns: int) -> None:
+    """Add `ns` nanoseconds a front end spent outside the solves: "build"
+    (stating the problem, such as translating constraints; charged to the
+    next solve on this thread) or "read" (copying a model back; charged to
+    the problem last solved on this thread). The library already counts its
+    own builder finalize and get_values. A no-op when statistics are off."""
+    from dv_solve.lib import _load_lib
+    lib = _load_lib()
+    if lib is not None:
+        lib.dvs_stats_add_time(_TIME_KINDS[kind], int(ns))
+
+
+class timed:
+    """`with stats.timed("build"): ...` adds the block's time (add_time).
+    Costs one check when statistics are off."""
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        self.t0 = None
+
+    def __enter__(self):
+        if enabled():
+            import time
+            self.t0 = time.perf_counter_ns()
+        return self
+
+    def __exit__(self, *exc):
+        if self.t0 is not None:
+            import time
+            add_time(self.kind, time.perf_counter_ns() - self.t0)
+        return False
+
 
 _NAME_MAPS = {
     "results": RESULTS, "engine_ran": ENGINES, "answered_by": ANSWERED, "work": ENGINES,
@@ -520,8 +570,14 @@ def _values_note(c: dict) -> str:
     if not v or not v.get("models"):
         return ""
     parts = [f"{v['solutions']} distinct of {v['models']} models sampled"]
+    r = c.get("root")
+    # at most 2^free_bits solutions exist (an interval bound, from the root)
+    room = 2 ** (r["free_bits"] / r["count"]) if r and r.get("count") else None
     if v["models"] >= 32 and v["solutions"] * 2 < v["models"]:
-        parts[0] += " (few: a small solution space, or collapsed sampling)"
+        if room is not None and v["solutions"] * 2 >= room:
+            parts[0] += f" (about all of the at most {room:.0f} the root allows)"
+        else:
+            parts[0] += " (few: a small solution space, or collapsed sampling)"
     stuck = sum(x["stuck"] for x in v.get("vars", []))
     if stuck:
         parts.append(f"{stuck} variable{'s' if stuck > 1 else ''} never changed")

@@ -49,9 +49,22 @@ values spanned, never the values themselves.
 The report also says, per class, how constrained the problem was before the
 solver's first decision (how many variables were fixed, and how far the
 domains shrank), how many constraints did the narrowing, and the time spent
-outside the solves: compiling, and on the SMT2 path stating the problem and
-reading the answers back. A class whose solves mostly repeat the previous
+outside the solves: stating the problem, compiling it, and reading the
+answers back. A class whose solves mostly repeat the previous
 problem is one where caching the compiled problem pays.
+
+A front end that drives the library directly can add its own time, such as
+translating its constraints, so that the statistics show the whole cost of a
+`randomize()` call:
+
+```python
+from dv_solve import stats
+with stats.timed("build"):
+    ...   # translate the constraints and call the builder
+```
+
+From C, call `dvs_stats_add_time`. Nothing is recorded while statistics are
+off.
 
 ## Sharing a bundle
 
@@ -150,10 +163,10 @@ The keys, each with what it means:
 | `varies` | bits that took both values |
 | `max_bias` | the largest bias of a bit that varied, in thousandths off one half |
 | `stuck` | 1 if the variable is free but never changed over 16 or more models |
-| `time_ns` | time outside the solves, in nanoseconds: `parse`, `compile` and `read`; on the SMT2 and handle paths, compile time is also part of `wall_ns` |
-| `parse` | SMT2 commands that state the problem (`declare-const`, `assert`, ...); reading the text is not counted, because in a pipe it includes waiting for the simulator |
+| `time_ns` | time outside the solves, in nanoseconds: `build`, `compile` and `read`; time inside a solve (an SMT2 `check-sat`, or a handle `randomize` that compiles) is part of `wall_ns` instead |
+| `build` | stating the problem: the library's builder finalize, SMT2 commands such as `declare-const` and `assert`, and time a front end reports itself; reading SMT2 text is not counted, because in a pipe it includes waiting for the simulator |
 | `compile` | compiling the problem for the CDCL engine |
-| `read` | SMT2 commands that read a model back (`get-value`) |
+| `read` | reading a model back: `dvs_solver_get_values`, SMT2 `get-value`, and time a front end reports itself |
 | `previous` | each solve against the previous solve on the same thread |
 | `same` | the same problem as the previous solve |
 | `constants` | the same class as the previous solve, with other constants |

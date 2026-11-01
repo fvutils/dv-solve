@@ -740,6 +740,22 @@ size_t dvs_stats_snapshot_json(char *buf, size_t cap);
  */
 int dvs_stats_write(const char *path);
 
+/** Kinds of time spent outside the solves (dvs_stats_add_time). */
+typedef enum {
+    DVS_STATS_TIME_BUILD = 0,   /**< stating a problem: charged to the next
+                                 *   solve on the calling thread */
+    DVS_STATS_TIME_READ  = 1    /**< reading a model back: charged to the
+                                 *   problem last solved on the thread */
+} dvs_stats_time_t;
+/**
+ * Add `ns` nanoseconds of time the caller spent outside the solves, such as
+ * a front end translating its constraints (build) or copying values back
+ * (read). The library already counts its own: dvs_builder_finalize as build
+ * and dvs_solver_get_values as read, when called outside a solve. A no-op
+ * when statistics are off.
+ */
+void dvs_stats_add_time(dvs_stats_time_t kind, uint64_t ns);
+
 #ifdef __cplusplus
 }
 #endif

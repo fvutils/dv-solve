@@ -412,7 +412,33 @@ in N) rather than dropped.
     bitblast, or answered before it). `parse` and `read` are 0 there: the
     SMT2 tests run the dv-solve-smt2 binary of the default build, without
     these changes.
+- **S0f, the core owns the time split (2026-11-01):** signal 6's
+  `parse`/`read` were SMT2-only, so a front end on the API (pyvsc) got no
+  time split. Now one core function attributes time outside the solves
+  (`dvs_stats_time`): `build` (renamed from `parse`) to the next solve on
+  the thread, `read` to the class last solved (or the context's). Sources:
+  the library's own `dvs_builder_finalize*` (build) and
+  `dvs_solver_get_values` (read), timed only outside a solve (inside one
+  the time is the solve's) and not when nested; SMT2 commands, as before;
+  and the public `dvs_stats_add_time` (Python `dv_solve.stats.add_time`,
+  `stats.timed("build")`) for a front end's own time.
+  - Everything else was already core: records open in `dvs_solver_solve`,
+    the handle, DPI and `dvs_bbsolver_*` entries; class, values, root and
+    binding come from compile, search and the bit-level engine.
+  - Checked with pyvsc (`../pyvsc-dv-solve`, `VSC_SOLVER=dv-solve`): 220
+    randomize calls give one class on the API path with values, root,
+    binding, compile/build/read time and 99% repeats. pyvsc sent only the
+    `dist` variable to the solver; it solved the range and inline `with`
+    fields itself, so the stats see only what pyvsc hands over, and its own
+    translation time only if pyvsc reports it (`stats.timed`; a pyvsc
+    change, not made).
+  - The report no longer flags "few distinct models" when the root allows
+    about that many solutions (`2^free_bits`).
+  - Tests: `test_stats` (reported and library build/read time on the API
+    path), `test_front_end_time` (Python `stats.timed`).
 - **Still to do in S0:**
+  - pyvsc: report its translation time with `stats.timed("build")` (in
+    pyvsc);
   - values for answers no engine gave (SMT2 model reuse), and from the cube
     engine;
   - SAT work on cube and portfolio worker threads.

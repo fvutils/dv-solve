@@ -3032,9 +3032,12 @@ void dvs_solver_set_seed(dvs_ctx_t *ctx, uint64_t seed) {
 void dvs_solver_get_values(const dvs_ctx_t *ctx, uint32_t n,
                        const uint32_t *var_ids, int64_t *out) {
     if (!ctx || !var_ids || !out) return;
+    /* Statistics (signal 6): read time, for this context's class. */
+    uint64_t t0 = dvs_stats_step_begin();
     for (uint32_t i = 0; i < n; i++) {
         out[i] = dvs_solver_get_value(ctx, var_ids[i]);
     }
+    dvs_stats_step_end(t0, DVS_STATS_TIME_READ, ctx->stats_class);
 }
 
 /* ------------------------------------------------------------------ */

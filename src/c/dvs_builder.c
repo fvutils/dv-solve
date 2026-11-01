@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "dvs_builder.h"
+#include "dvs_stats.h"
 
 #define DEFAULT_BLOCK_SIZE  4096u
 #define POOL_HEADER_SZ      ((uint32_t)sizeof(dvs_pool_t))
@@ -235,7 +236,7 @@ void *dvs_builder_ref_ptr(const dvs_builder_t *b, dvs_expr_t ref) {
 /* Finalize                                                            */
 /* ------------------------------------------------------------------ */
 
-dvs_problem_t *dvs_builder_finalize(dvs_builder_t *b, size_t *out_size) {
+static dvs_problem_t *_finalize(dvs_builder_t *b, size_t *out_size) {
     uint32_t pool_data_size = b->virtual_used;
     size_t total = sizeof(dvs_problem_t) + pool_data_size;
 
@@ -279,6 +280,14 @@ dvs_problem_t *dvs_builder_finalize(dvs_builder_t *b, size_t *out_size) {
     return sp;
 }
 
+/* Statistics (signal 6): finalizing is build time when no solve is open. */
+dvs_problem_t *dvs_builder_finalize(dvs_builder_t *b, size_t *out_size) {
+    uint64_t t0 = dvs_stats_step_begin();
+    dvs_problem_t *sp = _finalize(b, out_size);
+    dvs_stats_step_end(t0, DVS_STATS_TIME_BUILD, 0);
+    return sp;
+}
+
 /* Copy pool bytes [from, to) from the blocks into the problem's pool region,
  * zeroing what no block covers. */
 static void _copy_range(dvs_builder_t *b, dvs_problem_t *sp, uint32_t from, uint32_t to) {
@@ -301,8 +310,7 @@ static void _copy_range(dvs_builder_t *b, dvs_problem_t *sp, uint32_t from, uint
     }
 }
 
-dvs_problem_t *dvs_builder_finalize_append(dvs_builder_t *b, dvs_problem_t *prev,
-                                           size_t *size) {
+static dvs_problem_t *_finalize_append(dvs_builder_t *b, dvs_problem_t *prev, size_t *size) {
     uint32_t used = b->virtual_used;
     uint32_t old = prev ? prev->pool.used : 0;
     if (!prev || b->alloc || old > used || !b->n_blocks) {
@@ -343,8 +351,15 @@ dvs_problem_t *dvs_builder_finalize_append(dvs_builder_t *b, dvs_problem_t *prev
     return sp;
 }
 
-dvs_problem_t *dvs_builder_finalize_reserve(dvs_builder_t *b, size_t *out_size,
-                                       uint32_t extra_bytes) {
+/* Statistics (signal 6): finalizing is build time when no solve is open. */
+dvs_problem_t *dvs_builder_finalize_append(dvs_builder_t *b, dvs_problem_t *prev, size_t *size) {
+    uint64_t t0 = dvs_stats_step_begin();
+    dvs_problem_t *sp = _finalize_append(b, prev, size);
+    dvs_stats_step_end(t0, DVS_STATS_TIME_BUILD, 0);
+    return sp;
+}
+
+static dvs_problem_t *_finalize_reserve(dvs_builder_t *b, size_t *out_size, uint32_t extra_bytes) {
     uint32_t pool_data_size = b->virtual_used;
     size_t total = sizeof(dvs_problem_t) + pool_data_size + extra_bytes;
 
@@ -384,6 +399,15 @@ dvs_problem_t *dvs_builder_finalize_reserve(dvs_builder_t *b, size_t *out_size,
     }
 
     if (out_size) *out_size = total;
+    return sp;
+}
+
+/* Statistics (signal 6): finalizing is build time when no solve is open. */
+dvs_problem_t *dvs_builder_finalize_reserve(dvs_builder_t *b, size_t *out_size,
+                                            uint32_t extra_bytes) {
+    uint64_t t0 = dvs_stats_step_begin();
+    dvs_problem_t *sp = _finalize_reserve(b, out_size, extra_bytes);
+    dvs_stats_step_end(t0, DVS_STATS_TIME_BUILD, 0);
     return sp;
 }
 
@@ -493,8 +517,7 @@ int dvs_builder_rewind(dvs_builder_t *b, const dvs_builder_mark_t *m) {
             _drop_newest(b, &b->dists_head, &b->n_dists, m->n_dists)) ? -1 : 0;
 }
 
-dvs_problem_t *dvs_builder_finalize_since(dvs_builder_t *b,
-                                     const dvs_builder_mark_t *m, size_t *out_size) {
+static dvs_problem_t *_finalize_since(dvs_builder_t *b, const dvs_builder_mark_t *m, size_t *out_size) {
     size_t sz = 0;
     dvs_problem_t *sp = dvs_builder_finalize(b, &sz);
     if (!sp) return NULL;
@@ -516,6 +539,15 @@ dvs_problem_t *dvs_builder_finalize_since(dvs_builder_t *b,
         return NULL;
     }
     if (out_size) *out_size = sz;
+    return sp;
+}
+
+/* Statistics (signal 6): finalizing is build time when no solve is open. */
+dvs_problem_t *dvs_builder_finalize_since(dvs_builder_t *b, const dvs_builder_mark_t *m,
+                                          size_t *out_size) {
+    uint64_t t0 = dvs_stats_step_begin();
+    dvs_problem_t *sp = _finalize_since(b, m, out_size);
+    dvs_stats_step_end(t0, DVS_STATS_TIME_BUILD, 0);
     return sp;
 }
 
