@@ -38,7 +38,9 @@ source build puts it in `build/` (and `build/bin` after `cmake --install`).
   for `unknown`, as boolector and bitwuzla do.
 
 `--mode=verilator`
-: Serve Verilator's `randomize()` calls. See {doc}`../guides/verilator`.
+: Serve Verilator's `randomize()` calls with Verilator's default sampler. Not
+  needed with `+verilator+rand+sampler+solver` (Verilator 5.054 and later).
+  See {doc}`../guides/verilator`.
 
 `--verilator-hash=H`
 : With `--mode=verilator`: `honor` (the default) solves the random parity

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run dv-solve as Verilator's constraint solver and record the session.
+#
+# Every command Verilator sends is written to PREFIX.PID.smt2 and every reply
+# dv-solve gives to PREFIX.PID.out, byte for byte. PREFIX is $DVS_CAPTURE, or
+# dv-solve-capture in the current directory. Verilator starts a new solver
+# process if one fails, so a run can leave more than one pair of files.
+# Options passed to the script are added to the ones below.
+cap="${DVS_CAPTURE:-dv-solve-capture}.$$"
+tee "$cap.smt2" \
+  | dv-solve-smt2 "$@" \
+  | tee "$cap.out"

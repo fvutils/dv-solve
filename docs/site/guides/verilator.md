@@ -6,35 +6,30 @@ run time, how to confirm dv-solve is the one answering, and how to capture a
 testcase when something goes wrong. For a first run, see
 {doc}`../getting-started/quickstart-verilator`.
 
-In short, for Verilator versions that have the solver sampler:
+In short, with Verilator 5.054 or later and dv-solve 0.5.0 or later:
 
 ```bash
-export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"
+export VERILATOR_SOLVER=dv-solve-smt2
 ./obj_dir/Vtop +verilator+rand+sampler+solver
 ```
 
-dv-solve is tested with Verilator 5.046, 5.052 and the current development
-version.
+Older Verilator 5.x versions work too, with Verilator's own sampler; see
+{ref}`verilator-default-sampler`.
 
 ## What you need
 
-- Verilator 5.x, built as usual. Nothing in Verilator has to be rebuilt.
-- `dv-solve-smt2`, which `pip install dv-solve` puts on `PATH` (see
-  {doc}`../getting-started/install`). If the environment it was installed in
-  is not active when the simulation runs, use its full path, which
+- Verilator 5.054 or later, built as usual, for the solver sampler. Nothing
+  in Verilator has to be rebuilt.
+- dv-solve 0.5.0 or later. `pip install 'dv-solve>=0.5.0'` puts
+  `dv-solve-smt2` on `PATH` (see {doc}`../getting-started/install`). If the
+  environment it was installed in is not active when the simulation runs, use
+  its full path, which
   `python -c "import dv_solve; print(dv_solve.get_smt2_exe())"` prints.
 
-Always run `dv-solve-smt2` for Verilator with these two options:
-
-`--interactive`
-: Verilator talks to the solver over a pipe and waits for each answer, so
-  commands must be answered as they arrive.
-
-`--mode=verilator`
-: The problems Verilator sends are randomization requests, not proofs. In
-  this mode dv-solve solves them with the engine that spreads solutions most
-  evenly, and keeps recently used problems ready, since a testbench usually
-  calls `randomize()` on the same class many times.
+With the solver sampler, `dv-solve-smt2` needs no options: it reads
+Verilator's commands from the pipe and answers each one as it arrives.
+`--mode=verilator` is for Verilator's default sampler (see
+{ref}`verilator-default-sampler`).
 
 (verilator-sampler)=
 ## Let dv-solve pick the values
@@ -58,9 +53,8 @@ Verilator has two ways of turning the solver's answers into the values
   out of solvers that always return the same solution. With dv-solve it mostly
   adds cost (see {ref}`verilator-default-sampler`).
 
-The `solver` sampler is in Verilator's development version after 5.052
-(pull request #8899) and in the releases that follow it. Verilator 5.052 and
-earlier have only the `default` sampler, and stop at
+The `solver` sampler is in Verilator 5.054 and later (pull request #8899).
+Earlier versions have only the `default` sampler, and stop at
 `+verilator+rand+sampler+solver` with `Unknown runtime argument`.
 
 Choose it in any of these ways; the first one found is used:
@@ -75,8 +69,8 @@ Choose it in any of these ways; the first one found is used:
 5. Verilator itself configured with `--with-rand-sampler=solver`.
 
 The sampler and the solver are chosen independently: the `solver` sampler
-with z3 returns much the same values on every call, since z3 does not use the
-seed to vary its solutions.
+with z3 or Bitwuzla returns much the same values on every call, since they do
+not use the seed to vary their solutions.
 
 ## Choosing the solver
 
@@ -96,8 +90,8 @@ Set `VERILATOR_SOLVER` before running the simulation. Nothing in the build
 changes, so the same model can run with dv-solve or with z3:
 
 ```bash
-export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"
-./obj_dir/Vtop
+export VERILATOR_SOLVER=dv-solve-smt2
+./obj_dir/Vtop +verilator+rand+sampler+solver
 ```
 
 Verilator splits the value at each space and does not understand quotes, so
@@ -111,21 +105,24 @@ running it, set `VERILATOR_SOLVER` when running `verilator`. The generated
 makefile builds that command into the model as `VM_SOLVER_DEFAULT`, and
 `VERILATOR_RAND_SAMPLER` likewise as `VM_RAND_SAMPLER_DEFAULT`.
 
-Name `dv-solve-smt2` by its full path there; with a bare name, the model
-fails to start it:
-
 ```bash
-export VERILATOR_SOLVER="$(command -v dv-solve-smt2) --interactive --mode=verilator"
 export VERILATOR_RAND_SAMPLER=solver
+export VERILATOR_SOLVER=dv-solve-smt2
 verilator --binary top.sv
 unset VERILATOR_SOLVER VERILATOR_RAND_SAMPLER
 ./obj_dir/Vtop          # dv-solve, solver sampler; the environment still overrides both
 ```
 
+The model looks `dv-solve-smt2` up on `PATH` when it runs. A built-in command
+with options, such as `--mode=verilator` for the default sampler, needs the
+full path instead, `"$(command -v dv-solve-smt2) --mode=verilator"`: with a
+bare name followed by options, the model fails to start it (see
+{ref}`verilator-check`).
+
 You can confirm what was built in: `grep _DEFAULT= obj_dir/*.mk`.
 With a build system other than the generated makefile, define the macros
 yourself when compiling `verilated.cpp`, for example
-`-DVM_SOLVER_DEFAULT='"/path/to/dv-solve-smt2 --interactive --mode=verilator"' -DVM_RAND_SAMPLER_DEFAULT='"solver"'`.
+`-DVM_SOLVER_DEFAULT='"dv-solve-smt2"' -DVM_RAND_SAMPLER_DEFAULT='"solver"'`.
 
 ### From a C++ harness
 
@@ -133,7 +130,7 @@ A harness that builds its own `VerilatedContext` can set the solver before
 the first `randomize()`:
 
 ```c++
-contextp->solverProgram("dv-solve-smt2 --interactive --mode=verilator");
+contextp->solverProgram("dv-solve-smt2");
 ```
 
 This overrides `VERILATOR_SOLVER`, so a user can no longer switch solvers
@@ -158,10 +155,10 @@ apply:
   (Verilator 5.048 and later).
   See {ref}`verilator-check` and {ref}`verilator-capture`.
 
-dv-solve options go in the solver command. With the `default` sampler, the
-one that matters is `--verilator-hash=ignore` (see
-{ref}`verilator-default-sampler`), for example
-`VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator --verilator-hash=ignore"`.
+dv-solve options go in the solver command. With the `solver` sampler none are
+needed. With the `default` sampler, use `--mode=verilator`, and optionally
+`--verilator-hash=ignore` (see {ref}`verilator-default-sampler`), for example
+`VERILATOR_SOLVER="dv-solve-smt2 --mode=verilator --verilator-hash=ignore"`.
 Environment variables such as `DV_LOG` are read by the solver process, which
 inherits the simulation's environment, so set them before running the
 simulation (see {doc}`../reference/environment`).
@@ -191,12 +188,13 @@ sampler, shows which sampler the run used. With `solver`, each `randomize()`
 call in the log starts with a `(set-option :random-seed N)` line.
 
 **dv-solve's own log.** Set `DV_LOG` to a file name. dv-solve appends one
-`vlt-route:` line to it for every `check-sat`. If the file stays empty or is
-never created, dv-solve did not run:
+line to it for every `check-sat`, naming the engine it chose: `route:`, or
+`vlt-route:` with `--mode=verilator`. If the file stays empty or is never
+created, dv-solve did not run:
 
 ```bash
-DV_LOG=$PWD/dv-solve.log ./obj_dir/Vtop
-grep -c vlt-route dv-solve.log
+DV_LOG=$PWD/dv-solve.log ./obj_dir/Vtop +verilator+rand+sampler+solver
+grep -c 'route:' dv-solve.log
 ```
 
 Use an absolute path: a relative one is taken from the directory the
@@ -207,11 +205,12 @@ names the command it tried, and every `randomize()` returns 0:
 
 ```text
 %Warning: Unable to communicate with SAT solver, please check its installation or specify a different one in VERILATOR_SOLVER environment variable.
- ... Tried: $ dv-solve-smt2\ --interactive\ --mode=verilator
+ ... Tried: $ dv-solve-smt2\ --mode=verilator
 ```
 
-A backslash before each space, as here, means the command was built in
-without a full path (see {ref}`In the build <verilator-build>` above). A `Tried:` line naming
+A backslash before each space, as here, means a command with options was
+built in without a full path (see {ref}`In the build <verilator-build>`
+above). A `Tried:` line naming
 `z3` or `bitwuzla` means `VERILATOR_SOLVER` was not set where the simulation
 runs.
 
@@ -222,16 +221,27 @@ Verilator 5.052 and earlier, and later versions run without
 `+verilator+rand+sampler+solver`, sample the values themselves: after the
 first solution they ask again with random parity constraints over the
 variables' bits, with bits pinned to random values, or, in 5.052, with
-earlier solutions blocked to collect a batch. dv-solve answers all of these
-correctly, but it already picks a random solution each time, so the extra
-queries mostly add cost: they take most of the time of a call.
+earlier solutions blocked to collect a batch. For these, run dv-solve in
+Verilator mode:
+
+```bash
+export VERILATOR_SOLVER="dv-solve-smt2 --mode=verilator"
+```
+
+`--mode=verilator` tells dv-solve that the queries are randomization
+requests, not proofs: it uses the engine that spreads solutions most evenly,
+and keeps recently used problems ready, since a testbench usually calls
+`randomize()` on the same class many times. dv-solve answers all of
+Verilator's queries correctly, but it already picks a random solution each
+time, so the extra queries mostly add cost: they take most of the time of a
+call. Where you can, use the `solver` sampler instead.
 
 `--verilator-hash=ignore` skips the parity constraints: dv-solve answers each of those queries
 with the solution it already found, which satisfies every constraint of the
 class. Only Verilator's request for variety is not honoured.
 
 ```bash
-export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator --verilator-hash=ignore"
+export VERILATOR_SOLVER="dv-solve-smt2 --mode=verilator --verilator-hash=ignore"
 ```
 
 Calls get much cheaper. Whether the values spread as well depends on the
@@ -263,21 +273,30 @@ because it plays no part in the conflict.
 
 ## When dv-solve can't decide
 
-If a constraint uses something dv-solve doesn't support, dv-solve answers
-`unknown` (see {doc}`../concepts/soundness`). Verilator reports that as
+If a constraint is beyond what dv-solve supports, dv-solve answers `unknown`
+(see {doc}`../concepts/soundness`, which lists the limits). For example, a
+random variable wider than 65535 bits:
 
-```text
-%Warning: .../verilated_random.cpp:362: Solver returned unknown (timed out or incomplete), so randomize() may return 0; warned once
+```{literalinclude} ../../examples/verilator/unknown.sv
+:language: systemverilog
+:lines: 1-4
 ```
 
-and `randomize()` returns 0. The SMT-LIB2 operators dv-solve does not support
-yet are listed in {doc}`smt2-solver`.
+Verilator 5.054 reports that as
+
+```text
+%Warning: .../verilated_random.cpp:509: Solver returned unknown (timed out or incomplete), so randomize() may return 0; warned once
+```
+
+and `randomize()` returns 0. The line number in the message depends on the
+Verilator version.
 
 To see why dv-solve answered `unknown`, set `DV_LOG` to a file name before
 running the simulation. dv-solve writes the reason for each `unknown` there,
-next to the `vlt-route:` line for each `check-sat`, which names the engine it
-was routed to and why (for example `vlt-route: bitblast (enumeration)` for
-the batch of solutions Verilator 5.052 collects).
+next to the `route:` line for each `check-sat`, which names the engine it
+was routed to and why (with `--mode=verilator`, the `vlt-route:` line; for
+example `vlt-route: bitblast (enumeration)` for the batch of solutions
+Verilator 5.052 collects).
 
 (verilator-capture)=
 ## Capturing a testcase
@@ -300,7 +319,7 @@ Run the simulation with this wrapper as the solver:
 ```bash
 export DVS_CAPTURE=$PWD/capture/run          # where to put the files
 mkdir -p capture
-VERILATOR_SOLVER=/path/to/dv-solve-capture ./obj_dir/Vtop +verilator+seed+1
+VERILATOR_SOLVER=/path/to/dv-solve-capture ./obj_dir/Vtop +verilator+rand+sampler+solver +verilator+seed+1
 ls capture
 ```
 
@@ -310,8 +329,8 @@ run.3396371.out  run.3396371.smt2
 
 `run.PID.smt2` is everything Verilator sent, byte for byte; `run.PID.out` is
 everything dv-solve answered. Options after the wrapper's name are passed on
-to `dv-solve-smt2`, so a session using `--verilator-hash=ignore` is captured
-with `VERILATOR_SOLVER="/path/to/dv-solve-capture --verilator-hash=ignore"`.
+to `dv-solve-smt2`, so a session with the default sampler is captured with
+`VERILATOR_SOLVER="/path/to/dv-solve-capture --mode=verilator"`.
 Verilator starts a new solver process if one fails, so a run can leave more
 than one pair; each pair replays on its own.
 
@@ -327,12 +346,13 @@ to capture.
 ### Replaying it
 
 ```bash
-dv-solve-smt2 --mode=verilator capture/run.3396371.smt2 > replay.out
+dv-solve-smt2 capture/run.3396371.smt2 > replay.out
 cmp replay.out capture/run.3396371.out && echo same
 ```
 
 The replay gives the same answers and the same values as the simulation did,
-as long as the options and the dv-solve version are the same.
+as long as the options (add `--mode=verilator` if the session used it) and
+the dv-solve version are the same.
 `dv-solve-smt2 --version` prints the version. Compare the output, not the
 exit status: a session usually ends with Verilator's `(reset)`, after which
 there is no answer to report, so `dv-solve-smt2` exits with 2 (see
@@ -340,11 +360,11 @@ there is no answer to report, so `dv-solve-smt2` exits with 2 (see
 
 ### Checking the answers against another solver
 
+A session recorded with the `solver` sampler compares as it is.
 `--mode=verilator` deliberately does not hold the default sampler's variety
-requests to their letter (see {ref}`verilator-default-sampler`), so in that mode some answers
-differ from another solver's on purpose. To check that each answer is
-correct, replay the session without it and compare the `sat`/`unsat` lines
-with z3's:
+requests to their letter (see {ref}`verilator-default-sampler`), so in that
+mode some answers differ from another solver's on purpose; replay such a
+session without the option. Then compare the `sat`/`unsat` lines with z3's:
 
 ```bash
 dv-solve-smt2 capture/run.3396371.smt2 > dvs.out
@@ -366,7 +386,7 @@ own, and much easier to read:
 ```bash
 awk '/^\(set-option :produce-models/ {p=1} p {print} p && /^\(check-sat\)$/ {exit}' \
     capture/run.3396371.smt2 > first.smt2
-dv-solve-smt2 --mode=verilator first.smt2
+dv-solve-smt2 first.smt2
 ```
 
 When the problem is in a later call, cut out the commands from the `(reset)`

@@ -118,16 +118,14 @@ _COVERED = {
     ("getting-started/quickstart-smt2.md", "$ dv-solve-smt2"): "test_quickstart_smt2_session",
     ("getting-started/quickstart-verilator.md", "verilator --binary packet.sv"):
         "test_quickstart_verilator",
-    ("getting-started/quickstart-verilator.md",
-     'export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"'):
+    ("getting-started/quickstart-verilator.md", "export VERILATOR_SOLVER=dv-solve-smt2"):
         "test_quickstart_verilator",
-    ("getting-started/quickstart-verilator.md", "addr=0000088c len=3 kind=14"):
+    ("getting-started/quickstart-verilator.md", "addr=00000aa0 len=7 kind=12"):
         "test_quickstart_verilator",
     ("getting-started/quickstart-verilator.md",
      "./obj_dir/Vpacket +verilator+rand+sampler+solver +verilator+seed+1"):
         "test_quickstart_verilator",
-    ("guides/verilator.md",
-     'export VERILATOR_SOLVER="$(command -v dv-solve-smt2) --interactive --mode=verilator"'):
+    ("guides/verilator.md", "export VERILATOR_RAND_SAMPLER=solver"):
         "test_verilator_guide_build_in",
     ("guides/verilator.md", "%Warning: Unable to communicate with SAT solver, please check its "
                             "installation or specify a different one in VERILATOR_SOLVER "
@@ -137,30 +135,30 @@ _COVERED = {
      "./obj_dir/Vtop +verilator+rand+sampler+solver +verilator+solver+file+solver.log"):
         "test_verilator_guide_check",
     ("guides/verilator.md", "# Open: dv-solve-smt2"): "test_verilator_guide_check",
-    ("guides/verilator.md", "DV_LOG=$PWD/dv-solve.log ./obj_dir/Vtop"): "test_verilator_guide_check",
+    ("guides/verilator.md", "DV_LOG=$PWD/dv-solve.log ./obj_dir/Vtop +verilator+rand+sampler+solver"):
+        "test_verilator_guide_check",
     ("guides/verilator.md", "export DVS_CAPTURE=$PWD/capture/run          # where to put the files"):
         "test_verilator_guide_capture",
     ("guides/verilator.md", "run.3396371.out  run.3396371.smt2"): "test_verilator_guide_capture",
-    ("guides/verilator.md",
-     "dv-solve-smt2 --mode=verilator capture/run.3396371.smt2 > replay.out"):
+    ("guides/verilator.md", "dv-solve-smt2 capture/run.3396371.smt2 > replay.out"):
         "test_verilator_guide_capture",
     ("guides/verilator.md", "dv-solve-smt2 capture/run.3396371.smt2 > dvs.out"):
         "test_verilator_guide_capture",
     ("guides/verilator.md",
      "awk '/^\\(set-option :produce-models/ {p=1} p {print} p && /^\\(check-sat\\)$/ {exit}' \\"):
         "test_verilator_guide_capture",
-    ("guides/verilator.md",
-     'export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"'):
+    ("guides/verilator.md", "export VERILATOR_SOLVER=dv-solve-smt2"):
         "test_verilator_guide_setup",
+    ("guides/verilator.md", 'export VERILATOR_SOLVER="dv-solve-smt2 --mode=verilator"'):
+        "test_verilator_guide_hash_ignore",
     ("guides/verilator.md",
-     'export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator '
-     '--verilator-hash=ignore"'):
+     'export VERILATOR_SOLVER="dv-solve-smt2 --mode=verilator --verilator-hash=ignore"'):
         "test_verilator_guide_hash_ignore",
     ("guides/verilator.md",
      "%Warning-UNSATCONSTR: bad.sv:3: Unsatisfied constraint: 'constraint c1 { x > 10; }'"):
         "test_verilator_guide_unsat",
     ("guides/verilator.md",
-     "%Warning: .../verilated_random.cpp:362: Solver returned unknown (timed out or incomplete), "
+     "%Warning: .../verilated_random.cpp:509: Solver returned unknown (timed out or incomplete), "
      "so randomize() may return 0; warned once"):
         "test_verilator_guide_unknown",
     ("guides/systemverilog-dpi.md", "python3 packet_problem.py        # writes packet_problem_pkg.sv"):
@@ -183,7 +181,7 @@ _NOT_RUN = {
         "fetches packages from the network",
     ("internals/architecture.md", " Python / C builder ─┐"): "a diagram, not code",
     ("guides/verilator.md",
-     'contextp->solverProgram("dv-solve-smt2 --interactive --mode=verilator");'):
+     'contextp->solverProgram("dv-solve-smt2");'):
         "one line of a user's C++ harness; the call is Verilator's API",
     ("internals/randomization.md", " seeded check-sat"): "a diagram, not code",
     ("guides/smt2-solver.md", "(error \"line 10 column 31: unexpected ')'\")"):
@@ -390,9 +388,8 @@ def test_quickstart_verilator(shell_env: dict, tmp_path: Path) -> None:
     page = "getting-started/quickstart-verilator.md"
     sampler = _has_sampler(_verilator())
     build = _block(page, "verilator --binary packet.sv").text
-    run = _for_verilator(_block(page, 'export VERILATOR_SOLVER="dv-solve-smt2 '
-                                      '--interactive --mode=verilator"').text, sampler)
-    shown = _block(page, "addr=0000088c len=3 kind=14").text
+    run = _for_verilator(_block(page, "export VERILATOR_SOLVER=dv-solve-smt2").text, sampler)
+    shown = _block(page, "addr=00000aa0 len=7 kind=12").text
     out = _verilator_run(_EXAMPLES / "verilator" / "packet.sv", tmp_path, shell_env, build, run)
     assert "Warning" not in out, out            # no solver errors, no unknowns
     assert len(_packets(shown)) == 5 and len(_packets(out)) == 5, out
@@ -414,14 +411,15 @@ def test_quickstart_verilator(shell_env: dict, tmp_path: Path) -> None:
 # ------------------------------------------------------------------ #
 
 def test_verilator_guide_setup() -> None:
-    first = 'export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"'
+    """The guide and the quickstart give the same setup: dv-solve-smt2 with
+    no options, and the solver sampler."""
+    first = "export VERILATOR_SOLVER=dv-solve-smt2"
     quick = _block("getting-started/quickstart-verilator.md", first).body
     guide = [b.body for b in _parse(_SITE / "guides" / "verilator.md")
              if b.body and b.body[0] == first]
     assert len(guide) == 2, guide
-    assert guide[0][1] == "./obj_dir/Vtop" + _SAMPLER, guide[0]
+    assert all(g[1] == "./obj_dir/Vtop" + _SAMPLER for g in guide), guide
     assert quick[1] == "./obj_dir/Vpacket" + _SAMPLER, quick
-    assert guide[1][1] == "./obj_dir/Vtop", guide[1]
 
 
 @pytest.fixture(scope="module")
@@ -440,7 +438,7 @@ def vlt_top(shell_env: dict, tmp_path_factory) -> tuple:
 def test_verilator_guide_check(shell_env: dict, vlt_top: tuple) -> None:
     d, sampler = vlt_top
     page = "guides/verilator.md"
-    env = dict(shell_env, VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator")
+    env = dict(shell_env, VERILATOR_SOLVER="dv-solve-smt2")
     cmd = _block(page, "./obj_dir/Vtop" + _SAMPLER + " +verilator+solver+file+solver.log").text
     shown = _block(page, "# Open: dv-solve-smt2").body
     if _runtime_has(_verilator(), "+verilator+solver+file+"):      # 5.048 and later
@@ -450,19 +448,18 @@ def test_verilator_guide_check(shell_env: dict, vlt_top: tuple) -> None:
         i = next(k for k, ln in enumerate(got) if ln.startswith("# Open"))
         n = 2 if sampler else 1                   # older Verilator: no sampler line
         assert got[i:i + n] == shown[:n], r.stdout
-    log = _block(page, "DV_LOG=$PWD/dv-solve.log ./obj_dir/Vtop").text
-    r = _sh(log, d, env, timeout=120)
+    log = _block(page, "DV_LOG=$PWD/dv-solve.log ./obj_dir/Vtop" + _SAMPLER).text
+    r = _sh(_for_verilator(log, sampler), d, env, timeout=120)
     assert r.returncode == 0 and int(r.stdout.split()[-1]) > 0, r.stdout + r.stderr
 
 
 def test_verilator_guide_build_in(shell_env: dict, tmp_path: Path) -> None:
-    """A full path built in as the default runs dv-solve with nothing set at
-    run time; a bare name with options fails as the page shows."""
+    """dv-solve-smt2 built in as the default runs with nothing set at run
+    time; a bare name with options fails as the page shows."""
     _need(_verilator(), "verilator")
     _need(_smt2_exe(), "dv-solve-smt2")
     page = "guides/verilator.md"
-    block = _block(page, 'export VERILATOR_SOLVER="$(command -v dv-solve-smt2) '
-                         '--interactive --mode=verilator"').text
+    block = _block(page, "export VERILATOR_RAND_SAMPLER=solver").text
     shutil.copy(_EXAMPLES / "verilator" / "packet.sv", tmp_path / "top.sv")
     env = {k: v for k, v in shell_env.items()
            if k not in ("VERILATOR_SOLVER", "VERILATOR_RAND_SAMPLER")}
@@ -470,12 +467,12 @@ def test_verilator_guide_build_in(shell_env: dict, tmp_path: Path) -> None:
     r = _sh(script, tmp_path, env)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     assert len(set(_packets(r.stdout))) > 1, r.stdout
-    assert "vlt-route:" in (tmp_path / "dv.log").read_text()     # dv-solve answered
+    assert "route:" in (tmp_path / "dv.log").read_text()     # dv-solve answered
 
     shown = _block(page, "%Warning: Unable to communicate with SAT solver, please check its "
                          "installation or specify a different one in VERILATOR_SOLVER "
                          "environment variable.").body
-    bad = dict(env, VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator")
+    bad = dict(env, VERILATOR_SOLVER="dv-solve-smt2 --mode=verilator")
     r = _sh("verilator --binary --Mdir obj_bad top.sv", tmp_path, bad)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     r = subprocess.run(["./obj_bad/Vtop"], cwd=tmp_path, env=env,
@@ -486,11 +483,11 @@ def test_verilator_guide_build_in(shell_env: dict, tmp_path: Path) -> None:
 
 
 def test_verilator_guide_capture(shell_env: dict, vlt_top: tuple) -> None:
-    d, _ = vlt_top
+    d, sampler = vlt_top
     page = "guides/verilator.md"
     rec = _block(page, "export DVS_CAPTURE=$PWD/capture/run          # where to put the files").text
-    rec = rec.replace("/path/to/dv-solve-capture",
-                      str(_EXAMPLES / "verilator" / "dv-solve-capture"))
+    rec = _for_verilator(rec.replace("/path/to/dv-solve-capture",
+                                     str(_EXAMPLES / "verilator" / "dv-solve-capture")), sampler)
     r = _sh(rec, d, shell_env, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
     shown = _block(page, "run.3396371.out  run.3396371.smt2").body[0].split()
@@ -506,7 +503,7 @@ def test_verilator_guide_capture(shell_env: dict, vlt_top: tuple) -> None:
         assert r.returncode == 0, r.stdout + r.stderr
         return r.stdout
 
-    assert run("dv-solve-smt2 --mode=verilator capture/run.3396371.smt2 > replay.out").strip() == "same"
+    assert run("dv-solve-smt2 capture/run.3396371.smt2 > replay.out").strip() == "same"
     assert run("awk '/^\\(set-option :produce-models/ {p=1} p {print} p && "
                "/^\\(check-sat\\)$/ {exit}' \\").split() == ["sat"]
     z3 = _z3()
@@ -516,14 +513,16 @@ def test_verilator_guide_capture(shell_env: dict, vlt_top: tuple) -> None:
 
 
 def test_verilator_guide_hash_ignore() -> None:
-    """The documented VERILATOR_SOLVER line, given a parity query that
+    """The documented --verilator-hash=ignore line, given a parity query that
     contradicts the one before it, keeps answering sat (the parity constraint
-    is skipped), where the default answers unsat."""
+    is skipped), where the documented Verilator-mode line answers unsat."""
     exe = _need(_smt2_exe(), "dv-solve-smt2")
-    line = _block("guides/verilator.md", 'export VERILATOR_SOLVER="dv-solve-smt2 '
-                                         '--interactive --mode=verilator '
-                                         '--verilator-hash=ignore"').body[0]
+    page = "guides/verilator.md"
+    line = _block(page, 'export VERILATOR_SOLVER="dv-solve-smt2 --mode=verilator '
+                        '--verilator-hash=ignore"').body[0]
+    mode = _block(page, 'export VERILATOR_SOLVER="dv-solve-smt2 --mode=verilator"').body[0]
     args = line.split('"')[1].split()[1:]
+    assert mode.split('"')[1].split()[1:] == [x for x in args if "hash" not in x], (mode, line)
     script = ("(set-logic QF_ABV)(declare-fun x () (_ BitVec 8))"
               "(assert (= #b1 (ite (bvult x #x10) #b1 #b0)))(check-sat)"
               "(assert (= #b1 ((_ extract 0 0) x)))(check-sat)"
@@ -533,7 +532,7 @@ def test_verilator_guide_hash_ignore() -> None:
         assert r.stdout.split()[-1] == want, (a, r.stdout)
 
 
-_VLT_RUN = 'export VERILATOR_SOLVER="dv-solve-smt2 --interactive --mode=verilator"\n'
+_VLT_RUN = "export VERILATOR_SOLVER=dv-solve-smt2\n"
 
 
 def test_verilator_guide_unsat(shell_env: dict, tmp_path: Path) -> None:
@@ -546,38 +545,24 @@ def test_verilator_guide_unsat(shell_env: dict, tmp_path: Path) -> None:
     assert out.splitlines()[:len(shown)] == shown, out
 
 
-# A variable wider than 192 bits is beyond what dv-solve supports (see the
-# SMT-LIB2 guide), so Verilator gets `unknown`. If this starts solving, pick
-# another unsupported construct.
-_UNKNOWN_SV = """\
-class Item;
-  rand bit [255:0] w, v;
-  constraint c { w * v == 256'd12345678901234567890123; }
-endclass
-module top;
-  initial begin
-    automatic Item it = new;
-    if (it.randomize() == 0) $display("randomize() failed");
-    $finish;
-  end
-endmodule
-"""
-
-
 def test_verilator_guide_unknown(shell_env: dict, tmp_path: Path) -> None:
     _need(_verilator(), "verilator")
     _need(_smt2_exe(), "dv-solve-smt2")
-    shown = _block("guides/verilator.md", "%Warning: .../verilated_random.cpp:362: Solver returned "
+    """unknown.sv (a variable wider than dv-solve's 65535-bit limit) gets
+    `unknown`. If it starts solving, pick another construct beyond a limit
+    in concepts/soundness.md. The warning's line number varies with the
+    Verilator version, so it is not compared."""
+    shown = _block("guides/verilator.md", "%Warning: .../verilated_random.cpp:509: Solver returned "
                                           "unknown (timed out or incomplete), so randomize() "
                                           "may return 0; warned once").body[0]
-    src = tmp_path / "src" / "unk.sv"
-    src.parent.mkdir()
-    src.write_text(_UNKNOWN_SV)
-    out = _verilator_run(src, tmp_path, shell_env, "verilator --binary unk.sv",
-                         _VLT_RUN + "./obj_dir/Vunk")
-    warns = [re.sub(r"^%Warning: \S*/verilated_random", "%Warning: .../verilated_random", ln)
-             for ln in out.splitlines() if ln.startswith("%Warning")]
-    assert warns and warns[0] == shown, out
+    out = _verilator_run(_EXAMPLES / "verilator" / "unknown.sv", tmp_path, shell_env,
+                         "verilator --binary unknown.sv", _VLT_RUN + "./obj_dir/Vunknown")
+
+    def norm(ln: str) -> str:
+        ln = re.sub(r"^%Warning: \S*/verilated_random", "%Warning: .../verilated_random", ln)
+        return re.sub(r"verilated_random\.cpp:\d+", "verilated_random.cpp:N", ln)
+    warns = [norm(ln) for ln in out.splitlines() if ln.startswith("%Warning")]
+    assert warns and warns[0] == norm(shown), out
     assert "randomize() failed" in out, out
 
 
