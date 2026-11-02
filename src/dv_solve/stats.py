@@ -146,6 +146,14 @@ SCHEMA.update({
     "read": "reading a model back: dvs_solver_get_values, SMT2 get-value, and time a "
             "front end reports",
     "previous": "each solve against the previous one on its thread",
+    "expected": "the expected-cost check, made on the exact numbers before rounding: "
+                "the class's cost against the best case for its shape (dv_solve.perfmodel)",
+    "over": "the class's cost over the best case (rounded down to a power of two)",
+    "unexpected": "1 if the cost is at least 4x the best case for its shape",
+    "anomalous": "1 if the cost is at least 4x what dv-solve usually spends on its shape "
+                 "(a regression or a one-off, relative to dv-solve's own habits)",
+    "uniform": "solves that asked for uniform sampling over the solutions (fair_pick), "
+               "which costs more by design",
     "same": "the same problem as the previous solve",
     "constants": "the same class as the previous solve, other constants",
     "shape": "another class than the previous solve, or the thread's first",
@@ -380,10 +388,17 @@ def bundle(data: dict, salt: Optional[bytes], k: int = 3) -> dict:
     if data.get("schema") != FILE_SCHEMA:
         raise ValueError("bundle takes a stats file")
     s = data["snapshot"]
+    # The expected-cost check runs here, on the exact numbers: a ratio of two
+    # numbers rounded to powers of two could be off by 4x.
+    expected = _expected(data)
     kept, folded = [], None
     for c in s["classes"]:
         if c["solves"] >= k:
             r = {key: v for key, v in c.items() if key != "hll"}
+            e = expected.get(c["class"])
+            if e:
+                r["expected"] = {"over": int(e["ratio"]), "unexpected": int(e["unexpected"]),
+                                 "anomalous": int(e["anomalous"])}
             if "values" in r:
                 r["values"] = {key: v for key, v in r["values"].items() if key != "hll"}
             r["class"] = _salted(c["class"], salt)
@@ -614,8 +629,16 @@ def _shape_note(c: dict) -> str:
     return "; ".join(parts)
 
 
+def _expected(data: dict) -> Dict[str, dict]:
+    """The expected-cost check (dv_solve.perfmodel) per class id; empty if no
+    model ships with this install."""
+    from dv_solve import perfmodel
+    return {r["class"]: r for r in perfmodel.check(data)}
+
+
 def report(data: dict, top: int = 10) -> str:
     s = data["snapshot"]
+    expected = _expected(data)
     total = s["wall_ns"] or 1
     lines = [f"dv-solve {data['dv_solve']}: {s['solves']} solves, {_ms(s['wall_ns'])} "
              f"solver time, {len(s['classes'])} classes, {s.get('compiles', 0)} compiles"]
@@ -629,6 +652,16 @@ def report(data: dict, top: int = 10) -> str:
     if s.get("reasons"):
         lines.append("  routing reasons: " + ", ".join(
             f"{k} {v}" for k, v in sorted(s["reasons"].items(), key=lambda kv: -kv[1])))
+    flagged = [e for e in expected.values() if e["unexpected"]]
+    odd = [e for e in expected.values() if e["anomalous"]]
+    if odd:
+        lines.append(f"  anomalous: {len(odd)} of {len(expected)} classes cost at least 4x what "
+                     f"dv-solve usually spends on their shape")
+    if flagged:
+        lines.append(f"  unexpected: {len(flagged)} of {len(expected)} classes cost at least 4x "
+                     f"the best case for their shape; "
+                     f"{_ms(sum(e['recoverable_ns'] for e in flagged))} recoverable "
+                     f"(python -m dv_solve.perfmodel check)")
     cum = 0
     lines.append(f"  top classes by solver time:")
     for c in s["classes"][:top]:
@@ -645,6 +678,13 @@ def report(data: dict, top: int = 10) -> str:
         note = _shape_note(c)
         if note:
             lines.append(f"      {note}")
+        e = expected.get(c["class"])
+        if e and e["unexpected"]:
+            lines.append(f"      UNEXPECTED: {e['ratio']:.0f}x the best case for its shape; "
+                         f"{_ms(e['recoverable_ns'])} recoverable")
+        if e and e["anomalous"]:
+            lines.append(f"      ANOMALOUS: {2 ** e['self_delta']:.0f}x what dv-solve usually "
+                         f"spends on its shape (a regression or a one-off?)")
     if s.get("motifs"):
         lines.append("  motifs by the solver time of the classes holding them:")
         for m, e in sorted(s["motifs"].items(), key=lambda kv: -kv[1]["wall_ns"])[:8]:

@@ -183,6 +183,8 @@ _COVERED = {
 _NOT_RUN = {
     ("guides/solve-statistics.md", "DV_STATS=stats.%p.json ./run_my_tests"):
         "runs the user's own tests",
+    ("guides/solve-statistics.md", "python -m dv_solve.perfmodel check stats.*.json"):
+        "tests/unit/test_perfmodel.py runs the check command",
     ("guides/solve-statistics.md", "from dv_solve import stats"):
         "a fragment of a front end; tests/unit/test_stats_cli.py runs stats.timed",
     ("getting-started/install.md", "pip install dv-solve"): "installs from PyPI",

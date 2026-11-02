@@ -46,7 +46,8 @@ package-dir = {"" = "src"}
 [tool.setuptools.package-data]
 # Native libs + headers + SV package, staged into the package by the build.
 dv_solve = ["*.so", "*.so.*", "*.dll", "*.dylib", "*.lib",
-            "share/include/**/*.h", "share/sv/*.sv"]
+            "share/include/**/*.h", "share/sv/*.sv",
+            "perf_model.json"]   # the expected-cost model (dv_solve.perfmodel)
 
 [tool.ivpm-build]
 cmake = true

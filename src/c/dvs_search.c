@@ -2599,6 +2599,7 @@ static dvs_result_t _solver_solve_stats(dvs_ctx_t *ctx, const dvs_solve_opts_t *
     int outer = dvs_stats_begin(DVS_STATS_PATH_API);
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_CDCL);
     if (ctx) dvs_stats_note_class(ctx->stats_class, ctx->problem_fp);
+    if (opts && opts->fair_pick) dvs_stats_note_uniform();
     uint64_t fires = ctx ? ctx->prop_fires : 0, confl = ctx ? ctx->conflicts_ever : 0;
     if (ctx) ctx->stats_cons_on = ctx->stats_cons_hits && dvs_stats_want_values()
                                   && dvs_stats_take_sample(&ctx->stats_cons_seen);

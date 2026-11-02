@@ -447,6 +447,7 @@ static void test_values(void) {
     free(p);
     js = snap();
     CHECK(J(js, "values", "models") == 9, "values: 9 models on the handle path");
+    CHECK(J(js, "classes", "uniform") == 9, "uniform: the handle path asks for uniform sampling");
     free(js);
 
     dvs_stats_reset();
@@ -506,6 +507,7 @@ static void test_signals(void) {
     CHECK(J(js, "classes", "previous", "same") == 69
           && J(js, "classes", "previous", "shape") == 1, "previous: 69 repeats");
     CHECK(J(js, "classes", "time_ns", "compile") > 0, "time: compile timed");
+    CHECK(J(js, "classes", "uniform") == 0, "uniform: plain seeded API solves do not");
     free(js);
 
     /* two instances of one class, solved in turn: other constants each time */

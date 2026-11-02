@@ -4337,6 +4337,14 @@ static void bb_eval_model_check(dvs_bbsolver_t *S) {
             mismatch, checked, declined, S->ladder_enum_zero);
 }
 
+/* Statistics: the bit-level engine's deterministic work outside the SAT
+ * search (clauses encoded, AIG node visits in simulation and the samplers),
+ * which the SAT backend's own count (dvs_sat_solve) leaves out. A wrapper
+ * that opened the engine scope adds its growth to the solve's work. */
+static uint64_t _bb_aux_work(const dvs_bbsolver_t *S) {
+    return S ? S->aux_work + (S->sat ? dvs_sat_num_clauses(S->sat) : 0) : 0;
+}
+
 /* Note the problem's shape class on the open stats record, computed once. */
 static void _bb_note_class(dvs_bbsolver_t *S) {
     if (!S || !dvs_stats_want_values()) return;
@@ -4370,8 +4378,10 @@ int dvs_bbsolver_check(dvs_bbsolver_t *S, uint64_t seed) {
     int outer = dvs_stats_begin(DVS_STATS_PATH_BVSAT);
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
     _bb_note_class(S);
+    const uint64_t aux0 = _bb_aux_work(S);
     int rc = _bb_check_body(S, seed);
     _bb_note_values(S, rc);
+    if (eng) dvs_stats_add_work(_bb_aux_work(S) - aux0);
     dvs_stats_engine_leave(eng);
     if (outer) dvs_stats_end(dvs_stats_result_of_bb(rc));
     return rc;
@@ -4656,7 +4666,9 @@ int dvs_bbsolver_solve_assuming(dvs_bbsolver_t *S, const int32_t *lits,
     if (!dvs_stats_on()) return _bb_solve_assuming_body(S, lits, n, conflict_limit);
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
     _bb_note_class(S);
+    const uint64_t aux0 = _bb_aux_work(S);
     int rc = _bb_solve_assuming_body(S, lits, n, conflict_limit);
+    if (eng) dvs_stats_add_work(_bb_aux_work(S) - aux0);
     dvs_stats_engine_leave(eng);
     return rc;
 }
@@ -4787,8 +4799,10 @@ int dvs_bbsolver_sample(dvs_bbsolver_t *S, const uint32_t *vars,
     int outer = dvs_stats_begin(DVS_STATS_PATH_BVSAT);
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
     _bb_note_class(S);
+    const uint64_t aux0 = _bb_aux_work(S);
     int rc = _bb_sample_body(S, vars, n_vars, seed);
     _bb_note_values(S, rc);
+    if (eng) dvs_stats_add_work(_bb_aux_work(S) - aux0);
     dvs_stats_engine_leave(eng);
     if (outer) dvs_stats_end(dvs_stats_result_of_bb(rc));
     return rc;
@@ -4961,8 +4975,10 @@ int dvs_bbsolver_rediversify(dvs_bbsolver_t *S, uint64_t seed) {
     if (!dvs_stats_on()) return _bb_rediversify_body(S, seed);
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
     _bb_note_class(S);
+    const uint64_t aux0 = _bb_aux_work(S);
     int rc = _bb_rediversify_body(S, seed);
     _bb_note_values(S, rc);
+    if (eng) dvs_stats_add_work(_bb_aux_work(S) - aux0);
     dvs_stats_engine_leave(eng);
     return rc;
 }
@@ -5106,8 +5122,10 @@ int dvs_bbsolver_resample(dvs_bbsolver_t *S, uint64_t seed) {
     if (!dvs_stats_on()) return _bb_resample_body(S, seed);
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
     _bb_note_class(S);
+    const uint64_t aux0 = _bb_aux_work(S);
     int rc = _bb_resample_body(S, seed);
     _bb_note_values(S, rc);
+    if (eng) dvs_stats_add_work(_bb_aux_work(S) - aux0);
     dvs_stats_engine_leave(eng);
     return rc;
 }
@@ -5367,8 +5385,10 @@ int dvs_bbsolver_resolve(dvs_bbsolver_t *S, uint64_t seed) {
     if (!dvs_stats_on()) return _bb_resolve_body(S, seed);
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
     _bb_note_class(S);
+    const uint64_t aux0 = _bb_aux_work(S);
     int rc = _bb_resolve_body(S, seed);
     _bb_note_values(S, rc);
+    if (eng) dvs_stats_add_work(_bb_aux_work(S) - aux0);
     dvs_stats_engine_leave(eng);
     return rc;
 }
@@ -5401,8 +5421,10 @@ int dvs_bbsolver_resolve_raw(dvs_bbsolver_t *S) {
     if (!dvs_stats_on()) return _bb_resolve_raw_body(S);
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
     _bb_note_class(S);
+    const uint64_t aux0 = _bb_aux_work(S);
     int rc = _bb_resolve_raw_body(S);
     _bb_note_values(S, rc);
+    if (eng) dvs_stats_add_work(_bb_aux_work(S) - aux0);
     dvs_stats_engine_leave(eng);
     return rc;
 }
@@ -8802,8 +8824,10 @@ int dvs_bbsolver_sess_solve(dvs_bbsolver_t *S, uint64_t seed) {
     if (!dvs_stats_on()) return _bb_sess_solve_body(S, seed);
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
     _bb_note_class(S);
+    const uint64_t aux0 = _bb_aux_work(S);
     int rc = _bb_sess_solve_body(S, seed);
     _bb_note_values(S, rc);
+    if (eng) dvs_stats_add_work(_bb_aux_work(S) - aux0);
     dvs_stats_engine_leave(eng);
     return rc;
 }
@@ -8868,6 +8892,7 @@ int dvs_bbsolver_check_maxsat(dvs_alloc_t *alloc, dvs_problem_t *problem,
     int outer = dvs_stats_begin(DVS_STATS_PATH_BVSAT);
     int eng = dvs_stats_engine_enter(DVS_STATS_ENG_BITBLAST);
     int rc = _bb_check_maxsat_body(alloc, problem, seed, out_bb, out_keep, keep_cap);
+    if (eng && out_bb && *out_bb) dvs_stats_add_work(_bb_aux_work(*out_bb));
     if (rc == DVS_BB_SAT && out_bb && *out_bb) {
         _bb_note_class(*out_bb);
         _bb_note_values(*out_bb, rc);

@@ -66,6 +66,28 @@ with stats.timed("build"):
 From C, call `dvs_stats_add_time`. Nothing is recorded while statistics are
 off.
 
+## Unexpected performance
+
+dv-solve ships a model of the **best case** for each shape of problem: the
+cheapest cost that any way we know of solving it achieves on our corpus, from
+dv-solve's own engines and settings to other solvers and plain enumeration.
+It predicts that cost from a class's shape: its size, widths, operators,
+constraint patterns and how constrained it is. The report compares each
+class's cost with it, and marks a class that cost at least 4× its best case
+`UNEXPECTED`, with the solver time it would save at the best case. A second
+mark, `ANOMALOUS`, compares the class with what dv-solve usually spends on
+its shape. It finds regressions and one-off slow cases, but never a weakness
+dv-solve has everywhere, which is why the best case is the main measure:
+
+```sh
+python -m dv_solve.perfmodel check stats.*.json
+```
+
+The check compares work counts, not time, so it does not depend on the
+machine. It is what tells us that a shape is slow for dv-solve rather than
+hard. A bundle carries the result of the check, made on your exact numbers,
+not the numbers themselves.
+
 ## Sharing a bundle
 
 A bundle holds only statistics. It is made from your stats files in three
@@ -167,6 +189,11 @@ The keys, each with what it means:
 | `build` | stating the problem: the library's builder finalize, SMT2 commands such as `declare-const` and `assert`, and time a front end reports itself; reading SMT2 text is not counted, because in a pipe it includes waiting for the simulator |
 | `compile` | compiling the problem for the CDCL engine |
 | `read` | reading a model back: `dvs_solver_get_values`, SMT2 `get-value`, and time a front end reports itself |
+| `expected` | the expected-cost check, made on the exact numbers before rounding: the class's cost against the best case for its shape |
+| `over` | the class's cost over the best case, rounded down to a power of two |
+| `unexpected` | 1 if the cost is at least 4× the best case for its shape |
+| `anomalous` | 1 if the cost is at least 4× what dv-solve usually spends on its shape: a regression or a one-off, relative to dv-solve's own habits |
+| `uniform` | solves that asked for uniform sampling over the solutions, which costs more by design |
 | `previous` | each solve against the previous solve on the same thread |
 | `same` | the same problem as the previous solve |
 | `constants` | the same class as the previous solve, with other constants |

@@ -197,6 +197,10 @@ static inline int dvs_stats_take_values(dvs_class_track_t *t) {
 /* For hot paths: the call only when statistics are on. */
 #define DVS_STATS_VIA(v) do { if (dvs_stats_on()) dvs_stats_note_via(v); } while (0)
 
+/* The solve asked for uniform sampling over the solutions (fair_pick), which
+ * costs more by design; the expected-cost model needs to know. */
+void dvs_stats_note_uniform(void);
+
 /* A CDCL solve ended with bail reason `bail` (DVS_BAIL_*, 0 = none). */
 void dvs_stats_note_bail(unsigned bail);
 /* How constrained a problem is at the root (signal 3): over its rand and

@@ -69,6 +69,7 @@ typedef struct {
     uint64_t inst;          /* instance fingerprint, 0 not known */
     uint8_t  has_vals;      /* vals holds this solve's model */
     uint8_t  read;          /* an SMT2_AUX record that reads a model back */
+    uint8_t  uniform;       /* the solve asked for uniform sampling */
     uint8_t  has_bind;      /* bind holds this solve's binding counts */
     dvs_stats_binding_t bind;
     uint64_t t0;
@@ -117,6 +118,7 @@ typedef struct {
     /* Signal 6: time stating the problem (SMT2) and reading models back, and
      * each solve against the previous one on its thread. */
     uint64_t build_ns, read_ns;
+    uint64_t uniform;       /* solves that asked for uniform sampling */
     uint64_t prev[N_PREV];
 } Counts;
 
@@ -473,6 +475,7 @@ void dvs_stats_end(dvs_stats_result_t res) {
         n->wall_ns += wall;
         n->hist_wall_ns[_bucket(wall)]++;
         n->build_ns += build_ns;
+        n->uniform += r->uniform;
         if (r->has_bind) {
             const dvs_stats_binding_t *b = &r->bind;
             n->bind_solves++;
@@ -586,6 +589,10 @@ dvs_stats_reason_t dvs_stats_reason_of(const char *why) {
 
 const char *dvs_stats_reason_name(dvs_stats_reason_t why) {
     return (unsigned)why < DVS_STATS_N_REASONS ? k_reason[why] : k_reason[0];
+}
+
+void dvs_stats_note_uniform(void) {
+    if (tl_rec.open) tl_rec.uniform = 1;
 }
 
 void dvs_stats_note_bail(unsigned bail) {
@@ -776,6 +783,7 @@ static void _put_counts(Out *o, const Counts *n) {
          (unsigned long long)n->build_ns, (unsigned long long)n->compile_ns,
          (unsigned long long)n->read_ns);
     _put_named(o, "previous", n->prev, N_PREV, k_prev, 1);
+    _put(o, ",\"uniform\":%llu", (unsigned long long)n->uniform);
     if (n->roots)
         _put(o, ",\"root\":{\"count\":%llu,\"vars\":%llu,\"fixed\":%llu,"
                 "\"tied\":%llu,\"bits\":%llu,\"free_bits\":%llu,\"constraints\":%llu,"

@@ -62,7 +62,7 @@ add fidelity where they're allowed.
 | S2 | Local stats file and end-of-run report | in progress | S2a done (committed 38849ba): exit-time stats file, `python -m dv_solve.stats` report/merge/explain/bundle/audit; svcorpus stats pass the audit against all corpus names |
 | S3 | Versioned capture format, anonymizer, reproduction check | open | |
 | S4 | Corpus ingestion: replay a capture as a perf and distribution case | open | |
-| S5 | Representativeness: the corpus gap report and shape-faithful synthesis | open | |
+| S5 | Representativeness: the corpus gap report and shape-faithful synthesis | in progress | S5a, the expected-cost check (best case and our delta from it): in progress |
 | S6 | Dogfood on our own runs before any external user | open | |
 | S7 | Experiments on the user's machine: shadow solves under alternative settings | open | |
 | S8 | Local hard-core reduction and synthetic matching | open | |
@@ -878,6 +878,113 @@ This step makes the data actionable.
 | Shadow solve verdict disagreement (S7) | Soundness bug: fixed first |
 
 **Log:**
+
+## S5a: expected cost, best case, and our delta from it
+
+**Goal:** an internal check that says a class's performance is *unexpected*,
+so that "worth tackling" is decided from the statistics alone, including for
+a field class we can't see.
+
+**The risk this design answers:** a model fitted on our own performance learns
+our weaknesses as normal. Fitted on the test suite, the first model "expected"
+each doubling of `countones`, `array` or `sum` constraints to cost 4x more
+work: that is dv-solve's slowness on them, not their difficulty. A self-model
+can only flag what is bad by our own standards. So the expectation is the
+**best case**, and the check measures **our delta from it**:
+
+1. **Frontier target.** For each training problem, run every arm we have and
+   take the cheapest that gives the same answer and the same service:
+   - SMT-LIB2 fixtures: dv-solve default, forced CDCL, bitblast and cube, and
+     z3, bitwuzla, boolector, cvc5, yices;
+   - randomization problems (uniform draws): dv-solve's own uniform arms and
+     settings, plus the enumeration floor (a reference solver's single solve
+     is not a uniform draw; it is reported apart, as a lower bound).
+
+   Best-case cost = our cost x (best time / our time), in our cost units, so
+   the field check compares work counts and stays host-independent.
+2. **One model per domain** (randomization, SMT2), across engines, with
+   problem features only: never the engine, route or answer path, which
+   would compare a misrouted class only with other misrouted ones. Cost units
+   sum each engine's work at its measured ns per unit, wasted work included.
+3. **Analytic floors.** A class with few free bits at the root never costs
+   more than enumerating them: expected = min(model, floor).
+4. **The threshold does not come from our own residuals** (that would absorb
+   a systematic gap again): flag at least 4x the predicted best case, and
+   beyond the frontier model's own cross-validated error.
+5. **Ratchet.** A class's target is its best ever across releases; a refit
+   can only lower an expectation. Raising one is an explicit, logged
+   decision. (Once there is a second release to compare.)
+6. **Publish the bias.** The self-model's per-motif multipliers, against the
+   reference solvers', are a ranked list of weaknesses.
+
+**Tests:**
+- a single class planted 16x slower is flagged (done on the first model:
+  3 of 4 real slowdowns from turning box and enumeration off were caught);
+- **the status-quo test:** a slowdown planted across a whole motif in our
+  arm of the training data is still flagged after a refit. A self-model fails
+  this; the frontier model must pass it;
+- the shipped model loads, and the report and bundle carry the check (the
+  bundle's check runs on the exact numbers, before rounding).
+
+**Log:**
+- First version (a self-model, not shipped): ridge regression of log2 work
+  per solve per engine, on the corpus suites (`tests/perf/perfmodel_corpus.py`)
+  plus the test suite's randomization classes. Randomization/CDCL: cross-
+  validated R^2 0.96 after setting aside the corpus's own outliers (rmse 2x).
+  It rediscovered the known CDCL gaps on rand-core (`bit_mask` 500x,
+  `addr_aligned`, `disjoint_ranges`, sums) and every class that bailed. Found
+  on the way: bit-level work outside the SAT search was not counted (half the
+  bitblast classes showed zero work; now the clauses encoded and the engine's
+  non-SAT work are added), and uniform sampling, which costs more by design,
+  was not recorded (now `uniform`).
+- Best-case version (`src/dv_solve/perfmodel.py`, schema `perf-model/2`):
+  - **Cost units:** each engine's work, wasted work included, at its median
+    ns per unit on the fitting machine; one model per domain across engines.
+  - **Training** (`tests/perf/perfmodel_corpus.py`): each corpus item runs on
+    its own under every arm, 3 runs each, start-up subtracted, times under
+    2 ms clamped to 2 ms (start-up jitter would otherwise invent gaps).
+    SMT2 fixtures: dv default, forced CDCL/bitblast/cube, z3, bitwuzla,
+    boolector, cvc5, yices. Randomization items: ours, a plain solve without
+    uniform sampling, and z3/bitwuzla on the exported problem when our solve
+    takes over 1 ms. **Uniform allowance (policy, 4x):** a class that asked
+    for uniform sampling has as its best case 4x the best single solve.
+  - **Limit:** svcorpus-sized problems solve in microseconds, where no
+    process arm can measure a best case; there the target is our own cost
+    plus the enumeration floor. In-process reference timing (and a generator
+    sweep for more randomization classes) is the follow-up.
+  - `bias` lists, per motif, our measured cost over the best arm's on the
+    training classes holding it: the weaknesses, measured, not modelled.
+  - Tests (`tests/unit/test_perfmodel.py`): a 16x planted class is flagged;
+    **status quo:** with an 8x slowdown on a whole motif in our arm of the
+    training data, the self-model does not flag a field class of that motif
+    and the best-case model does; the enumeration floor; the shipped model
+    loads; the check and bundle on a real stats file.
+  - Early signal from the trial: on `alignedaddr` the default route took
+    4.4 ms where forced CDCL and every reference took under 2 ms.
+- **First full best-case run** (650 of 653 corpus items, 9 arms, 18 min):
+  - **Measured gaps, no model needed:** 119 items are 4x or more over their
+    best arm. The corpus takes 21.8 s our way, 6.7 s with our own best engine
+    per item (a 3.3x routing gap), 2.9 s with the best arm overall (7.4x).
+    Best arm on the 119: forced CDCL 35, yices 30, z3 20, bitwuzla 16, cube,
+    bitblast and boolector 6 each. By source: fw-hdl 68, BMC tiers 48.
+  - Largest losses: `qc_crc8_affine_polyff_s3` 4.9 s vs boolector 0.15 s;
+    `secded_data64` 1.2 s vs z3 17 ms; the `fletcher16` fold/collision family
+    ~640 ms vs 2 ms. Checked: `fletcher16_fold_bytes2` is routed to bitblast
+    by the `multiplier` rule (0.61 s) where CDCL takes 0.01 s.
+  - Where we lose, by motif (SMT2): `bool-var` 4.0x, `guarded` 3.8x,
+    `constant` 2.8x, `disjunction` 2.7x, `ite-value` 2.5x.
+  - **The best-case model is still weak:** randomization has only 33
+    training classes (R^2 0.43), SMT2 R^2 0.54, so it flags at >= 29x and
+    >= 37x. Shipped as `src/dv_solve/perf_model.json` with a **self-model**
+    alongside (1,711 randomization classes from the test suite, R^2 0.83),
+    reported as a separate signal, `anomalous` (flags at >= 9x). The planted
+    run (box and enumeration off): 1 of 3 real slowdowns caught, baseline 6 of
+    33 flagged. The two missed were unusually fast classes slowed to normal:
+    only a per-class history check (the ratchet) can see that.
+- **Next in S5a:** more randomization training classes with a measurable
+  best case (a generator sweep, and in-process reference timing for
+  microsecond solves); the ratchet (per-class history across runs); then
+  act on the measured gaps (routing: the `multiplier` rule; fw-hdl).
 
 ## S6: dogfood
 
