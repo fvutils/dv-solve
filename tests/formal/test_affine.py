@@ -33,6 +33,10 @@ _EXE = Path(os.environ.get("DVS_SMT2_EXE", _REPO / "build" / "dv-solve-smt2"))
 _N = int(os.environ.get("AFFINE_N", "1000"))
 _FIRST = int(os.environ.get("AFFINE_FIRST", "0"))
 _Z3 = Z3Solver()
+# Fast paths that run before this stage and would decide most fuzz problems
+# first: the resample samplers and the pinned-constant path.
+_NO_FAST_PATHS = {**{f"DV_{k}SAMP": "0" for k in ("DIV", "ENUM", "POP", "SORT", "UNIQ")},
+                  "DV_PINFAST_FIRST": "0"}
 _stats = {"checked": 0, "unsat": 0, "affine-unsat": 0, "affine-sat": 0, "opaque": 0,
           "tables": 0}
 
@@ -136,8 +140,9 @@ class _Gen:
 
 def _dv(path: Path, extra: dict) -> tuple[str, str, int]:
     env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+    # The fast paths would decide most problems before the analysis.
     env.update({"DV_ENGINE": "bitblast", "DV_LOG": "1", "DV_SIM_CHECK": "1",
-                "DV_AFFINE_MIN_INPUTS": "0"}, **extra)
+                "DV_AFFINE_MIN_INPUTS": "0", **_NO_FAST_PATHS}, **extra)
     p = subprocess.run([str(_EXE), str(path)], capture_output=True,
                        text=True, timeout=120, env=env)
     out = next((l.strip() for l in p.stdout.splitlines()
@@ -194,7 +199,8 @@ def test_affine_seeded_models_hold(seed: int, tmp_path: Path) -> None:
         f.write_text(f"(set-option :random-seed {rs})\n" + smt2
                      + f"(get-value ({' '.join(g.vars)}))\n")
         env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
-        env.update({"DV_ENGINE": "bitblast", "DV_LOG": "1", "DV_AFFINE_MIN_INPUTS": "0"})
+        env.update({"DV_ENGINE": "bitblast", "DV_LOG": "1", "DV_AFFINE_MIN_INPUTS": "0",
+                    **_NO_FAST_PATHS})
         p = subprocess.run([str(_EXE), str(f)], capture_output=True, text=True,
                            timeout=120, env=env)
         if "sat" not in p.stdout.split():

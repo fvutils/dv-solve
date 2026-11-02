@@ -33,6 +33,10 @@ _REPO = Path(__file__).resolve().parents[2]
 _EXE = Path(os.environ.get("DVS_SMT2_EXE", _REPO / "build" / "dv-solve-smt2"))
 _N = int(os.environ.get("AIG_SIM_N", "300"))
 _Z3 = Z3Solver()
+# Fast paths that run before this stage and would decide most fuzz problems
+# first: the resample samplers and the pinned-constant path.
+_NO_FAST_PATHS = {**{f"DV_{k}SAMP": "0" for k in ("DIV", "ENUM", "POP", "SORT", "UNIQ")},
+                  "DV_PINFAST_FIRST": "0"}
 _stats = {"exhaustive": 0, "raced": 0, "random": 0, "checked": 0, "unsat": 0}
 
 _SAME = ["bvand", "bvor", "bvxor", "bvadd", "bvsub", "bvmul", "bvudiv", "bvurem",
@@ -111,9 +115,11 @@ class _Gen:
 
 def _dv(path: Path, extra: dict) -> tuple[str, str, int]:
     env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
-    # DV_AFFINE=0: affine analysis (test_affine.py) would decide some first.
+    # DV_AFFINE=0: affine analysis (test_affine.py) would decide some first,
+    # and so would the fast paths (the fuzzer's bvmul/bvudiv terms hand most
+    # problems to _divsamp).
     env.update({"DV_ENGINE": "bitblast", "DV_LOG": "1", "DV_SIM_CHECK": "1",
-                "DV_AFFINE": "0"}, **extra)
+                "DV_AFFINE": "0", **_NO_FAST_PATHS}, **extra)
     p = subprocess.run([str(_EXE), str(path)], capture_output=True,
                        text=True, timeout=60, env=env)
     out = next((l.strip() for l in p.stdout.splitlines()
@@ -142,7 +148,9 @@ def test_sim_agrees_with_z3(seed: int, tmp_path: Path) -> None:
     _stats["checked"] += 1
     _stats["unsat"] += want == "unsat"
     if m:
-        _stats["raced" if " raced" in err else m.group(1)] += 1
+        # "split" is the exhaustive sweep run per independent assertion group.
+        kind = "exhaustive" if m.group(1) == "split" else m.group(1)
+        _stats["raced" if " raced" in err else kind] += 1
 
 
 def test_zz_sim_coverage() -> None:
