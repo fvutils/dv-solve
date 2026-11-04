@@ -62,6 +62,8 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
         if cfg.replay or cfg.replay_cmd:
             plusargs.append(standalone.session_plusarg(session))
         out = run(cfg, exe, str(tmp_path), plusargs)
+        provenance.check_banner(cfg.simulator, out.log, provenance.simulator_build(
+            cfg.simulator, cfg.tool, cfg.version_flag))
         if cfg.replay_cmd:
             out = standalone.replay_text(cfg, out, session, str(tmp_path))
         elif cfg.replay:

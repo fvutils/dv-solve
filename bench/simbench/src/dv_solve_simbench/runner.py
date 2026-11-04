@@ -1,11 +1,13 @@
 """Subprocess runner: build a bench image with a simulator and run it.
 
-Back ends: verilator, vcs, xcelium, questa (Config.simulator). Images are
+Back ends: verilator, vcs, xcelium, questa, xezim (Config.simulator). Images are
 cached per (simulator, tool, build args, bench) so configs that share a tool
 (and differ only in run-time solver or sampler) share one build. sb_time.c
 (the DPI timer) is passed to each compiler, which builds it with the image.
-Only the Verilator commands have been run here; the commercial command lines
-are checked by unit tests only.
+xezim interprets: its "build" elaborates the bench (`--compile`), so a bench it
+cannot take fails there, untimed, and then compiles sb_time.c into the shared
+library each run loads with --dpi-lib. Only the Verilator and xezim commands
+have been run here; the commercial command lines are checked by unit tests only.
 """
 import dataclasses as dc
 import functools
@@ -62,6 +64,18 @@ def _sv_files(bench: Bench) -> List[str]:
             os.path.join(sv, "simbench_top.sv"), os.path.join(sv, "sb_time.c")]
 
 
+def _xezim_args(bdir: str) -> str:
+    """xezim's args file of sources (-F); written by build(). It takes source
+    files, not options: --dpi-lib in it is ignored with a warning."""
+    return os.path.join(bdir, "sources.f")
+
+
+def _xezim_include(tool: str) -> List[str]:
+    """svdpi.h of the xezim install (a bundle has bin/ next to include/)."""
+    inc = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(tool))), "include")
+    return ["-I" + inc] if os.path.isdir(inc) else []
+
+
 def _sibling(tool: str, name: str) -> str:
     """Another executable from the install of `tool` (e.g. vlog next to vsim)."""
     d = os.path.dirname(tool)
@@ -87,13 +101,22 @@ def build_cmds(cfg: Config, bench: Bench, bdir: str) -> List[List[str]]:
         return [[_sibling(cfg.tool, "vlib"), lib],
                 [_sibling(cfg.tool, "vlog"), "-sv", "-timescale", "1ns/1ps", "-work", lib]
                 + cfg.build_args + files]
+    if sim == "xezim":
+        # The library is built last, so its presence (the image) means the
+        # bench elaborated. dlopen does not search the cwd: the path is absolute.
+        so = os.path.join(os.path.abspath(bdir), "sb_time.so")
+        return [[cfg.tool, "--compile", "-s", "simbench_top"] + cfg.build_args
+                + ["-F", _xezim_args(bdir)],
+                [os.environ.get("CC", "cc"), "-shared", "-fPIC", "-O2", "-o", so]
+                + _xezim_include(cfg.tool) + [files[-1]]]
     raise BuildError("%s: unknown simulator %r" % (cfg.id, sim))
 
 
 def image_path(cfg: Config, bdir: str) -> str:
     """File whose presence means the build in `bdir` is done; passed to run_cmd()."""
     return os.path.join(bdir, {"verilator": "Vsimbench_top", "vcs": "simv",
-                               "xcelium": "xcelium.d", "questa": "work"}[cfg.simulator])
+                               "xcelium": "xcelium.d", "questa": "work",
+                               "xezim": "sb_time.so"}[cfg.simulator])
 
 
 def run_cmd(cfg: Config, image: str, plusargs: List[str]) -> List[str]:
@@ -105,6 +128,9 @@ def run_cmd(cfg: Config, image: str, plusargs: List[str]) -> List[str]:
     if cfg.simulator == "questa":
         return [cfg.tool, "-c", "-lib", image, "simbench_top",
                 "-do", "run -all; quit -f"] + args
+    if cfg.simulator == "xezim":
+        return [cfg.tool, "--dpi-lib", os.path.abspath(image), "-s", "simbench_top"] \
+            + cfg.build_args + ["-F", _xezim_args(os.path.dirname(image))] + args
     raise ValueError("%s: unknown simulator %r" % (cfg.id, cfg.simulator))
 
 
@@ -139,6 +165,9 @@ def build(cfg: Config, bench: Bench, cache_dir: str) -> str:
     if os.path.exists(image):
         return image
     os.makedirs(bdir, exist_ok=True)
+    if cfg.simulator == "xezim":
+        with open(_xezim_args(bdir), "w") as fp:
+            fp.write("".join(f + "\n" for f in _sv_files(bench)[:-1]))
     log = []
     for cmd in cmds:
         p = subprocess.run(cmd, cwd=bdir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

@@ -3,13 +3,14 @@
 # from a local file named by SIMBENCH_CONFIGS (same format; same id overrides).
 #
 # Fields:
-#   simulator: verilator | vcs | xcelium | questa
+#   simulator: verilator | vcs | xcelium | questa | xezim
 #   tool:      simulator executable (path, or a name looked up on PATH):
-#              verilator, vcs, xrun, or vsim (questa: vlib/vlog are taken from vsim's directory)
+#              verilator, vcs, xrun, vsim (questa: vlib/vlog are taken from vsim's directory),
+#              or xezim
 #   solver:    Verilator only: command line put in VERILATOR_SOLVER (its first word must exist)
 #   sampler:   Verilator only: default | solver | null (null: no sampler plusarg; stock Verilator)
 #   version:   optional; text that must appear in the tool's version output (test fails otherwise);
-#              flag: verilator --version, vcs -ID, xrun -version, vsim -version
+#              flag: verilator --version, vcs -ID, xrun -version, vsim -version, xezim -V
 #   plusargs:  extra plusargs for every run
 #   build_args: extra compile/elaborate arguments (e.g. vcs ["-cm", "line"])
 #   env:       extra environment for every run
@@ -97,3 +98,10 @@ configs:
   - id: questa
     simulator: questa
     tool: ${SIMBENCH_VSIM:-vsim}
+
+  # xezim (open source, interpreted): its built-in solver and sampler. The
+  # "build" elaborates the bench (xezim --compile); the DPI timer is loaded
+  # with --dpi-lib. Needs a C compiler (CC, default cc) for sb_time.c.
+  - id: xezim
+    simulator: xezim
+    tool: ${SIMBENCH_XEZIM:-xezim}

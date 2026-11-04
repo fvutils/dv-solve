@@ -15,6 +15,12 @@ gathers that:
 - session_info(): size, hash and check-sat count of a captured solver session;
   SIMBENCH_SESSION_DIR=<dir> also keeps it as <dir>/<config>/<bench>.smt2.gz.
 - replay_details(): everything the replay printed about its scoring.
+- simulator_build(): which simulator build ran: its full version output
+  (xezim -V: version, git, tag), the binary's sha256, and, for an edapack
+  bundle (verilator-bin, xezim-bin), the bundle's manifest.json and
+  BUILD-INFO.txt. xezim's -V is the same for a release and a snapshot built
+  from the same commit and does not name xezim-core; the bundle files do.
+- check_banner(): the git hash a xezim run printed at start-up matches -V.
 """
 import functools
 import gzip
@@ -330,3 +336,95 @@ def replay_quality(text: str, pass_name: str) -> Optional[dict]:
                        "status": f.group(6) or "varies"})
     q["fields"] = fields
     return q
+
+
+_XEZIM_V = re.compile(r"^xezim version (\S+)\s*$|^git ([0-9a-f]+) \(([^)]*)\)\s*$|^tag (\S+)\s*$", re.M)
+
+
+def parse_xezim_version(text: str) -> dict:
+    """`xezim -V`: "xezim version 0.11.3 / git 058f2bba (2026-10-23T17:05:55-07:00) / tag 0.11.3"."""
+    out = {}
+    for m in _XEZIM_V.finditer(text):
+        if m.group(1):
+            out["version"] = m.group(1)
+        elif m.group(2):
+            out["git"], out["git_date"] = m.group(2), m.group(3)
+        elif m.group(4):
+            out["tag"] = m.group(4)
+    return out
+
+
+def parse_build_info_txt(text: str) -> dict:
+    """An edapack bundle's BUILD-INFO.txt: a title line, then `name value...`
+    lines; a `name <repo-url> <sha>` line gives {name: {repo, sha}}."""
+    lines = text.splitlines()
+    out = {"title": lines[0].strip()} if lines else {}
+    for ln in lines[1:]:
+        parts = ln.split(None, 1)
+        if len(parts) != 2:
+            continue
+        words = parts[1].split()
+        if len(words) == 2 and "://" in words[0] and re.fullmatch(r"[0-9a-f]{40}", words[1]):
+            out[parts[0]] = {"repo": words[0], "sha": words[1]}
+        else:
+            out[parts[0]] = parts[1].strip()
+    return out
+
+
+def _bundle(tool_path: str) -> dict:
+    """manifest.json and BUILD-INFO.txt of the edapack bundle holding tool_path
+    (<bundle>/bin/<tool>), when there is one."""
+    import json
+    root = os.path.dirname(os.path.dirname(tool_path))
+    out = {}
+    try:
+        with open(os.path.join(root, "manifest.json")) as fp:
+            m = json.load(fp)
+        out["package"] = m.get("package")
+        out["release"] = {k: m.get("release", {}).get(k)
+                          for k in ("version", "tag", "track", "built_at", "recipe_sha")}
+        out["inputs"] = {i.get("name"): {"ref": i.get("ref"), "sha": i.get("resolved_sha"),
+                                         "version": i.get("version")}
+                         for i in m.get("inputs", [])}
+    except (OSError, ValueError):
+        pass
+    for rel in ("share/xezim/BUILD-INFO.txt", "share/verilator/BUILD-INFO.txt", "BUILD-INFO.txt"):
+        txt = _read(os.path.join(root, rel))
+        if txt:
+            out["build_info"] = parse_build_info_txt(txt)
+            break
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def _simulator_build(tool: str, flag: str) -> dict:
+    path = os.path.realpath(shutil.which(tool) or tool)
+    try:
+        p = subprocess.run([path, flag], capture_output=True, text=True, timeout=60)
+        text = (p.stdout or p.stderr).strip()
+    except (OSError, subprocess.TimeoutExpired):
+        text = ""
+    out = {"version_text": text, "sha256": file_sha256(path)}
+    if os.path.basename(path) == "xezim":
+        out.update(parse_xezim_version(text))
+    out.update(_bundle(path))
+    return out
+
+
+def simulator_build(simulator: str, tool: str, flag: str) -> Optional[dict]:
+    """Which simulator build ran (see the module docstring); None if not found."""
+    if not tool or not (shutil.which(tool) or os.path.exists(tool)):
+        return None
+    return dict(_simulator_build(tool, flag), simulator=simulator)
+
+
+def check_banner(simulator: str, log: str, build: Optional[dict]) -> None:
+    """A xezim run prints `git <hash>` under its `=== xezim <ver> ===` banner;
+    raise if that is not the build -V named (another xezim ran)."""
+    if simulator != "xezim" or not build or not build.get("git"):
+        return
+    m = re.search(r"^=== xezim (\S+) ===\s*\ngit ([0-9a-f]+)", log, re.M)
+    if not m:
+        raise RuntimeError("xezim printed no version banner")
+    if not build["git"].startswith(m.group(2)) and not m.group(2).startswith(build["git"]):
+        raise RuntimeError("xezim run was git %s, -V says %s" % (m.group(2), build["git"]))

@@ -47,7 +47,7 @@ def test_default_configs():
     cfgs = load_configs(environ={}, detect=False)
     assert list(cfgs) == ["vlt-z3-default", "vlt-dvs-solver", "dvs-standalone",
                           "z3-standalone", "dvs-smt2-standalone", "vlt-dvs-default", "vlt540-z3",
-                          "vcs", "xcelium", "questa"]
+                          "vcs", "xcelium", "questa", "xezim"]
     assert cfgs["dvs-standalone"].replay.endswith("bench_vlt_replay")
     assert cfgs["vlt-dvs-solver"].replay is None
     assert cfgs["z3-standalone"].replay_cmd == "z3 -smt2"
@@ -266,6 +266,48 @@ def test_build_cmds_commercial(tmp_path):
     assert vlog[0] == "/q/bin/vlog" and vlog[-1].endswith("sb_time.c")
     assert run_cmd(q, image_path(q, "/b"), ["+sb_n=5"]) == [
         "/q/bin/vsim", "-c", "-lib", "/b/work", "simbench_top", "-do", "run -all; quit -f", "+sb_n=5"]
+
+
+def test_build_cmds_xezim(tmp_path):
+    from dv_solve_simbench.runner import build_cmds, image_path, run_cmd
+    x = load_configs(environ={}, detect=False)["xezim"]
+    assert x.version_flag == "-V" and x.run_env() == {} and x.run_plusargs() == []
+    x.tool = "/x/bin/xezim"
+    elab, cc = build_cmds(x, _bench(tmp_path), "/b")
+    # Elaborate first (a bench xezim cannot take fails here, untimed); the
+    # DPI library is built last, so it marks a finished build.
+    assert elab == ["/x/bin/xezim", "--compile", "-s", "simbench_top", "-F", "/b/sources.f"]
+    assert cc[-1].endswith("sb_time.c") and cc[cc.index("-o") + 1] == "/b/sb_time.so"
+    assert image_path(x, "/b") == "/b/sb_time.so"
+    # --dpi-lib on the command line with an absolute path: the args file
+    # ignores options, and dlopen does not search the cwd.
+    assert run_cmd(x, "/b/sb_time.so", ["+sb_n=5"]) == [
+        "/x/bin/xezim", "--dpi-lib", "/b/sb_time.so", "-s", "simbench_top",
+        "-F", "/b/sources.f", "+sb_n=5"]
+
+
+def test_xezim_provenance():
+    from dv_solve_simbench import provenance as p
+    v = p.parse_xezim_version("xezim version 0.11.3\ngit 058f2bba (2026-10-23T17:05:55-07:00)\n"
+                              "tag 0.11.3\n")
+    assert v == {"version": "0.11.3", "git": "058f2bba",
+                 "git_date": "2026-10-23T17:05:55-07:00", "tag": "0.11.3"}
+    bi = p.parse_build_info_txt(
+        "xezim-bin 0.11.3 (release track)\n"
+        "xezim       https://github.com/aionhw/xezim       " + "a" * 40 + "\n"
+        "xezim-core  https://github.com/aionhw/xezim-core  " + "b" * 40 + "\n"
+        "rustc       rustc 1.99.1 (58cf8f9c3 2026-10-13)\n"
+        "features    (default; interpreter only)\n")
+    assert bi["title"] == "xezim-bin 0.11.3 (release track)"
+    assert bi["xezim-core"] == {"repo": "https://github.com/aionhw/xezim-core", "sha": "b" * 40}
+    assert bi["features"] == "(default; interpreter only)"
+    build = {"git": "058f2bba"}
+    p.check_banner("xezim", "=== xezim 0.11.3 ===\ngit 058f2bba (x)\nSIMBENCH_RESULT {}", build)
+    with pytest.raises(RuntimeError, match="-V says"):
+        p.check_banner("xezim", "=== xezim 0.11.4 ===\ngit 1234abcd (x)\n", build)
+    with pytest.raises(RuntimeError, match="no version banner"):
+        p.check_banner("xezim", "SIMBENCH_RESULT {}", build)
+    p.check_banner("verilator", "", build)       # only xezim prints one
 
 
 def test_simulator_checks(tmp_path):

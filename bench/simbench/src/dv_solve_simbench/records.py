@@ -125,6 +125,8 @@ def make_record(cfg: Config, bench: Bench, result: Optional[Result], params: dic
         "machine": machine(loadavg_start, _loadavg()),
         "tools": {"lock_sha": None, "simulator": cfg.simulator, "simulator_path": cfg.tool,
                   "simulator_version": tool_version(cfg.tool, cfg.version_flag),
+                  "simulator_build": provenance.simulator_build(cfg.simulator, cfg.tool,
+                                                                cfg.version_flag),
                   "solver": cfg.solver, "sampler": cfg.sampler,
                   "sampler_active": sampler_active,
                   # The dv-solve builds behind the solver and the replay, and the

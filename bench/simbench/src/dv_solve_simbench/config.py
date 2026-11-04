@@ -32,7 +32,8 @@ def expand(value: str, environ: Optional[Dict[str, str]] = None) -> str:
 
 # Simulators the runner can drive, and the flag that prints each tool's version.
 # Only Verilator has the solver/sampler controls (VERILATOR_SOLVER, sampler plusarg).
-SIMULATORS = {"verilator": "--version", "vcs": "-ID", "xcelium": "-version", "questa": "-version"}
+SIMULATORS = {"verilator": "--version", "vcs": "-ID", "xcelium": "-version", "questa": "-version",
+              "xezim": "-V"}
 
 
 SAMPLER_OPTION = "+verilator+rand+sampler+"
