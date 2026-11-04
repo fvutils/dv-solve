@@ -4212,6 +4212,24 @@ static int _affine_worth(const dvs_aigsim_t *sim) {
     return !sim || dvs_aigsim_inputs(sim) >= _env_u64("DV_AFFINE_MIN_INPUTS", 13);
 }
 
+/* The assertions' input cone is small enough for the exhaustive sweep
+ * _solve_with_sim runs (DV_SIM_MAX_WORK gate evaluations). The sweep decides
+ * the problem and, seeded, draws uniformly over every satisfying assignment
+ * (reservoir sampling), in bit-parallel gate evaluations; the enumeration
+ * sampler does the same one bb_eval at a time. One-shot clz_w16 (unsat):
+ * 4.2e6 visits, 0.1 s, then the sweep in 0.15 ms (docs/routing_gap_plan.md,
+ * R2). The reused-context draw keeps its table: built once, it serves every
+ * later draw. */
+static int _sweep_small(const dvs_bbsolver_t *S) {
+    if (!S->presim || S->asserts_lost || !S->n_asserts || !S->aig) return 0;
+    dvs_aigsim_t *sim = dvs_aigsim_new(S->aig, S->assert_nodes, S->n_asserts);
+    if (!sim) return 0;
+    int small = dvs_aigsim_inputs(sim) <= 32
+             && dvs_aigsim_exhaustive_work(sim) <= _env_u64("DV_SIM_MAX_WORK", 1500000ull);
+    dvs_aigsim_free(sim);
+    return small;
+}
+
 /* Simulation, then SAT. Returns the DVS_BB_* verdict. */
 static int _solve_with_sim(dvs_bbsolver_t *S) {
     if (!S->presim || S->asserts_lost || !S->n_asserts) return bb_sat_solve(S);
@@ -4498,7 +4516,10 @@ static int _bb_check_body(dvs_bbsolver_t *S, uint64_t seed) {
     if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_SORTED; rc = _capped(S, _sortsamp); }
     if (rc == DVS_BB_UNKNOWN && _pinfast_first()) { via = DVS_STATS_VIA_BB_PINFAST; rc = _pinfast(S); }
     if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_DIVMUL; rc = _capped(S, _divsamp); }
-    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_ENUM; rc = _capped(S, _enumsamp); }
+    if (rc == DVS_BB_UNKNOWN && !_sweep_small(S)) {
+        via = DVS_STATS_VIA_BB_ENUM;
+        rc = _capped(S, _enumsamp);
+    }
     int sampled = rc != DVS_BB_UNKNOWN;
     if (sampled) { DVS_STATS_VIA(via); _sim_check(S, rc); }
     else rc = _solve_with_sim(S);
@@ -7263,6 +7284,12 @@ static int _ds_reaches(dvs_bbsolver_t *S, const uint32_t *vs, size_t s0, size_t 
 #define DVS_DS_PROBE 4096u      /* hulls this wide are probed before enumerating */
 #define DVS_DS_PROBES 64u
 #define DVS_DS_DENSE 48u        /* probes that must pass for a box draw */
+/* The domain enumeration's budget in bb_eval visits: DVS_SS_WORK counts
+ * evaluations, and a leaf that is a circuit visits thousands of nodes each
+ * (fletcher16 folds: 13k a value, 8.8e8 for a 16-bit domain). The visits are
+ * extrapolated from the share of the hull passed and a domain bound to pass
+ * this declines early (docs/routing_gap_plan.md, R2). */
+#define DVS_DS_DOM_STEPS (1ull << 24)
 
 /* Every var of e is free and drawn from an enumerated domain. */
 static int _ds_enum_only(dvs_bbsolver_t *S, dvs_expr_t e, uint32_t **vs, size_t s0,
@@ -7702,8 +7729,13 @@ static int _divsamp(dvs_bbsolver_t *S) {
             work += (kh[v] - kl[v] + 1) * nuv;
             if (work > DVS_SS_WORK) goto out;
             doff[v] = n_d;
+            const uint64_t dsteps0 = S->eval_steps;
             for (uint64_t key = kl[v]; ; key++) {
                 uint64_t x = key ^ bias[v];
+                if (((key - kl[v]) & 63) == 63
+                    && (double)(S->eval_steps - dsteps0) * ((double)(kh[v] - kl[v]) + 1.0)
+                       > (double)DVS_DS_DOM_STEPS * (double)(key - kl[v] + 1))
+                    goto out;
                 if ((x & fmask[v]) == fval[v] && _ds_in(pl, ph, np, x)) {
                     int ok = !(n_ex && _ds_u64_has(exv, n_ex, x));
                     vval[v] = x;
@@ -8189,11 +8221,19 @@ out:
  * leaf that is a large circuit (a CRC, a SECDED code) ran 2^19 evaluations of
  * thousands of nodes each -- 1.2e9 visits, 4.5 s -- before declining, where
  * SAT answers in milliseconds. The one table the SMT2 corpus builds takes
- * 8.5e6 visits; a build that found no model at all by 2^22 visits stops too
- * (an empty table cannot be sampled; SAT decides it far cheaper).
- * docs/routing_gap_plan.md, R1. */
+ * 8.5e6 visits; a build that found no model at all by 2^20 visits stops too
+ * (an empty table cannot be sampled; SAT decides it far cheaper). Measured
+ * (R2): the first model came by 2,004 visits in the C tests and by 255k in
+ * the SMT2 corpus, whose 255 empty builds spent 1.4e8 visits.
+ * docs/routing_gap_plan.md, R1 and R2. */
 #define DVS_EN_MAX_STEPS   (1ull << 24)
-#define DVS_EN_EMPTY_STEPS (1ull << 22)
+#define DVS_EN_EMPTY_STEPS (1ull << 20)
+/* Past this many visits the DFS extrapolates them from the share of the box
+ * it has passed, as it does models: a build bound to pass 2x
+ * DVS_EN_MAX_STEPS declines now. fletcher16 folds: one 16-bit var, 13k
+ * visits a value, 8.8e8 for the table -- declined at 2^20, not at 2^24
+ * (docs/routing_gap_plan.md, R2). */
+#define DVS_EN_PROBE_STEPS (1ull << 20)
 
 static uint64_t _en_key(const dvs_bbsolver_t *S) {
     uint64_t h = 0xcbf29ce484222325ull ^ (uint64_t)(uintptr_t)S->problem;
@@ -8641,6 +8681,16 @@ static int _en_build(dvs_bbsolver_t *S) {
                 uint64_t steps = S->eval_steps - steps0;
                 if (steps > DVS_EN_MAX_STEPS || (n_sol == 0 && steps > DVS_EN_EMPTY_STEPS))
                     goto out;
+                if ((nodes & 1023) == 0 && steps > DVS_EN_PROBE_STEPS) {
+                    double done = 0.0, cell = 1.0;
+                    for (uint32_t q = 0; q <= k; q++) {
+                        uint32_t sq = dord[q];
+                        cell /= (double)(shi[sq] - slo[sq]) + 1.0;
+                        done += (double)(EN_GET(sq) - slo[sq]) * cell;
+                    }
+                    done += cell;
+                    if ((double)steps > 2.0 * DVS_EN_MAX_STEPS * done) goto out;
+                }
             }
             if (hold && k + 1 < n_sl) {
                 k++;

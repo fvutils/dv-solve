@@ -36,7 +36,7 @@ own engines.
 |---|---|---|
 | R0 | Attribute the gap: per routing rule, the items it misroutes and the time lost | done |
 | R1 | Cap the bit-level engine's pre-SAT samplers by evaluator node visits | done: corpus 21.3 s -> 10.0 s on the default route |
-| R2 | The next rules, in order of time lost | open |
+| R2 | The remaining misroutes: sampler budgets in visits, sweep before the table on small cones | done: corpus 10.0 s -> 6.9 s on the default route |
 | R3 | Re-fit the expected-cost model; record the corpus totals before and after | open |
 
 ## Log
@@ -89,7 +89,40 @@ own engines.
     best engine; the loss to misroutes fell from 14.6 s to **3.3 s**:
     `multiplier` 14 items 1.6 s (fletcher16 folds 200 ms vs cube 8 ms, CDCL
     10 ms), `bit-level` 34 items 1.0 s (cube faster on 28).
-- **Next (R2):** the rest of the gap is cube beating bitblast on CPU on the
-  `bit-level` and `multiplier` items, and the fletcher folds still paying the
-  divmul cap (~130 ms) before SAT. Find what cube does that bitblast's one-shot
-  path does not; route mod/div by a constant to CDCL if the evidence holds.
+- R2 (2026-11-02): the remaining misroutes were not the routing rules either.
+  Traced per sampler (visits per pre-SAT sampler, `DV_LOG`, `DV_BB_STATS`):
+  - **fletcher16 folds** (`multiplier`, 200 ms): the divmul sampler's domain
+    enumeration of one 16-bit free var. Its budget, `DVS_SS_WORK`, counts
+    values x leaves (131k, under 2^20), but each value visits 13k nodes, so it
+    ran into the 2^25 sampler cap. Now the enumeration extrapolates its visits
+    from the share of the hull passed and declines past `DVS_DS_DOM_STEPS`
+    (2^24) after 64 values. The table build extrapolates the same way past
+    2^20 visits (`DVS_EN_PROBE_STEPS`), declining a build bound to pass
+    2x `DVS_EN_MAX_STEPS`.
+  - **clz_w16, gray_early_stop_w16** (`bit-level`, 96-128 ms): the
+    enumeration table build over a 16-bit cone found no model by 2^22 visits;
+    the exhaustive sweep then decided it in 0.15 ms. The sweep already
+    reservoir-samples uniformly over every satisfying assignment when seeded,
+    so on the one-shot path the evaluator-based table is skipped when the
+    sweep fits `DV_SIM_MAX_WORK` (`_sweep_small`). The reused-context draw
+    keeps its table (built once, it serves every later draw).
+  - **Empty tables** (`logic`, e.g. array_symbolic_index 37 ms): traced over
+    the corpus, 255 of 259 table builds found no model and spent 1.4e8
+    visits; where a model was found, the first came by 255k visits (2,004 in
+    the C tests). `DVS_EN_EMPTY_STEPS` 2^22 -> 2^20.
+  - All three only decline sooner (a sampler decline hands the problem to
+    the sweep/SAT path), so verdicts cannot change. fletcher16 fold, clz_w16,
+    gray_early_stop_w16: 0.13-0.19 s -> under 10 ms each.
+  - Tests: ctest 34/34, the 486 sampling/uniformity/fuzz tests pass; full
+    pytest: the same 35 failures as R1 (25 pre-existing, 10 order-dependent),
+    none new.
+  - **Re-measured** (`perf-out/perfmodel/train-r2.json`,
+    `route_gaps-r2.txt`): the 613 SMT2 items take **6.9 s** on the default
+    route (10.0 s after R1, 21.3 s before), 6.0 s on our own best engine; the
+    loss to misroutes fell from 3.3 s to **0.7 s** (`bit-level` 13 items
+    0.38 s, `logic` 29 items 0.16 s; `multiplier` none). Items 4x or more over
+    the best arm of any solver: 110 -> 47. No item got slower (one flagged at
+    14 ms re-times under 10 ms).
+  - Left (0.7 s, not worth a rule change yet): clz_nz_w16 ~42 ms vs CDCL
+    2 ms, parity_w16 ~35-47 ms vs cube; array_symbolic_index ~19 ms vs
+    CDCL 2 ms.
