@@ -50,6 +50,23 @@ A 2026-07-10 generative fuzz sweep (`tests/formal/test_fuzz_cross_check.py`,
 
 ## 🟥 OPEN
 
+- **B130: memmap.soc_mem_map samples a reused bitblast context slowly and clumps it — OPEN 2026-11-04 (PERFORMANCE + DIVERSITY).**
+  (Numbered B130 because `wpk/solve-stats-routing-gap` already uses B129.)
+  simbench dvs-standalone, N=200, seed 1: 2 distinct problems, 209 reuses,
+  all on bitblast. Each reused call takes ~500 µs/call (17fb20a; `--engine
+  cdcl` 83). Its 12 17-bit fields still take only 20–85 distinct values over
+  211 calls (min entropy 0.258), where Verilator + z3 gets 143–181 (0.91)
+  and xezim 187–200 (0.98, at 134 µs/call for the whole simulation). Through
+  Verilator (vlt-dvs-solver) it is 7.3 ms/call. Before ce37488 it took 35
+  µs/call because a reused context returned its last answer: every field was
+  stuck. ce37488 fixed that, and this is what is left: a resample of the
+  reused context that is both slow and narrow. `wpk/solve-stats-routing-gap`
+  (R1–R3, d69b110) does not move it (512 µs, same spread), but it does take
+  scenario.bus_transaction from 63 to 37.5 µs/call with unchanged spread.
+  Evidence and method: `docs/perf/simbench_preflight_spread_2026-11-04.md`.
+  Guarded by the simbench pre-flight's reference (README §5): time 502
+  µs/call, min entropy 0.258. Re-measure the table when this is fixed.
+
 - **B128: affine seeded model ignored rows pivoted on a gate — FIXED 2026-10-29 (DIVERSITY: 3 distinct models of 200).**
   A parity base plus `r = q + 1`: each carry AND gate is the lowest column
   of its row `r_i + q_i + c_i`, so it took the pivot; `_model` evaluates

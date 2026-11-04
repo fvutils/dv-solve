@@ -157,33 +157,59 @@ python3 -m pytest -q -rs -m smoke -k "dvs-standalone or vlt-dvs-solver" --simben
 
 `--calib` times fixed work: a plain integer loop (the host's speed) and a fixed
 dv-solve problem (the host's speed times the library build). Compare everything
-with this reference (AMD Ryzen 9 9950X, Release, GCC 13.3, idle host, 2026-10-28):
+with this reference (AMD Ryzen 9 9950X, Release, GCC 13.3, idle host,
+2026-11-04, dv-solve 17fb20a (0.5.0), Verilator 5.054, N=200, seed 1):
 
-| reading | reference |
-|---|---|
-| `--calib` `cpu_ns_per_iter` | 1.18 |
-| `--calib` `dvs_solve_us` | 0.74 |
-| `--calib` `dvs_compile_us` | 4.3 |
-| dvs-standalone construct.range | 15 µs/call |
-| dvs-standalone scenario.axi4_burst | 13 µs/call |
-| dvs-standalone scenario.bus_transaction | 7 µs/call |
-| dvs-standalone scenario.reset_reuse | 3 µs/call |
-| dvs-standalone memmap.soc_mem_map | 39 µs/call |
-| dvs-standalone dist.weighted | 52 µs/call |
-| vlt-dvs-solver construct.range | 127 µs/call |
-| vlt-dvs-solver scenario.axi4_burst | 85 µs/call |
+| reading | time | min entropy |
+|---|---|---|
+| `--calib` `cpu_ns_per_iter` | 1.05 | |
+| `--calib` `dvs_solve_us` | 0.72 | |
+| `--calib` `dvs_compile_us` | 3.8 | |
+| dvs-standalone construct.range | 7.3 µs/call | 0.809 |
+| dvs-standalone dist.weighted | 27 µs/call | 0.179 |
+| dvs-standalone memmap.soc_mem_map | 502 µs/call | 0.258 |
+| dvs-standalone scenario.axi4_burst | 8.1 µs/call | 0.059 |
+| dvs-standalone scenario.bus_transaction | 63 µs/call | 0.259 |
+| dvs-standalone scenario.reset_reuse | 4.1 µs/call | 0.669 |
+| vlt-dvs-solver construct.range | 69 µs/call | 0.817 |
+| vlt-dvs-solver dist.weighted | 52 µs/call | 0.201 |
+| vlt-dvs-solver memmap.soc_mem_map | 7300 µs/call | 0.271 |
+| vlt-dvs-solver scenario.axi4_burst | 47 µs/call | 0.059 |
+| vlt-dvs-solver scenario.bus_transaction | 1250 µs/call | 0.261 |
+| vlt-dvs-solver scenario.reset_reuse | 27 µs/call | 0.670 |
 
-To read the µs/call values from the file:
+Min entropy is the lowest per-field entropy, normalized by log(calls), of the
+values the config timed. For dvs-standalone those are the replay's own answers
+(`randomization.replay`); for vlt-dvs-solver they are the run's `+sb_dump`.
+Seed 1 makes it repeat exactly from run to run. It is checked against this
+table, not against z3: Verilator's default sampler spreads each field, while
+dv-solve is uniform over the solutions, so on axi4_burst, where 256 of 276
+solutions have burst=1, dv-solve's 0.059 is the correct figure.
+
+**This table replaced the 2026-10-28 one,** which was measured before ce37488.
+That build's sampler returned the same answer on every reused call: all 12
+fields of memmap.soc_mem_map and 3 of the 4 fields of scenario.bus_transaction
+held one value for all 210 calls. Its 39 and 7 µs/call were the cost of not
+sampling. See `docs/perf/simbench_preflight_spread_2026-11-04.md`.
+
+To read the values from the file:
 
 ```
-python3 -c "import json;[print(r['simbench']['config'],r['simbench']['bench'],r['valid'],(r['simbench']['result'] or {}).get('ns_per_call',0)/1e3) for r in map(json.loads,open('out/preflight.jsonl'))]"
+python3 -c "import json
+for r in map(json.loads,open('out/preflight.jsonl')):
+  s=r['simbench']; res=s['result'] or {}; q=res.get('randomization') or {}
+  q=q.get('replay') or {} if q.get('source')=='capture' else q
+  print(s['config'],s['bench'],r['valid'],res.get('ns_per_call',0)/1e3,q.get('min_entropy'),q.get('stuck'),q.get('invalid'))"
 ```
 
 Pass criteria:
 - all 12 tests pass;
-- `dvs_solve_us / cpu_ns_per_iter` is within 1.5× of the reference ratio (0.63). A
+- `dvs_solve_us / cpu_ns_per_iter` is within 1.5× of the reference ratio (0.69). A
   bigger ratio means the dv-solve build is slow, not the host;
-- after scaling by `dvs_solve_us / 0.74`, every µs/call is within 3× of the reference.
+- after scaling by `dvs_solve_us / 0.72`, every µs/call is within 3× of the reference;
+- spread: dvs-standalone has no `stuck` field and no `invalid` model, and every
+  min entropy is at least the reference minus 0.05. A sampler change that
+  moves spread on purpose needs this table re-measured, in the same commit.
 
 If a criterion fails, stop. Send `out/preflight.jsonl` and the outputs of
 `--build-info` and `--calib`.
