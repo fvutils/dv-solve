@@ -5894,11 +5894,16 @@ out:
 #define DVS_US_WORK (1u << 20)
 
 /* The var of a unary conjunct (const op var, var op const, var inside
- * consts, a bare var), else -1. */
+ * consts, a bare var), else -1. A chain of logical nots is walked in a loop
+ * (its length comes from the input). */
 static int64_t _us_unary_var(dvs_bbsolver_t *S, dvs_expr_t r) {
     const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);
     uint64_t a, b;
     int64_t v;
+    while (k && *k == EXPR_UNARY && ((const ExprUnary *)k)->op == DVS_UN_NOT) {
+        r = ((const ExprUnary *)k)->operand;
+        k = (const ExprKind *)POOL_PTR(S->problem, r);
+    }
     if (!k) return -1;
     if (*k == EXPR_VAR) return bb_unsigned_var(S, r);
     if (*k == EXPR_BINARY) {
@@ -5936,8 +5941,6 @@ static int64_t _us_unary_var(dvs_bbsolver_t *S, dvs_expr_t r) {
             if (!bb_const_u(S, ls[i], &a) || !bb_const_u(S, hs[i], &b)) v = -1;
         return v;
     }
-    if (*k == EXPR_UNARY && ((const ExprUnary *)k)->op == DVS_UN_NOT)
-        return _us_unary_var(S, ((const ExprUnary *)k)->operand);
     return -1;
 }
 
@@ -6509,9 +6512,12 @@ static dvs_expr_t _ss_unwrap(dvs_bbsolver_t *S, dvs_expr_t r) {
 
 /* Narrow the key hull [*kl,*kh] of v (key = v ^ *bias) by `t cmp const` where
  * t is v or v ^ bias through substitutions; the first such conjunct fixes the
- * bias. Other conjuncts leave the hull as is (the enumeration checks them). */
+ * bias. Other conjuncts leave the hull as is (the enumeration checks them).
+ * It recurses into the disjuncts of an or, as deep as the input nests them;
+ * on a low stack it leaves the hull as is (a superset, so still sound). */
 static void _ss_hull(dvs_bbsolver_t *S, dvs_expr_t r, uint32_t v, uint64_t *bias,
                      int *have_bias, uint64_t *kl, uint64_t *kh) {
+    if (dvs_stack_low(&S->sg)) return;
     r = _ss_unwrap(S, r);
     if (r == EXPR_NULL) return;
     const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, r);

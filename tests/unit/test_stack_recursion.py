@@ -101,6 +101,17 @@ BOUNDED = {
     ("dvs_bbsolver", "expr_direct_vars"): "dvs_stack_low",
     ("dvs_bbsolver", "bb_flatten_or"): "dvs_stack_low",
     ("dvs_bbsolver", "bb_concat_cuts"): "depth cap 64",
+    ("dvs_bbsolver", "bb_eval"): "dvs_stack_low (decline)",
+    ("dvs_bbsolver", "is_const_tree"): "depth cap 16",
+    ("dvs_bbsolver", "is_wiring_tree"): "depth cap 16",
+    ("dvs_bbsolver", "collect_substs_from_m"): "one level: a forced (second-pass) call never recurses",
+    ("dvs_bbsolver", "_ss_base"): "depth cap 32",
+    ("dvs_bbsolver", "_ss_aff"): "depth cap 32",
+    ("dvs_bbsolver", "_ss_hull"): "dvs_stack_low (hull left as is)",
+    ("dvs_bbsolver", "_ss_ivals"): "depth cap 16",
+    ("dvs_bbsolver", "_ds_vars"): "depth cap 64",
+    ("dvs_bbsolver", "_en_bits"): "depth cap 64",
+    ("dvs_bbsolver", "_en_colwise"): "depth cap 64",
     # Model validator and the oracle's SMT-LIB2 emitter
     ("dvs_validate", "_ev"): "dvs_stack_low (skip)",
     ("dvs_validate", "_vtype"): "dvs_stack_low (skip)",
@@ -173,11 +184,14 @@ def _cycles(edges):
 def _compile_all(flags):
     out = Path(tempfile.mkdtemp(prefix="dvs_stack_"))
     cc = os.environ.get("CC_STACK_CHECK", "gcc")
+    # The build generates dvs_git_info.h (cmake/dvs_git_info.cmake); these
+    # compiles have no build directory, so stand in for it as for DVS_VERSION.
+    (out / "dvs_git_info.h").write_text('#define DVS_BI_COMMIT "x"\n#define DVS_BI_DIRTY 0\n')
 
     def one(src: Path):
         stem = src.stem
         cmd = [cc, *flags, "-std=gnu11", "-fPIC", '-DDVS_VERSION="x"',
-               *[f"-I{ROOT / i}" for i in INCLUDES],
+               *[f"-I{ROOT / i}" for i in INCLUDES], f"-I{out}",
                "-fcallgraph-info=su", "-c", str(src),
                "-o", str(out / f"{stem}.o"), "-dumpbase", f"{stem}.c"]
         r = subprocess.run(cmd, capture_output=True, text=True)
