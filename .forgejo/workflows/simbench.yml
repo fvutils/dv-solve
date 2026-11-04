@@ -1,0 +1,120 @@
+# Simulator benchmarks (simbench) for fvutils/dv-solve on Forgejo Actions.
+# Plan: docs/simbench_nightly_plan.md. Procedure: bench/simbench/README.md.
+#
+# Like perf.yml, the job MEASURES and UPLOADS. It never writes to git, holds
+# no write credential, and publishes nothing, so it has no GitHub twin and
+# needs no release-authority gate. It uploads two artifacts:
+#   simbench-<kind>-<utc>-<sha>      one gzipped run record: every result keyed
+#                                    by variant, simulator build (pinned in
+#                                    tests/perf/sim_tools.lock.json) and dv-solve
+#                                    build, with random spread per bench
+#   simbench-raw-<kind>-<utc>-<sha>  the per-bench JSONL, value dumps, solver
+#                                    sessions and pytest logs, for diagnosis
+#
+# Dispatch only until two runs on the runner pass (plan S2); the 05:30
+# schedule, queued behind perf.yml in the same concurrency group, comes in S3.
+
+name: Simbench
+
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "Run kind (reference adds Verilator+z3 first)"
+        default: manual
+        type: choice
+        options: [manual, nightly, reference]
+      variants:
+        description: "Comma-separated variant ids (default: the kind's set)"
+        default: ""
+      tier:
+        description: "Bench tier (smoke, standard, stress; empty: all 100)"
+        default: ""
+
+concurrency:
+  group: perf          # shared with perf.yml: two timed jobs would measure each other
+  cancel-in-progress: false
+
+jobs:
+  simbench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      KIND: ${{ inputs.kind || 'nightly' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned tools
+        run: |
+          pip_install() {
+            python3 -m pip install -q "$@" && return 0
+            python3 -m pip install -q --break-system-packages "$@"
+          }
+          pip_install cmake ninja pyyaml pytest -r tests/perf/solvers.lock
+          python3 -m tests.perf.tools fetch --lock sim --dest sim-tools
+          {
+            echo "SIMBENCH_VERILATOR_SC=$PWD/$(DVS_PERF_TOOLS=sim-tools python3 -c 'from tests.perf import tools; print(tools.path("verilator-sc"))')"
+            echo "SIMBENCH_XEZIM=$PWD/$(DVS_PERF_TOOLS=sim-tools python3 -c 'from tests.perf import tools; print(tools.path("xezim"))')"
+            echo "SIM_LOCK_SHA=$(python3 -c 'from tests.perf import tools; print(tools.lock_sha("sim"))')"
+          } >> "$GITHUB_ENV"
+
+      - name: Build dv-solve (Release)
+        run: |
+          [ -d packages/cadical ] || git clone -q --depth 1 -b rel-3.0.1 \
+              https://github.com/arminbiere/cadical.git packages/cadical
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j8 --target dv-solve-smt2 dv_solve bench_vlt_replay > build.log 2>&1 \
+            || { tail -40 build.log; exit 1; }
+
+      - name: Collect
+        id: collect
+        # Exit 1 means the record is INVALID (a failed check, or a wrong
+        # answer from dv-solve). It is still written; the failure is deferred
+        # until after the upload so it can be diagnosed.
+        working-directory: bench/simbench
+        run: |
+          set +e
+          tier="${{ inputs.tier }}"
+          variants="${{ inputs.variants }}"
+          env -u LD_LIBRARY_PATH PYTHONPATH=src python3 -m dv_solve_simbench.ci \
+            --kind "$KIND" ${variants:+--variants "$variants"} ${tier:+-m "$tier"} \
+            --lock-sha "$SIM_LOCK_SHA" --out "$GITHUB_WORKSPACE/sim-out" --github-output
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check the record and logs for internal identifiers
+        # Both artifacts are downloadable, and the record is public once
+        # consolidated.
+        run: |
+          pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          if zcat sim-out/*.json.gz | grep -nE "$pattern" ; then
+            echo "::error::internal identifier in the run record"
+            exit 1
+          fi
+          if grep -rlE "$pattern" sim-out/raw --exclude-dir=build ; then
+            echo "::error::internal identifier in the raw results"
+            exit 1
+          fi
+
+      - name: Upload the run record
+        if: steps.collect.outputs.name != ''
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: ${{ steps.collect.outputs.name }}
+          path: sim-out/*.json.gz
+          if-no-files-found: error
+
+      - name: Upload the raw results
+        if: steps.collect.outputs.raw != ''
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: ${{ steps.collect.outputs.raw }}
+          path: |
+            sim-out/raw/**
+            !sim-out/raw/build/**
+          if-no-files-found: warn
+
+      - name: Fail on an invalid record
+        if: steps.collect.outputs.rc != '0'
+        run: |
+          echo "::error::the simbench record is invalid (collect exited ${{ steps.collect.outputs.rc }}); see the record's reason"
+          exit 1
