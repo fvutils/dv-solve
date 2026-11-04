@@ -285,6 +285,8 @@ struct dvs_bbsolver_s {
      * pass and pre-solve simulation. Deterministic, for engine routing
      * (dvs_bbsolver_work). */
     uint64_t        aux_work;
+    uint64_t        eval_steps;    /* expression nodes bb_eval visited, ever */
+    uint64_t        eval_cap;      /* bb_eval declines past this many (0: none) */
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -3310,6 +3312,7 @@ static int bb_eval_in(dvs_bbsolver_t *S, dvs_expr_t v, dvs_expr_t lo,
 static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
                    const uint64_t *val, uint64_t *out) {
     if (ref == EXPR_NULL || w == 0 || w > 64) return 0;
+    if (++S->eval_steps > S->eval_cap && S->eval_cap) return 0;
     if (dvs_stack_low(&S->sg)) return 0;
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
@@ -4172,6 +4175,24 @@ static int _popsamp(dvs_bbsolver_t *S);
 static int _uniqsamp(dvs_bbsolver_t *S);
 static int _sortsamp(dvs_bbsolver_t *S);
 static int _divsamp(dvs_bbsolver_t *S);
+
+/* A pre-SAT sampler, its evaluations capped: past DVS_SAMPLER_STEPS
+ * expression nodes, bb_eval declines, and every sampler takes a decline as
+ * "leave it to SAT". Their own budgets count evaluations, and an evaluation
+ * of a large circuit (a CRC, a checksum fold) visits thousands of nodes: the
+ * divmul sampler spent 0.6 s on fletcher16 folds that SAT answers in 0.06 s.
+ * docs/routing_gap_plan.md, R1. */
+/* Measured over the SMT2 corpus and the sampling tests (2,987 calls): a
+ * sampler that succeeded visited at most 1.25e7 nodes; 2^25 keeps 2.7x
+ * headroom and stops a runaway at ~0.13 s. */
+#define DVS_SAMPLER_STEPS (1ull << 25)
+static int _capped(dvs_bbsolver_t *S, int (*fn)(dvs_bbsolver_t *)) {
+    uint64_t old = S->eval_cap;
+    S->eval_cap = S->eval_steps + DVS_SAMPLER_STEPS;
+    int rc = fn(S);
+    S->eval_cap = old;
+    return rc;
+}
 static int _pinfast(dvs_bbsolver_t *S);
 /* The one-shot check and the reused-context draw try the pinned-constant fast
  * path before the division sampler (DV_PINFAST_FIRST=0: old order, no pinfast). */
@@ -4472,12 +4493,12 @@ static int _bb_check_body(dvs_bbsolver_t *S, uint64_t seed) {
     free(S->node_val);
     S->node_val = NULL;
     dvs_stats_via_t via = DVS_STATS_VIA_BB_POPCOUNT;
-    int rc = _popsamp(S);
-    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_UNIQUE; rc = _uniqsamp(S); }
-    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_SORTED; rc = _sortsamp(S); }
+    int rc = _capped(S, _popsamp);
+    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_UNIQUE; rc = _capped(S, _uniqsamp); }
+    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_SORTED; rc = _capped(S, _sortsamp); }
     if (rc == DVS_BB_UNKNOWN && _pinfast_first()) { via = DVS_STATS_VIA_BB_PINFAST; rc = _pinfast(S); }
-    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_DIVMUL; rc = _divsamp(S); }
-    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_ENUM; rc = _enumsamp(S); }
+    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_DIVMUL; rc = _capped(S, _divsamp); }
+    if (rc == DVS_BB_UNKNOWN) { via = DVS_STATS_VIA_BB_ENUM; rc = _capped(S, _enumsamp); }
     int sampled = rc != DVS_BB_UNKNOWN;
     if (sampled) { DVS_STATS_VIA(via); _sim_check(S, rc); }
     else rc = _solve_with_sim(S);
@@ -5147,12 +5168,12 @@ static int _fresh_base(dvs_bbsolver_t *S, uint64_t seed) {
      * leaves the cached model in place. (No _sim_check: the verdict is
      * already SAT, and a second kissat solve is not supported.) */
     dvs_stats_via_t via = DVS_STATS_VIA_BB_POPCOUNT;
-    int rc = _popsamp(S);
-    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_UNIQUE; rc = _uniqsamp(S); }
-    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_SORTED; rc = _sortsamp(S); }
+    int rc = _capped(S, _popsamp);
+    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_UNIQUE; rc = _capped(S, _uniqsamp); }
+    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_SORTED; rc = _capped(S, _sortsamp); }
     if (rc != DVS_BB_SAT && _pinfast_first()) { via = DVS_STATS_VIA_BB_PINFAST; rc = _pinfast(S); }
-    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_DIVMUL; rc = _divsamp(S); }
-    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_ENUM; rc = _enumsamp(S); }
+    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_DIVMUL; rc = _capped(S, _divsamp); }
+    if (rc != DVS_BB_SAT) { via = DVS_STATS_VIA_BB_ENUM; rc = _capped(S, _enumsamp); }
     if (rc == DVS_BB_SAT) {
         DVS_STATS_VIA(via);
         S->last_result = DVS_BB_SAT;
@@ -8163,6 +8184,16 @@ out:
 /* A build pays off only over many draws: 2^22 nodes (cons8, one 2^22 range)
  * cost 520 us a draw over 210 draws, 148k (nqueens 8) paid back 9x. */
 #define DVS_EN_MAX_NODES (1ull << 19)
+/* The same budget in what an evaluation costs: expression nodes bb_eval
+ * visits (S->eval_steps). DVS_EN_MAX_NODES counts evaluations alone, so a
+ * leaf that is a large circuit (a CRC, a SECDED code) ran 2^19 evaluations of
+ * thousands of nodes each -- 1.2e9 visits, 4.5 s -- before declining, where
+ * SAT answers in milliseconds. The one table the SMT2 corpus builds takes
+ * 8.5e6 visits; a build that found no model at all by 2^22 visits stops too
+ * (an empty table cannot be sampled; SAT decides it far cheaper).
+ * docs/routing_gap_plan.md, R1. */
+#define DVS_EN_MAX_STEPS   (1ull << 24)
+#define DVS_EN_EMPTY_STEPS (1ull << 22)
 
 static uint64_t _en_key(const dvs_bbsolver_t *S) {
     uint64_t h = 0xcbf29ce484222325ull ^ (uint64_t)(uintptr_t)S->problem;
@@ -8434,6 +8465,7 @@ static int _en_build(dvs_bbsolver_t *S) {
     uint32_t *sv = NULL, *sl = NULL, *spos = NULL, *dord = NULL;
     uint64_t *sm = NULL, *slo = NULL, *shi = NULL;
     uint64_t *sol = NULL, nodes = 0;
+    const uint64_t steps0 = S->eval_steps;
     int ok = 0;
     if (!pos || !ord || !lo || !hi || !vval || !fm || !cut || !lfm || !lcut || !s0) goto out;
     for (uint32_t v = 0; v < nv; v++) {
@@ -8605,6 +8637,11 @@ static int _en_build(dvs_bbsolver_t *S) {
                 hold = t != 0;
             }
             if (nodes > DVS_EN_MAX_NODES) goto out;
+            {
+                uint64_t steps = S->eval_steps - steps0;
+                if (steps > DVS_EN_MAX_STEPS || (n_sol == 0 && steps > DVS_EN_EMPTY_STEPS))
+                    goto out;
+            }
             if (hold && k + 1 < n_sl) {
                 k++;
                 EN_SET(dord[k], slo[dord[k]]);
@@ -8667,10 +8704,12 @@ done:
     sol = NULL;
     ok = 1;
 out:
-    S->aux_work += nodes;
+    /* Work done: the expression nodes visited, not the evaluations. */
+    S->aux_work += S->eval_steps - steps0;
     if (getenv("DV_LOG"))
-        fprintf(stderr, "bb-enumsamp: vars=%u slots=%u leaves=%zu nodes=%llu sols=%zu -> %s\n",
-                n_ord, n_sl, n_lf, (unsigned long long)nodes, n_sol, ok ? "table" : "decline");
+        fprintf(stderr, "bb-enumsamp: vars=%u slots=%u leaves=%zu nodes=%llu steps=%llu sols=%zu -> %s\n",
+                n_ord, n_sl, n_lf, (unsigned long long)nodes,
+                (unsigned long long)(S->eval_steps - steps0), n_sol, ok ? "table" : "decline");
     free(lf); free(lsl); free(lown); free(vs); free(loff); free(pos); free(ord); free(lo); free(hi);
     free(vval); free(fm); free(cut); free(lfm); free(lcut); free(s0);
     free(dhead); free(dlf); free(ldep); free(sv); free(sl); free(spos); free(dord);
@@ -8839,11 +8878,11 @@ static int _bb_sess_solve_body(dvs_bbsolver_t *S, uint64_t seed) {
     S->seed = seed;
     free(S->node_val);
     S->node_val = NULL;
-    int pf = _popsamp(S);
-    if (pf == DVS_BB_UNKNOWN) pf = _uniqsamp(S);
-    if (pf == DVS_BB_UNKNOWN) pf = _sortsamp(S);
+    int pf = _capped(S, _popsamp);
+    if (pf == DVS_BB_UNKNOWN) pf = _capped(S, _uniqsamp);
+    if (pf == DVS_BB_UNKNOWN) pf = _capped(S, _sortsamp);
     if (pf == DVS_BB_UNKNOWN) pf = _pinfast(S);
-    if (pf == DVS_BB_UNKNOWN) pf = _divsamp(S);
+    if (pf == DVS_BB_UNKNOWN) pf = _capped(S, _divsamp);
     if (pf != DVS_BB_UNKNOWN) {
         _sim_check(S, pf);
         S->last_result = pf;
