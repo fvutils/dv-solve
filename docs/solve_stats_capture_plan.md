@@ -981,10 +981,14 @@ can only flag what is bad by our own standards. So the expectation is the
     run (box and enumeration off): 1 of 3 real slowdowns caught, baseline 6 of
     33 flagged. The two missed were unusually fast classes slowed to normal:
     only a per-class history check (the ratchet) can see that.
+- **Routing gap closed** (docs/routing_gap_plan.md, R0-R3, 2026-11-04): the
+  measured gaps were the bit-level samplers' evaluator budgets, not the
+  routing rules. Corpus 21.3 s -> 6.9 s on the default route, items 4x over
+  the best arm 119 -> 47; the shipped model re-fitted on that data (R3).
 - **Next in S5a:** more randomization training classes with a measurable
   best case (a generator sweep, and in-process reference timing for
   microsecond solves); the ratchet (per-class history across runs); then
-  act on the measured gaps (routing: the `multiplier` rule; fw-hdl).
+  act on the remaining measured gaps.
 
 ## S6: dogfood
 

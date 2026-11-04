@@ -37,7 +37,7 @@ own engines.
 | R0 | Attribute the gap: per routing rule, the items it misroutes and the time lost | done |
 | R1 | Cap the bit-level engine's pre-SAT samplers by evaluator node visits | done: corpus 21.3 s -> 10.0 s on the default route |
 | R2 | The remaining misroutes: sampler budgets in visits, sweep before the table on small cones | done: corpus 10.0 s -> 6.9 s on the default route |
-| R3 | Re-fit the expected-cost model; record the corpus totals before and after | open |
+| R3 | Re-fit the expected-cost model; record the corpus totals before and after | done |
 
 ## Log
 
@@ -126,3 +126,29 @@ own engines.
   - Left (0.7 s, not worth a rule change yet): clz_nz_w16 ~42 ms vs CDCL
     2 ms, parity_w16 ~35-47 ms vs cube; array_symbolic_index ~19 ms vs
     CDCL 2 ms.
+- R3 (2026-11-04): corpus totals per run (`perf-out/perfmodel/train-*.json`,
+  650 items; items 4x over the best arm as the collector counts them, with
+  its 2 ms noise floor):
+
+  | Run | Default route | Own best engine | Best arm of any solver | Items >= 4x |
+  |---|---|---|---|---|
+  | 3fca456 (before) | 21.3 s | 6.5 s | 2.8 s | 119 |
+  | R1 (e6f6faa) | 10.0 s | 6.4 s | 2.6 s | 110 |
+  | R2 (6ac284e) | 6.9 s | 6.0 s | 2.6 s | 47 |
+
+  - Our gap to the best arm per motif (SMT2, `perfmodel bias`): `bool-var`
+    3.9x -> 2.1x, `guarded` 3.9x -> 2.0x, `constant` 2.8x -> 1.8x,
+    `disjunction` 2.6x -> 1.8x, `ite-value` 2.4x -> 1.7x.
+  - `src/dv_solve/perf_model.json` re-fitted on `train-r2.json`, the
+    self-model on a fresh test-suite capture (`suite_stats-r2.json`, 12,385
+    classes; the earlier one was lost with the scratch directory). The
+    best-case model barely moves (SMT2 cv R^2 0.49 -> 0.51, rand 0.41 ->
+    0.42): it predicts the best arm, which R1/R2 did not change. Thresholds
+    rand 33x, SMT2 57x (were 29x, 37x: the old SMT2 fit's p95 error was
+    measured on 3fca456 data). On the corpus's own 546 classes: 43
+    unexpected (69 with the old model), 92 anomalous (96).
+  - The model's `commit` is set by hand to 6ac284e: the build stamps the git
+    commit at configure time, so `build-perf` still said 328c6a8. Re-run
+    `cmake <build>` before a collection.
+  - Still the model's limit: 33 randomization training classes. More are the
+    next step for it (S5a: a generator sweep, in-process reference timing).
