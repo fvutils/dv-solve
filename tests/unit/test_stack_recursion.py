@@ -145,7 +145,12 @@ def _graph(ci: Path):
             continue
         m = _EDGE.match(line)
         if m:
-            edges[_name(m.group(1))].add(_name(m.group(2)))
+            src, dst = _name(m.group(1)), _name(m.group(2))
+            # gcc may split a function into fn and fn.part.N (partial
+            # inlining); the call from one half to the other is not recursion.
+            if src == dst and m.group(1) != m.group(2):
+                continue
+            edges[src].add(dst)
     return frames, edges
 
 
