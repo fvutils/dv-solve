@@ -1,0 +1,30 @@
+{
+ "_comment": "Pinned simulators for the nightly simbench runs (docs/simbench_nightly_plan.md §2). Kept apart from tools.lock.json so moving a simulator pin does not change the lock hash of the solver perf records, and the reverse. Each bundle unpacks into its own directory (`into`): both Verilator bundles unpack to verilator/. Changing anything here changes the lock hash every simbench record carries.",
+ "verilator-bin-5.054": {
+  "_comment": "First release with sampler control (+verilator+rand+sampler+, verilator#8899).",
+  "url": "https://github.com/edapack/verilator-bin/releases/download/v5.054/verilator-manylinux_2_28_x86_64-5.054.tar.gz",
+  "sha256": "9767714611968e6d8e67c18d717455072295ffad975b4fb8a8bac9e5b7c0a97e",
+  "into": "verilator-5.054",
+  "manifest": "verilator-5.054/verilator/manifest.json",
+  "provides": {
+   "verilator-sc": [
+    "verilator-5.054/verilator/bin/verilator",
+    "5.054"
+   ]
+  }
+ },
+ "xezim-bin-0.11.3": {
+  "_comment": "Release track (upstream tag 0.11.3). manylinux_2_34: needs glibc 2.34; the runner image (Ubuntu 22.04) has 2.35.",
+  "url": "https://github.com/EDAPack/xezim-bin/releases/download/v0.11.3/xezim-manylinux_2_34_x86_64-0.11.3.tar.gz",
+  "sha256": "9c9a3db6b0410db304afd7f35d3d002fb118c9fa6dcfddd68a27ee1e631663b4",
+  "into": "xezim-0.11.3",
+  "manifest": "xezim-0.11.3/xezim/manifest.json",
+  "build_info": "xezim-0.11.3/xezim/share/xezim/BUILD-INFO.txt",
+  "provides": {
+   "xezim": [
+    "xezim-0.11.3/xezim/bin/xezim",
+    "0.11.3"
+   ]
+  }
+ }
+}
