@@ -17,6 +17,11 @@ run record:
    variant, simulator build and dv-solve build. The full JSONL, dumps and
    sessions stay in <out>/raw for a second, diagnostic artifact.
 
+Before the pre-flight and before each variant it waits for a quiet host
+(wait_quiet): the runner shares the machine with push-triggered CI, and the
+concurrency group keeps out only perf.yml. A dispatch that landed beside a
+test.yml run measured calib at twice its reference.
+
 A failed check marks the record invalid. It is still written, and the exit
 status is 1, so the workflow uploads it and then goes red. Exit 1 also follows
 a wrong answer (a check error) from a dv-solve variant: that is our bug. A
@@ -160,6 +165,47 @@ def check_preflight(recs: List[dict], calib: dict) -> dict:
     return out
 
 
+# --- a quiet host -----------------------------------------------------------
+
+QUIET_LOAD = 2.0         # 1-minute load average below this ...
+QUIET_SETTLE_S = 60      # ... for this long
+QUIET_TIMEOUT_S = 1800   # then give up and measure anyway (the record says so)
+QUIET_POLL_S = 15
+
+
+def wait_quiet(max_load: float = QUIET_LOAD, settle_s: float = QUIET_SETTLE_S,
+               timeout_s: float = QUIET_TIMEOUT_S, poll_s: float = QUIET_POLL_S,
+               read=None, sleep=time.sleep, now=time.monotonic) -> dict:
+    """Wait until the load average is under `max_load`; once it has been over,
+    it must then stay under for `settle_s`.
+
+    Returns what happened, for the record: {"quiet", "waited_s", "load_start",
+    "load_end"}. quiet=False means `timeout_s` passed first; the run goes on and
+    machine.noisy marks it as usual. timeout_s=0 does not wait.
+    """
+    read = read or records._loadavg
+    t0 = now()
+    load0 = load = read()
+    if load < max_load:          # the 1-minute average already covers the last minute
+        return {"quiet": True, "waited_s": 0.0, "load_start": load0, "load_end": load}
+    calm_since = None
+    while timeout_s > 0:
+        t = now()
+        if calm_since is not None and t - calm_since >= settle_s:
+            break
+        if t - t0 >= timeout_s:
+            return {"quiet": False, "waited_s": round(t - t0, 1), "load_start": load0,
+                    "load_end": load}
+        sleep(poll_s)
+        load = read()
+        if load >= max_load:
+            calm_since = None
+        elif calm_since is None:
+            calm_since = now()
+    return {"quiet": True, "waited_s": round(now() - t0, 1), "load_start": load0,
+            "load_end": load}
+
+
 # --- per-bench outcome ------------------------------------------------------
 
 def outcome(rec: dict) -> str:
@@ -293,7 +339,8 @@ def _git_describe() -> Optional[str]:
 
 
 def collect(kind: str, variants: List[str], out: str, n: int, seed: int,
-            marker: Optional[str], release: Optional[str], lock_sha: Optional[str]) -> dict:
+            marker: Optional[str], release: Optional[str], lock_sha: Optional[str],
+            quiet: Optional[dict] = None) -> dict:
     from .config import dvs_defaults, load_configs
     raw = os.path.join(out, "raw")
     os.makedirs(raw, exist_ok=True)
@@ -308,7 +355,16 @@ def collect(kind: str, variants: List[str], out: str, n: int, seed: int,
     rec = {"schema": 1, "valid": True, "kind": kind, "family": "sim", "run": run,
            "machine": None, "tools": {"lock_sha": lock_sha}, "calib": {},
            "sim": {"n": n, "seed": seed, "tier": marker or "all", "preflight": None,
-                   "variants": {}}}
+                   "variants": {}, "quiet_waits": {}}}
+    quiet = dict(quiet or {})
+
+    def settle(what: str) -> None:
+        w = wait_quiet(**quiet)
+        rec["sim"]["quiet_waits"][what] = w
+        if w["waited_s"] >= QUIET_POLL_S or not w["quiet"]:
+            _log("%s: waited %.0f s for a quiet host (load %.1f -> %.1f)%s"
+                 % (what, w["waited_s"], w["load_start"], w["load_end"],
+                    "" if w["quiet"] else "; gave up, measuring anyway"))
     try:
         if any(v in DVS_VARIANTS and VARIANTS[v] for v in variants):
             dvs = {k: os.environ.get(k) or v for k, v in dvs_defaults().items()}
@@ -316,6 +372,7 @@ def collect(kind: str, variants: List[str], out: str, n: int, seed: int,
                 provenance.build_info(dvs["SIMBENCH_DVS_SMT2"]), "dv-solve-smt2")
             rec["tools"]["dvs_replay"] = check_build(
                 provenance.build_info(dvs["SIMBENCH_DVS_REPLAY"]), "bench_vlt_replay")
+            settle("preflight")
             calib = provenance.calib(dvs["SIMBENCH_DVS_REPLAY"])
             rec["calib"] = calib
             check_calib(calib)
@@ -334,6 +391,7 @@ def collect(kind: str, variants: List[str], out: str, n: int, seed: int,
             cfg = cfgs[config]
             if not cfg.available:
                 raise Check("%s (%s): %s" % (v, config, cfg.reason))
+            settle(v)
             _log("%s (%s)" % (v, config))
             before = len(records.load(results)) if os.path.exists(results) else 0
             t0 = time.time()
@@ -376,6 +434,10 @@ def main(argv=None) -> int:
     ap.add_argument("-m", "--marker", default=None, help="bench tier (smoke/standard/stress); default all")
     ap.add_argument("--release", default=None, help="dv-solve release tag the build is (kind=release)")
     ap.add_argument("--lock-sha", default=None, help="tests.perf.tools.lock_sha('sim')")
+    ap.add_argument("--quiet-load", type=float, default=QUIET_LOAD,
+                    help="wait for the 1-minute load average to stay under this (default %(default)s)")
+    ap.add_argument("--quiet-timeout", type=float, default=QUIET_TIMEOUT_S,
+                    help="seconds to wait for a quiet host before measuring anyway; 0: no wait")
     ap.add_argument("--github-output", action="store_true")
     a = ap.parse_args(argv)
     variants = a.variants.split(",") if a.variants else KINDS[a.kind]
@@ -383,7 +445,8 @@ def main(argv=None) -> int:
     if unknown:
         ap.error("unknown variant(s) %s" % unknown)
     out = os.path.abspath(a.out)
-    rec = collect(a.kind, variants, out, a.n, a.seed, a.marker, a.release, a.lock_sha)
+    rec = collect(a.kind, variants, out, a.n, a.seed, a.marker, a.release, a.lock_sha,
+                  quiet={"max_load": a.quiet_load, "timeout_s": a.quiet_timeout})
     name = artifact_name(a.kind, rec["run"]["utc"], rec["run"]["commit"])
     path = os.path.join(out, name + ".json.gz")
     with gzip.open(path, "wt") as fp:

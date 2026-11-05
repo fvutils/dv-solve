@@ -143,3 +143,49 @@ def test_kinds_and_artifact():
     assert ci.KINDS["reference"][0] == "vlt-z3-default"
     assert ci.artifact_name("nightly", "20261104T053000Z", "abcdef0123") == \
         "simbench-nightly-20261104T053000Z-abcdef0"
+
+
+class _Clock:
+    """A fake clock: sleep() advances it; read() replays a load series."""
+    def __init__(self, loads):
+        self.t, self.loads = 0.0, list(loads)
+
+    def now(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+    def read(self):
+        return self.loads.pop(0) if len(self.loads) > 1 else self.loads[0]
+
+
+def _wait(loads, **kw):
+    c = _Clock(loads)
+    return ci.wait_quiet(read=c.read, sleep=c.sleep, now=c.now, **kw)
+
+
+def test_wait_quiet_idle_host():
+    w = _wait([0.3], settle_s=60, poll_s=15)
+    assert w["quiet"] and w["waited_s"] == 0.0     # no settle when it starts quiet
+
+
+def test_wait_quiet_waits_out_a_busy_spell():
+    # 18 -> falls under 2 at the 4th poll; it must then stay under for 60 s.
+    w = _wait([18, 12, 6, 3, 1.5, 1.2, 1.0, 0.9, 0.8, 0.7], settle_s=60, poll_s=15)
+    assert w["quiet"] and w["load_start"] == 18 and w["waited_s"] == 120.0
+
+
+def test_wait_quiet_restarts_on_a_spike():
+    w = _wait([5, 1, 5, 1, 1, 1, 1, 1], settle_s=30, poll_s=15)
+    assert w["quiet"] and w["waited_s"] == 75.0     # calm at 15, spike at 30, calm 45..75
+
+
+def test_wait_quiet_gives_up():
+    w = _wait([18], settle_s=60, poll_s=15, timeout_s=300)
+    assert not w["quiet"] and w["waited_s"] == 300.0
+
+
+def test_wait_quiet_disabled():
+    assert _wait([18], timeout_s=0) == {"quiet": True, "waited_s": 0.0, "load_start": 18,
+                                         "load_end": 18}
