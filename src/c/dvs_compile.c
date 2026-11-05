@@ -9,6 +9,7 @@
 #include "dvs_problem.h"
 #include "dvs_sv.h"
 #include "dvs_i128.h"
+#include "dvs_engine.h"
 
 /* ------------------------------------------------------------------ */
 /* Internal helpers                                                    */
@@ -201,7 +202,11 @@ static int _compile_var_const_cmp(dvs_ctx_t *ctx, dvs_binop_t op,
         {
             int64_t lo = (int64_t)var_lo64(ctx, &ctx->vars[vid]);
             int64_t hi = (int64_t)var_hi64(ctx, &ctx->vars[vid]);
-            if (cv < lo || cv > hi) return 1;  /* already excluded */
+            /* In the var's own order: an unsigned 64-bit domain [0, 2^64-1]
+             * is lo 0, hi -1 as int64, and a signed test read every
+             * constant as above it, dropping the constraint. */
+            const Variable *v = &ctx->vars[vid];
+            if (var_b_lt(v, cv, lo) || var_b_gt(v, cv, hi)) return 1;  /* already excluded */
             if (cv == lo) {
                 if (ctx_tighten_lb64(ctx, vid, cv + 1) == PROP_CONFLICT) return -1;
                 return 1;
@@ -884,6 +889,23 @@ static int _binop_exact(dvs_ctx_t *ctx, dvs_binop_t op, uint32_t r_id,
     *out_lo = 0; *out_hi = 0;
     if (w >= 1 && w <= 64 && modular) return 1;
     if (w == 0 || w > 64) return 0;
+
+    /* Unsigned division, remainder and logical shift never exceed the left
+     * operand, so they fit r whenever r is as wide; their 64-bit propagators
+     * read unsigned 64-bit values as uint64 (dvs_prop_templates.c, _u64_op). */
+    if ((op == DVS_BIN_DIV || op == DVS_BIN_MOD || op == DVS_BIN_RSHIFT) && !rs
+            && !(ctx->vars[a_id].flags & VAR_SIGNED)
+            && !(ctx->vars[b_id].flags & VAR_SIGNED)
+            && ctx->vars[a_id].width <= w)
+        return 1;
+    /* Unsigned bitwise ops stay below the wider operand's power of two, so
+     * they fit r whenever both operands do; their 64-bit propagators read
+     * unsigned 64-bit values as uint64 too (_bitwise_u64). */
+    if ((op == DVS_BIN_BAND || op == DVS_BIN_BOR || op == DVS_BIN_BXOR) && !rs
+            && !(ctx->vars[a_id].flags & VAR_SIGNED)
+            && !(ctx->vars[b_id].flags & VAR_SIGNED)
+            && ctx->vars[a_id].width <= w && ctx->vars[b_id].width <= w)
+        return 1;
 
     int64_t alo, ahi, blo, bhi;
     /* Every value must have an honest int64 spelling. */
@@ -2099,13 +2121,40 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         uint32_t else_id = _value_to_var(ctx, sp, ite->else_e, width);
         if (else_id == EXPR_NULL) return EXPR_NULL;
 
-        /* Create result var for this ITE — VAR_AUX: determined by propagation */
+        /* Create result var for this ITE — VAR_AUX: determined by propagation.
+         * It is signed when the ITE is (both arms signed, dvs_sv.h), with the
+         * signed range: an unsigned [0, 2^w-1] aux could not hold a negative
+         * arm, and an SV cast above would read it with the wrong sign. */
         if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
         uint32_t r_id = ctx->n_vars;
-        uint32_t w = width ? width : 32;
+        /* With no width asked for (a shift amount, an extract's operand),
+         * the ITE is as wide as its wider arm. A 32-bit default could not
+         * hold a 64-bit arm's value, and ite_value compared that arm's
+         * unsigned 64-bit bounds (hi 2^64-1, stored -1) in the narrow
+         * result's order: `y >= z << (c ? z : 0)` came back unsat. */
+        uint32_t w = width;
+        if (!w) {
+            uint32_t tw = ctx->vars[then_id].width, ew = ctx->vars[else_id].width;
+            w = tw > ew ? tw : ew;
+            if (!w) w = 32;
+        }
+        int sgn = _expr_has_signed(ctx, sp, ref, 0)
+               && (ctx->vars[then_id].flags & VAR_SIGNED)
+               && (ctx->vars[else_id].flags & VAR_SIGNED);
+        int64_t min_val = 0;
         int64_t max_val = (w >= 64) ? (int64_t)UINT64_MAX
                         : (int64_t)((1ULL << w) - 1);
-        if (_init_aux_tiered(ctx, &ctx->vars[r_id], w, VAR_AUX, 0, max_val) != 0)
+        if (sgn) {
+            /* Signed ITE values of 63-64 bits sit next to the int64-domain
+             * hazard (docs/signed_unsigned_ops_design.md, step 4): SMOD lowered
+             * from typed operators came back wrongly UNSAT there. Decline. */
+            if (w >= 63) return EXPR_NULL;
+            max_val = ((int64_t)1 << (w - 1)) - 1;
+            min_val = -max_val - 1;
+        }
+        if (_init_aux_tiered(ctx, &ctx->vars[r_id], w,
+                             (uint8_t)(VAR_AUX | (sgn ? VAR_SIGNED : 0)),
+                             min_val, max_val) != 0)
             return EXPR_NULL;   /* B24 */
         ctx->n_vars = r_id + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
@@ -4251,6 +4300,7 @@ static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 #endif
     int err = 0;
     dvs_problem_t *esp = dvs_sv_elaborate(sp, NULL, NULL, &err);
+    if (!err && esp == sp) esp = dvs_sv_lower_typed(sp, NULL, NULL, &err);
     if (err) return _elab_error_code(err);
     dvs_problem_t *msp = dvs_sv_rewrite_masks(esp, NULL, NULL);
     int rc = _nomem_check(ctx, _solver_compile_body(ctx, msp));
@@ -4265,9 +4315,11 @@ static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 }
 
 int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
-    if (!ctx || !ctx->oracle) return _solver_compile(ctx, sp);
+    /* The engine choice (dvs_engine.c) settles the result the caller and the
+     * oracle see: OK when bit-blast takes what CDCL left incomplete. */
+    if (!ctx || !ctx->oracle) return dvs_engine_compile(ctx, sp, _solver_compile(ctx, sp));
     double t0 = dvs_oracle_clock_ms();
-    int rc = _solver_compile(ctx, sp);
+    int rc = dvs_engine_compile(ctx, sp, _solver_compile(ctx, sp));
     dvs_oracle_on_compile(ctx, sp, rc, dvs_oracle_clock_ms() - t0);
     return rc;
 }
@@ -4822,6 +4874,7 @@ static int _ctx_var_type(void *ud, uint32_t vid, uint32_t *w, uint8_t *sgn) {
 static int _solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
     int err = 0;
     dvs_problem_t *esp = dvs_sv_elaborate(aux_sp, _ctx_var_type, ctx, &err);
+    if (!err && esp == aux_sp) esp = dvs_sv_lower_typed(aux_sp, _ctx_var_type, ctx, &err);
     if (err) return _elab_error_code(err);
     dvs_problem_t *msp = dvs_sv_rewrite_masks(esp, _ctx_var_type, ctx);
     int rc = _nomem_check(ctx, _solver_add_constraint_body(ctx, msp));
@@ -4831,6 +4884,8 @@ static int _solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
 }
 
 int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
+    /* Only CDCL serves this (dvs_engine.h). */
+    if (dvs_engine_need_cdcl(ctx) != 0) return -1;
     /* Another problem now: keep this context's memory, but stop sharing it
      * under the old problem's key. */
     if (ctx) ctx->problem_fp = 0;
@@ -5241,6 +5296,8 @@ int dvs_solver_add_array_vars(dvs_ctx_t *ctx,
                           uint8_t  is_signed,
                           int64_t  lo,
                           int64_t  hi) {
+    /* Only CDCL serves this (dvs_engine.h). */
+    if (dvs_engine_need_cdcl(ctx) != 0) return -1;
     uint32_t end = elem_var_base + n_elems;
     /* New variables only: initialising an id the context has would reset a
      * variable propagators already watch, the compile's own included (B118). */

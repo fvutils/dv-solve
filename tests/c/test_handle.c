@@ -143,8 +143,8 @@ int main(void) {
     CHECK(dvs_handle_set_engine(h, DVS_ENGINE_CDCL) == -1, "engine is fixed after the first call");
     CHECK(dvs_handle_engine(h) == DVS_ENGINE_CDCL, "orderings route to CDCL");
 
-    /* Bitblast: (x * 3) ^ y == 0x55 is a multiplier, so AUTO bit-blasts it
-     * (x, y 8-bit RAND); w (RAND in 5..9) is in no constraint. */
+    /* (x * 3) ^ y == 0x55 (x, y 8-bit RAND); w (RAND in 5..9) is in no
+     * constraint. AUTO keeps CDCL, which compiles it whole. */
     b = dvs_builder_create(0, NULL);
     dvs_builder_add_var(b, 0, 8, 0, 0, 255);
     dvs_builder_add_var(b, 1, 8, 0, 0, 255);
@@ -170,9 +170,9 @@ int main(void) {
             ok = 0;
         if (!bseen[bx]++) bdistinct++;
     }
-    CHECK(dvs_handle_engine(hb) == DVS_ENGINE_BITBLAST, "a multiplier routes to bitblast");
-    CHECK(ok, "bitblast: 30 calls ok, (x*3)^y == 0x55, w in its range");
-    CHECK(bdistinct >= 3, "bitblast: x varies across seeds (resample)");
+    CHECK(dvs_handle_engine(hb) == DVS_ENGINE_CDCL, "CDCL first: it compiles the multiplier whole");
+    CHECK(ok, "auto: 30 calls ok, (x*3)^y == 0x55, w in its range");
+    CHECK(bdistinct >= 3, "auto: x varies across seeds");
     dvs_handle_free(hb);
 
     /* Bitblast UNSAT: x * 2 == 1 (x 8-bit), chosen explicitly. */
@@ -217,6 +217,38 @@ int main(void) {
     }
     CHECK(ok, "bitblast: unsigned 64-bit, 30 calls ok, (x & 0xF) == 5");
     CHECK(high > 0 && high < 30, "bitblast: unsigned 64-bit values on both sides of 2^63");
+    dvs_handle_free(hb);
+
+    /* A dist keeps its weights under AUTO even when a multiplier is present:
+     * (x * 3) ^ y == 0x55 as above, and w dist {0 := 90, [1:9] :/ 10}, so
+     * w == 0 on about 90% of calls (uniform over 0..9 would give 10%). */
+    b = dvs_builder_create(0, NULL);
+    dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 1, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 2, 8, 0, 0, 9);
+    dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ,
+        dvs_builder_expr_binary(b, DVS_BIN_BXOR,
+            dvs_builder_expr_binary(b, DVS_BIN_MUL, dvs_builder_expr_var(b, 0),
+                                    dvs_builder_expr_const(b, 3, 0)),
+            dvs_builder_expr_var(b, 1)),
+        dvs_builder_expr_const(b, 0x55, 0)));
+    dvs_dist_entry_t wd[2] = { {0, 0, 90, 1, {0}}, {1, 9, 10, 0, {0}} };
+    dvs_builder_add_dist(b, 2, 2, wd);
+    p = dvs_builder_finalize(b, &sz);
+    hb = dvs_handle_new(p, sz);
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
+    int zeros = 0;
+    ok = 1;
+    for (uint64_t s = 1; s <= 400; s++) {
+        if (dvs_randomize(hb, brefs, NULL, s) != DVS_RANDOMIZE_OK
+                || ((bx * 3u) ^ by) != 0x55 || bw > 9)
+            ok = 0;
+        zeros += bw == 0;
+    }
+    printf("     dist+multiplier: engine %d, w == 0 on %d of 400\n", dvs_handle_engine(hb), zeros);
+    CHECK(ok, "dist+multiplier: 400 calls ok");
+    CHECK(zeros >= 320 && zeros <= 400, "dist+multiplier: w == 0 on about 90% (weights kept)");
     dvs_handle_free(hb);
 
     /* No pins on bitblast: a handle with STATE vars refuses it. */

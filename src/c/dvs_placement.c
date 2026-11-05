@@ -5,6 +5,7 @@
 #include "dvs_ctx.h"
 #include "dvs_search.h"
 #include "dvs_lcg.h"
+#include "dvs_engine.h"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -830,6 +831,8 @@ static double _now_sec(void) {
 
 int dvs_solver_optimize(dvs_ctx_t *ctx, uint32_t objective_var_id,
                     const OptimizeOpts *opts, OptimizeResult *result) {
+    /* Only CDCL serves this (dvs_engine.h). */
+    if (dvs_engine_need_cdcl(ctx) != 0) return -1;
     if (!ctx || !result) return -1;
     if (objective_var_id >= ctx->n_vars) return -1;
 

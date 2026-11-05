@@ -66,8 +66,15 @@ static int _visit(Walk *w, dvs_expr_t r) {
         case DVS_BIN_LT: case DVS_BIN_LTE: case DVS_BIN_GT: case DVS_BIN_GTE:
                                                               o->n_cmp++;   break;
         case DVS_BIN_AND: case DVS_BIN_OR:                    o->n_bool++;  break;
+        case DVS_BIN_ULT: case DVS_BIN_ULE: case DVS_BIN_UGT: case DVS_BIN_UGE:
+        case DVS_BIN_SLT: case DVS_BIN_SLE: case DVS_BIN_SGT: case DVS_BIN_SGE:
+                                                              o->n_cmp++;   break;
+        case DVS_BIN_UDIV: case DVS_BIN_UREM: case DVS_BIN_SDIV: case DVS_BIN_SREM:
+        case DVS_BIN_SMOD:                                    o->n_mul++;   break;
+        case DVS_BIN_LSHR:                                    o->n_bit++;   break;
         default:                                              o->n_other++; break;
         }
+        if (dvs_binop_is_typed(b->op)) o->n_typed++;
         if (_push(w, b->lhs) < 0 || _push(w, b->rhs) < 0) rc = -1;
         break;
     }
@@ -179,6 +186,7 @@ int dvs_shape_compute(dvs_problem_t *p, dvs_shape_t *out) {
     memset(&w, 0, sizeof w);
     w.p = p;
     w.out = out;
+    out->n_dist = p->n_dists;
     w.seen_bits = (size_t)p->pool.used + 1;
     w.seen = (uint8_t *)calloc((w.seen_bits + 7) / 8, 1);
     if (!w.seen) return -1;
@@ -193,12 +201,31 @@ int dvs_shape_compute(dvs_problem_t *p, dvs_shape_t *out) {
         }
         c = cs->next;
     }
+    /* Soft constraints count toward n_typed only: elaboration must lower a
+     * typed operator wherever it is (dvs_sv_lower_typed), while the routing
+     * classes describe the hard constraints. */
+    dvs_shape_t soft;
+    memset(&soft, 0, sizeof soft);
+    w.out = &soft;
+    for (dvs_expr_t c = p->softs_head; c != EXPR_NULL && rc == 0; ) {
+        SoftSpec *ss = (SoftSpec *)POOL_PTR(p, c);
+        rc = _push(&w, ss->root);
+        while (rc == 0 && w.sp > 0) {
+            if (soft.n_nodes >= SHAPE_NODE_CAP) { out->truncated = 1; w.sp = 0; break; }
+            rc = _visit(&w, w.stack[--w.sp]);
+        }
+        c = ss->next;
+    }
+    out->n_typed += soft.n_typed;
     free(w.stack);
     free(w.seen);
     return rc;
 }
 
 const char *dvs_shape_route(const dvs_shape_t *sh) {
+    /* Bit-blast encodes a dist as membership only and drops its weights;
+     * CDCL picks the bucket by weight at each decision (dvs_search.c). */
+    if (sh->n_dist)                                   return NULL;
     if (sh->n_mul)                                    return "multiplier";
     /* The front end binds every let and define-fun to a variable through an
      * equality, so equalities say nothing about the shape; orderings do.

@@ -1,5 +1,5 @@
 {
- "_comment": "Pinned simulators for the nightly simbench runs (docs/simbench_nightly_plan.md §2). Kept apart from tools.lock.json so moving a simulator pin does not change the lock hash of the solver perf records, and the reverse. Each bundle unpacks into its own directory (`into`): both Verilator bundles unpack to verilator/. Changing anything here changes the lock hash every simbench record carries.",
+ "_comment": "Pinned simulators for the nightly simbench runs (docs/simbench_nightly_plan.md §2). Kept apart from tools.lock.json so moving a simulator pin does not change the lock hash of the solver perf records, and the reverse. Each bundle unpacks into its own directory (`into`): both Verilator bundles unpack to verilator/. Changing anything here changes the lock hash every simbench record carries. `latest` names the release feed `tools.py latest` follows: the nightly runs the newest release (both simulators float, plan §2), and these pins are the fallback, the pre-flight's Verilator and what local runs use.",
  "verilator-bin-5.054": {
   "_comment": "First release with sampler control (+verilator+rand+sampler+, verilator#8899).",
   "url": "https://github.com/edapack/verilator-bin/releases/download/v5.054/verilator-manylinux_2_28_x86_64-5.054.tar.gz",
@@ -11,6 +11,12 @@
     "verilator-5.054/verilator/bin/verilator",
     "5.054"
    ]
+  },
+  "latest": {
+   "repo": "edapack/verilator-bin",
+   "asset": "verilator-manylinux_2_28_x86_64-{version}.tar.gz",
+   "min": "5.054",
+   "bin": "verilator/bin/verilator"
   }
  },
  "xezim-bin-0.11.3": {
@@ -25,6 +31,12 @@
     "xezim-0.11.3/xezim/bin/xezim",
     "0.11.3"
    ]
+  },
+  "latest": {
+   "repo": "EDAPack/xezim-bin",
+   "asset": "xezim-manylinux_2_34_x86_64-{version}.tar.gz",
+   "min": "0.11.3",
+   "bin": "xezim/bin/xezim"
   }
  }
 }

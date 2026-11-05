@@ -598,6 +598,19 @@ static int _explain_binary_bitwise(Propagator *self, dvs_ctx_t *ctx,
     return 0;
 }
 
+/* An unsigned bitwise op with a 64-bit var: its propagator reasons in
+ * uint64 (dvs_prop_templates.c, _bitwise_u64), not by the int64 rules the
+ * rule-aware explanations below mirror, so it gets the conservative one. */
+static int _bitwise_u64(const dvs_ctx_t *ctx, uint32_t r, uint32_t a, uint32_t b) {
+    const uint32_t ids[3] = { r, a, b };
+    int wide = 0;
+    for (int i = 0; i < 3; i++) {
+        if (ctx->vars[ids[i]].flags & VAR_SIGNED) return 0;
+        if (ctx->vars[ids[i]].width >= 64) wide = 1;
+    }
+    return wide;
+}
+
 /* Rule-aware bvand explanation. Mirrors _fire_bounds_band_64's six
  * propagation rules and cites only the antecedents the actually-fired
  * rule needed. Soundness arguments per rule:
@@ -615,6 +628,8 @@ int explain_bounds_band(Propagator *self, dvs_ctx_t *ctx,
                          int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
+    if (_bitwise_u64(ctx, rid, aid, bid))
+        return _explain_binary_bitwise(self, ctx, var_id, is_lb, new_bound, out);
     int64_t alo = var_lo64(ctx, &ctx->vars[aid]);
     int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
     int64_t blo = var_lo64(ctx, &ctx->vars[bid]);
@@ -680,6 +695,8 @@ int explain_bounds_bor(Propagator *self, dvs_ctx_t *ctx,
                         int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
+    if (_bitwise_u64(ctx, rid, aid, bid))
+        return _explain_binary_bitwise(self, ctx, var_id, is_lb, new_bound, out);
     int64_t alo = var_lo64(ctx, &ctx->vars[aid]);
     int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
     int64_t blo = var_lo64(ctx, &ctx->vars[bid]);
@@ -716,6 +733,8 @@ int explain_bounds_bxor(Propagator *self, dvs_ctx_t *ctx,
                          int64_t new_bound, Explanation *out) {
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
+    if (_bitwise_u64(ctx, rid, aid, bid))
+        return _explain_binary_bitwise(self, ctx, var_id, is_lb, new_bound, out);
     int64_t alo = var_lo64(ctx, &ctx->vars[aid]);
     int64_t ahi = var_hi64(ctx, &ctx->vars[aid]);
     int64_t blo = var_lo64(ctx, &ctx->vars[bid]);

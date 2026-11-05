@@ -67,6 +67,7 @@ BOUNDED = {
     ("smt2_eval", "_sort_eq"): "sorts from _parse_sort (64)",
     ("smt2_eval", "_print_sort"): "sorts from _parse_sort (64)",
     ("smt2_eval", "_eq"): "array values nest only as deep as their sort (64)",
+    ("smt2_eval", "smt2_value_print"): "array values nest only as deep as their sort (64)",
     # SV elaboration
     ("dvs_sv", "_type"): "dvs_stack_deep",
     ("dvs_sv", "_val"): "dvs_stack_deep",
@@ -130,10 +131,16 @@ _NODE = re.compile(r'node: \{ title: "([^"]+)" label: "[^\\]*\\n[^\\]*\\n(\d+) b
 _EDGE = re.compile(r'edge: \{ sourcename: "([^"]+)" targetname: "([^"]+)"')
 
 
+def _raw(title: str) -> str:
+    """`fn.localalias` is gcc's local alias of `fn` itself (a self call made
+    through it is recursion), not a split-off part."""
+    return re.sub(r"\.localalias$", "", title)
+
+
 def _name(title: str) -> str:
     """`file.c:line:col:fn.part.0` -> `fn`."""
     return re.sub(r"\.(part|isra|constprop|cold)\.\d+$", "",
-                  re.sub(r"\.(part|isra|constprop|cold)\.\d+", "", title.split(":")[-1]))
+                  re.sub(r"\.(part|isra|constprop|cold)\.\d+", "", _raw(title).split(":")[-1]))
 
 
 def _graph(ci: Path):
@@ -148,7 +155,7 @@ def _graph(ci: Path):
             src, dst = _name(m.group(1)), _name(m.group(2))
             # gcc may split a function into fn and fn.part.N (partial
             # inlining); the call from one half to the other is not recursion.
-            if src == dst and m.group(1) != m.group(2):
+            if src == dst and _raw(m.group(1)) != _raw(m.group(2)):
                 continue
             edges[src].add(dst)
     return frames, edges

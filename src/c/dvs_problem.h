@@ -373,6 +373,20 @@ struct dvs_problem_s {
  * is skipped for such a problem. Set by the SMT-LIB2 front end. */
 #define DVS_PROBLEM_F_EXPLICIT  0x1u
 
+/** Typed operators (DVS_BIN_ULT .. DVS_BIN_LSHR, dv_solve.h): the operator
+ *  names its signedness; the node is self-determined. */
+static inline int dvs_binop_is_typed(int op) {
+    return op >= DVS_BIN_ULT && op <= DVS_BIN_LSHR;
+}
+static inline int dvs_binop_is_typed_cmp(int op) {
+    return op >= DVS_BIN_ULT && op <= DVS_BIN_SGE;
+}
+/** A typed operator that reads its operands signed (SLT..SGE, SDIV..SMOD). */
+static inline int dvs_binop_typed_signed(int op) {
+    return (op >= DVS_BIN_SLT && op <= DVS_BIN_SGE)
+        || (op >= DVS_BIN_SDIV && op <= DVS_BIN_SMOD);
+}
+
 /** Convert a pool offset (dvs_expr_t) to a real pointer. */
 #define POOL_PTR(sp, ref)  dvs_pool_ptr(&(sp)->pool, (ref))
 

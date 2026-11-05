@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "dvs_ctx.h"
+#include "dvs_engine.h"
 #include "dvs_oracle_hooks.h"
 #include "dvs_lcg.h"
 #include "dvs_costguided.h"
@@ -57,10 +58,13 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
     /* The header at the front of the buffer, the pool's fixed region after
      * it. With a block allocator the pool grows past the buffer through
      * the allocator behind it; without one it stays inside. */
-    return _ctx_init((dvs_ctx_t *)static_buf,
-                     (uint8_t *)static_buf + _pool_offset(),
-                     static_size - _pool_offset(), block_alloc,
-                     block_alloc ? dvs_block_alloc_backing(block_alloc) : NULL);
+    dvs_ctx_t *ctx = _ctx_init((dvs_ctx_t *)static_buf,
+                               (uint8_t *)static_buf + _pool_offset(),
+                               static_size - _pool_offset(), block_alloc,
+                               block_alloc ? dvs_block_alloc_backing(block_alloc) : NULL);
+    /* Bounded memory is this context's point; bit-blast mallocs freely. */
+    if (ctx) ctx->engine_pref = DVS_ENGINE_CDCL;
+    return ctx;
 }
 
 /* level_marks and decisions, one block of `cap` entries each: from
@@ -436,6 +440,7 @@ int dvs_scope_log_bound(dvs_ctx_t *ctx, uint32_t var_id, int is_lb, int64_t boun
 void dvs_solver_destroy(dvs_ctx_t *ctx) {
     if (!ctx) return;
     dvs_oracle_on_destroy(ctx);
+    dvs_engine_free(ctx);
     if (ctx->lcg) {
         lcg_destroy((LCGCtx *)ctx->lcg);
         dvs_ctx_free(ctx, ctx->lcg, sizeof(LCGCtx));
@@ -553,6 +558,8 @@ uint32_t dvs_prop_constraint_id(const dvs_ctx_t *ctx, uint32_t prop_idx) {
 void dvs_solver_set_value_selector(dvs_ctx_t *ctx,
                                int64_t (*fn)(dvs_ctx_t *, uint32_t, void *),
                                void *data) {
+    /* Only CDCL serves this (dvs_engine.h). */
+    if (dvs_engine_need_cdcl(ctx) != 0) return;
     ctx->value_selector_fn   = fn;
     ctx->value_selector_data = data;
 }

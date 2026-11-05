@@ -124,6 +124,18 @@ def test_variant_block_and_spread():
     assert ci.bench_row(r)["spread"] == q
 
 
+def test_bench_row_session_hash():
+    r = _rec("d", config="dvs-standalone")
+    r["simbench"]["session"] = {"sha256": "0123456789abcdef" * 4, "bytes": 10}
+    assert ci.bench_row(r)["ses"] == "0123456789ab"
+    assert "ses" not in ci.bench_row(_rec("e"))
+
+
+def test_manifest_benches():
+    a, b = _rec("y"), _rec("x")
+    assert ci.manifest_benches([a, b, a]) == [["x", "sx"], ["y", "sy"]]
+
+
 def test_sim_identity_verilator():
     b = {"simulator": "verilator", "version_text": "Verilator 5.054 2026-11-01 rev v5.054",
          "release": {"version": "5.054"}}
@@ -141,6 +153,7 @@ def test_manifest_hash_order_free():
 def test_kinds_and_artifact():
     assert all(v in ci.VARIANTS for vs in ci.KINDS.values() for v in vs)
     assert ci.KINDS["reference"][0] == "vlt-z3-default"
+    assert "latest" not in ci.KINDS          # both simulators float nightly (plan §2)
     assert ci.artifact_name("nightly", "20261104T053000Z", "abcdef0123") == \
         "simbench-nightly-20261104T053000Z-abcdef0"
 

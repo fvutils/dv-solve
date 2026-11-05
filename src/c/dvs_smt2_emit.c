@@ -102,7 +102,8 @@ static int _is_arith(dvs_binop_t op) {
 }
 static int _is_cmp(dvs_binop_t op) {
     return op == DVS_BIN_EQ || op == DVS_BIN_NEQ || op == DVS_BIN_LT ||
-           op == DVS_BIN_LTE || op == DVS_BIN_GT || op == DVS_BIN_GTE;
+           op == DVS_BIN_LTE || op == DVS_BIN_GT || op == DVS_BIN_GTE ||
+           dvs_binop_is_typed_cmp(op);
 }
 
 /* A node whose value is a truth (1-bit unsigned): comparisons, connectives,
@@ -172,6 +173,14 @@ static ETy _type(E *e, dvs_expr_t ref) {
         } else if (eb->op == DVS_BIN_LSHIFT || eb->op == DVS_BIN_RSHIFT ||
                    eb->op == DVS_BIN_ASHR) {
             t = _type(e, eb->lhs);
+        } else if (eb->op == DVS_BIN_LSHR) {
+            t.w = _type(e, eb->lhs).w;
+        } else if (dvs_binop_is_typed(eb->op) && !dvs_binop_is_typed_cmp(eb->op)) {
+            /* Typed div/rem: self-determined at the wider operand's width,
+             * signed as the operator says. */
+            ETy a = _type(e, eb->lhs), b = _type(e, eb->rhs);
+            t.w = a.w > b.w ? a.w : b.w;
+            t.s = (uint8_t)dvs_binop_typed_signed(eb->op);
         }
         break;
     }
@@ -262,13 +271,33 @@ static void _var_term(E *e, uint32_t id, uint32_t W, DvsOBuf *o) {
     _close(o, c);
 }
 
+/* An operand of a typed operator: its own value, extended to w by the
+ * operator's signedness `s` (not its own). */
+static void _typed_opnd(E *e, dvs_expr_t r, uint32_t w, uint8_t s, DvsOBuf *o) {
+    ETy t = _type(e, r);
+    int c = _conv_open(o, t.w, s, w);
+    _val(e, r, t.w, t.s, o);
+    _close(o, c);
+}
+
 /* `l op r` for a comparison, in the comparison's own context. */
 static void _cmp(E *e, dvs_binop_t op, dvs_expr_t l, dvs_expr_t r, DvsOBuf *o) {
     ETy a = _type(e, l), b = _type(e, r);
     uint32_t w = a.w > b.w ? a.w : b.w;
-    uint8_t  s = (uint8_t)(a.s && b.s);
+    /* A typed comparison reads its operands as it says; an SV one as signed
+     * only when both are. */
+    uint8_t  s = dvs_binop_is_typed_cmp(op) ? (uint8_t)dvs_binop_typed_signed(op)
+                                            : (uint8_t)(a.s && b.s);
     const char *f;
     switch (op) {
+    case DVS_BIN_ULT: f = "bvult"; break;
+    case DVS_BIN_ULE: f = "bvule"; break;
+    case DVS_BIN_UGT: f = "bvugt"; break;
+    case DVS_BIN_UGE: f = "bvuge"; break;
+    case DVS_BIN_SLT: f = "bvslt"; break;
+    case DVS_BIN_SLE: f = "bvsle"; break;
+    case DVS_BIN_SGT: f = "bvsgt"; break;
+    case DVS_BIN_SGE: f = "bvsge"; break;
     case DVS_BIN_EQ:  f = "="; break;
     case DVS_BIN_NEQ: f = "distinct"; break;
     case DVS_BIN_LT:  f = s ? "bvslt" : "bvult"; break;
@@ -278,9 +307,15 @@ static void _cmp(E *e, dvs_binop_t op, dvs_expr_t l, dvs_expr_t r, DvsOBuf *o) {
     default: _fail(e, "bad comparison"); dvs_ob_str(o, "false"); return;
     }
     dvs_ob_printf(o, "(%s ", f);
-    _val(e, l, w, s, o);
-    dvs_ob_add(o, " ", 1);
-    _val(e, r, w, s, o);
+    if (dvs_binop_is_typed_cmp(op)) {
+        _typed_opnd(e, l, w, s, o);
+        dvs_ob_add(o, " ", 1);
+        _typed_opnd(e, r, w, s, o);
+    } else {
+        _val(e, l, w, s, o);
+        dvs_ob_add(o, " ", 1);
+        _val(e, r, w, s, o);
+    }
     dvs_ob_add(o, ")", 1);
 }
 
@@ -605,6 +640,44 @@ static void _val_raw(E *e, dvs_expr_t ref, uint32_t W, uint8_t S, DvsOBuf *o) {
                 _val(e, eb->rhs, rt.w, rt.s, o);
                 dvs_ob_str(o, ")))");
             }
+            return;
+        }
+        if (dvs_binop_is_typed(op)) {
+            /* Self-determined at its own type (_type), then converted to the
+             * context by that type's signedness. SMT-LIB defines x/0 as
+             * these operators do, so no DVS_EMIT_F_DIV. */
+            const char *f = op == DVS_BIN_UDIV ? "bvudiv" : op == DVS_BIN_UREM ? "bvurem"
+                          : op == DVS_BIN_SDIV ? "bvsdiv" : op == DVS_BIN_SREM ? "bvsrem"
+                          : op == DVS_BIN_SMOD ? "bvsmod" : "bvlshr";
+            ETy t = _type(e, ref);
+            int c = _conv_open(o, t.w, t.s, W);
+            dvs_ob_printf(o, "(%s ", f);
+            if (op == DVS_BIN_LSHR) {
+                /* The amount, read unsigned, at the value's width. */
+                ETy rt = _type(e, eb->rhs);
+                _typed_opnd(e, eb->lhs, t.w, 0, o);
+                dvs_ob_add(o, " ", 1);
+                if (rt.w <= t.w) {
+                    _typed_opnd(e, eb->rhs, t.w, 0, o);
+                } else {
+                    /* Wider amount: clamp at t.w (every bit shifted out). */
+                    dvs_ob_str(o, "(ite (bvuge ");
+                    _val(e, eb->rhs, rt.w, 0, o);
+                    dvs_ob_add(o, " ", 1);
+                    dvs_smt2_emit_value(o, t.w, rt.w);
+                    dvs_ob_str(o, ") ");
+                    dvs_smt2_emit_value(o, t.w, t.w);
+                    dvs_ob_printf(o, " ((_ extract %u 0) ", (unsigned)(t.w - 1));
+                    _val(e, eb->rhs, rt.w, 0, o);
+                    dvs_ob_str(o, "))");
+                }
+            } else {
+                _typed_opnd(e, eb->lhs, t.w, t.s, o);
+                dvs_ob_add(o, " ", 1);
+                _typed_opnd(e, eb->rhs, t.w, t.s, o);
+            }
+            dvs_ob_add(o, ")", 1);
+            _close(o, c);
             return;
         }
         _fail(e, "unknown binary operator");

@@ -32,6 +32,16 @@ A bench a simulator cannot take (xezim does not elaborate it) is
 
 Tools come from the environment, as for a person: SIMBENCH_VERILATOR_SC,
 SIMBENCH_XEZIM, SIMBENCH_DVS_BUILD (or SIMBENCH_DVS_SMT2/_REPLAY), z3 on PATH.
+In CI both simulators float (the newest release, `tests.perf.tools latest`;
+plan §2), and `--sims` records how each was resolved. The pre-flight checks
+the dv-solve build against README §5, which was measured on the pinned
+Verilator, so SIMBENCH_PREFLIGHT_VERILATOR_SC (the lock's pin) runs it when
+set: a new Verilator that legitimately moves a number must not invalidate the
+run that shows it.
+
+Each dvs-standalone bench row carries `ses`, the hash of the solver session
+Verilator sent. A step in the series with new hashes is Verilator's (it sent
+a different problem); one with the same hashes is dv-solve's.
 """
 import argparse
 import gzip
@@ -61,7 +71,6 @@ _NIGHTLY = ["vlt-dvs-smt", "dvs-standalone", "xezim", "vlt-dvs-lib"]
 KINDS = {
     "nightly": _NIGHTLY,
     "manual": _NIGHTLY,
-    "latest": _NIGHTLY,
     "reference": ["vlt-z3-default"] + _NIGHTLY,
     "release": ["vlt-dvs-smt", "dvs-standalone"],
 }
@@ -252,9 +261,19 @@ def bench_row(rec: dict) -> dict:
            "first_us": round(res["first_call_ns"] / 1e3, 3) if res.get("first_call_ns") else None,
            "failures": res.get("failures"), "check_errors": res.get("check_errors"),
            "spread": _spread(rec)}
+    ses = (rec["simbench"].get("session") or {}).get("sha256")
+    if ses:
+        row["ses"] = ses[:12]
     if not rec["valid"]:
         row["reason"] = (rec.get("reason") or "")[:300]
     return row
+
+
+def manifest_benches(recs: List[dict]) -> List[list]:
+    """[[bench, bench.sv sha256 (12)]] in manifest order: the order of the
+    trend line's per-bench arrays."""
+    return [[b, (sha or "")[:12]] for b, sha in sorted(
+        {(r["simbench"]["bench"], r["simbench"]["bench_sha"] or "") for r in recs})]
 
 
 def manifest_hash(recs: List[dict]) -> str:
@@ -340,7 +359,7 @@ def _git_describe() -> Optional[str]:
 
 def collect(kind: str, variants: List[str], out: str, n: int, seed: int,
             marker: Optional[str], release: Optional[str], lock_sha: Optional[str],
-            quiet: Optional[dict] = None) -> dict:
+            quiet: Optional[dict] = None, sims: Optional[dict] = None) -> dict:
     from .config import dvs_defaults, load_configs
     raw = os.path.join(out, "raw")
     os.makedirs(raw, exist_ok=True)
@@ -353,7 +372,12 @@ def collect(kind: str, variants: List[str], out: str, n: int, seed: int,
     if run["commit"] == "unknown" and os.environ.get("GITHUB_SHA"):
         run["commit"] = os.environ["GITHUB_SHA"]      # a checkout without .git
     rec = {"schema": 1, "valid": True, "kind": kind, "family": "sim", "run": run,
-           "machine": None, "tools": {"lock_sha": lock_sha}, "calib": {},
+           "machine": None, "calib": {},
+           "tools": {"lock_sha": lock_sha,
+                     # how each simulator was resolved: version, url, sha256, src (latest|lock)
+                     "sims": {k: {f: v.get(f) for f in ("version", "url", "sha256", "src", "error")
+                                  if v.get(f) is not None}
+                              for k, v in (sims or {}).items()}},
            "sim": {"n": n, "seed": seed, "tier": marker or "all", "preflight": None,
                    "variants": {}, "quiet_waits": {}}}
     quiet = dict(quiet or {})
@@ -378,8 +402,13 @@ def collect(kind: str, variants: List[str], out: str, n: int, seed: int,
             check_calib(calib)
             _log("pre-flight")
             pre = os.path.join(raw, "preflight.jsonl")
+            pre_env = dict(env)
+            if env.get("SIMBENCH_PREFLIGHT_VERILATOR_SC"):
+                pre_env["SIMBENCH_VERILATOR_SC"] = env["SIMBENCH_PREFLIGHT_VERILATOR_SC"]
+            rec["sim"]["preflight_sim"] = sim_identity(provenance.simulator_build(
+                "verilator", pre_env.get("SIMBENCH_VERILATOR_SC") or "verilator", "--version"))
             _pytest("dvs-standalone- or vlt-dvs-solver-", pre, os.path.join(raw, "preflight.log"),
-                    env, marker="smoke")
+                    pre_env, marker="smoke")
             rec["sim"]["preflight"] = check_preflight(records.load(pre), calib)
         cfgs = load_configs(environ=env)
         results = os.path.join(raw, "results.jsonl")
@@ -405,6 +434,7 @@ def collect(kind: str, variants: List[str], out: str, n: int, seed: int,
             _log("%s: %s" % (v, block["counts"]))
         allrecs = records.load(results) if os.path.exists(results) else []
         rec["sim"]["manifest"] = manifest_hash(allrecs)
+        rec["sim"]["benches"] = manifest_benches(allrecs)
         wrong = [(v, b["bench"]) for v, blk in rec["sim"]["variants"].items()
                  if v in DVS_VARIANTS
                  for b in blk.get("benches", []) if b["outcome"] == "wrong"]
@@ -413,6 +443,7 @@ def collect(kind: str, variants: List[str], out: str, n: int, seed: int,
     except Check as e:
         rec["valid"], rec["reason"] = False, str(e)
         _log("INVALID: %s" % e)
+    rec["sim"]["noisy"] = any(not w["quiet"] for w in rec["sim"]["quiet_waits"].values())
     rec["machine"] = {k: v for k, v in records.machine(load0, records._loadavg()).items()
                       if k != "label"}
     return rec
@@ -438,6 +469,8 @@ def main(argv=None) -> int:
                     help="wait for the 1-minute load average to stay under this (default %(default)s)")
     ap.add_argument("--quiet-timeout", type=float, default=QUIET_TIMEOUT_S,
                     help="seconds to wait for a quiet host before measuring anyway; 0: no wait")
+    ap.add_argument("--sims", default=None,
+                    help="JSON from `tests.perf.tools latest`: how each simulator was resolved")
     ap.add_argument("--github-output", action="store_true")
     a = ap.parse_args(argv)
     variants = a.variants.split(",") if a.variants else KINDS[a.kind]
@@ -446,7 +479,8 @@ def main(argv=None) -> int:
         ap.error("unknown variant(s) %s" % unknown)
     out = os.path.abspath(a.out)
     rec = collect(a.kind, variants, out, a.n, a.seed, a.marker, a.release, a.lock_sha,
-                  quiet={"max_load": a.quiet_load, "timeout_s": a.quiet_timeout})
+                  quiet={"max_load": a.quiet_load, "timeout_s": a.quiet_timeout},
+                  sims=json.load(open(a.sims)) if a.sims else None)
     name = artifact_name(a.kind, rec["run"]["utc"], rec["run"]["commit"])
     path = os.path.join(out, name + ".json.gz")
     with gzip.open(path, "wt") as fp:

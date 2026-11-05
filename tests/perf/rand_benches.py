@@ -269,6 +269,93 @@ def _sum3_const():
             (lambda m: m["a"], {v: (201 - v) / tot for v in range(201)}, _draw_sum3))
 
 
+
+# ---- simbench gap shapes: where xezim beats dv-solve (docs/simbench_xezim_gap.md) ----
+
+_MM_U, _MM_L = 0x10_0000, 32            # 1 MiB units, a 32 MiB window
+_MM_SIZES = (1, 2, 4, 8)                # region sizes, in units
+
+
+def _mm_ways(sz):
+    """Placements of 3 regions of `sz` units, in one order, in _MM_L units."""
+    from math import comb
+    free = _MM_L - sum(sz)
+    return comb(free + 3, 3) if free >= 0 else 0
+
+
+def _draw_memmap3(r):
+    import itertools
+    combos = list(itertools.product(_MM_SIZES, repeat=3))
+    sz = r.choices(combos, weights=[_mm_ways(c) for c in combos])[0]
+    order = r.sample(range(3), 3)
+    free = _MM_L - sum(sz)
+    cut = sorted(r.sample(range(free + 3), 3))           # stars and bars
+    m, at = {}, 0
+    for j, reg in enumerate(order):
+        gap = cut[j] - (cut[j - 1] + 1 if j else 0)
+        at += gap
+        m[f"base{reg}"], m[f"size{reg}"] = at * _MM_U, sz[reg] * _MM_U
+        at += sz[reg]
+    return m
+
+
+def _memmap3():
+    """Three regions in a 32 MiB window: 1 MiB-aligned bases, sizes of 1, 2, 4
+    or 8 MiB, no two overlapping. Binned by (region 0's size, its rank in
+    address order). For fixed sizes every order has the same number of
+    placements, so the rank is uniform; a solver that settles the
+    disjunctions or the sizes early shows a skew."""
+    import itertools
+    base = [V(f"base{i}", 32) for i in range(3)]
+    size = [V(f"size{i}", 32) for i in range(3)]
+    top = C(_MM_L * _MM_U, 32)
+    end = [B("bvadd", 32, base[i], size[i]) for i in range(3)]
+    cons = []
+    for i in range(3):
+        cons += [P("=", B("bvand", 32, base[i], C(_MM_U - 1, 32)), C(0, 32)),
+                 OR(*(P("=", size[i], C(k * _MM_U, 32)) for k in _MM_SIZES)),
+                 P("bvule", base[i], top), P("bvule", end[i], top)]
+    for i in range(3):
+        for j in range(i + 1, 3):
+            cons.append(OR(P("bvule", end[i], base[j]), P("bvule", end[j], base[i])))
+    tot = 6 * sum(_mm_ways(c) for c in itertools.product(_MM_SIZES, repeat=3))
+    tr = {}
+    for c in itertools.product(_MM_SIZES, repeat=3):
+        for rank in range(3):
+            tr[(c[0], rank)] = tr.get((c[0], rank), 0) + 2 * _mm_ways(c) / tot
+
+    def key(m):
+        rank = sum(m[f"base{j}"] < m["base0"] for j in (1, 2))
+        return (m["size0"] // _MM_U, rank)
+    return ({**{f"base{i}": 32 for i in range(3)}, **{f"size{i}": 32 for i in range(3)}},
+            cons, None,
+            "3 regions, 1 MiB-aligned, sizes 1/2/4/8 MiB, no overlap, in 32 MiB: "
+            "binned by (size0, rank of region 0 by address), 12 bins",
+            (key, tr, _draw_memmap3))
+
+
+def _mul_div_64():
+    """simbench arith.mul_div_64: `p == a * b`, `p / b == a`, 64-bit, a in
+    [1, 2^32-1], b in [1, 2^16-1]. Every (a, b) is one solution; binned by
+    (a >> 28, b >> 12), 256 bins."""
+    a, b, p = V("a", 64), V("b", 64), V("p", 64)
+    cons = [P("bvuge", a, C(1, 64)), P("bvule", a, C(2**32 - 1, 64)),
+            P("bvuge", b, C(1, 64)), P("bvule", b, C(2**16 - 1, 64)),
+            P("=", p, B("bvmul", 64, a, b)),
+            P("=", B("bvudiv", 64, p, b), a)]
+    na, nb = 2**32 - 1, 2**16 - 1
+    tr = {(i, j): ((2**28 - (i == 0)) / na) * ((2**12 - (j == 0)) / nb)
+          for i in range(16) for j in range(16)}
+
+    def draw(r):
+        x, y = r.randint(1, na), r.randint(1, nb)
+        return {"a": x, "b": y, "p": x * y}
+    return ({"a": 64, "b": 64, "p": 64}, cons, None,
+            "64-bit `p == a*b`, `p/b == a`, a < 2^32, b < 2^16: binned by "
+            "(a >> 28, b >> 12), 256 bins",
+            (lambda m: (m["a"] >> 28, m["b"] >> 12), tr, draw))
+
+
 ENUMERABLE = {
     "countones": _countones, "ot_aon_wkup": _ot_aon_wkup, "range_1000": _range_1000,
     "disjoint_ranges": _disjoint_ranges, "sum_eq_const": _sum_eq_const,
@@ -281,7 +368,8 @@ WIDE = {"addr_aligned": _addr_aligned, "packet": _packet,
         "order_chain_a5": lambda: _order_chain(5),
         "order_chain_a9": lambda: _order_chain(9),
         "sum_unique": _sum_unique, "linear_sys": _linear_sys,
-        "sum3_const": _sum3_const}
+        "sum3_const": _sum3_const,
+        "memmap3": _memmap3, "mul_div_64": _mul_div_64}
 
 
 class Bench:

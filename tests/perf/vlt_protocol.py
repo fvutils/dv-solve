@@ -2,7 +2,7 @@
 
 A re-implementation of `VlRandomizer::next()` in
 `share/verilator/include/verilated_random.cpp` of the pinned Verilator
-(packages/verilator-bin, tools.lock.json), for problems without randc,
+(packages/verilator, tools.lock.json), for problems without randc,
 `unique` arrays or solve-before. One solver process lives for the whole run,
 as in Verilator (`getSolver()` opens it once). Per randomize():
 

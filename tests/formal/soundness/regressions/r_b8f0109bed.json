@@ -1,0 +1,44 @@
+{
+ "why": "seed=1 i=579 door=builder[lcg=0] expect=sat got=unsat",
+ "widths": {
+  "y": 64,
+  "z": 64
+ },
+ "cons": [
+  [
+   "bvuge",
+   "bool",
+   [
+    "var",
+    "y",
+    64
+   ],
+   [
+    "bvshl",
+    64,
+    [
+     "var",
+     "z",
+     64
+    ],
+    [
+     "ite",
+     64,
+     [
+      "true"
+     ],
+     [
+      "var",
+      "z",
+      64
+     ],
+     [
+      "const",
+      0,
+      64
+     ]
+    ]
+   ]
+  ]
+ ]
+}

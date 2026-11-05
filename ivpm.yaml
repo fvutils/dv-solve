@@ -35,9 +35,14 @@ package:
       url: https://github.com/edapack/yosys-bin
       src: gh-rls
       dep-set: default
+    # The newest verilator-bin release (prereleases excluded), at least 5.054:
+    # the first with sampler control (+verilator+rand+sampler+, verilator#8899),
+    # which the doc examples and perf harness rely on. Unpacks into
+    # packages/verilator (bin/verilator, bin/bitwuzla).
     - name: verilator
       url: https://github.com/edapack/verilator-bin
       src: gh-rls
+      version: ">=5.054"
     - name: covsight
       url: https://github.com/covsight/covsight.git
       dep-set: default-dev

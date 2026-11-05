@@ -1,9 +1,11 @@
 """The bit-blast engine's concrete evaluator (`bb_eval` in dvs_bbsolver.c) on
-unsigned div/mod.
+unsigned div/mod, and the pin fast path on signed div/rem/mod (bvsdiv/bvsrem/
+bvsmod; the typed SDIV/SREM/SMOD operators are tested in tests/c/test_bb_typed.c).
 
-With every var pinned, the pin fast path answers from bb_eval alone. Here every
+With every var pinned, the pin fast path answers without a SAT search. Here every
 4-bit (x, y, q) for `q == x op y` must get the verdict SMT-LIB gives (zero
-divisor: bvudiv is all-ones, bvurem the dividend), and every answer must come
+divisor: bvudiv is all-ones, bvurem the dividend; bvsdiv is -1 or 1 by the
+dividend's sign, bvsrem and bvsmod the dividend), and every answer must come
 from the fast path. DV_SIM_CHECK=1 makes the engine re-check each fast-path
 verdict with SAT and abort on a mismatch.
 
@@ -25,13 +27,29 @@ W = 4
 M = (1 << W) - 1
 
 
+def _s(v: int) -> int:
+    return v - (1 << W) if v >> (W - 1) else v
+
+
 def _ref(op: str, x: int, y: int) -> int:
     if op == "bvudiv":
         return x // y if y else M
-    return x % y if y else x
+    if op == "bvurem":
+        return x % y if y else x
+    sx, sy = _s(x), _s(y)
+    if sy == 0:
+        return (1 if sx < 0 else M) if op == "bvsdiv" else x
+    q = abs(sx) // abs(sy)
+    q = -q if (sx < 0) != (sy < 0) else q
+    if op == "bvsdiv":
+        return q & M
+    r = sx - q * sy                       # bvsrem: the dividend's sign
+    if op == "bvsmod" and r and (r < 0) != (sy < 0):
+        r += sy                           # bvsmod: the divisor's sign
+    return r & M
 
 
-@pytest.mark.parametrize("op", ["bvudiv", "bvurem"])
+@pytest.mark.parametrize("op", ["bvudiv", "bvurem", "bvsdiv", "bvsrem", "bvsmod"])
 def test_divmod_exhaustive(op):
     s = ["(set-logic QF_BV)"]
     s += [f"(declare-fun {v} () (_ BitVec {W}))" for v in ("x", "y", "q")]

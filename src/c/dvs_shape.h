@@ -29,6 +29,9 @@ typedef struct {
     uint32_t n_eq;           /* == !=                                        */
     uint32_t n_bool;         /* && || ! ite                                  */
     uint32_t n_other;        /* sum, countones, clog2, array select, casts   */
+    uint32_t n_dist;         /* dist declarations (weights only CDCL keeps)  */
+    uint32_t n_typed;        /* typed operators (DVS_BIN_ULT .. LSHR), also
+                              * counted in their class above                */
     uint32_t truncated;      /* walk stopped at its node cap                 */
 } dvs_shape_t;
 
@@ -42,6 +45,7 @@ int dvs_shape_compute(dvs_problem_t *p, dvs_shape_t *out);
  * circuits -- XOR/AND/shift networks, multipliers, miters asserting two
  * circuits differ -- it stalls until its budget runs out, while bit-blast
  * answers in milliseconds (fwhdl-core baseline, plan section 1.3).
+ * A dist keeps CDCL: bit-blast drops its weights.
  * Returns why `sh` goes to bitblast, or NULL to keep CDCL. Used by the
  * SMT-LIB front end and by problem handles (dvs_handle.c).
  */

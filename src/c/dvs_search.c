@@ -7,6 +7,7 @@
 #include "dvs_search.h"
 #include "dvs_thread.h"
 #include "dvs_ctx.h"
+#include "dvs_engine.h"
 #include "dvs_oracle_hooks.h"
 #include "dvs_propagator.h"
 #include "dvs_trail.h"
@@ -2525,10 +2526,15 @@ static dvs_result_t _solver_solve_relax(dvs_ctx_t *ctx, const dvs_solve_opts_t *
 static dvs_result_t _solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts);
 
 dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
-    if (!ctx || !ctx->oracle) return _solver_solve(ctx, opts);
-    double t0 = dvs_oracle_clock_ms();
-    dvs_result_t r = _solver_solve(ctx, opts);
-    dvs_oracle_on_solve(ctx, opts, r, dvs_oracle_clock_ms() - t0);
+    /* The oracle checks the answer whichever engine gave it. */
+    double t0 = ctx && ctx->oracle ? dvs_oracle_clock_ms() : 0;
+    dvs_result_t r;
+    if (!dvs_engine_solve(ctx, opts, &r)) {
+        r = _solver_solve(ctx, opts);
+        /* The search gave up: bit-blast, when the context may move. */
+        if (r == DVS_SOLVE_TIMEOUT) dvs_engine_take_over(ctx, opts, &r);
+    }
+    if (ctx && ctx->oracle) dvs_oracle_on_solve(ctx, opts, r, dvs_oracle_clock_ms() - t0);
     return r;
 }
 
@@ -2744,6 +2750,8 @@ static uint32_t _alias_root(const dvs_ctx_t *ctx, uint32_t var_id) {
 }
 
 int64_t dvs_solver_get_value(const dvs_ctx_t *ctx, uint32_t var_id) {
+    int64_t bv;
+    if (dvs_engine_value(ctx, var_id, &bv)) return bv;
     if (!ctx || var_id >= ctx->n_vars) return 0;
     return var_lo64(ctx, &ctx->vars[_alias_root(ctx, var_id)]);
 }
@@ -2888,6 +2896,7 @@ static void _solver_reset(dvs_ctx_t *ctx) {
 static int _solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
 
 int dvs_solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
+    if (dvs_engine_need_cdcl(ctx) != 0) return -1;
     int rc = _solver_pin_var(ctx, var_id, value);
     if (ctx && ctx->oracle) dvs_oracle_on_pin(ctx, var_id, value, rc);
     return rc;
@@ -3065,6 +3074,7 @@ int dvs_search_insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
 static int _solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
 
 int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
+    if (dvs_engine_need_cdcl(ctx) != 0) return -1;
     dvs_search_discard(ctx);
     int rc = _solver_exclude_value(ctx, var_id, value);
     if (ctx && ctx->oracle) dvs_oracle_on_exclude(ctx, var_id, value, rc);

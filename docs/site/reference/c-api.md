@@ -335,6 +335,26 @@ Binary operators, for {c:func}`dvs_builder_expr_binary`.
 | `DVS_BIN_EQ`, `DVS_BIN_NEQ` | `==`, `!=` |
 | `DVS_BIN_LT`, `DVS_BIN_LTE`, `DVS_BIN_GT`, `DVS_BIN_GTE` | `<`, `<=`, `>`, `>=` |
 | `DVS_BIN_AND`, `DVS_BIN_OR` | logical `&&`, `\|\|` |
+
+The operators above follow SystemVerilog: their operands' types decide
+signedness and width. The typed operators below say it themselves, as SMT-LIB
+does. Each operand is extended to the wider operand's width by the operator's
+signedness (sign for the `S` forms, zero for the `U` forms and
+`DVS_BIN_LSHR`), and the operator works at that width. Division by zero is
+defined, as in SMT-LIB: `x UDIV 0` is all ones, `x UREM 0` is `x`, `x SDIV 0`
+is −1 for `x ≥ 0` and 1 otherwise, `x SREM 0` and `x SMOD 0` are `x`.
+
+| Enumerator | Operator |
+|---|---|
+| `DVS_BIN_ULT`, `DVS_BIN_ULE`, `DVS_BIN_UGT`, `DVS_BIN_UGE` | unsigned `<`, `<=`, `>`, `>=` (`bvult` …) |
+| `DVS_BIN_SLT`, `DVS_BIN_SLE`, `DVS_BIN_SGT`, `DVS_BIN_SGE` | signed `<`, `<=`, `>`, `>=` (`bvslt` …) |
+| `DVS_BIN_UDIV`, `DVS_BIN_UREM` | unsigned `/`, `%` (`bvudiv`, `bvurem`) |
+| `DVS_BIN_SDIV`, `DVS_BIN_SREM` | signed `/` truncating, `%` with the dividend's sign (`bvsdiv`, `bvsrem`) |
+| `DVS_BIN_SMOD` | signed modulo with the divisor's sign (`bvsmod`) |
+| `DVS_BIN_LSHR` | logical `>>` of the value at its own width; the amount read unsigned (`bvlshr`) |
+
+The CDCL engine does not take typed operators yet: under
+{c:enumerator}`DVS_ENGINE_AUTO` a problem using them is solved on bit-blast.
 ````
 
 ````{c:enum} dvs_unop_t
@@ -394,6 +414,40 @@ Release the memory of a context made by {c:func}`dvs_solver_create`.
 `static_buf` itself is yours to free.
 ```
 
+```{c:enumerator} DVS_ENGINE_AUTO
+The context chooses (see {c:func}`dvs_solver_set_engine`). The default for
+{c:func}`dvs_solver_new`.
+```
+
+```{c:enumerator} DVS_ENGINE_CDCL
+Solve on the CDCL engine. The default for {c:func}`dvs_solver_create`.
+```
+
+```{c:enumerator} DVS_ENGINE_BITBLAST
+Solve on the bit-blast engine.
+```
+
+```{c:function} int dvs_solver_set_engine(dvs_ctx_t *ctx, int engine)
+Fix the engine, before {c:func}`dvs_solver_compile`; for tests and
+benchmarks. A caller need not choose: under
+{c:enumerator}`DVS_ENGINE_AUTO` the context solves on CDCL, and moves to
+bit-blast when CDCL cannot compile the problem whole (wide multiply/divide,
+for instance) or when a CDCL search gives up (not one with its own
+`time_limit_ms`). A problem with {c:enumerator}`DVS_VAR_STATE` or
+{c:enumerator}`DVS_VAR_RANDC` variables, solve order, soft constraints or a
+dist stays on CDCL. Pins, value exclusion, checkpoints, incremental adds,
+optimization and cost guidance are CDCL's: calling one moves the context back
+to CDCL for good, or fails (−1) when CDCL could not compile the problem
+whole.
+
+:returns: 0; −1 if the context has compiled already or `engine` is unknown.
+```
+
+```{c:function} int dvs_solver_engine(const dvs_ctx_t *ctx)
+The engine the context solves on now: {c:enumerator}`DVS_ENGINE_CDCL` or
+{c:enumerator}`DVS_ENGINE_BITBLAST` once compiled, else its preference.
+```
+
 ```{c:function} int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *p)
 Compile problem `p` into the context. The context reads `p` only during the
 call: afterwards `p` may be freed, reused or moved.
@@ -401,7 +455,9 @@ call: afterwards `p` may be freed, reused or moved.
 :returns: {c:macro}`DVS_COMPILE_OK`, a negative error code (see
   [Compile results](#compile-results)), or a positive count of constraints
   that could not be compiled. A solve after a positive return would ignore
-  those constraints, so treat it as an error.
+  those constraints, so treat it as an error. Under
+  {c:enumerator}`DVS_ENGINE_AUTO`, a problem CDCL cannot compile whole goes to
+  bit-blast and returns {c:macro}`DVS_COMPILE_OK`, unless it needs CDCL.
 ```
 
 ```{c:function} dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts)
@@ -636,25 +692,10 @@ The number of entries {c:func}`dvs_randomize` reads from `refs`: one past the
 highest variable id the problem declares.
 ```
 
-```{c:enumerator} DVS_ENGINE_AUTO
-The core's routing rule (see {c:func}`dvs_handle_set_engine`). The default.
-```
-
-```{c:enumerator} DVS_ENGINE_CDCL
-Solve on the CDCL engine.
-```
-
-```{c:enumerator} DVS_ENGINE_BITBLAST
-Solve on the bit-blast engine.
-```
-
 ```{c:function} int dvs_handle_set_engine(dvs_handle_t *h, int engine)
-Choose the engine, before the first {c:func}`dvs_randomize`.
-{c:enumerator}`DVS_ENGINE_AUTO` bit-blasts a problem whose shape is a circuit,
-one CDCL cannot compile whole, and one whose CDCL search gave up; otherwise it
-uses CDCL. A problem with {c:enumerator}`DVS_VAR_STATE` or
-{c:enumerator}`DVS_VAR_RANDC` variables stays on CDCL: the bit-blast engine
-has no pins or value exclusion yet.
+Choose the engine, before the first {c:func}`dvs_randomize`: the handle's
+context gets it ({c:func}`dvs_solver_set_engine`, which describes
+{c:enumerator}`DVS_ENGINE_AUTO`, the default).
 
 :returns: 0; −1 if `h` is `NULL` or has already solved, `engine` is unknown,
   or {c:enumerator}`DVS_ENGINE_BITBLAST` is asked of a problem with STATE or

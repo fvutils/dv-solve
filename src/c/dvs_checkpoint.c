@@ -5,6 +5,7 @@
 #include "dvs_lcg.h"
 #include "dvs_propagator.h"
 #include "dvs_trail.h"
+#include "dvs_engine.h"
 
 /* ------------------------------------------------------------------ */
 /* dvs_solver_checkpoint -- save solver state                              */
@@ -13,6 +14,8 @@
 static int _solver_checkpoint(dvs_ctx_t *ctx);
 
 int dvs_solver_checkpoint(dvs_ctx_t *ctx) {
+    /* Only CDCL serves this (dvs_engine.h). */
+    if (dvs_engine_need_cdcl(ctx) != 0) return -1;
     int cp = _solver_checkpoint(ctx);
     if (ctx->oracle) dvs_oracle_on_checkpoint(ctx, cp);
     return cp;

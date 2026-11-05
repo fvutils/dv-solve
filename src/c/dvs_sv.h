@@ -86,6 +86,18 @@ typedef int (*dvs_sv_var_type_fn)(void *ud, uint32_t var_id,
 dvs_problem_t *dvs_sv_elaborate(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
                                void *ud, int *err);
 
+/** Lower the typed operators (DVS_BIN_ULT .. DVS_BIN_LSHR) of an EXPLICIT
+ * problem, for the CDCL engine, which compiles only the SV operators. An
+ * EXPLICIT problem skips dvs_sv_elaborate(); this elaborates it anyway when it
+ * holds a typed operator, which lowers each one exactly as elaboration does
+ * for an SV problem (cast operands, guarded division). The SV rules are the
+ * validator's for an EXPLICIT problem too, so the rest keeps its meaning.
+ * Returns `sp` itself when it is not EXPLICIT or holds no typed operator;
+ * otherwise as dvs_sv_elaborate(). Bit-blast encodes typed operators natively
+ * and does not call this. */
+dvs_problem_t *dvs_sv_lower_typed(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
+                                 void *ud, int *err);
+
 /** Incremental use of a private copy from dvs_sv_elaborate(): first sync into
  * `*elab` whatever the caller appended to `orig` in place since the copy was
  * taken (`*synced_used`, initially orig->pool.used at copy time, tracks that),

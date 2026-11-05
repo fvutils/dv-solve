@@ -500,14 +500,14 @@ static int64_t _bv_unsigned_hi(uint32_t width) {
     return (int64_t)((1ULL << width) - 1);
 }
 
-/* A width >= 64 value produced by ARITHMETIC / bitwise / shift / ite is a CDCL
- * soundness hazard: the engine models a variable's domain with an int64
- * [lo,hi], so any result landing in [2^63, 2^64) reads as *negative* and breaks
- * unsigned propagation — e.g. `(bvult (bvadd x y) x)` (unsigned-overflow check)
- * returns a wrong `unsat`. Route such a problem to the bit-exact bit-blast
- * engine. Plain comparisons / equality over 64-bit values are sound (they yield
- * a 1-bit result and never materialize a >=2^63-bounded aux var), so they stay
- * on CDCL — this keeps the routing targeted (width-64 arithmetic is rare). */
+/* A value produced by arithmetic / bitwise / shift / ite that CDCL cannot
+ * compute exactly routes the problem to the bit-exact bit-blast engine. CDCL
+ * models a domain as an int64 [lo,hi]: wider than 64 bits it has no
+ * propagators at all. At exactly 64 bits an unsigned value >= 2^63 is a
+ * negative int64 pattern, and the unsigned operators read it as uint64
+ * (docs/signed_unsigned_ops_design.md, step 4b), so the callers flag only
+ * widths above 64, and the signed operators that still decline at 64
+ * (bvashr; bvsdiv/bvsrem/bvsmod route on their own). */
 static void _flag_wide_arith(Smt2Frontend *fe, uint32_t width) {
     if (width >= 64) { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "wide-arith"; }
 }
@@ -1763,38 +1763,6 @@ static dvs_expr_t _neg_expr(Smt2Frontend *fe, dvs_expr_t x, uint16_t w) {
     return dvs_builder_expr_binary(fe->builder, DVS_BIN_SUB, _bv_const(fe, 0, w), x);
 }
 
-/* Build the SMT-LIB signed division (is_rem=0) or remainder (is_rem=1) of two
- * width-`w` operands: one unsigned bvudiv/bvurem of the magnitudes plus a sign
- * fix (round toward zero). The quotient is negated when the signs differ, the
- * remainder takes the dividend's sign. MIN's magnitude is 2^(w-1) unsigned,
- * and a zero divisor gives SMT-LIB's results (s/0 = s<0 ? 1 : -1, s%0 = s).
- *
- * One divider, not one per sign quadrant: on bitblast each is a w*w-cell
- * array, and four of them made riscv_loop_instr's `bvsmod` ~3x slower. Every
- * step is its own aux var so the CDCL compile links each one, and CDCL
- * answers all three exactly. (It once left the quotient uncompiled: the
- * compile had no arm for the zero-divisor value `~0`; see _udivrem_expr.)
- * These problems still route to bitblast because model validation evaluates
- * this same lowering, so it is no independent check of it (B69; plan
- * docs/cdcl_construct_plan.md phase 6).
- *
- * Reused by bvsdiv/bvsrem and by bvsmod. Returns an dvs_expr_t of width `w`.
- * The caller must set fe->needs_bitblast. */
-static dvs_expr_t _signed_divrem_expr(Smt2Frontend *fe, dvs_expr_t S_, dvs_expr_t T_,
-                                   uint16_t w, int is_rem) {
-    dvs_builder_t *b = fe->builder;
-    dvs_expr_t msb_s = _fv(fe, dvs_builder_expr_extract(b, S_, w - 1, w - 1), 1);
-    dvs_expr_t msb_t = _fv(fe, dvs_builder_expr_extract(b, T_, w - 1, w - 1), 1);
-    dvs_expr_t mag_s = _fv(fe, dvs_builder_expr_ite(b, msb_s,
-                           _fv(fe, _neg_expr(fe, S_, w), w), S_), w);
-    dvs_expr_t mag_t = _fv(fe, dvs_builder_expr_ite(b, msb_t,
-                           _fv(fe, _neg_expr(fe, T_, w), w), T_), w);
-    dvs_expr_t m = _fv(fe, _udivrem_expr(fe, mag_s, mag_t, w, is_rem), w);
-    dvs_expr_t neg = is_rem ? msb_s
-                   : _fv(fe, dvs_builder_expr_binary(b, DVS_BIN_BXOR, msb_s, msb_t), 1);
-    return dvs_builder_expr_ite(b, neg, _fv(fe, _neg_expr(fe, m, w), w), m);
-}
-
 /* Both operands are the same variable (after flattening). A comparison of a
  * variable with itself is decided -- and left to the engines it is not:
  * `x <s x` lowers each side to its own `x ^ 2^(w-1)` auxiliary, and the
@@ -2631,7 +2599,7 @@ static SMT2_NOINLINE TaggedExpr _tr_band_bor(Smt2Frontend *fe, const Sexpr *s, i
         uint64_t id = is_band ? (w >= 64 ? ~0ull : ((1ull << w) - 1)) : 0;
         return _tagged(_bv_const(fe, (int64_t)id, w), w, 2, NULL);
     }
-    _flag_wide_arith(fe, w);
+    if (w > 64) _flag_wide_arith(fe, w);    /* exact on CDCL at 64 (_tr_binop) */
     return _tagged(acc.ref, w, acc.leaf_kind, NULL);
 }
 
@@ -2658,7 +2626,11 @@ static SMT2_NOINLINE TaggedExpr _tr_binop(Smt2Frontend *fe, const Sexpr *s, cons
         a.ref = dvs_builder_expr_binary(fe->builder, binop, a.ref, b.ref);
         a.leaf_kind = 0;   /* composed: must be re-flattened next round */
     }
-    _flag_wide_arith(fe, a.width);
+    /* At 64 bits every operator here is exact on CDCL: a logical right
+     * shift never exceeds its operand (as bvudiv), the bv*_64 propagators
+     * compute add/sub/mul/shl modulo 2^64, and the bitwise ones read an
+     * unsigned 64-bit value as uint64. */
+    if (a.width > 64) _flag_wide_arith(fe, a.width);
     return _tagged(a.ref, a.width, 0, NULL);
 }
 
@@ -2785,28 +2757,29 @@ static SMT2_NOINLINE TaggedExpr _tr_udivrem(Smt2Frontend *fe, const Sexpr *s, in
                      s->list.items[2], b))
         return TAGGED_NULL;
     uint16_t w = a.width ? a.width : b.width;
-    _flag_wide_arith(fe, w);
+    /* At 64 bits too CDCL is exact: unsigned division and remainder never
+     * exceed the dividend, and its 64-bit propagators read unsigned values
+     * as uint64. Wider goes to bit-blast. */
+    if (w > 64) _flag_wide_arith(fe, w);
     dvs_expr_t q = _udivrem_expr(fe, a.ref, b.ref, w, is_urem);
     return _tagged(q, w, 0, NULL);
 }
 
+/* A typed signed division operator (SDIV, SREM, SMOD) at w bits: bit-blast
+ * encodes it natively, CDCL compiles it through elaboration's lowering
+ * (dvs_sv_lower_typed), and the validator evaluates it itself. Its value is
+ * signed under the SV rules every engine applies to an EXPLICIT problem, so
+ * it is bound to an unsigned variable: an untyped parent (`bvult` of two of
+ * them, say) then reads its bit pattern, as SMT-LIB means. */
+static TaggedExpr _typed_signed_div(Smt2Frontend *fe, dvs_binop_t op,
+                                    dvs_expr_t a, dvs_expr_t b, uint16_t w) {
+    dvs_expr_t r = dvs_builder_expr_binary(fe->builder, op, a, b);
+    return _flatten_to_var(fe, _tagged(r, w, 0, NULL));
+}
+
 /* Signed division / remainder (SMT-LIB `bvsdiv` / `bvsrem`, round toward
- * zero), lowered to the already-supported unsigned bvudiv/bvurem plus sign
- * muxing. No engine changes: on bitblast the ite/neg/udiv are primitives;
- * on CDCL each flattened sub-op has a propagator. Verilator emits these for
- * signed `/` and `%`.
- *
- *   sdiv(s,t): quadrant by (sign s, sign t) —
- *     (+,+) udiv(s,t)      (-,+) -udiv(-s,t)
- *     (+,-) -udiv(s,-t)    (-,-) udiv(-s,-t)
- *   srem(s,t): sign follows the dividend s —
- *     (+,+) urem(s,t)      (-,+) -urem(-s,t)
- *     (+,-) urem(s,-t)     (-,-) -urem(-s,-t)
- */
+ * zero). Still routed to bit-blast (design step 5 drops it). */
 static SMT2_NOINLINE TaggedExpr _tr_sdivrem(Smt2Frontend *fe, const Sexpr *s, int is_srem) {
-    /* The ITE-of-unsigned-divisions this lowers to is solved exactly by
-     * bitblast but left unpinned (wrong model) by the CDCL bounds
-     * engine, so force bitblast for this problem. */
     { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "sdiv-srem"; }
     if (s->list.count != 3) return TAGGED_NULL;
     TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
@@ -2815,9 +2788,8 @@ static SMT2_NOINLINE TaggedExpr _tr_sdivrem(Smt2Frontend *fe, const Sexpr *s, in
     if (tb.ref == EXPR_NULL) return TAGGED_NULL;
     uint16_t w = sa.width ? sa.width : tb.width;
     if (w == 0) return TAGGED_NULL;
-    dvs_expr_t r = _signed_divrem_expr(fe, sa.ref, tb.ref,
-                                    w, is_srem);
-    return _tagged(r, w, 0, NULL);
+    return _typed_signed_div(fe, is_srem ? DVS_BIN_SREM : DVS_BIN_SDIV,
+                             sa.ref, tb.ref, w);
 }
 
 /* Signed modulo (SMT-LIB `bvsmod`): result sign follows the DIVISOR t.
@@ -2835,24 +2807,7 @@ static SMT2_NOINLINE TaggedExpr _tr_smod(Smt2Frontend *fe, const Sexpr *s) {
     if (tb.ref == EXPR_NULL) return TAGGED_NULL;
     uint16_t w = sa.width ? sa.width : tb.width;
     if (w == 0) return TAGGED_NULL;
-    dvs_expr_t T_ = tb.ref;
-    dvs_expr_t r_expr = _signed_divrem_expr(fe, sa.ref, T_, w, /*is_rem=*/1);
-    /* Materialise the remainder into its own var: bvsmod references it
-     * three times (sign bit, +t, ==0), and re-embedding the raw ITE tree
-     * at each use makes the bitblaster produce inconsistent values for
-     * the shared sub-DAG. One aux var = one bit-blasted value, shared. */
-    TaggedExpr rt = _flatten_to_var(fe, _tagged(r_expr, w, 0, NULL));
-    if (rt.ref == EXPR_NULL) return TAGGED_NULL;
-    dvs_expr_t r = rt.ref;
-    dvs_expr_t msb_r = dvs_builder_expr_extract(fe->builder, r, w - 1, w - 1);
-    dvs_expr_t msb_t = dvs_builder_expr_extract(fe->builder, T_, w - 1, w - 1);
-    dvs_expr_t same_sign = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, msb_r, msb_t);
-    dvs_expr_t r_plus_t = dvs_builder_expr_binary(fe->builder, DVS_BIN_ADD, r, T_);
-    dvs_expr_t adjusted = dvs_builder_expr_ite(fe->builder, same_sign, r, r_plus_t);
-    dvs_expr_t zero = _bv_const(fe, 0, w);
-    dvs_expr_t r_is_zero = dvs_builder_expr_binary(fe->builder, DVS_BIN_EQ, r, zero);
-    dvs_expr_t result = dvs_builder_expr_ite(fe->builder, r_is_zero, r, adjusted);
-    return _tagged(result, w, 0, NULL);
+    return _typed_signed_div(fe, DVS_BIN_SMOD, sa.ref, tb.ref, w);
 }
 
 /* = (equality) -- handles both BV and array operands */
@@ -2953,7 +2908,7 @@ static SMT2_NOINLINE TaggedExpr _tr_bvnot(Smt2Frontend *fe, const Sexpr *s) {
     TaggedExpr a = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
     if (a.ref == EXPR_NULL) return TAGGED_NULL;
     dvs_expr_t r = dvs_builder_expr_unary(fe->builder, DVS_UN_INVERT, a.ref);
-    _flag_wide_arith(fe, a.width);
+    if (a.width > 64) _flag_wide_arith(fe, a.width);    /* ~a = mask - a: exact at 64 */
     return _tagged(r, a.width, 0, NULL);
 }
 
@@ -2970,7 +2925,7 @@ static SMT2_NOINLINE TaggedExpr _tr_bvneg(Smt2Frontend *fe, const Sexpr *s) {
     TaggedExpr z = _flatten_to_var(fe, _tagged(_bv_const(fe, 0, a.width), a.width, 2, NULL));
     if (z.ref == EXPR_NULL) return TAGGED_NULL;
     dvs_expr_t r = dvs_builder_expr_binary(fe->builder, DVS_BIN_SUB, z.ref, a.ref);
-    _flag_wide_arith(fe, a.width);
+    if (a.width > 64) _flag_wide_arith(fe, a.width);    /* a bvsub: exact at 64 */
     return _tagged(r, a.width, 0, NULL);
 }
 
@@ -3146,7 +3101,7 @@ static SMT2_NOINLINE TaggedExpr _tr_ite(Smt2Frontend *fe, const Sexpr *s) {
     e = _flatten_to_var(fe, e);
     if (e.ref == EXPR_NULL) return TAGGED_NULL;
     dvs_expr_t r = dvs_builder_expr_ite(fe->builder, c.ref, t.ref, e.ref);
-    _flag_wide_arith(fe, t.width);
+    if (t.width > 64) _flag_wide_arith(fe, t.width);    /* picks a value: exact at 64 */
     return _tagged(r, t.width, 0, NULL);
 }
 
@@ -4709,6 +4664,10 @@ static int _ensure_compiled(Smt2Frontend *fe) {
     {
         fe->ctx = dvs_solver_new(NULL);
         if (!fe->ctx) return -1;
+        /* The front end chooses between this context and its own bit-blast
+         * sessions (_engine_is_bitblast) until it moves onto the context's
+         * choice (docs/solver_gap_plan.md, step 3). */
+        dvs_solver_set_engine(fe->ctx, DVS_ENGINE_CDCL);
         int rc = dvs_solver_compile(fe->ctx, fe->problem);
         if (rc >= 0) {
             /* rc > 0 (some constraints left uncompiled; validation and

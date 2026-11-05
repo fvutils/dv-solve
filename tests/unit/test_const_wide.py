@@ -164,7 +164,7 @@ def _cdcl(var_w, var_s, op, k, kw, ks, var_left=True, seeds=range(1, 9),
         b.destroy()
     text = lambda: log.read_text() if log.exists() else ""  # noqa: E731
     try:
-        ctx = SolveCtx(buf)
+        ctx = SolveCtx(buf, engine="cdcl")
     except CompileUnsatError:
         return None, text()
     except CompileIncompleteError:

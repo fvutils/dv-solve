@@ -815,6 +815,7 @@ static void cdcl_close(Cdcl *c) {
 static int cdcl_open(Cdcl *c, Built *bt) {
     c->ctx = dvs_solver_new(NULL);
     if (!c->ctx) return -1;
+    dvs_solver_set_engine(c->ctx, DVS_ENGINE_CDCL);   /* replays the front end's CDCL calls */
     int rc = dvs_solver_compile(c->ctx, bt->p);
     if (rc == -2) return -2;
     if (rc < 0) { cdcl_close(c); return -1; }
@@ -1778,6 +1779,7 @@ static void census(void) {
 static dvs_ctx_t *check_ctx(Rebuild *r, Capture *cp) {
     dvs_ctx_t *c = dvs_solver_new(NULL);
     if (!c) return NULL;
+    dvs_solver_set_engine(c, DVS_ENGINE_CDCL);
     Built bt;
     build(r, cp, &bt);
     int rc = dvs_solver_compile(c, bt.p);
@@ -1985,6 +1987,7 @@ static void calib(void) {
     int bad = 0;
     for (int rep = 0; rep < 3; rep++) {
         dvs_ctx_t *ctx = dvs_solver_new(NULL);
+        if (ctx) dvs_solver_set_engine(ctx, DVS_ENGINE_CDCL);
         if (!ctx || dvs_solver_compile(ctx, p) != 0) { bad = 1; break; }
         double a = now_s();
         for (int i = 0; i < n_solve; i++) {
@@ -1999,6 +2002,7 @@ static void calib(void) {
         a = now_s();
         for (int i = 0; i < n_compile; i++) {
             ctx = dvs_solver_new(NULL);
+            if (ctx) dvs_solver_set_engine(ctx, DVS_ENGINE_CDCL);
             if (!ctx || dvs_solver_compile(ctx, p) != 0) bad = 1;
             if (ctx) dvs_solver_free(ctx);
         }

@@ -360,6 +360,11 @@ typedef struct dvs_ctx_s {
     /* The oracle check attached by dvs_solver_set_oracle(), or NULL
      * (dvs_oracle.c). */
     struct dvs_octx_s *oracle;
+    /* The engine the context solves on (dvs_engine.c): the preference
+     * (DVS_ENGINE_*; dvs_solver_set_engine) and, once compiled under AUTO
+     * or BITBLAST, the bit-blast state. */
+    int                engine_pref;
+    struct dvs_engine_s *engine;
     /* Compile's recursive passes stop (decline the constraint) when the
      * stack runs low (dvs_stackinfo.h). A cache; any value is safe. */
     dvs_stack_guard_t  stack_guard;

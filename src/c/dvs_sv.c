@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "dvs_sv.h"
+#include "dvs_shape.h"
 #include "dvs_i128.h"
 #include "dvs_stackinfo.h"
 
@@ -379,6 +380,13 @@ static SvTy _type(SvE *E, dvs_expr_t ref) {
         } else if (b.op == DVS_BIN_LSHIFT || b.op == DVS_BIN_RSHIFT ||
                    b.op == DVS_BIN_ASHR) {
             t = _type(E, b.lhs);
+        } else if (b.op == DVS_BIN_LSHR) {
+            t.w = _type(E, b.lhs).w;            /* unsigned, the value's width */
+        } else if (dvs_binop_is_typed(b.op) && !dvs_binop_is_typed_cmp(b.op)) {
+            /* Typed div/rem: the wider operand's width, the operator's sign. */
+            SvTy l = _type(E, b.lhs), r = _type(E, b.rhs);
+            t.w = l.w > r.w ? l.w : r.w;
+            t.s = (uint8_t)dvs_binop_typed_signed(b.op);
         }
         break;
     }
@@ -467,6 +475,67 @@ static dvs_expr_t _widen(SvE *E, dvs_expr_t x, uint32_t W) {
     return _mk_ext(E, x, t.w, W, t.s);
 }
 
+/* An operand of a typed operator: elaborated at its own type, then read with
+ * the operator's signedness `s` and extended to w by it. */
+static dvs_expr_t _typed_opnd(SvE *E, dvs_expr_t ref, uint32_t w, uint8_t s) {
+    SvTy t = _type(E, ref);
+    dvs_expr_t x = _val(E, ref, t.w, t.s);
+    if (E->err || (t.w == w && t.s == s)) return x;
+    return _mk_cast(E, x, t.w, w, s, s);
+}
+
+/* A typed operator (DVS_BIN_ULT .. DVS_BIN_LSHR), elaborated and lowered to
+ * the SV operators every engine already compiles. Its operands are cast to
+ * the operator's width and signedness first, so an SV operator on them means
+ * exactly the typed one: a comparison is the SV comparison, LSHR the SV `>>`
+ * of an unsigned value. The engines leave SV `/` and `%` unconstrained at a
+ * zero divisor (SV's x), so division is guarded with SMT-LIB's results, as
+ * the SMT-LIB front end guards bvudiv (_udivrem_expr); SMOD moves a non-zero
+ * remainder whose sign differs from the divisor's by the divisor. The
+ * validator evaluates the typed operator itself, so it checks this lowering. */
+static dvs_expr_t _typed_node(SvE *E, dvs_expr_t ref, ExprBinary b) {
+    (void)ref;
+    SvTy lt = _type(E, b.lhs), rt = _type(E, b.rhs);
+    if (b.op == DVS_BIN_LSHR) {
+        dvs_expr_t l = _typed_opnd(E, b.lhs, lt.w, 0);
+        dvs_expr_t r = _typed_opnd(E, b.rhs, rt.w, 0);
+        return E->err ? EXPR_NULL : _mk_bin(E, DVS_BIN_RSHIFT, l, r);
+    }
+    uint32_t w  = lt.w > rt.w ? lt.w : rt.w;
+    uint8_t  sg = (uint8_t)dvs_binop_typed_signed(b.op);
+    dvs_expr_t l = _typed_opnd(E, b.lhs, w, sg);
+    dvs_expr_t r = _typed_opnd(E, b.rhs, w, sg);
+    if (E->err) return EXPR_NULL;
+    switch (b.op) {
+    case DVS_BIN_ULT: case DVS_BIN_SLT: return _mk_bin(E, DVS_BIN_LT,  l, r);
+    case DVS_BIN_ULE: case DVS_BIN_SLE: return _mk_bin(E, DVS_BIN_LTE, l, r);
+    case DVS_BIN_UGT: case DVS_BIN_SGT: return _mk_bin(E, DVS_BIN_GT,  l, r);
+    case DVS_BIN_UGE: case DVS_BIN_SGE: return _mk_bin(E, DVS_BIN_GTE, l, r);
+    default: break;
+    }
+    int is_div = b.op == DVS_BIN_UDIV || b.op == DVS_BIN_SDIV;
+    dvs_expr_t q = _mk_bin(E, is_div ? DVS_BIN_DIV : DVS_BIN_MOD, l, r);
+    dvs_expr_t z = _mk_const(E, 0, sg, w);
+    int nonzero_const = _kind(E, r) == EXPR_CONST && ((ExprConst *)_P(E, r))->value != 0;
+    dvs_expr_t m = q;
+    if (!nonzero_const) {
+        dvs_expr_t at0;
+        if (b.op == DVS_BIN_UDIV)
+            at0 = _mk_un(E, DVS_UN_INVERT, z);                      /* all ones */
+        else if (b.op == DVS_BIN_SDIV)
+            at0 = _mk_ite(E, _mk_bin(E, DVS_BIN_LT, l, z),
+                          _mk_const(E, 1, 1, w), _mk_const(E, -1, 1, w));
+        else
+            at0 = l;                                                /* x rem 0 = x */
+        m = _mk_ite(E, _mk_bin(E, DVS_BIN_EQ, r, z), at0, q);
+    }
+    if (b.op != DVS_BIN_SMOD) return m;
+    dvs_expr_t fix = _mk_bin(E, DVS_BIN_OR,
+        _mk_bin(E, DVS_BIN_AND, _mk_bin(E, DVS_BIN_LT, m, z), _mk_bin(E, DVS_BIN_GT, r, z)),
+        _mk_bin(E, DVS_BIN_AND, _mk_bin(E, DVS_BIN_GT, m, z), _mk_bin(E, DVS_BIN_LT, r, z)));
+    return _mk_ite(E, fix, _mk_bin(E, DVS_BIN_ADD, m, r), m);
+}
+
 static dvs_expr_t _val_const(SvE *E, dvs_expr_t ref, uint32_t W, uint8_t S) {
     ExprConst c = *(ExprConst *)_P(E, ref);
     uint32_t cw; uint8_t cs;
@@ -508,7 +577,9 @@ static dvs_expr_t _val(SvE *E, dvs_expr_t ref, uint32_t W, uint8_t S) {
         break;
     case EXPR_BINARY: {
         ExprBinary b = *(ExprBinary *)_P(E, ref);
-        if (_is_arith(b.op)) {
+        if (dvs_binop_is_typed(b.op) && !dvs_binop_is_typed_cmp(b.op)) {
+            out = _conv(E, _typed_node(E, ref, b), W, S);
+        } else if (_is_arith(b.op)) {
             dvs_expr_t l = _val(E, b.lhs, W, S);
             dvs_expr_t r = _val(E, b.rhs, W, S);
             if (E->err) break;
@@ -916,6 +987,8 @@ static dvs_expr_t _bool(SvE *E, dvs_expr_t ref) {
             out = (l == b.lhs && r == b.rhs) ? ref : _mk_bin(E, b.op, l, r);
         } else if (_is_cmp(b.op)) {
             out = _cmp(E, b.op, b.lhs, b.rhs, ref);
+        } else if (dvs_binop_is_typed_cmp(b.op)) {
+            out = _typed_node(E, ref, b);
         } else {
             out = _nonzero(E, ref);
         }
@@ -969,10 +1042,32 @@ static dvs_expr_t _bool(SvE *E, dvs_expr_t ref) {
 /* Entry point                                                         */
 /* ------------------------------------------------------------------ */
 
+static dvs_problem_t *_elaborate(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
+                                 void *ud, int *err);
+
 dvs_problem_t *dvs_sv_elaborate(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
                                void *ud, int *err) {
     if (err) *err = 0;
     if (!sp || (sp->flags & DVS_PROBLEM_F_EXPLICIT)) return sp;
+    return _elaborate(sp, fn, ud, err);
+}
+
+dvs_problem_t *dvs_sv_lower_typed(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
+                                 void *ud, int *err) {
+    if (err) *err = 0;
+    if (!sp || !(sp->flags & DVS_PROBLEM_F_EXPLICIT)) return sp;
+    dvs_shape_t sh;
+    if (dvs_shape_compute(sp, &sh) != 0) {
+        if (err) *err = DVS_SV_ERR_NOMEM;
+        return sp;
+    }
+    if (sh.n_typed == 0 && !sh.truncated) return sp;
+    return _elaborate(sp, fn, ud, err);
+}
+
+static dvs_problem_t *_elaborate(dvs_problem_t *sp, dvs_sv_var_type_fn fn,
+                                 void *ud, int *err) {
+    if (err) *err = 0;
     if (sp->constraints_head == EXPR_NULL && sp->softs_head == EXPR_NULL)
         return sp;
 

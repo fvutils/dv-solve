@@ -86,6 +86,54 @@ def test_mul_div_models(divsamp):
         assert len({m["b"] for m in models}) >= n // 2
 
 
+
+# --- Signed division ------------------------------------------------------
+# `c == a op k` defines c, so the sampler draws `a`, computes c and checks
+# `c != 0` on it. The models must match SMT-LIB's signed division, and every
+# answer must come from the sampler.
+
+def _sref(op: str, a: int, k: int, w: int) -> int:
+    m = (1 << w) - 1
+    sa = a - (1 << w) if a >> (w - 1) else a
+    sk = k - (1 << w) if k >> (w - 1) else k
+    q = abs(sa) // abs(sk)
+    q = -q if (sa < 0) != (sk < 0) else q
+    if op == "bvsdiv":
+        return q & m
+    r = sa - q * sk
+    if op == "bvsmod" and r and (r < 0) != (sk < 0):
+        r += sk
+    return r & m
+
+
+@pytest.mark.parametrize("w", [8, 64])
+@pytest.mark.parametrize("k", [7, -5])
+@pytest.mark.parametrize("op", ["bvsdiv", "bvsrem", "bvsmod"])
+def test_signed_divrem_definition(op, k, w):
+    n = 20
+    kb = k & ((1 << w) - 1)
+    neg = "bvslt" if k > 0 else "bvsgt"     # a's sign opposite the divisor's
+    text = "".join(f"""(reset)
+(set-option :produce-models true)
+(set-option :random-seed {500 + i})
+(set-logic QF_BV)
+(declare-fun a () (_ BitVec {w}))
+(declare-fun c () (_ BitVec {w}))
+(assert ({neg} a {_bv(0, w)}))
+(assert (= c ({op} a {_bv(kb, w)})))
+(assert (distinct c {_bv(0, w)}))
+(check-sat)
+(get-value (a c))
+""" for i in range(n))
+    verdicts, models, err = _run(text)
+    assert verdicts == ["sat"] * n
+    assert len(models) == n
+    for m in models:
+        assert m["c"] == _sref(op, m["a"], kb, w), m
+    hits = re.findall(r"\[bb-divsamp\].*-> sat", err)
+    assert len(hits) == n, err[-2000:]
+    assert len({m["a"] for m in models}) >= n // 2
+
 # --- Box-var proposals (residue, change of variable) and the OR hull --------
 # A var whose hull has 2^16 values or more is a box var (drawn, not
 # enumerated); the proposals apply to those, so `x` below is 18 bits and the

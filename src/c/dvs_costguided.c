@@ -5,6 +5,7 @@
 #include "dvs_costguided.h"
 #include "dvs_ctx.h"
 #include "dvs_search.h"
+#include "dvs_engine.h"
 
 /* ================================================================== */
 /* CostGuided value selector callback                                  */
@@ -98,6 +99,8 @@ static int64_t _costguided_select(dvs_ctx_t *ctx, uint32_t var_id,
 
 void dvs_solver_set_cost_guided(dvs_ctx_t *ctx, CostFunc cost_fn,
                              void *cost_data, int32_t max_scan) {
+    /* Only CDCL serves this (dvs_engine.h). */
+    if (dvs_engine_need_cdcl(ctx) != 0) return;
     if (!ctx) return;
 
     /* One CostGuidedCtx per context, from its allocator: it lives as
@@ -294,6 +297,8 @@ void hpwl_cost_ctx_destroy(HPWLCostCtx *hctx) {
 
 int dvs_solver_set_cost_guided_hpwl(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
                                  int32_t max_scan) {
+    /* Only CDCL serves this (dvs_engine.h). */
+    if (dvs_engine_need_cdcl(ctx) != 0) return -1;
     if (!ctx || !hctx) return -1;
     if (!hctx->macro_net_count) {
         if (hpwl_cost_ctx_build_index(hctx) != 0) return -1;
@@ -496,6 +501,8 @@ int costguided_greedy_place(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
 
 int dvs_solver_set_phase_hints(dvs_ctx_t *ctx, const uint32_t *var_ids,
                             const int64_t *values, uint32_t n_hints) {
+    /* Only CDCL serves this (dvs_engine.h). */
+    if (dvs_engine_need_cdcl(ctx) != 0) return -1;
     if (!ctx || !var_ids || !values) return -1;
 
     /* Ensure phase_save array exists */
@@ -558,6 +565,8 @@ static uint64_t _lns_rng(uint64_t *state) {
 int dvs_solver_lns_optimize(dvs_ctx_t *ctx, HPWLCostCtx *hctx,
                          const LNSOpts *opts,
                          int32_t *out_positions, LNSResult *result) {
+    /* Only CDCL serves this (dvs_engine.h). */
+    if (dvs_engine_need_cdcl(ctx) != 0) return -1;
     if (!ctx || !hctx || !out_positions || !result) return -1;
     memset(result, 0, sizeof(LNSResult));
 

@@ -439,6 +439,10 @@ static int bb_signed(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
         case DVS_BIN_LSHIFT: case DVS_BIN_RSHIFT: case DVS_BIN_ASHR:
             return bb_signed(S, b->lhs, depth + 1);
         default:
+            /* A typed operator names its own: a comparison and LSHR are
+             * unsigned, SDIV/SREM/SMOD signed, UDIV/UREM unsigned. */
+            if (dvs_binop_is_typed(b->op))
+                return !dvs_binop_is_typed_cmp(b->op) && dvs_binop_typed_signed(b->op);
             return bb_signed(S, b->lhs, depth + 1)
                 && bb_signed(S, b->rhs, depth + 1);
         }
@@ -483,8 +487,10 @@ static uint32_t bb_self_width(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
         case DVS_BIN_AND: case DVS_BIN_OR:
             return 1;
         case DVS_BIN_LSHIFT: case DVS_BIN_RSHIFT: case DVS_BIN_ASHR:
+        case DVS_BIN_LSHR:
             return bb_self_width(S, b->lhs, depth + 1);
         default: {
+            if (dvs_binop_is_typed_cmp(b->op)) return 1;
             uint32_t l = bb_self_width(S, b->lhs, depth + 1);
             uint32_t r = bb_self_width(S, b->rhs, depth + 1);
             return l > r ? l : r;
@@ -1773,6 +1779,49 @@ static dvs_bv_t bb_word_eq(dvs_bbsolver_t *S, dvs_expr_t lref, dvs_expr_t rref,
     return all;
 }
 
+/* Signed division of two w-bit words, as SMT-LIB defines it: truncate toward
+ * zero by dividing the magnitudes; the quotient is negative when the signs
+ * differ, the remainder takes the dividend's sign (SMOD: the divisor's). MIN /
+ * -1 wraps to MIN with remainder 0; x / 0 is -1 (x >= 0) or 1, x rem 0 is x. */
+static dvs_bv_t bb_sdivrem(dvs_bbsolver_t *S, dvs_bv_t l, dvs_bv_t r, uint32_t w, int op) {
+    dvs_aig_node_t sa = l.bits[0], sb = r.bits[0];   /* MSB-first */
+    dvs_bv_t al = dvs_bb_ite(S->bb, sa, dvs_bb_neg(S->bb, l), l);
+    dvs_bv_t ar = dvs_bb_ite(S->bb, sb, dvs_bb_neg(S->bb, r), r);
+    if (op == DVS_BIN_SDIV) {
+        dvs_bv_t q = dvs_bb_udiv(S->bb, al, ar);
+        dvs_bv_t diff = dvs_bb_xor(S->bb, dvs_bb_extract(S->bb, l, w - 1, w - 1),
+                                   dvs_bb_extract(S->bb, r, w - 1, w - 1));
+        return dvs_bb_ite(S->bb, diff.bits[0], dvs_bb_neg(S->bb, q), q);
+    }
+    dvs_bv_t m = dvs_bb_urem(S->bb, al, ar);
+    dvs_bbword_note_urem(S->word, al, ar, m);   /* |l| urem |r|, as SV % notes */
+    dvs_bv_t rem = dvs_bb_ite(S->bb, sa, dvs_bb_neg(S->bb, m), m);
+    if (op == DVS_BIN_SREM) return rem;
+    /* SMOD: a non-zero remainder whose sign differs from the divisor's
+     * moves by the divisor. */
+    dvs_bv_t zero = dvs_bb_value_u64(S->bb, w, 0);
+    dvs_bv_t nz = dvs_bb_not(S->bb, dvs_bb_eq(S->bb, rem, zero));
+    dvs_bv_t differ = dvs_bb_xor(S->bb, dvs_bb_extract(S->bb, rem, w - 1, w - 1),
+                                 dvs_bb_extract(S->bb, r, w - 1, w - 1));
+    dvs_bv_t fix = dvs_bb_and(S->bb, nz, differ);
+    return dvs_bb_ite(S->bb, fix.bits[0], dvs_bb_add(S->bb, rem, r), rem);
+}
+
+/* The operands of a typed operator: each at its own width, extended to the
+ * wider one by the operator's signedness. */
+static int bb_typed_opnds(dvs_bbsolver_t *S, const ExprBinary *b, int sg,
+                          dvs_bv_t *l, dvs_bv_t *r) {
+    *l = bb_expr(S, b->lhs, 0);
+    if (S->had_error) return -1;
+    *r = bb_expr(S, b->rhs, l->size);
+    if (S->had_error) return -1;
+    if (l->size == 0 || r->size == 0) { *l = err_bv(S, "typed operand of no width"); return -1; }
+    uint32_t w = max_w(l->size, r->size);
+    *l = sg ? sext_to(S, *l, w) : zext_to(S, *l, w);
+    *r = sg ? sext_to(S, *r, w) : zext_to(S, *r, w);
+    return 0;
+}
+
 static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dvs_expr_t ref,
                           uint32_t hint) {
     /* Comparison / logical ops always produce 1-bit; arithmetic / bitwise
@@ -1970,23 +2019,44 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
             dvs_bbword_note_urem(S->word, l, r, m);
             return m;
         }
-        /* Signed: truncate toward zero. Divide the magnitudes; the quotient
-         * is negative when the signs differ, the remainder takes the
-         * dividend's sign. MIN / -1 wraps to MIN, its remainder is 0. */
-        {
-            dvs_aig_node_t sa = l.bits[0], sb = r.bits[0];   /* MSB-first */
-            dvs_bv_t al = dvs_bb_ite(S->bb, sa, dvs_bb_neg(S->bb, l), l);
-            dvs_bv_t ar = dvs_bb_ite(S->bb, sb, dvs_bb_neg(S->bb, r), r);
-            if (b->op == DVS_BIN_DIV) {
-                dvs_bv_t q = dvs_bb_udiv(S->bb, al, ar);
-                dvs_bv_t diff = dvs_bb_xor(S->bb,
-                    dvs_bb_extract(S->bb, l, w - 1, w - 1),
-                    dvs_bb_extract(S->bb, r, w - 1, w - 1));
-                return dvs_bb_ite(S->bb, diff.bits[0], dvs_bb_neg(S->bb, q), q);
-            }
-            dvs_bv_t m = dvs_bb_urem(S->bb, al, ar);
-            return dvs_bb_ite(S->bb, sa, dvs_bb_neg(S->bb, m), m);
+        /* Signed: truncate toward zero (bb_sdivrem). */
+        return bb_sdivrem(S, l, r, w, b->op == DVS_BIN_DIV ? DVS_BIN_SDIV : DVS_BIN_SREM);
+    }
+    case DVS_BIN_ULT: case DVS_BIN_ULE: case DVS_BIN_UGT: case DVS_BIN_UGE:
+    case DVS_BIN_SLT: case DVS_BIN_SLE: case DVS_BIN_SGT: case DVS_BIN_SGE: {
+        int sg = dvs_binop_typed_signed(b->op);
+        dvs_bv_t l, r;
+        if (bb_typed_opnds(S, b, sg, &l, &r) != 0) return l;
+        dvs_bv_t (*lt)(dvs_bitblast_t *, dvs_bv_t, dvs_bv_t) = sg ? dvs_bb_slt : dvs_bb_ult;
+        switch (b->op) {
+        case DVS_BIN_ULT: case DVS_BIN_SLT: return lt(S->bb, l, r);
+        case DVS_BIN_UGT: case DVS_BIN_SGT: return lt(S->bb, r, l);
+        case DVS_BIN_ULE: case DVS_BIN_SLE: return dvs_bb_not(S->bb, lt(S->bb, r, l));
+        default:                            return dvs_bb_not(S->bb, lt(S->bb, l, r));
         }
+    }
+    case DVS_BIN_UDIV: case DVS_BIN_UREM:
+    case DVS_BIN_SDIV: case DVS_BIN_SREM: case DVS_BIN_SMOD: {
+        int sg = dvs_binop_typed_signed(b->op);
+        dvs_bv_t l, r;
+        if (bb_typed_opnds(S, b, sg, &l, &r) != 0) return l;
+        if (b->op == DVS_BIN_UDIV) return dvs_bb_udiv(S->bb, l, r);
+        if (b->op == DVS_BIN_UREM) {
+            dvs_bv_t m = dvs_bb_urem(S->bb, l, r);
+            dvs_bbword_note_urem(S->word, l, r, m);
+            return m;
+        }
+        return bb_sdivrem(S, l, r, l.size, b->op);
+    }
+    case DVS_BIN_LSHR: {
+        /* At the value's own width; the amount read unsigned. */
+        dvs_bv_t l = bb_expr(S, b->lhs, 0);
+        if (S->had_error) return l;
+        dvs_bv_t r = bb_expr(S, b->rhs, l.size);
+        if (S->had_error) return r;
+        dvs_bv_t sh = bb_shift(S, 0, l, r);
+        dvs_bbword_note_shr(S->word, l, r, sh);
+        return sh;
     }
     default:
         return err_bv(S, "unknown dvs_binop_t");
@@ -2326,7 +2396,10 @@ static dvs_bv_t bb_expr(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t hint_width) 
 }
 
 static dvs_bv_t bb_predicate(dvs_bbsolver_t *S, dvs_expr_t ref) {
-    dvs_bv_t r = bb_expr(S, ref, 1);
+    /* A condition is self-determined: its value at its own width, then != 0.
+     * A width-1 hint sized an unsized constant (or a sum) to its low bit, so
+     * a constraint `76` read as false. */
+    dvs_bv_t r = bb_expr(S, ref, 0);
     if (S->had_error) return r;
     if (r.size != 1) {
         /* Reduce to (r != 0) */
@@ -2354,7 +2427,12 @@ static int assert_var_bounds(dvs_bbsolver_t *S, uint32_t var_id) {
         }
     } else {
         natural_lo = 0;
-        natural_hi = (v->width >= 64) ? INT64_MAX : (((int64_t)1 << v->width) - 1);
+        /* An unsigned 64-bit bound is a uint64_t pattern (dv_solve.h): the
+         * full range ends at all ones, and INT64_MAX is a real bound (2^63-1),
+         * as CDCL reads it. Wider vars can't spell their top in an int64. */
+        natural_hi = v->width > 64 ? INT64_MAX
+                   : v->width == 64 ? (int64_t)UINT64_MAX
+                   : (((int64_t)1 << v->width) - 1);
     }
     int need_lo = v->lo != natural_lo;
     int need_hi = v->hi != natural_hi;
@@ -3422,6 +3500,57 @@ static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
             uint64_t r = b->op == DVS_BIN_DIV ? (y ? x / y : bb_eval_mask(ow))
                                                : (y ? x % y : x);
             *out = r & bb_eval_mask(w);
+            return 1;
+        }
+        case DVS_BIN_ULT: case DVS_BIN_ULE: case DVS_BIN_UGT: case DVS_BIN_UGE:
+        case DVS_BIN_SLT: case DVS_BIN_SLE: case DVS_BIN_SGT: case DVS_BIN_SGE:
+        case DVS_BIN_UDIV: case DVS_BIN_UREM:
+        case DVS_BIN_SDIV: case DVS_BIN_SREM: case DVS_BIN_SMOD:
+        case DVS_BIN_LSHR: {
+            /* Self-determined, as bb_binary encodes it: each operand at its
+             * own width, extended by the operator's signedness to the wider
+             * one (LSHR: the value's width, the amount read unsigned). */
+            int sg = dvs_binop_typed_signed(b->op);
+            uint32_t lw = bb_self_width(S, b->lhs, 0), rw = bb_self_width(S, b->rhs, 0);
+            if (lw == 0 || rw == 0 || lw > 64 || rw > 64) return 0;
+            uint32_t ow = b->op == DVS_BIN_LSHR || lw > rw ? lw : rw;
+            if (!bb_eval(S, b->lhs, lw, val, &x)) return 0;
+            if (!bb_eval(S, b->rhs, rw, val, &y)) return 0;
+            uint64_t M = bb_eval_mask(ow), r;
+            if (b->op == DVS_BIN_LSHR) {
+                r = y >= ow ? 0 : x >> y;
+                *out = bb_eval_ext(r, ow, w, 0);
+                return 1;
+            }
+            x = bb_eval_ext(x, lw, ow, sg);
+            y = bb_eval_ext(y, rw, ow, sg);
+            uint64_t sb = (uint64_t)1 << (ow - 1);
+            int xn = sg && (x & sb), yn = sg && (y & sb);
+            uint64_t ax = xn ? (0 - x) & M : x, ay = yn ? (0 - y) & M : y;
+            switch (b->op) {
+            case DVS_BIN_ULT: case DVS_BIN_SLT: r = (sg ? (x ^ sb) < (y ^ sb) : x < y); break;
+            case DVS_BIN_ULE: case DVS_BIN_SLE: r = (sg ? (x ^ sb) <= (y ^ sb) : x <= y); break;
+            case DVS_BIN_UGT: case DVS_BIN_SGT: r = (sg ? (x ^ sb) > (y ^ sb) : x > y); break;
+            case DVS_BIN_UGE: case DVS_BIN_SGE: r = (sg ? (x ^ sb) >= (y ^ sb) : x >= y); break;
+            case DVS_BIN_UDIV: r = y ? x / y : M; break;
+            case DVS_BIN_UREM: r = y ? x % y : x; break;
+            case DVS_BIN_SDIV: {
+                /* |x| / |y| (|y| = 0 gives all ones), negated when the signs
+                 * differ: x SDIV 0 is -1 for x >= 0, 1 for x < 0. */
+                uint64_t q = ay ? ax / ay : M;
+                r = (xn != yn) ? (0 - q) & M : q;
+                break;
+            }
+            default: {      /* SREM, SMOD */
+                uint64_t m = ay ? ax % ay : ax;
+                r = xn ? (0 - m) & M : m;            /* the dividend's sign */
+                if (b->op == DVS_BIN_SMOD && r && (((r & sb) != 0) != yn))
+                    r = (r + y) & M;                 /* the divisor's sign */
+                break;
+            }
+            }
+            if (dvs_binop_is_typed_cmp(b->op)) { *out = r; return 1; }
+            *out = bb_eval_ext(r, ow, w, sg);
             return 1;
         }
         default:

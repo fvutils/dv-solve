@@ -82,6 +82,10 @@ class Forgejo:
 
     def perf_artifacts(self) -> list:
         """Unexpired perf-* artifacts, oldest first: [(name, id)]."""
+        return self.artifacts(schema.ARTIFACT_RE)
+
+    def artifacts(self, name_re) -> list:
+        """Unexpired artifacts whose name matches name_re, by name: [(name, id)]."""
         found, page = {}, 1
         while True:
             batch = json.loads(self._get(f"actions/artifacts?limit=50&page={page}"))
@@ -90,7 +94,7 @@ class Forgejo:
             if not batch:
                 break
             for a in batch:
-                if not a.get("expired") and schema.ARTIFACT_RE.match(a.get("name", "")):
+                if not a.get("expired") and name_re.match(a.get("name", "")):
                     found.setdefault(a["name"], a["id"])   # newest upload of a name wins
             page += 1
         return sorted(found.items())

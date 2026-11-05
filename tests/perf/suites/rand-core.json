@@ -21,6 +21,8 @@
     {"name": "order_chain_a9"},
     {"name": "sum_unique"},
     {"name": "linear_sys"},
-    {"name": "sum3_const"}
+    {"name": "sum3_const"},
+    {"name": "memmap3"},
+    {"name": "mul_div_64"}
   ]
 }

@@ -1,6 +1,9 @@
 """Pinned solver binaries for perf runs (design §5.3).
 
     python3 -m tests.perf.tools fetch --dest DIR   # download, verify sha256, unpack
+    python3 -m tests.perf.tools latest --lock sim --dest DIR --out FILE
+                                                   # the newest release of each
+                                                   # bundle with a `latest` feed
 
 Tarballs are pinned by URL and sha256 in tools.lock.json; pip tools (z3) in
 solvers.lock. The simulators simbench runs are pinned in sim_tools.lock.json
@@ -30,8 +33,8 @@ LOCK_FILES = {"perf": "tools.lock.json", "sim": "sim_tools.lock.json"}
 LOCKS = {k: json.loads((_HERE / f).read_text(encoding="utf-8")) for k, f in LOCK_FILES.items()}
 LOCK = LOCKS["perf"]
 # Developer checkouts get these from ivpm (ivpm.yaml); same bundles, older layout.
-_LOCAL = {"bitwuzla": _REPO / "packages/verilator-bin/bin/bitwuzla",
-          "verilator": _REPO / "packages/verilator-bin/bin/verilator",
+_LOCAL = {"bitwuzla": _REPO / "packages/verilator/bin/bitwuzla",
+          "verilator": _REPO / "packages/verilator/bin/verilator",
           "boolector": _REPO / "packages/yosys-bin/bin/boolector",
           "yosys": _REPO / "packages/yosys/bin/yosys",
           "yosys-abc": _REPO / "packages/yosys/bin/yosys-abc"}
@@ -158,6 +161,68 @@ def fetch(dest: Path, lock: str = "perf") -> None:
         arc.unlink()
 
 
+def _vkey(v: str) -> tuple:
+    return tuple(int(x) if x.isdigit() else 0 for x in v.split("."))
+
+
+def _get(url: str, timeout: int = 60) -> bytes:
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
+                                               "User-Agent": "dv-solve-perf-tools"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def _resolve(feed: dict, get=_get) -> dict:
+    """The newest release on a GitHub release feed: {version, url, sha256}.
+    GitHub's releases/latest skips prereleases, which is where edapack's
+    snapshot builds go, so this is the newest real release."""
+    rel = json.loads(get(f"https://api.github.com/repos/{feed['repo']}/releases/latest"))
+    version = rel["tag_name"].lstrip("v")
+    if _vkey(version) < _vkey(feed["min"]):
+        raise RuntimeError(f"newest release {version} is older than {feed['min']}")
+    name = feed["asset"].format(version=version)
+    urls = {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])}
+    if name not in urls or name + ".sha256" not in urls:
+        raise RuntimeError(f"release {version} has no {name} (or its .sha256)")
+    sha = get(urls[name + ".sha256"]).decode().split()[0].lower()
+    return {"version": version, "url": urls[name], "sha256": sha}
+
+
+def latest(dest: Path, lock: str = "sim", get=_get) -> dict:
+    """Fetch the newest release of every bundle in `lock` with a `latest` feed
+    into dest/<package>@<version>/, sha256-checked against the release's own
+    .sha256. Returns {tool name: {path, version, url, sha256, src}}. On any
+    failure the tool falls back to its pin (`src: "lock"`, with the error),
+    which `fetch` must already have unpacked under $DVS_PERF_TOOLS."""
+    dest.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for pkg, spec in _packages(lock):
+        feed = spec.get("latest")
+        if not feed:
+            continue
+        (name, (rel_pin, ver_pin)), = spec["provides"].items()
+        try:
+            r = _resolve(feed, get)
+            into = dest / f"{pkg.rsplit('-', 1)[0]}@{r['version']}"
+            tool = into / feed["bin"]
+            if not tool.exists():
+                arc = dest / f"{pkg}.download"
+                arc.write_bytes(get(r["url"], timeout=300))
+                digest = hashlib.sha256(arc.read_bytes()).hexdigest()
+                if digest != r["sha256"]:
+                    arc.unlink()
+                    raise RuntimeError(f"sha256 {digest} does not match the release's {r['sha256']}")
+                with tarfile.open(arc) as t:
+                    t.extractall(into)
+                arc.unlink()
+            out[name] = dict(r, path=str(tool.resolve()), src="latest")
+        except Exception as e:           # noqa: BLE001 -- any failure falls back to the pin
+            out[name] = {"path": str((_root() / rel_pin).resolve()), "version": ver_pin,
+                         "url": spec["url"], "sha256": spec["sha256"], "src": "lock",
+                         "error": f"{type(e).__name__}: {e}"[:300]}
+    return out
+
+
 # Default reference solvers for a SAT suite with no "references" of its own
 # (run_sat.REFERENCES, duplicated here to avoid importing run_sat, which
 # imports this module).
@@ -196,11 +261,21 @@ def main(argv=None) -> int:
                                "they use, instead of every pinned tool")
     check_p = sub.add_parser("check")
     check_p.add_argument("--lock", choices=sorted(LOCK_FILES), default="perf")
+    latest_p = sub.add_parser("latest", help="fetch the newest release of each floating bundle")
+    latest_p.add_argument("--lock", choices=sorted(LOCK_FILES), default="sim")
+    latest_p.add_argument("--dest", required=True)
+    latest_p.add_argument("--out", required=True, help="JSON: tool -> path, version, sha256, src")
     prov_p = sub.add_parser("provenance", help="print a pinned bundle's build provenance")
     prov_p.add_argument("name")
     a = ap.parse_args(argv)
     if a.cmd == "provenance":
         print(json.dumps(provenance(a.name), indent=1))
+        return 0
+    if a.cmd == "latest":
+        got = latest(Path(a.dest), a.lock)
+        Path(a.out).write_text(json.dumps(got, indent=1, sort_keys=True), encoding="utf-8")
+        for n, r in sorted(got.items()):
+            print(f"{n}: {r['version']} ({r['src']}){'  ' + r['error'] if 'error' in r else ''}")
         return 0
     if a.cmd == "fetch":
         fetch(Path(a.dest), a.lock)

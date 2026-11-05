@@ -44,7 +44,7 @@ def _packages_dir() -> Path:
 
 # DVS_DOC_VERILATOR names another Verilator, e.g. one with the solver sampler.
 _VERILATOR = Path(os.environ.get("DVS_DOC_VERILATOR")
-                  or _packages_dir() / "verilator-bin" / "bin" / "verilator")
+                  or _packages_dir() / "verilator" / "bin" / "verilator")
 _SAMPLER = " +verilator+rand+sampler+solver"
 
 

@@ -1,9 +1,9 @@
 # Simulator benchmarks (simbench) for fvutils/dv-solve on Forgejo Actions.
 # Plan: docs/simbench_nightly_plan.md. Procedure: bench/simbench/README.md.
 #
-# Like perf.yml, the job MEASURES and UPLOADS. It never writes to git, holds
-# no write credential, and publishes nothing, so it has no GitHub twin and
-# needs no release-authority gate. It uploads two artifacts:
+# The simbench job MEASURES and UPLOADS, like perf.yml. It publishes nothing,
+# so the workflow has no GitHub twin and needs no release-authority gate. It
+# uploads two artifacts:
 #   simbench-<kind>-<utc>-<sha>      one gzipped run record: every result keyed
 #                                    by variant, simulator build (pinned in
 #                                    tests/perf/sim_tools.lock.json) and dv-solve
@@ -11,16 +11,28 @@
 #   simbench-raw-<kind>-<utc>-<sha>  the per-bench JSONL, value dumps, solver
 #                                    sessions and pytest logs, for diagnosis
 #
-# Dispatch only until two runs on the runner pass (plan S2); the 05:30
-# schedule, queued behind perf.yml in the same concurrency group, comes in S3.
+#
+# The record job then keeps the record for good (plan §6a): it adds every
+# unexpired simbench-<nightly|reference|release>-* record to the orphan branch
+# bench-data (tests/perf/simstore.py), checks it for internal identifiers, and
+# pushes, fast-forward only. It is the only job that writes, and it runs no
+# bench or build code. A night whose push failed is picked up by the next.
+#
+# Both simulators float: each night runs the newest verilator-bin and xezim-bin
+# release (sha256-checked; the sim lock's pins are the fallback), and the
+# pre-flight runs on the pinned Verilator (plan §2). 05:30 daily, queued
+# behind perf.yml (05:00) in the same concurrency group. Sundays, and the first
+# night of a Verilator with no z3 reference yet, are kind=reference.
 
 name: Simbench
 
 on:
+  schedule:
+    - cron: '30 5 * * *'
   workflow_dispatch:
     inputs:
       kind:
-        description: "Run kind (reference adds Verilator+z3 first)"
+        description: "Run kind (reference adds Verilator+z3 first; manual runs are not kept on bench-data)"
         default: manual
         type: choice
         options: [manual, nightly, reference]
@@ -39,8 +51,8 @@ jobs:
   simbench:
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    env:
-      KIND: ${{ inputs.kind || 'nightly' }}
+    outputs:
+      kind: ${{ steps.kind.outputs.kind }}
     steps:
       - uses: actions/checkout@v4
 
@@ -51,12 +63,31 @@ jobs:
             python3 -m pip install -q --break-system-packages "$@"
           }
           pip_install cmake ninja pyyaml pytest -r tests/perf/solvers.lock
+          # The pins: the pre-flight's Verilator, and the fallback for latest.
           python3 -m tests.perf.tools fetch --lock sim --dest sim-tools
+          DVS_PERF_TOOLS=sim-tools python3 -m tests.perf.tools latest --lock sim \
+              --dest sim-latest --out sim-latest.json
+          tool() { python3 -c "import json,sys; print(json.load(open('sim-latest.json'))[sys.argv[1]][sys.argv[2]])" "$@"; }
           {
-            echo "SIMBENCH_VERILATOR_SC=$PWD/$(DVS_PERF_TOOLS=sim-tools python3 -c 'from tests.perf import tools; print(tools.path("verilator-sc"))')"
-            echo "SIMBENCH_XEZIM=$PWD/$(DVS_PERF_TOOLS=sim-tools python3 -c 'from tests.perf import tools; print(tools.path("xezim"))')"
+            echo "SIMBENCH_VERILATOR_SC=$(tool verilator-sc path)"
+            echo "SIMBENCH_XEZIM=$(tool xezim path)"
+            echo "SIMBENCH_PREFLIGHT_VERILATOR_SC=$PWD/$(DVS_PERF_TOOLS=sim-tools python3 -c 'from tests.perf import tools; print(tools.path("verilator-sc"))')"
+            echo "VLT_VERSION=$(tool verilator-sc version)"
             echo "SIM_LOCK_SHA=$(python3 -c 'from tests.perf import tools; print(tools.lock_sha("sim"))')"
           } >> "$GITHUB_ENV"
+
+      - name: Kind
+        id: kind
+        # bench-data's sims.json says which Verilator versions have a z3
+        # reference; there is none before the first record job.
+        run: |
+          git fetch -q --depth 1 origin bench-data 2>/dev/null \
+            && git show FETCH_HEAD:simbench/sims.json > sims-seen.json 2>/dev/null || : > sims-seen.json
+          kind=$(python3 -m tests.perf.simstore kind --event "${{ github.event_name }}" \
+                   --input "${{ inputs.kind }}" --verilator "$VLT_VERSION" --sims sims-seen.json)
+          echo "kind: $kind (Verilator $VLT_VERSION)"
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          echo "KIND=$kind" >> "$GITHUB_ENV"
 
       - name: Build dv-solve (Release)
         run: |
@@ -78,7 +109,8 @@ jobs:
           variants="${{ inputs.variants }}"
           env -u LD_LIBRARY_PATH PYTHONPATH=src python3 -m dv_solve_simbench.ci \
             --kind "$KIND" ${variants:+--variants "$variants"} ${tier:+-m "$tier"} \
-            --lock-sha "$SIM_LOCK_SHA" --out "$GITHUB_WORKSPACE/sim-out" --github-output
+            --lock-sha "$SIM_LOCK_SHA" --sims "$GITHUB_WORKSPACE/sim-latest.json" \
+            --out "$GITHUB_WORKSPACE/sim-out" --github-output
           echo "rc=$?" >> "$GITHUB_OUTPUT"
 
       - name: Check the record and logs for internal identifiers
@@ -117,4 +149,61 @@ jobs:
         if: steps.collect.outputs.rc != '0'
         run: |
           echo "::error::the simbench record is invalid (collect exited ${{ steps.collect.outputs.rc }}); see the record's reason"
+          exit 1
+
+  record:
+    # Keep the record on bench-data (plan §6a). Separate from the measuring job
+    # so the push credential never shares a job with bench or build code.
+    needs: simbench
+    if: always() && needs.simbench.outputs.kind != '' && needs.simbench.outputs.kind != 'manual'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      FORGEJO_API_URL: ${{ github.server_url }}/api/v1
+      FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the new records to bench-data and push
+        run: |
+          pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          git config --global user.name "simbench"
+          git config --global user.email "simbench@noreply.invalid"
+          for attempt in 1 2; do
+            git worktree remove --force bench-data 2>/dev/null || rm -rf bench-data
+            if git ls-remote --exit-code origin refs/heads/bench-data > /dev/null; then
+              git fetch -q origin +refs/heads/bench-data:refs/remotes/origin/bench-data
+              git worktree add -q -B bench-data bench-data origin/bench-data
+            else
+              git worktree add -q --detach bench-data
+              git -C bench-data checkout -q --orphan bench-data
+              git -C bench-data rm -rfq .
+              printf '%s\n' "# bench-data" "" \
+                "Benchmark records for dv-solve, written by the record job of" \
+                "\`.forgejo/workflows/simbench.yml\` on main. Nothing else goes here," \
+                "and there are no workflows on this branch. Layout and format:" \
+                "\`tests/perf/simstore.py\` and \`docs/simbench_nightly_plan.md\` §6a on main." \
+                > bench-data/README.md
+            fi
+            python3 -m tests.perf.simstore add --root bench-data/simbench > added.txt
+            if grep -rnE "$pattern" bench-data --exclude-dir=.git --exclude='*.gz' \
+               || { for f in bench-data/simbench/records/*/*.json.gz; do zcat "$f"; done | grep -nE "$pattern"; }; then
+              echo "::error::internal identifier in bench-data"
+              exit 1
+            fi
+            git -C bench-data add -A
+            if git -C bench-data diff --cached --quiet; then
+              echo "bench-data: nothing new"
+              exit 0
+            fi
+            git -C bench-data commit -q -m "simbench: $(wc -l < added.txt) run(s)" -m "$(cat added.txt)"
+            if git -C bench-data push -q origin HEAD:refs/heads/bench-data; then
+              echo "bench-data: added"; cat added.txt
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); starting over from the remote branch"
+          done
+          echo "::error::could not push bench-data"
           exit 1

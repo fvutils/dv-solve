@@ -24,6 +24,8 @@ SOLVE_OK      = 0
 SOLVE_UNSAT   = 1
 SOLVE_TIMEOUT = 2
 
+# dvs_solver_set_engine values (DVS_ENGINE_* in dv_solve.h)
+ENGINES = {"auto": 0, "cdcl": 1, "bitblast": 2}
 
 
 # ------------------------------------------------------------------ #
@@ -97,6 +99,10 @@ class SolveCtx:
             by default the one set by :func:`dv_solve.oracle.set_default_oracle`,
             if any. ``False``: none.
         label: Names this context in the oracle's records.
+        engine: ``"auto"`` (the default): the context solves on CDCL and
+            moves to the bit-blast engine when CDCL cannot compile the
+            problem whole or its search gives up (``dvs_solver_set_engine``).
+            ``"cdcl"`` or ``"bitblast"`` fix it, for tests and benchmarks.
 
     Raises:
         CompileUnsatError: The constraints are provably unsatisfiable.
@@ -105,7 +111,7 @@ class SolveCtx:
     """
 
     def __init__(self, problem: "SolveProblem", ctx_buf_size: Optional[int] = None,  # noqa: F821
-                 oracle=None, label=None) -> None:
+                 oracle=None, label=None, engine: str = "auto") -> None:
         if ctx_buf_size is not None:
             warnings.warn("SolveCtx(ctx_buf_size=...) is ignored: the context "
                           "grows as the problem needs", DeprecationWarning, stacklevel=2)
@@ -127,6 +133,9 @@ class SolveCtx:
         if ctx is None:
             raise MemoryError("dvs_solver_new failed")
         self._ctx = ctx  # c_void_p value
+        if engine not in ENGINES:
+            raise ValueError(f"engine must be one of {sorted(ENGINES)}")
+        lib.dvs_solver_set_engine(ctx, ENGINES[engine])
 
         # The oracle check, attached before compile: it takes the problem from
         # the compile call.
@@ -467,6 +476,12 @@ class SolveCtx:
         compile made for itself. A problem passed to :meth:`add_constraint`
         numbers its new variables from here."""
         return self._lib.dvs_solver_n_vars(self._ctx)
+
+    @property
+    def engine(self) -> str:
+        """The engine the context solves on now: ``"cdcl"`` or ``"bitblast"``."""
+        n = self._lib.dvs_solver_engine(self._ctx)
+        return {v: k for k, v in ENGINES.items()}[n]
 
     def get_value(self, var_id: int) -> int:
         """The value of variable ``var_id`` in the last solution.

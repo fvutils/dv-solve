@@ -46,6 +46,21 @@ BIN_GTE    = 15
 BIN_AND    = 16
 BIN_OR     = 17
 BIN_ASHR   = 18
+# Typed operators: the operator says how operands are read (dv_solve.h).
+BIN_ULT    = 19
+BIN_ULE    = 20
+BIN_UGT    = 21
+BIN_UGE    = 22
+BIN_SLT    = 23
+BIN_SLE    = 24
+BIN_SGT    = 25
+BIN_SGE    = 26
+BIN_UDIV   = 27
+BIN_UREM   = 28
+BIN_SDIV   = 29
+BIN_SREM   = 30
+BIN_SMOD   = 31
+BIN_LSHR   = 32
 
 UN_NEG    = 0
 UN_NOT    = 1

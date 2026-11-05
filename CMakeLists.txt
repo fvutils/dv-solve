@@ -255,6 +255,7 @@ set(DVS_SOURCES
     src/c/dvs_smt2_emit.c
     src/c/dvs_oracle.c
     src/c/dvs_handle.c
+    src/c/dvs_engine.c
 )
 
 # The CaDiCaL backend translation unit (pure C over the ccadical.h C API) is
@@ -430,6 +431,11 @@ target_link_libraries(test_handle PRIVATE dv_solve)
 target_include_directories(test_handle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_handle COMMAND test_handle)
 
+add_executable(test_engine tests/c/test_engine.c)
+target_link_libraries(test_engine PRIVATE dv_solve)
+target_include_directories(test_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_engine COMMAND test_engine)
+
 add_executable(test_dvs_bbsolver_incremental tests/c/test_dvs_bbsolver_incremental.c)
 target_link_libraries(test_dvs_bbsolver_incremental PRIVATE dv_solve kissat)
 target_include_directories(test_dvs_bbsolver_incremental PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -439,6 +445,16 @@ add_executable(test_bb_enumsamp tests/c/test_bb_enumsamp.c)
 target_link_libraries(test_bb_enumsamp PRIVATE dv_solve kissat)
 target_include_directories(test_bb_enumsamp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_bb_enumsamp COMMAND test_bb_enumsamp)
+
+add_executable(test_bb_typed tests/c/test_bb_typed.c)
+target_link_libraries(test_bb_typed PRIVATE dv_solve kissat)
+target_include_directories(test_bb_typed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_bb_typed COMMAND test_bb_typed)
+
+add_executable(test_cdcl_typed tests/c/test_cdcl_typed.c)
+target_link_libraries(test_cdcl_typed PRIVATE dv_solve)
+target_include_directories(test_cdcl_typed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_cdcl_typed COMMAND test_cdcl_typed)
 
 add_executable(test_dvs_block_alloc_cache tests/c/test_dvs_block_alloc_cache.c)
 target_link_libraries(test_dvs_block_alloc_cache PRIVATE dv_solve)

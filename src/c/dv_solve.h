@@ -100,6 +100,27 @@ typedef enum {
     DVS_BIN_AND,        /* &&  */
     DVS_BIN_OR,         /* ||  */
     DVS_BIN_ASHR,       /* >>> (arithmetic in a signed expression, else >>) */
+    /* Typed operators: the operator, not the operand types, says how the
+     * operands are read. Each operand is extended to the wider operand's
+     * width by the operator's signedness (sign for S*, zero for U* and
+     * LSHR), and the operator works at that width: the node is
+     * self-determined, as an SMT-LIB term is. Division by zero is defined as
+     * in SMT-LIB (no SV x): x UDIV 0 is all ones, x UREM 0 is x, x SDIV 0 is
+     * -1 for x >= 0 and 1 for x < 0, x SREM 0 and x SMOD 0 are x. */
+    DVS_BIN_ULT,        /* <  unsigned (bvult)                            */
+    DVS_BIN_ULE,        /* <= unsigned (bvule)                            */
+    DVS_BIN_UGT,        /* >  unsigned (bvugt)                            */
+    DVS_BIN_UGE,        /* >= unsigned (bvuge)                            */
+    DVS_BIN_SLT,        /* <  signed (bvslt)                              */
+    DVS_BIN_SLE,        /* <= signed (bvsle)                              */
+    DVS_BIN_SGT,        /* >  signed (bvsgt)                              */
+    DVS_BIN_SGE,        /* >= signed (bvsge)                              */
+    DVS_BIN_UDIV,       /* /  unsigned (bvudiv)                           */
+    DVS_BIN_UREM,       /* %  unsigned (bvurem)                           */
+    DVS_BIN_SDIV,       /* /  signed, truncating (bvsdiv)                 */
+    DVS_BIN_SREM,       /* %  signed, the dividend's sign (bvsrem)        */
+    DVS_BIN_SMOD,       /* signed modulo, the divisor's sign (bvsmod)     */
+    DVS_BIN_LSHR,       /* >> logical, whatever the operand (bvlshr)      */
 } dvs_binop_t;
 
 /** Unary operators, for dvs_builder_expr_unary(). */
@@ -401,6 +422,36 @@ dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
  *  itself is yours to free. */
 void dvs_solver_destroy(dvs_ctx_t *ctx);
 
+/** The engines a context solves on (dvs_solver_set_engine). */
+enum {
+    DVS_ENGINE_AUTO     = 0,   /* the context chooses (dvs_solver_compile) */
+    DVS_ENGINE_CDCL     = 1,
+    DVS_ENGINE_BITBLAST = 2
+};
+
+/**
+ * Fix the engine before dvs_solver_compile(); for tests and benchmarks; a
+ * caller need not choose. A context from dvs_solver_new() starts at AUTO,
+ * one from dvs_solver_create() at CDCL (bit-blast's memory is not bounded).
+ *
+ * Under AUTO the context solves on CDCL, and moves to bit-blast when CDCL
+ * cannot compile the problem whole (wide multiply/divide, for instance) or
+ * when a CDCL search gives up (not one with its own time_limit_ms: bit-blast
+ * has no budget to keep it to). A problem with STATE or RANDC variables, solve order, soft
+ * constraints or a dist stays on CDCL: bit-blast has no pins, value
+ * exclusion, order or weights. Pins, exclusion, checkpoints, incremental
+ * adds, optimization and cost guidance are CDCL's: calling one moves the
+ * context back to CDCL for good, or fails (-1) when CDCL could not compile
+ * the problem whole.
+ *
+ * @return  0; -1 if the context has compiled already or `engine` is unknown.
+ */
+int dvs_solver_set_engine(dvs_ctx_t *ctx, int engine);
+
+/** The engine the context solves on now: CDCL or BITBLAST once compiled,
+ *  else its preference. */
+int dvs_solver_engine(const dvs_ctx_t *ctx);
+
 /**
  * Compile problem `p` into the context. The context reads `p` only during
  * the call: afterwards `p` may be freed, reused or moved.
@@ -410,6 +461,9 @@ void dvs_solver_destroy(dvs_ctx_t *ctx);
  *          DVS_COMPILE_BAD_VAR on failure; or a positive count of
  *          constraints that could not be compiled. A solve after a positive
  *          return would ignore those constraints, so treat it as an error.
+ *          Under AUTO a problem CDCL cannot compile whole goes to bit-blast
+ *          and returns DVS_COMPILE_OK, unless it needs CDCL
+ *          (dvs_solver_set_engine).
  */
 int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *p);
 
@@ -633,19 +687,9 @@ void dvs_handle_free(dvs_handle_t *h);
  *  highest variable id the problem declares. */
 uint32_t dvs_handle_n_vars(const dvs_handle_t *h);
 
-/** Engines a handle can solve on (dvs_handle_set_engine). */
-enum {
-    DVS_ENGINE_AUTO     = 0,   /* the core's routing rule (below)         */
-    DVS_ENGINE_CDCL     = 1,
-    DVS_ENGINE_BITBLAST = 2
-};
-
 /**
- * Choose the engine before the first dvs_randomize(). AUTO (the default)
- * bit-blasts a problem whose shape is a circuit (dvs_shape_route), one CDCL
- * cannot compile whole, and one whose CDCL search gave up; else CDCL. A
- * problem with STATE or RANDC variables stays on CDCL: the bit-blast engine
- * has no pins or value exclusion yet.
+ * Choose the engine before the first dvs_randomize(): the handle's context
+ * gets it (dvs_solver_set_engine, which describes AUTO, the default).
  *
  * @return  0; -1 if `h` is NULL, has already solved, `engine` is unknown, or
  *          BITBLAST is asked of a problem with STATE or RANDC variables.

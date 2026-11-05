@@ -25,11 +25,14 @@ _HARD = ("(declare-fun x () (_ BitVec 64))(declare-fun y () (_ BitVec 64))"
          "(assert (bvugt x #x0000000000000001))(assert (bvugt y #x0000000000000001))"
          "(assert (bvult x y))(assert (bvult x #x00000000ffffffff))"
          "(assert (bvult y #x00000000ffffffff))")
-# The same product without the 32-bit bounds: CDCL's word-level search stops
-# on a five-conflict budget (with the bounds it now finds the factors).
+# Two products of x and y: CDCL's word-level search stops on a five-conflict
+# budget. (One product alone is no longer hard: with the 32-bit bounds it
+# finds the factors, and without them it solves y = c / x by the inverse of
+# an odd x modulo 2^64.)
 _HARD_CDCL = ("(declare-fun x () (_ BitVec 64))(declare-fun y () (_ BitVec 64))"
               "(assert (= (bvmul x y) #x6b8b4567327b23c7))"
-              "(assert (bvugt x #x0000000000000001))(assert (bvugt y #x0000000000000001))")
+              "(assert (= (bvmul (bvadd x #x0000000000000001) (bvadd y #x0000000000000001))"
+              " #x1234567887654321))")
 
 
 def _reason(body: str, env: dict | None = None) -> list[str]:

@@ -53,7 +53,7 @@ def _timed(ctx, seed, **opts):
 def test_thrashing_problem_escalates_at_once(monkeypatch):
     monkeypatch.setenv("DV_CDCL_TIME_LIMIT", str(LIMIT_S))
     buf = _mix()
-    ctx = SolveCtx(buf)
+    ctx = SolveCtx(buf, engine="cdcl")
     try:
         rc, t = _timed(ctx, 1)
         assert rc == SOLVE_TIMEOUT and t >= LIMIT_S * 0.9
@@ -63,7 +63,7 @@ def test_thrashing_problem_escalates_at_once(monkeypatch):
     finally:
         ctx.destroy()
     # A context compiled afresh from the same problem remembers too.
-    ctx = SolveCtx(_mix())
+    ctx = SolveCtx(_mix(), engine="cdcl")
     try:
         rc, t = _timed(ctx, 5)
         assert rc == SOLVE_TIMEOUT and t < LIMIT_S / 3, t

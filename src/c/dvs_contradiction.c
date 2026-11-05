@@ -136,6 +136,7 @@ static int _solver_create(SolverInstance *si, dvs_problem_t *sp) {
     memset(si, 0, sizeof(*si));
     si->ctx = dvs_solver_new(NULL);
     if (!si->ctx) return -1;
+    dvs_solver_set_engine(si->ctx, DVS_ENGINE_CDCL);    /* explains CDCL's own search */
     int rc = dvs_solver_compile(si->ctx, sp);
     if (rc == -1) {
         dvs_solver_free(si->ctx);

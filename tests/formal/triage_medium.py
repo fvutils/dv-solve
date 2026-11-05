@@ -11,7 +11,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 DV = REPO / "build" / "dv-solve-smt2"
-BWZ = REPO / "packages" / "verilator-bin" / "bin" / "bitwuzla"
+BWZ = REPO / "packages" / "verilator" / "bin" / "bitwuzla"
 CORPUS = HERE / "corpus" / "smtcomp2025_parallel" / "smt2"
 BB_RE = re.compile(r"bb=([\d.]+)ms sat=([\d.]+)ms ands=(\d+) vars=(\d+) clauses=(\d+)")
 

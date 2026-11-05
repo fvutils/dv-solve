@@ -184,6 +184,13 @@ static VTy _vtype(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         } else if (eb->op == DVS_BIN_LSHIFT || eb->op == DVS_BIN_RSHIFT ||
                    eb->op == DVS_BIN_ASHR) {
             t = _vtype(ctx, sp, eb->lhs, skip);
+        } else if (eb->op == DVS_BIN_LSHR) {
+            t.w = _vtype(ctx, sp, eb->lhs, skip).w;
+        } else if (dvs_binop_is_typed(eb->op) && !dvs_binop_is_typed_cmp(eb->op)) {
+            VTy a = _vtype(ctx, sp, eb->lhs, skip);
+            VTy b = _vtype(ctx, sp, eb->rhs, skip);
+            t.w = a.w > b.w ? a.w : b.w;
+            t.s = (uint8_t)dvs_binop_typed_signed(eb->op);
         }
         break;
     }
@@ -247,6 +254,68 @@ static int _truth(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
     return _ev(ctx, sp, ref, t.w, t.s, skip) != 0;
 }
 
+/* An operand of a typed operator: its own value, read with the operator's
+ * signedness `s` and extended to w by it. */
+static VI _typed_opnd(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t r,
+                      uint32_t w, uint8_t s, int *skip) {
+    VTy t = _vtype(ctx, sp, r, skip);
+    if (*skip) return 0;
+    if (t.w > V_MAXW || w > V_MAXW) { *skip = 1; return 0; }
+    VI v = _ev(ctx, sp, r, t.w, t.s, skip);
+    if (*skip) return 0;
+    return _wrap((VU)_wrap((VU)v & _mask_for(t.w), t.w, s), w, s);
+}
+
+/* A typed operator (DVS_BIN_ULT .. DVS_BIN_LSHR) at its own type; division
+ * by zero as SMT-LIB defines it. */
+static VI _typed(const dvs_ctx_t *ctx, const dvs_problem_t *sp, const ExprBinary *eb,
+                 int *skip) {
+    int op = eb->op;
+    VTy a = _vtype(ctx, sp, eb->lhs, skip);
+    VTy b = _vtype(ctx, sp, eb->rhs, skip);
+    if (*skip) return 0;
+    uint8_t s = (uint8_t)dvs_binop_typed_signed(op);
+    if (op == DVS_BIN_LSHR) {
+        uint32_t w = a.w;
+        VU x = (VU)_typed_opnd(ctx, sp, eb->lhs, w, 0, skip) & _mask_for(w);
+        VU n = (VU)_typed_opnd(ctx, sp, eb->rhs, b.w, 0, skip) & _mask_for(b.w);
+        if (*skip) return 0;
+        return n >= w ? 0 : _wrap(x >> (int)n, w, 0);
+    }
+    uint32_t w = a.w > b.w ? a.w : b.w;
+    VI x = _typed_opnd(ctx, sp, eb->lhs, w, s, skip);
+    VI y = _typed_opnd(ctx, sp, eb->rhs, w, s, skip);
+    if (*skip) return 0;
+    VU M = _mask_for(w), ux = (VU)x & M, uy = (VU)y & M;
+    switch (op) {
+    case DVS_BIN_ULT: return ux <  uy;
+    case DVS_BIN_ULE: return ux <= uy;
+    case DVS_BIN_UGT: return ux >  uy;
+    case DVS_BIN_UGE: return ux >= uy;
+    case DVS_BIN_SLT: return x <  y;
+    case DVS_BIN_SLE: return x <= y;
+    case DVS_BIN_SGT: return x >  y;
+    case DVS_BIN_SGE: return x >= y;
+    case DVS_BIN_UDIV: return _wrap(uy ? ux / uy : M, w, 0);
+    case DVS_BIN_UREM: return _wrap(uy ? ux % uy : ux, w, 0);
+    case DVS_BIN_SDIV:
+        if (y == 0) return x < 0 ? 1 : -1;
+        if (y == -1) return _wrap((VU)0 - (VU)x, w, 1);    /* MIN / -1 wraps */
+        return _wrap((VU)(x / y), w, 1);
+    case DVS_BIN_SREM:
+        if (y == 0) return x;
+        if (y == -1) return 0;
+        return _wrap((VU)(x % y), w, 1);                   /* the dividend's sign */
+    case DVS_BIN_SMOD: {
+        if (y == 0) return x;
+        VI r = y == -1 ? 0 : x % y;
+        if (r != 0 && ((r < 0) != (y < 0))) r += y;        /* the divisor's sign */
+        return _wrap((VU)r, w, 1);
+    }
+    default: *skip = 1; return 0;
+    }
+}
+
 /* `l op r` for a comparison op, in the comparison's own context. */
 static int _cmp(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_binop_t op,
                 dvs_expr_t l, dvs_expr_t r, int *skip) {
@@ -306,7 +375,8 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         const Variable *dv = &ctx->vars[ev->var_id];
         if (dv->width > 64) { *skip = 1; return 0; }
         uint8_t vs = (dv->flags & VAR_SIGNED) ? 1 : 0;
-        int64_t v = var_lo64(ctx, _var_of(ctx, ev->var_id));
+        /* The model's value on either engine (dvs_engine.h). */
+        int64_t v = dvs_solver_get_value(ctx, ev->var_id);
         /* An unsigned 64-bit var's bound is its bit pattern. */
         VI own = vs ? (VI)v : (VI)(VU)(uint64_t)v;
         own = _wrap((VU)own, dv->width, vs);
@@ -315,6 +385,14 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
     case EXPR_BINARY: {
         ExprBinary *eb = (ExprBinary *)dvs_pool_ptr(&sp->pool, ref);
         dvs_binop_t op = eb->op;
+        if (dvs_binop_is_typed(op)) {
+            /* Self-determined: its own type's value, extended to the context
+             * by that type's signedness. */
+            VTy t = _vtype(ctx, sp, ref, skip);
+            VI v = _typed(ctx, sp, eb, skip);
+            if (*skip) return 0;
+            return _wrap((VU)_wrap((VU)v, t.w, t.s), W, S);
+        }
         if (_vis_arith(op)) {
             VI a = _ev(ctx, sp, eb->lhs, W, S, skip);
             VI b = _ev(ctx, sp, eb->rhs, W, S, skip);
@@ -554,6 +632,8 @@ static void _dump_expr(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
         static const char *names[] = {
             "+","-","*","/","%","&","|","^","<<",">>",
             "==","!=","<","<=",">",">=","and","or",">>>",
+            "bvult","bvule","bvugt","bvuge","bvslt","bvsle","bvsgt","bvsge",
+            "bvudiv","bvurem","bvsdiv","bvsrem","bvsmod","bvlshr",
         };
         const char *n = (eb->op < (int)(sizeof(names)/sizeof(names[0])))
                         ? names[eb->op] : "?";
