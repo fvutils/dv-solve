@@ -508,16 +508,20 @@ int dvs_solver_set_phase_hints(dvs_ctx_t *ctx, const uint32_t *var_ids,
     /* Ensure phase_save array exists */
     if (!ctx->phase_save && ctx->n_vars > 0) {
         if (dvs_ctx_alloc_phase_save(ctx) != 0) return -1;
-        for (uint32_t i = 0; i < ctx->n_vars; i++)
+        for (uint32_t i = 0; i < ctx->n_vars; i++) {
             ctx->phase_save[i] = var_lo64(ctx, &ctx->vars[i]);
+            ctx->phase_set[i]  = 1;
+        }
     }
 
     if (!ctx->phase_save) return -1;
 
     for (uint32_t i = 0; i < n_hints; i++) {
         uint32_t vid = var_ids[i];
-        if (vid < ctx->n_vars)
+        if (vid < ctx->n_vars) {
             ctx->phase_save[vid] = values[i];
+            ctx->phase_set[vid]  = 1;
+        }
     }
 
     return 0;

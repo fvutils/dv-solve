@@ -337,3 +337,177 @@ Proposal (step 3): **`dvs_ctx_t` itself becomes engine-agnostic.**
     63-64 bits); pins on AUTO's bit-blast fall-back (the protocol-door failures above and
     `test_signed_part`); then step 5's clean-up (dispatch tables, bound-read audit, the
     sdiv-srem/smod/sext64 routing).
+- **2026-11-05, after the slice-3 checkpoint commit (f6b97a6): the protocol-door
+  failures diagnosed.** Every saved failure (wide seeds 1-3 and sound seeds 1-2, 43
+  problems) was a problem CDCL declined, so AUTO gave it a bit-blast context that refuses
+  every pin. The constructs were not signed operators but two compile gaps
+  (`DV_LOG=1` prints `cdcl-uncompiled:`):
+  - **A: `concat` with a 64-bit result**, even of two constants
+    (`x = (concat #b0.. #b0..)`). Both the value path (`_value_to_var`) and the
+    `var == concat` path declined at 64 because the propagator reasoned in int64. Now
+    `_fire_bounds_concat_64` hands an all-unsigned op with a 64-bit side to `_concat_u64`
+    (r read as uint64; forward, hi = r >> lo_w, lo from r's ends when hi is fixed,
+    entailment). Compile admits 64 when r and both parts are unsigned and the parts are
+    exactly 64 - lo_w and lo_w bits; the explanation was already all-bounds.
+  - **B: `(xor (not true) c)`**, lowered as `(!= (not 1) c)`. No path took a `!` (or an
+    ite of truths) side. Now EQ/NEQ of two truths (a `!`, a comparison or connective, the
+    constants 0/1, an unsigned 1-bit var, an ite of truths), one of them a `!` or an ite,
+    compile as `_bool_to_var` guards with eq/ne (`_is_truth`, depth cap 32).
+  - **Result:** all 43 saved problems pass the protocol and builder doors on CDCL.
+    Regressions `r_d7801c3e23` (concat with top bits set), `r_d0620422f6`,
+    `r_4bf5463fe9` (`!` compare). `test_cdcl_u64.py` 40 (concat forward/backward at
+    lo_w 1/17/32/63, UNSAT, pin above 2^63 under AUTO; `!` compares).
+    Also `r_4463009f22` (`(xor (not true) (ite true true true))`), and
+    `t_constraint_operators` in `test_cdcl_targets.py` now passes (its xfail removed).
+  - **Harness:** the protocol door's per-pin oracle call did not catch
+    `OracleUndecided`; a z3 timeout there aborted the wide seed-2 campaign. It skips that
+    pin now, as the other doors do.
+  - **Suites:** ctest 36/36. Unit 1446 passed, the 2 Verilator doc failures. Formal 8780
+    passed, 224 failed: the known set (`test_signed_part` 22, `value_overflow` 1,
+    `test_eval_fuzz` 200, `test_parser_fuzz` 1). Soundness n=1500 seeds 1 / 2: 0 / 0
+    failures (the 5 known protocol-pin failures are gone). Wide (`--wide 0.5`, n=600)
+    seeds 1 / 2 / 3: 0 / 0 / 0.
+  - **Next:** unchanged: signed 64-bit; pins on AUTO's bit-blast fall-back (still
+    needed for whatever CDCL declines, and `test_signed_part`); step 5's clean-up.
+- **2026-11-05: signed 64-bit on CDCL** (uncommitted, on top of f6b97a6).
+  - **`bvsdiv`/`bvsrem`/`bvsmod` at 63-64 bits** were declined only by a guard in
+    `_value_to_var`'s ITE arm: a signed ITE of 63-64 bits returned `EXPR_NULL` (the
+    lowering's zero-divisor guard is such an ITE). The guard predates the uint64 domain
+    work (step 4b), and a signed 64-bit domain is just the int64 range. Removed.
+    `test_cdcl_typed.c` is strict at every width now (8, 62, 63, 64; it tolerated
+    declines at 64). The SMT front end no longer forces them to bit-blast
+    (`nb=sdiv-srem`, `nb=smod`); only above 64 bits, as every other operator.
+  - **`bvashr` at 64** was declined by `_binop_exact`: it wants every operand value to
+    have an int64 spelling, and an unsigned 64-bit amount has none. A floor shift of a
+    signed operand stays in the operand's range for any amount, and the lshr
+    propagator reads a u64 amount >= 2^63 as a huge shift, so that case is now exact
+    up front. The front end routes `bvashr` to bit-blast only above 64.
+  - **`bvashr` search:** `c = bvashr(a, k), k < 5, c != a` took 3-4 s at 32/62 bits and
+    hit the 10 s deadline at 63 (`bvlshr`, the same shape: 0.75 s). The shift propagator
+    never narrowed the amount from the result, so with `a` fixed, a decided `c` was
+    refuted only after deciding `k`. `_shr_narrow_amount` (`dvs_prop_templates.c`) cuts
+    `b` to the amounts whose image `[lo(a)>>s, hi(a)>>s]` meets r's domain (both ends
+    monotone in s, so an interval; at most 64 steps), in the signed and unsigned
+    branches. Now 2.3 s at 32/62/63/64. New `run_ashr` in `test_cdcl_typed.c` (8, 32,
+    63, 64 bits, variable amount, EXPLICIT lowering as `_tr_bvashr`).
+  - **Remaining cost, not fixed (search heuristics):** both shifts still pay ~10,000
+    conflicts through the SMT front end. The first restart comes at 10,000 conflicts
+    (`smt2_frontend.c`, restart base), and until then the search decides `k = 0` first
+    (saved phase starts at the lower bound, `dvs_search.c`), where `c != a` refutes `a`
+    one value at a time. With `DV_MAX_CONFLICTS=100` every case is instant. Options: a
+    smaller restart base (it was A/B-chosen, so re-measure), flip a long-held phase at
+    restart, or a compile rule `c != a && c = shift(a, k) => k >= 1`.
+  - **`test_engine.c`:** its AUTO fall-back case was a signed 64-bit division, which
+    CDCL now compiles. It is now `{s, x[2:0]} >= 6'b111000` with a signed `s` (the
+    `test_signed_part` shape), which CDCL still declines. Neither a sign-extend into an
+    unsigned 64-bit var (CDCL compiles it) nor a >64-bit var (the C API refuses it
+    under AUTO too, `DVS_COMPILE_UNSUPPORTED_WIDTH`) would do.
+  - **Suites:** ctest 36/36. Unit 1447 passed, the 2 Verilator doc failures. Formal
+    8780 passed, 224 failed, the known set. Soundness n=1500 seeds 1 / 2: 0 / 0. Wide
+    (`--wide 0.5`, n=600) seeds 1 / 2 / 3: 0 / 0 / 0 failures; their unknown and
+    slow>2s counts are about what they were before this round (seed 1: 74 protocol
+    unknowns, 19 slow).
+  - **Next:** pins on AUTO's bit-blast fall-back (`test_signed_part`, the `test_engine`
+    fixture); the restart-floor item above; step 5's clean-up (dispatch tables,
+    bound-read audit, the `sext64` routing: CDCL now compiles `r == sext(a)` into an
+    unsigned 64-bit var through the builder door, so check whether the front end's
+    `nb=sext64` can go).
+- **2026-11-05: research, speeding up `bvashr` on CDCL** (measurements only, no code
+  change). Problem: `c = bvashr(a, k), k < 5, c != a`, sign bit of `a` set, through
+  `dv-solve-smt2 --engine=cdcl`; inputs and timings in the session scratchpad, re-creatable
+  from the forms below.
+  - **Rewrites are all worse** than the native lowering (with `_shr_narrow_amount`):
+
+    | form (32-bit; 63/64 alike) | default | `DV_MAX_CONFLICTS=100` |
+    |---|---|---|
+    | F0 native `bvashr` | 2.3 s | 0.00 s |
+    | F1 bit view `msb(a) ? ~(~a >> k) : a >> k` | 10 s deadline | 10 s deadline |
+    | F2 case split `ite(k=0, a, ite(k=1, a>>>1, ...))` | 10 s deadline | 2.3 s |
+    | F3 signed division `floor(a / (1 << k))` via `bvsdiv` | 8.8 s | 0.00 s (64: deadline) |
+    | `bvlshr`, for reference | 0.77 s | 0.00 s |
+
+    Each rewrite adds aux vars and propagators (ite, not, shl, div) whose interval
+    reasoning is weaker than one shift propagator's, so CDCL prunes less, not more.
+  - **The cost is phase saving, not the operator.** `DV_USE_PHASE_SAVE=0`: F0 and
+    `bvlshr` solve in 0.00 s at 32 and 64 bits. `DV_MAX_CONFLICTS=1000`: 0.02 s; 3000:
+    0.16 s. The saved phase starts at each var's lower bound (`dvs_search.c`,
+    the `ps_fresh` init), so the seed-0 search (SMT `check-sat`; seeded solves skip phase
+    saving) decides `k = 0` and keeps re-deciding it after every backjump. With `k = 0`,
+    `c = a`, and `c != a` can only be refuted one value of `a` at a time: an interval
+    explanation cannot say "k = 0 implies c = a". Only the restart (every 10,000
+    conflicts) re-ranks the vars.
+  - **Per-conflict cost:** F0 does the same 10,000 conflicts as `bvlshr` in 3x the
+    time: the lowering's two value-changing casts (unsigned to signed and back, each a
+    modular add with a zero addend) are on every propagation path. A native
+    pattern-level ashr propagator (an unsigned w-bit operand; within each half of the
+    range ashr is monotone: `a >> k` below 2^(w-1), `~(~a >> k)` above; hull the two
+    halves) would drop both casts. F1 is this idea written as a rewrite; inside one
+    propagator it avoids F1's extra aux vars.
+  - **Bug seen on the way:** phase saving stores `ctx->phase_save[dv] = (int32_t)val`
+    (`dvs_search.c`, after a decision) into an `int64_t` array, so a saved value outside
+    int32 (any wide var) is truncated. It is range-checked before use, so it costs
+    search quality, not soundness.
+  - **Options, cheapest first:** (1) fix the int32 truncation; (2) don't let phase
+    saving re-decide a value that conflicted at the same decision level: drop the
+    saved phase for a var whose decision was the conflict's last decision, or rephase
+    at restart (CaDiCaL-style: original / inverted / best); (3) a smaller restart base,
+    re-measured on the tier fixtures (the 10,000 was A/B-chosen); (4) the native
+    pattern ashr propagator for the 3x per-conflict cost. Phase-saving changes need the
+    tier1-3 cross-check, since B18/B19 (`docs/solver_bug_backlog.md`) record why
+    randomising the saved phases was wrong before.
+- **2026-11-05: phase saving, items 1-2 of the research above** (uncommitted).
+  - **Correction to the research entry:** the stall is not phase saving re-deciding
+    `k = 0` after each conflict. `k = 0` is decided once; every learned clause
+    (`k >= 1 or a != X`) asserts at `k`'s level, so `k = 0` stays on the trail until the
+    restart. What matters is the *first* value, and the saved phase started at each var's
+    lower bound. Also, phase is saved only when a split flips to its second half, never
+    on a forward decision, so seed-0 search was in effect "lower bound first" everywhere.
+  - **Fix 1:** the saved value was stored as `(int32_t)val` into the `int64_t` array; now
+    stored whole.
+  - **Fix 2:** a new `ctx->phase_set` flag per var (alloc / grow / free with
+    `phase_save`; `dvs_solver_set_phase_hints` sets it). Seed-0 solves now start with no
+    phase set, so a var's first decision takes `_pick_value`'s seeded, hole-aware pick
+    (B18's trap was a random phase *not* vetted by that pick). `DV_PHASE_INIT=lo` restores
+    the old start.
+  - **A/B, tier 1-3 cross-check (`run_compare.py`, 30 s):** `lo` 118/118 definitive,
+    1.24 s total; `none` 118/118, 1.21 s; 0 disagreements with z3; no fixture moved by
+    more than 2x or 200 ms. `bvashr` / `bvlshr` problem: 2.2 s / 0.7 s -> 0.00 s at 32
+    and 64 bits.
+  - **Seed-0 models change** (check-sat no longer leans to lower bounds). Seed 0 kept
+    its RNG state across solves ("seed or preserve"), harmless while phases decided the
+    first values; now a repeated seed-0 solve drew different first values
+    (`test_seed_zero_stays_deterministic` failed). Seed 0 now restarts from a fixed RNG
+    state every solve.
+  - **That A/B was blind:** `run_compare.py` runs with the bit-blast fall-back on, so a
+    CDCL stall shows up only as a slower answer. `t_constraint_operators` in
+    `test_cdcl_targets.py` (pure CDCL): `lo` sat in 0.00 s, `none` unknown at the 10 s
+    deadline (22,266 conflicts). Lower bounds first suits Verilator-style constraint
+    sets.
+  - **Pure-CDCL A/B** (`DV_NO_BITBLAST=1`; tiers 1-3, 30 s; and `test_cdcl_targets.py`):
+
+    | config | definitive | total | targets |
+    |---|---|---|---|
+    | `lo` | 114/118 | 45.4 s | 8 pass |
+    | `none` | 114/118 | 54.4 s | `t_constraint_operators` stalls |
+    | `lo`, restart base 1000 | 114/118 | 51.6 s | 8 pass |
+
+    Both alternatives slow the four tier-3 `cache_direct_1way_bmc` fixtures 2-6x
+    (`lo` 0.83 s each; `none` 0.6-5.2 s; base 1000 1.4-3.3 s).
+  - **Decision:** `lo` stays the default. Kept: the int32 fix, `phase_set`, and
+    `DV_PHASE_INIT=none` as an opt-in (seed 0 restarts its RNG every solve only under
+    `none`, so the default's seed-0 behaviour is unchanged). `bvashr` / `bvlshr` in the
+    `c != a` shape stay at 2.1 s / 0.7 s by default (0.00 s under `none`).
+  - **Left open for the `k = 0` trap:** a targeted fix rather than a global heuristic,
+    e.g. compile `c != a` with `c = shift(a, k)` (through the casts) to also assert
+    `k != 0`; or rephase at restart with an earlier first restart only when the
+    conflicts all assert at one level. Not started; low priority unless a real
+    workload hits the shape (bit-blast answers it at once: ~8k clauses at 64 bits).
+  - **Suites (final: `lo` default, int32 fix, opt-in `none`):** ctest 36/36. Unit 1447
+    passed, the 2 Verilator doc failures. Formal 8780 passed, 224 failed, the known set
+    (the quickstart doc tests, the determinism test and `t_constraint_operators` pass
+    again). Soundness n=1500 seeds 1 / 2: 0 / 0. Wide seeds 1 / 2 / 3: 0 / 0 / 0.
+  - **Follow-on design:** docs/structural_reasoning_design.md (static facts such as
+    power-of-two and known bits, change of variable, bit-blast-assisted pruning).
+  - **Suites (with `none` as default, before the RNG fix; superseded below):** ctest 36/36; soundness and
+    wide campaigns 0 failures; new failures: the determinism test (fixed), the target
+    above, and 3 quickstart doc tests whose printed model changed (`addr` 0 -> 0x60).

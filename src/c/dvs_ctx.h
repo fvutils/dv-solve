@@ -194,6 +194,9 @@ typedef struct dvs_ctx_s {
     DecisionRecord    *decisions;     /* array[level_cap]              */
     int64_t           *phase_save;    /* last tried value per var;
                                        * from ctx->alloc, created lazily */
+    uint8_t           *phase_set;     /* phase_save[v] holds a value: a
+                                       * var with none takes the seeded
+                                       * pick (dvs_search.c, _pick_value) */
     uint32_t           phase_save_cap;
     /* A seeded solve's first draw per var, kept for the rest of the solve
      * (see _pick_value). keep_state: KEEP_NONE / KEEP_SET / KEEP_DEAD. */

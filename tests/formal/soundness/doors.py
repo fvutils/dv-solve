@@ -314,7 +314,10 @@ def protocol(p: Problem, seeds: int = PROTOCOL_SEEDS) -> list:
                 name, v = pin
                 w = p.widths[name]
                 cons.append(("=", "bool", ("var", name, w), ("const", v, w)))
-            exp = "sat" if satisfiable(p.widths, cons) else "unsat"
+            try:
+                exp = "sat" if satisfiable(p.widths, cons) else "unsat"
+            except OracleUndecided:
+                continue        # no reference for this pin: skip the solve
             door = f"protocol[k={k}{'' if pin is None else f' pin {pin[0]}={pin[1]}'}]"
             cp = ctx.checkpoint()
             if pin is not None and not ctx.pin(ids[pin[0]], pin[1]):

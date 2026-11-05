@@ -6,8 +6,12 @@ EXPLICIT problem, through elaboration's lowering, at widths up to 62) done;
 the SMT front-end emits typed SDIV/SREM/SMOD; 4b slices 1-2 (unsigned 64-bit
 compares, `/`, `%`, `>>` on CDCL) done; slice 3 (every unsigned 64-bit
 operator stays on CDCL: div/rem/lshr, add/sub/mul/shl/neg, and/or/xor/not,
-ite) done. Signed 64-bit (`bvashr`, `bvsdiv`/`bvsrem`/`bvsmod`) and pins on
-AUTO's bit-blast fall-back next. Plan: docs/solver_gap_plan.md, step 5.
+ite, and 64-bit concat) done; the soundness campaigns' protocol-door pin
+failures were CDCL declines (64-bit concat, a `!` compared as a truth), now
+compiled, and the campaigns are clean. Signed 64-bit done: `bvsdiv`/`bvsrem`/
+`bvsmod` and `bvashr` compile on CDCL at up to 64 bits and the SMT front end
+routes them there (only wider goes to bit-blast). Pins on AUTO's bit-blast
+fall-back next. Plan: docs/solver_gap_plan.md, step 5.
 
 ## Why
 

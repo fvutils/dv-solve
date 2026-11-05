@@ -1,0 +1,35 @@
+{
+ "why": "seed=1 i=363 door=protocol[k=4 pin u=3] expect=sat got=unsat",
+ "widths": {
+  "x": 2,
+  "y": 2,
+  "z": 2,
+  "u": 2
+ },
+ "cons": [
+  [
+   "xor",
+   "bool",
+   [
+    "not",
+    "bool",
+    [
+     "true"
+    ]
+   ],
+   [
+    "ite",
+    "bool",
+    [
+     "true"
+    ],
+    [
+     "true"
+    ],
+    [
+     "true"
+    ]
+   ]
+  ]
+ ]
+}

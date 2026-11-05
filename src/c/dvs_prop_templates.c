@@ -3826,6 +3826,49 @@ static int64_t _shl_checked(int64_t v, int64_t s, int *ok) {
     return r;
 }
 
+/* Narrow the shift amount b of r = a >> b to the amounts that can still
+ * produce a value in r's domain. For each s the operand interval maps to
+ * [lo(a) >> s, hi(a) >> s], and both ends move monotonically with s, so
+ * the amounts whose image meets [lo(r), hi(r)] form one interval
+ * [s0, s1]: scan the (at most 64) clamped amounts for it. Every amount
+ * above the clamp behaves as the clamp, so cutting the upper bound below
+ * it is sound only because the clamp itself was found infeasible.
+ *
+ * Without this the result never narrowed the amount: with the operand
+ * fixed, a decided result value that no amount reaches was refuted only
+ * after deciding every amount, and the search walked the hull of the few
+ * reachable values one value at a time (`c = a >>> k`, k < 5).
+ *
+ * Explained by _explain_binary_bitwise (bounds of a, b and r). */
+static PropResult _shr_narrow_amount(dvs_ctx_t *ctx, uint32_t rid, uint32_t bid,
+                                     int64_t alo, int64_t ahi,
+                                     int64_t *blo, int64_t *bhi, int a_signed) {
+    int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
+    int64_t rhi = var_hi64(ctx, &ctx->vars[rid]);
+    if (!a_signed && (alo < 0 || ahi < 0 || rhi < 0)) return PROP_OK;
+    if (!a_signed && rlo < 0) rlo = 0;
+    int64_t s0 = -1, s1 = -1;
+    for (int64_t s = *blo; s <= *bhi; s++) {
+        int64_t ilo = a_signed ? _ashr64(alo, s) : (alo >> s);
+        int64_t ihi = a_signed ? _ashr64(ahi, s) : (ahi >> s);
+        if (ilo <= rhi && ihi >= rlo) {
+            if (s0 < 0) s0 = s;
+            s1 = s;
+        }
+    }
+    if (s0 < 0) return PROP_CONFLICT;
+    PropResult res;
+    if (s0 > *blo) {
+        if ((res = ctx_tighten_lb64(ctx, bid, s0)) != PROP_OK) return res;
+        *blo = s0;
+    }
+    if (s1 < *bhi) {
+        if ((res = ctx_tighten_ub64(ctx, bid, s1)) != PROP_OK) return res;
+        *bhi = s1;
+    }
+    return PROP_OK;
+}
+
 static PropResult _fire_bounds_lshr_64(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
@@ -3847,6 +3890,11 @@ static PropResult _fire_bounds_lshr_64(Propagator *self, dvs_ctx_t *ctx) {
     }
 
     PropResult res;
+    /* The amount's bounds are plain non-negative integers (no u64 pattern
+     * >= 2^63, no negative signed amount): only then is the narrowing scan
+     * allowed to write them back. */
+    const int b_plain = var_lo64(ctx, &ctx->vars[bid]) >= 0 &&
+                        var_hi64(ctx, &ctx->vars[bid]) >= 0;
 
     if (a_signed) {
         /* Arithmetic (floor) shift. A shift of >= 63 bits already yields
@@ -3856,6 +3904,9 @@ static PropResult _fire_bounds_lshr_64(Propagator *self, dvs_ctx_t *ctx) {
         if (bhi < 0) bhi = 0;
         if (blo > 63) blo = 63;
         if (bhi > 63) bhi = 63;
+        if (b_plain && (res = _shr_narrow_amount(ctx, rid, bid, alo, ahi,
+                                                 &blo, &bhi, 1)) != PROP_OK)
+            return res;
         /* floor(a / 2^s) is non-decreasing in a, and moves monotonically
          * toward 0 / -1 as s grows, so the extremes are at the corners. */
         int64_t r_lo = alo >= 0 ? _ashr64(alo, bhi) : _ashr64(alo, blo);
@@ -3911,6 +3962,9 @@ static PropResult _fire_bounds_lshr_64(Propagator *self, dvs_ctx_t *ctx) {
     if (bhi < 0) bhi = 0;
     if (blo > maxsh) blo = maxsh;
     if (bhi > maxsh) bhi = maxsh;
+    if (b_plain && (res = _shr_narrow_amount(ctx, rid, bid, alo, ahi,
+                                             &blo, &bhi, 0)) != PROP_OK)
+        return res;
 
     /* Both singletons: exact result */
     if (alo == ahi && blo == bhi) {
@@ -3960,6 +4014,40 @@ uint32_t prop_add_bounds_lshr_64(dvs_ctx_t *ctx, uint32_t r_id,
 /*   lo_width = bit width of lo operand                               */
 /* ------------------------------------------------------------------ */
 
+/* r = {hi, lo}, r unsigned 64-bit: compile gives hi and lo exactly
+ * 64 - lo_w and lo_w bits, unsigned, so only r's bounds need uint64. */
+static PropResult _concat_u64(dvs_ctx_t *ctx, uint32_t rid, uint32_t hid,
+                              uint32_t lid, uint8_t lo_w) {
+#define LO(v) ((uint64_t)var_lo64(ctx, &ctx->vars[v]))
+#define HI(v) ((uint64_t)var_hi64(ctx, &ctx->vars[v]))
+    if (lo_w == 0 || lo_w >= 64) return PROP_OK;
+    uint64_t lmask = ((uint64_t)1 << lo_w) - 1, hmax = ~(uint64_t)0 >> lo_w;
+    PropResult res;
+    if ((res = _tighten_u64(ctx, lid, 0, lmask)) != PROP_OK) return res;
+    if ((res = _tighten_u64(ctx, hid, 0, hmax)) != PROP_OK) return res;
+    /* Forward. */
+    if ((res = _tighten_u64(ctx, rid, (LO(hid) << lo_w) | LO(lid),
+                            (HI(hid) << lo_w) | HI(lid))) != PROP_OK) return res;
+    /* Backward: hi = r >> lo_w; with hi fixed, lo is r's low bits at the ends
+     * of r's range that share that hi. */
+    uint64_t rlo = LO(rid), rhi = HI(rid);
+    if ((res = _tighten_u64(ctx, hid, rlo >> lo_w, rhi >> lo_w)) != PROP_OK) return res;
+    uint64_t h = LO(hid);
+    if (h == HI(hid)) {
+        uint64_t llo = (rlo >> lo_w) == h ? (rlo & lmask) : 0;
+        uint64_t lhi = (rhi >> lo_w) == h ? (rhi & lmask) : lmask;
+        if ((res = _tighten_u64(ctx, lid, llo, lhi)) != PROP_OK) return res;
+        if (LO(lid) == HI(lid)) {
+            uint64_t r = (h << lo_w) | LO(lid);
+            if ((res = _tighten_u64(ctx, rid, r, r)) != PROP_OK) return res;
+            return PROP_ENTAILED;
+        }
+    }
+    return PROP_OK;
+#undef LO
+#undef HI
+}
+
 static PropResult _fire_bounds_concat_64(Propagator *self, dvs_ctx_t *ctx) {
     BoundsConcat_64_t *cself = (BoundsConcat_64_t *)self;
     PropWatchSect *ws  = PROP_WS(self);
@@ -3968,6 +4056,7 @@ static PropResult _fire_bounds_concat_64(Propagator *self, dvs_ctx_t *ctx) {
     uint32_t       lid = ws->var_ids[2];
 
     uint8_t lo_w = cself->lo_width;
+    if (_u64_op(ctx, rid, hid, lid)) return _concat_u64(ctx, rid, hid, lid, lo_w);
     int64_t lo_mask = (lo_w < 64) ? ((int64_t)1 << lo_w) - 1 : -1;
 
     int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);

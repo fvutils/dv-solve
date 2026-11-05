@@ -278,3 +278,99 @@ def test_bitwise_unsat():
         assert ctx.solve(seed=1) == SOLVE_UNSAT
     finally:
         ctx.destroy()
+
+
+# ---- {hi, lo} at 64 bits, and comparing a `!` (the protocol-door declines) ----
+
+def _cat_ctx(lo_w, build, engine="cdcl"):
+    """u64 r (0), hi (1) of 64 - lo_w bits, lo (2) of lo_w bits; r == {hi, lo}."""
+    bld = SolveProblemBuilder()
+    try:
+        bld.add_var(0, 64, False, 0, -1)
+        bld.add_var(1, 64 - lo_w, False, 0, (1 << (64 - lo_w)) - 1)
+        bld.add_var(2, lo_w, False, 0, (1 << lo_w) - 1)
+        r, hi, lo = (bld.expr_var(i) for i in range(3))
+        bld.add_constraint(bld.expr_binary(BIN_EQ, r, bld.expr_concat(hi, lo, lo_w)))
+        build(bld, r, hi, lo)
+        buf, _sz = bld.finalize()
+    finally:
+        bld.destroy()
+    return SolveCtx(buf, engine=engine)
+
+
+def _cat_models(ctx, lo_w, seeds=range(1, 21)):
+    out = []
+    for s in seeds:
+        assert ctx.solve(seed=s) == SOLVE_OK
+        assert ctx.validate_model() == 0
+        r, hi, lo = (ctx.get_value(i) & M for i in range(3))
+        assert r == (hi << lo_w) | lo
+        out.append((r, hi, lo))
+    return out
+
+
+@pytest.mark.parametrize("lo_w", [1, 17, 32, 63])
+def test_concat64_forward_backward(lo_w):
+    """r above 2^63 found from its parts, and the parts from a fixed r."""
+    with _cat_ctx(lo_w, lambda b, r, hi, lo: b.add_constraint(
+            b.expr_binary(BIN_GTE, r, _k(b, TOP + 5)))) as ctx:
+        assert all(r >= TOP + 5 for r, _, _ in _cat_models(ctx, lo_w))
+    want = M - 12345
+    with _cat_ctx(lo_w, lambda b, r, hi, lo: b.add_constraint(
+            b.expr_binary(BIN_EQ, r, _k(b, want)))) as ctx:
+        assert set(_cat_models(ctx, lo_w)) == {
+            (want, want >> lo_w, want & ((1 << lo_w) - 1))}
+
+
+def test_concat64_unsat():
+    """r < 2^63 with hi's top bit set."""
+    lo_w = 20
+    with _cat_ctx(lo_w, lambda b, r, hi, lo: (
+            b.add_constraint(b.expr_binary(BIN_LT, r, _k(b, TOP))),
+            b.add_constraint(b.expr_binary(BIN_GTE, hi, b.expr_const_wide(1 << 43, 44))))) as ctx:
+        assert ctx.solve(seed=1) == SOLVE_UNSAT
+
+
+def test_concat64_pin():
+    """A pin on r above 2^63 sets both parts (the protocol door pins)."""
+    lo_w = 40
+    with _cat_ctx(lo_w, lambda b, r, hi, lo: None, engine="auto") as ctx:
+        assert ctx.engine == "cdcl"
+        v = TOP + (77 << lo_w) + 99
+        assert ctx.pin(0, v)
+        assert ctx.solve(seed=3) == SOLVE_OK
+        assert [ctx.get_value(i) & M for i in range(3)] == [v, (TOP >> lo_w) + 77, 99]
+
+
+@pytest.mark.parametrize("op,rhs,sat", [
+    (BIN_NEQ, "true", True),     # (xor (not true) true)
+    (BIN_EQ, "true", False),
+    (BIN_NEQ, "x>1", True),      # (xor (not true) (> x 1)): x > 1
+    (BIN_NEQ, "ite", True),      # (xor (not true) (ite true true true))
+    (BIN_EQ, "ite", False),
+])
+def test_lnot_compare(op, rhs, sat):
+    from dv_solve.problem import BIN_GT, UN_NOT
+    bld = SolveProblemBuilder()
+    try:
+        bld.add_var(0, 8, False, 0, 255)
+        one = bld.expr_const(1)
+        lhs = bld.expr_unary(UN_NOT, one)
+        if rhs == "true":
+            r = one
+        elif rhs == "ite":
+            t = bld.expr_const(1, width=1)
+            r = bld.expr_ite(t, t, t)
+        else:
+            r = bld.expr_binary(BIN_GT, bld.expr_var(0), bld.expr_const(1))
+        bld.add_constraint(bld.expr_binary(op, lhs, r))
+        buf, _sz = bld.finalize()
+    finally:
+        bld.destroy()
+    with SolveCtx(buf, engine="cdcl") as ctx:
+        rc = ctx.solve(seed=1)
+        assert rc == (SOLVE_OK if sat else SOLVE_UNSAT)
+        if sat:
+            assert ctx.validate_model() == 0
+            if rhs == "x>1":
+                assert ctx.get_value(0) > 1

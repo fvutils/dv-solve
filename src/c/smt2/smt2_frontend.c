@@ -506,8 +506,8 @@ static int64_t _bv_unsigned_hi(uint32_t width) {
  * propagators at all. At exactly 64 bits an unsigned value >= 2^63 is a
  * negative int64 pattern, and the unsigned operators read it as uint64
  * (docs/signed_unsigned_ops_design.md, step 4b), so the callers flag only
- * widths above 64, and the signed operators that still decline at 64
- * (bvashr; bvsdiv/bvsrem/bvsmod route on their own). */
+ * widths above 64. The signed ones (bvashr, bvsdiv/bvsrem/bvsmod) compile
+ * on CDCL at up to 64 bits too (test_cdcl_typed.c). */
 static void _flag_wide_arith(Smt2Frontend *fe, uint32_t width) {
     if (width >= 64) { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "wide-arith"; }
 }
@@ -2778,9 +2778,9 @@ static TaggedExpr _typed_signed_div(Smt2Frontend *fe, dvs_binop_t op,
 }
 
 /* Signed division / remainder (SMT-LIB `bvsdiv` / `bvsrem`, round toward
- * zero). Still routed to bit-blast (design step 5 drops it). */
+ * zero). CDCL compiles the lowering at up to 64 bits (test_cdcl_typed.c);
+ * wider routes to bit-blast like every other wide operator. */
 static SMT2_NOINLINE TaggedExpr _tr_sdivrem(Smt2Frontend *fe, const Sexpr *s, int is_srem) {
-    { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "sdiv-srem"; }
     if (s->list.count != 3) return TAGGED_NULL;
     TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
     if (sa.ref == EXPR_NULL) return TAGGED_NULL;
@@ -2788,6 +2788,7 @@ static SMT2_NOINLINE TaggedExpr _tr_sdivrem(Smt2Frontend *fe, const Sexpr *s, in
     if (tb.ref == EXPR_NULL) return TAGGED_NULL;
     uint16_t w = sa.width ? sa.width : tb.width;
     if (w == 0) return TAGGED_NULL;
+    if (w > 64) _flag_wide_arith(fe, w);
     return _typed_signed_div(fe, is_srem ? DVS_BIN_SREM : DVS_BIN_SDIV,
                              sa.ref, tb.ref, w);
 }
@@ -2799,7 +2800,6 @@ static SMT2_NOINLINE TaggedExpr _tr_sdivrem(Smt2Frontend *fe, const Sexpr *s, in
  *   else                   -> r + t   (flip the sign toward the divisor)
  */
 static SMT2_NOINLINE TaggedExpr _tr_smod(Smt2Frontend *fe, const Sexpr *s) {
-    { fe->needs_bitblast = 1; if (!fe->nb_why) fe->nb_why = "smod"; }
     if (s->list.count != 3) return TAGGED_NULL;
     TaggedExpr sa = _flatten_to_var(fe, _translate_tagged(fe, s->list.items[1]));
     if (sa.ref == EXPR_NULL) return TAGGED_NULL;
@@ -2807,6 +2807,7 @@ static SMT2_NOINLINE TaggedExpr _tr_smod(Smt2Frontend *fe, const Sexpr *s) {
     if (tb.ref == EXPR_NULL) return TAGGED_NULL;
     uint16_t w = sa.width ? sa.width : tb.width;
     if (w == 0) return TAGGED_NULL;
+    if (w > 64) _flag_wide_arith(fe, w);
     return _typed_signed_div(fe, DVS_BIN_SMOD, sa.ref, tb.ref, w);
 }
 
@@ -3150,7 +3151,7 @@ static SMT2_NOINLINE TaggedExpr _tr_bvashr(Smt2Frontend *fe, const Sexpr *s) {
     dvs_expr_t sh = dvs_builder_expr_binary(fe->builder, DVS_BIN_ASHR, as, k.ref);
     dvs_expr_t r  = dvs_builder_expr_sv_cast(fe->builder, sh,
                                       (uint16_t)w, (uint16_t)w, 1, 0);
-    _flag_wide_arith(fe, w);
+    if (w > 64) _flag_wide_arith(fe, w);
     return _tagged(r, w, 0, NULL);
 }
 

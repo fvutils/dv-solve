@@ -913,6 +913,23 @@ static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t 
     return 1;
 }
 
+/* A seed-0 solve's saved phases start at each var's lower bound. With
+ * DV_PHASE_INIT=none they start unset: a var's first decision takes the
+ * seeded pick (_pick_value's hole-aware path), and phase saving repeats only
+ * values that propagated. `none` solves `c = a >> k, c != a` at once, where
+ * lower bounds first decide k = 0 (so c = a, refuted one value of a at a
+ * time until the first restart, 2.3 s); but on pure CDCL it is slower on
+ * the tier 1-3 cross-check (45 s -> 54 s) and stalls t_constraint_operators,
+ * so it is opt-in (docs/solver_gap_plan.md, 2026-11-05). */
+static int _phase_init_lo(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("DV_PHASE_INIT");
+        cached = (e && strcmp(e, "none") == 0) ? 0 : 1;
+    }
+    return cached;
+}
+
 static int _keep_draws_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
@@ -943,7 +960,8 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
      * depend on this: the _rand_range64 path below is seeded from
      * ctx->rng_state and yields fully distinct models per seed (verified
      * 20/20). Seed 0 (BMC/decision) keeps phase saving exactly as before. */
-    if (opts && opts->use_phase_save && opts->seed == 0 && ctx->phase_save) {
+    if (opts && opts->use_phase_save && opts->seed == 0 && ctx->phase_save
+            && ctx->phase_set[var_id]) {
         const Variable *v = &ctx->vars[var_id];
         int64_t ps = ctx->phase_save[var_id];
         if (!var_b_lt(v, ps, lo) && !var_b_gt(v, ps, hi)
@@ -1902,9 +1920,14 @@ static int _enum_sample(dvs_ctx_t *ctx, uint32_t base) {
 
 static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     ctx->bail_reason = DVS_BAIL_NONE;
-    /* Seed or preserve RNG. Sequential seeds must be avalanched first. */
-    if (opts && opts->seed != 0) ctx->rng_state = _seed_mix64(opts->seed);
-    if (ctx->rng_state == 0)     ctx->rng_state = 0xDEADBEEF12345678ULL;
+    /* Seed or preserve RNG. Sequential seeds must be avalanched first. Under
+     * DV_PHASE_INIT=none a seed-0 solve's first decisions draw from the RNG,
+     * so it restarts from one fixed state on every solve: a state carried
+     * over from the last solve made a repeated seed-0 solve return a
+     * different model (test_seed_zero_stays_deterministic). */
+    if (opts && opts->seed != 0)  ctx->rng_state = _seed_mix64(opts->seed);
+    else if (!_phase_init_lo())   ctx->rng_state = 0xDEADBEEF12345678ULL;
+    if (ctx->rng_state == 0)      ctx->rng_state = 0xDEADBEEF12345678ULL;
 
     /* Wall-clock budget (B10). Default 10s; DV_CDCL_TIME_LIMIT overrides
      * (<=0 disables). deadline==0.0 means unlimited. Checked cheaply (every
@@ -1964,19 +1987,23 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
     if (opts && opts->use_phase_save && !ctx->phase_save && ctx->n_vars > 0)
         ps_fresh = dvs_ctx_alloc_phase_save(ctx) == 0;
 
-    /* Initialize the saved phases to each var's lower bound, once, on the solve
-     * that allocated the array. Only the seed-0 (BMC/decision) path consults
-     * them -- a diversity solve (seed != 0) bypasses phase saving entirely so
-     * its value choice goes through the hole-aware randomized path. See B18/B19
-     * in docs/solver_bug_backlog.md for why randomizing these was wrong. */
+    /* Initialize the saved phases, once, on the solve that allocated the
+     * array: each var's lower bound, or none set (see _phase_init_lo).
+     * Only the seed-0 (BMC/decision) path consults them -- a diversity solve
+     * (seed != 0) bypasses phase saving entirely so its value choice goes
+     * through the hole-aware randomized path. See B18/B19 in docs/solver_bug_backlog.md for why
+     * saved phases must never be random values the pick did not vet. */
     if (ps_fresh && ctx->phase_save && ctx->n_vars > 0) {
         /* Never write past the allocation: n_vars can grow past the capacity
          * the array was sized to via the incremental paths. */
         uint32_t ps_lim = ctx->n_vars_capacity > 0
                           ? ctx->n_vars_capacity : ctx->n_vars;
         if (ps_lim > ctx->n_vars) ps_lim = ctx->n_vars;
-        for (uint32_t i = 0; i < ps_lim; i++)
+        int init_lo = _phase_init_lo();
+        for (uint32_t i = 0; i < ps_lim; i++) {
             ctx->phase_save[i] = var_lo64(ctx, &ctx->vars[i]);
+            ctx->phase_set[i]  = (uint8_t)init_lo;
+        }
     }
 
     /* Kept draws (see _pick_value) are per solve: a seeded solve starts
@@ -2426,8 +2453,10 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                 pr = dvs_solver_propagate(ctx);
                 /* Save phase if enabled */
                 if (pr == PROP_OK && opts && opts->use_phase_save
-                        && opts->seed == 0 && ctx->phase_save)
-                    ctx->phase_save[dv] = (int32_t)val;
+                        && opts->seed == 0 && ctx->phase_save) {
+                    ctx->phase_save[dv] = val;
+                    ctx->phase_set[dv]  = 1;
+                }
             }
             /* If pr == PROP_CONFLICT, loop continues → backtracks further */
         }

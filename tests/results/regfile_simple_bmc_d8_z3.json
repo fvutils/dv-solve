@@ -2,8 +2,8 @@
   "solver": "z3",
   "benchmark": "regfile_simple_bmc_d8",
   "result": "unsat",
-  "solve_time_ms": 5.954972002655268,
-  "peak_memory_kb": 12213748,
+  "solve_time_ms": 5.576547002419829,
+  "peak_memory_kb": 12729556,
   "returncode": 0,
   "stdout": "unsat\n",
   "stderr": ""

@@ -907,6 +907,15 @@ static int _binop_exact(dvs_ctx_t *ctx, dvs_binop_t op, uint32_t r_id,
             && ctx->vars[a_id].width <= w && ctx->vars[b_id].width <= w)
         return 1;
 
+    /* A floor shift of a signed operand stays inside the operand's own
+     * range for every amount, so it fits r whenever r is signed and as wide.
+     * The amount need not have an int64 spelling: the lshr propagator reads
+     * an unsigned 64-bit amount >= 2^63 as a huge shift (bvashr at 64). */
+    if ((op == DVS_BIN_ASHR || op == DVS_BIN_RSHIFT) && rs
+            && (ctx->vars[a_id].flags & VAR_SIGNED)
+            && ctx->vars[a_id].width <= w)
+        return 1;
+
     int64_t alo, ahi, blo, bhi;
     /* Every value must have an honest int64 spelling. */
     if (!_rng64(ctx, a_id, &alo, &ahi) || !_rng64(ctx, b_id, &blo, &bhi))
@@ -2148,8 +2157,7 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
             /* Signed ITE values of 63-64 bits sit next to the int64-domain
              * hazard (docs/signed_unsigned_ops_design.md, step 4): SMOD lowered
              * from typed operators came back wrongly UNSAT there. Decline. */
-            if (w >= 63) return EXPR_NULL;
-            max_val = ((int64_t)1 << (w - 1)) - 1;
+            max_val = (w >= 64) ? INT64_MAX : ((int64_t)1 << (w - 1)) - 1;
             min_val = -max_val - 1;
         }
         if (_init_aux_tiered(ctx, &ctx->vars[r_id], w,
@@ -2188,12 +2196,12 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
          * RISC-V branch offset -- through the propagator `var == {hi, lo}`
          * already uses. Both parts must be unsigned variables of exactly
          * their widths (the propagator reads their values as bits), and the
-         * result below 64 bits (it reasons in signed int64). */
+         * result at most 64 bits (a 64-bit result is read as uint64). */
         ExprConcat cat = *(ExprConcat *)dvs_pool_ptr(&sp->pool, ref);
         uint32_t lo_w = cat.lo_width;
         uint32_t hi_w = _expr_width(ctx, sp, cat.hi, 0);
         if (hi_w == 0 && width > lo_w) hi_w = (uint32_t)(width - lo_w);
-        if (lo_w == 0 || hi_w == 0 || hi_w + lo_w > 63) return EXPR_NULL;
+        if (lo_w == 0 || hi_w == 0 || hi_w + lo_w > 64) return EXPR_NULL;
         uint32_t hi_id = _value_to_var(ctx, sp, cat.hi, hi_w);
         uint32_t lo_id = _value_to_var(ctx, sp, cat.lo, lo_w);
         if (hi_id == EXPR_NULL || lo_id == EXPR_NULL) return EXPR_NULL;
@@ -2204,8 +2212,9 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
         uint32_t r_id = ctx->n_vars;
         uint32_t out_w = (uint32_t)(hi_w + lo_w);
-        if (_init_aux_tiered(ctx, &ctx->vars[r_id], out_w, VAR_AUX,
-                             0, (int64_t)((1ULL << out_w) - 1)) != 0)
+        if (_init_aux_tiered(ctx, &ctx->vars[r_id], out_w, VAR_AUX, 0,
+                             out_w >= 64 ? (int64_t)UINT64_MAX
+                                         : (int64_t)((1ULL << out_w) - 1)) != 0)
             return EXPR_NULL;
         ctx->n_vars = r_id + 1;
         if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
@@ -2590,6 +2599,43 @@ static int _flatten_or_reify(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref,
 }
 
 /* Returns 1 if the constraint was compiled, 0 if it could not be handled. */
+/* `!x`. */
+static int _is_lnot(dvs_problem_t *sp, dvs_expr_t r) {
+    if (r == EXPR_NULL || *(ExprKind *)dvs_pool_ptr(&sp->pool, r) != EXPR_UNARY) return 0;
+    return ((ExprUnary *)dvs_pool_ptr(&sp->pool, r))->op == DVS_UN_NOT;
+}
+
+/* `!x` or an ite: the truth shapes the EQ/NEQ paths below don't take. */
+static int _is_lnot_or_ite(dvs_problem_t *sp, dvs_expr_t r) {
+    return _is_lnot(sp, r)
+        || (r != EXPR_NULL && *(ExprKind *)dvs_pool_ptr(&sp->pool, r) == EXPR_ITE);
+}
+
+/* Whether r's value is 0 or 1 and equals its truth, so comparing it is
+ * comparing truths: a `!`, a comparison or connective, the constants 0 and
+ * 1, an unsigned 1-bit variable, an ite of two truths. */
+static int _is_truth(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t r, int depth) {
+    if (r == EXPR_NULL || depth > 32) return 0;
+    ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, r);
+    if (k == EXPR_UNARY) return _is_lnot(sp, r);
+    if (k == EXPR_ITE) {
+        ExprITE *ei = (ExprITE *)dvs_pool_ptr(&sp->pool, r);
+        return _is_truth(ctx, sp, ei->then_e, depth + 1)
+            && _is_truth(ctx, sp, ei->else_e, depth + 1);
+    }
+    if (k == EXPR_BINARY) return _is_bool_op(((ExprBinary *)dvs_pool_ptr(&sp->pool, r))->op);
+    if (k == EXPR_CONST) {
+        int64_t v = ((ExprConst *)dvs_pool_ptr(&sp->pool, r))->value;
+        return v == 0 || v == 1;
+    }
+    if (k == EXPR_VAR) {
+        uint32_t id = _resolve(ctx, ((ExprVar *)dvs_pool_ptr(&sp->pool, r))->var_id);
+        return id < ctx->n_vars && ctx->vars[id].width == 1
+            && !(ctx->vars[id].flags & VAR_SIGNED);
+    }
+    return 0;
+}
+
 static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t root) {
     if (root == EXPR_NULL) return 1; /* vacuously handled */
     /* Nesting deeper than the stack can hold: decline, so the constraint is
@@ -2767,6 +2813,22 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                 default: truth = 1; break;
                 }
                 return truth ? 1 : -1;
+            }
+        }
+
+        /* Two truths compared, one of them a logical not or an ite:
+         * `(xor (not true) c)` from SMT-LIB arrives as `(!= (not 1) c)`. The
+         * paths below take variables and constants, not a `!`; as guards it
+         * is `gl != gr`. */
+        if ((e->op == DVS_BIN_EQ || e->op == DVS_BIN_NEQ)
+                && (_is_lnot_or_ite(sp, e->lhs) || _is_lnot_or_ite(sp, e->rhs))
+                && _is_truth(ctx, sp, e->lhs, 0) && _is_truth(ctx, sp, e->rhs, 0)) {
+            uint32_t gl = _bool_to_var(ctx, sp, e->lhs);
+            uint32_t gr = gl == EXPR_NULL ? EXPR_NULL : _bool_to_var(ctx, sp, e->rhs);
+            if (gr != EXPR_NULL) {
+                if (e->op == DVS_BIN_EQ) prop_add_bounds_eq_32(ctx, gl, gr, 0);
+                else                     prop_add_bounds_ne_32(ctx, gl, gr, 0);
+                return 1;
             }
         }
 
@@ -3414,20 +3476,23 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                 uint32_t r_w = ctx->vars[r_id].width;
                 uint32_t lo_w = cat->lo_width;
                 uint32_t hi_w = (r_w >= lo_w) ? (uint32_t)(r_w - lo_w) : 0;
-                /* Soundness guard: the concat bounds propagator reasons in
-                 * signed int64 (`hi << lo_w`, arithmetic `r >> lo_w`, `>= 0`
-                 * guards). A full 64-bit result range [0, 2^64-1] lands in the
-                 * upper half (>= 2^63), where that signed arithmetic produces
-                 * spurious empty-domain conflicts -> wrong `unsat` (e.g.
-                 * `r == concat(c,b)` with `r > K` or `c != 0`). The range isn't
-                 * representable in signed-int64 bounds, so decline native
-                 * compile for a full-width result: leave it uncompiled (return
-                 * 0) -> the model-validation net re-checks it and CDCL degrades
-                 * to `unknown`, escalating to bitblast. (Results <= 63 bits stay
-                 * within INT64_MAX and remain sound.) */
-                if (r_w >= 64) return 0;
+                /* The concat propagator reads a 64-bit result as uint64
+                 * (_concat_u64), which needs r unsigned and both parts
+                 * unsigned variables of exactly their widths. Before that it
+                 * reasoned in signed int64, and a result >= 2^63 gave
+                 * spurious conflicts (`r == concat(c,b)` with `r > K` or
+                 * `c != 0`: wrong `unsat`). Anything else at 64 bits stays
+                 * uncompiled (return 0): the model-validation net re-checks
+                 * it and CDCL degrades to `unknown`. */
+                if (r_w > 64 || hi_w == 0) return 0;
                 uint32_t hi_id = _value_to_var(ctx, sp, cat->hi, hi_w);
                 uint32_t lo_id = _value_to_var(ctx, sp, cat->lo, lo_w);
+                if (r_w == 64 && hi_id != EXPR_NULL && lo_id != EXPR_NULL
+                        && ((ctx->vars[r_id].flags | ctx->vars[hi_id].flags
+                             | ctx->vars[lo_id].flags) & VAR_SIGNED
+                            || ctx->vars[hi_id].width != hi_w
+                            || ctx->vars[lo_id].width != lo_w))
+                    return 0;
                 if (hi_id != EXPR_NULL && lo_id != EXPR_NULL) {
                     prop_add_bounds_concat_64(ctx, r_id, hi_id, lo_id,
                                               cat->lo_width, 0);

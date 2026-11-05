@@ -34,7 +34,7 @@ TARGETS = [
     ("qc_satadd_w4", _F / "fw_hdl/gen/quickcheck-trivial/qc_satadd_w4_signed1_s1.smt2",
      "unsat", 0.5, [_phase(3, "80% of conflicts bail out of analysis")]),
     ("t_constraint_operators", _F / "verilator/t_constraint_operators.smt2",
-     "sat", 2.0, [_phase(5, "64-bit concat (5.2); the divides were phase 1")]),
+     "sat", 2.0, []),          # closed by the uint64 concat propagator
     ("cdcl64_xor_highbit", _F / "gaps/cdcl64_xor_highbit_sat.smt2",
      "sat", 2.0, []),          # closed by the uint64 bitwise propagators (step 4b)
     ("r_ca9fa37135", _REPO / "tests/formal/soundness/regressions/r_ca9fa37135.smt2",

@@ -147,6 +147,7 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->n_prop_refs_capacity = 0;
     ctx->decisions       = NULL;
     ctx->phase_save      = NULL;
+    ctx->phase_set       = NULL;
     ctx->keep_val        = NULL;
     ctx->keep_state      = NULL;
     ctx->keep_cap        = 0;
@@ -335,6 +336,11 @@ int dvs_ctx_reserve_vars(dvs_ctx_t *ctx, uint32_t n) {
         memset(ps + ctx->phase_save_cap, 0,
                (cap - ctx->phase_save_cap) * sizeof(int64_t));
         ctx->phase_save = ps;
+        uint8_t *pset = (uint8_t *)DVS_RESIZE(ctx->alloc, ctx->phase_set,
+                                              ctx->phase_save_cap, cap);
+        if (!pset) { _tbl_free(ctx, b, (size_t)cap * VAR_ROW); goto fail; }
+        memset(pset + ctx->phase_save_cap, 0, cap - ctx->phase_save_cap);
+        ctx->phase_set = pset;
         ctx->phase_save_cap = cap;
     }
     if (ctx->lcg && lcg_reserve_vars((LCGCtx *)ctx->lcg, ctx->alloc, cap) != 0) {
@@ -400,7 +406,11 @@ int dvs_ctx_alloc_phase_save(dvs_ctx_t *ctx) {
     uint32_t n = ctx->n_vars_capacity > 0 ? ctx->n_vars_capacity : ctx->n_vars;
     int64_t *ps = (int64_t *)DVS_ALLOC(ctx->alloc, n * sizeof(int64_t));
     if (!ps) return -1;
+    uint8_t *pset = (uint8_t *)DVS_ALLOC(ctx->alloc, n);
+    if (!pset) { DVS_RELEASE(ctx->alloc, ps, n * sizeof(int64_t)); return -1; }
+    memset(pset, 0, n);
     ctx->phase_save     = ps;
+    ctx->phase_set      = pset;
     ctx->phase_save_cap = n;
     return 0;
 }
@@ -483,7 +493,9 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     if (ctx->phase_save)
         DVS_RELEASE(ctx->alloc, ctx->phase_save,
                     ctx->phase_save_cap * sizeof(int64_t));
-    ctx->phase_save = NULL; ctx->phase_save_cap = 0;
+    if (ctx->phase_set)
+        DVS_RELEASE(ctx->alloc, ctx->phase_set, ctx->phase_save_cap);
+    ctx->phase_save = NULL; ctx->phase_set = NULL; ctx->phase_save_cap = 0;
     if (ctx->costguided)
         DVS_RELEASE(ctx->alloc, ctx->costguided, sizeof(CostGuidedCtx));
     ctx->costguided = NULL;
