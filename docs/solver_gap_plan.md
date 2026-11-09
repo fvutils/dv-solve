@@ -511,3 +511,42 @@ Proposal (step 3): **`dvs_ctx_t` itself becomes engine-agnostic.**
   - **Suites (with `none` as default, before the RNG fix; superseded below):** ctest 36/36; soundness and
     wide campaigns 0 failures; new failures: the determinism test (fixed), the target
     above, and 3 quickstart doc tests whose printed model changed (`addr` 0 -> 0x60).
+- **2026-11-05, structural reasoning steps 0-2 (bit-blast):** checkpoint `06635aa` first.
+  Workload scan done (13 fixtures, `tests/formal/smt2/pow2/`). Bit-blast encodes a
+  divisor or factor known to be 0 or a power of two as a shift; signed division by a
+  constant +-2^k as a biased arithmetic shift. 64-bit fixtures drop 5-30x in clauses.
+  Details, fuzz and measurements: docs/structural_reasoning_design.md, "Results so
+  far". CDCL side open: its 64-bit timeouts need known bits/congruence (step 3; diagnosis
+  and design in the same doc, "Why CDCL stalls").
+  Suites: ctest 36/36; unit: the 2 Verilator doc failures only; formal 8793 passed (13
+  new), 224 failed, the known set; soundness seeds 1/2: 0/0; wide seeds 1/2/3: 0/0/0,
+  slow>2s 19/26/35 (in the range of earlier runs).
+- **2026-11-06, structural reasoning step 3 (CDCL), parts 1-4:** not committed.
+  Shift stride rounding, static known bits, monotone top-bit slice
+  (`dvs_prop_templates.c`, `dvs_compile.c`); power-of-two links (a product with a
+  `1 << k` factor propagated as a shift), the `(x & (x-1)) == 0` fact as `x == 1 << k`
+  with k decided, and the redundant `a == q*b + r` link for a div/rem pair. Every
+  pow2 fixture but `axi_burst_bytes_64` now solves under pure CDCL in 0.00 s on 6
+  seeds (before: 6 of 13 timed out). CDCL fuzz (`tests/formal/pow2_fuzz.py --engine
+  cdcl`, gens var/pair, 1,800 cases) and the earlier 2,400-case fuzz: 0 mismatches;
+  every sat model re-checked by z3. Full suite on parts 1-4: ctest 36/36, unit/formal
+  only the known failures, soundness and wide campaigns 0 mismatches (slow>2s 19/25/34);
+  pure-CDCL tiers 1-3 rules on vs. off: identical answers, same total time. Next:
+  `axi_burst_bytes_64` (a congruence that never reaches a low slice). Details:
+  docs/structural_reasoning_design.md, "Implemented" entries.
+- **2026-11-06, `axi_burst_bytes_64` fix (CDCL):** not committed. A redundant
+  remainder/low-slice link (`r = a % b` beside `s = a[j-1:0]`, from a slice or a
+  concat's low half; b fixed at 2^k gives `r = s % b` for k <= j, `s = r[j-1:0]`
+  for k > j; `DV_NO_SLICE_MOD=1`) and power-of-two rounding of `r = 1 << s` in
+  the shift propagator. `axi_burst_bytes_64`: `unknown` on 6 seeds before, `sat`
+  in 0.00 s after; every pow2 fixture now solves under pure CDCL, and
+  `test_pow2_cdcl` has no expected failure. New fuzz generator `--gen slice`.
+  Fuzz 3,600 CDCL + 900 bit-blast cases: 0 wrong answers. Suites: ctest 36/36,
+  unit/formal only the known failures, soundness and wide campaigns 0
+  mismatches (slow>2s 19/26/35). Pure-CDCL tiers 1-3 (118 fixtures, 10 s), rules on vs. all off: identical answers (79 unsat, 35 sat, 4 timeouts), 0 disagreements with z3, total 46.0 s vs. 46.8 s, no fixture moved by more than 2x. Details:
+  docs/structural_reasoning_design.md, "the low-slice fix".
+- **2026-11-06, performance check:** docs/perf/perf_status_2026-11-06.md. The default
+  replay path against xezim is unchanged since 11-05 (the 12 losing benches lose by the
+  same ratios). With `--engine cdcl`, the memmap benches and `mul_div_64` win or tie,
+  with entropy 1.0: they are now blocked on routing (step 3b), not on the solver.
+  SMT tiers against z3: tier 1 6.5x faster, tier 2 1.6x faster, tier 3 0.6x (BMC shapes).

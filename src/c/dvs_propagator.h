@@ -429,6 +429,7 @@ uint32_t prop_add_bit_slice_32(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                 uint8_t hi_bit, uint8_t lo_bit, uint8_t priority);
 uint32_t prop_add_bit_slice_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
                                 uint8_t hi_bit, uint8_t lo_bit, uint8_t priority);
+void prop_add_lowslice_mod_links(dvs_ctx_t *ctx);
 
 
 /* ------------------------------------------------------------------ */

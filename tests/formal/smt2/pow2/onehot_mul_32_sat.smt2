@@ -1,0 +1,16 @@
+; b is a power of two by `(b & (b-1)) == 0, b != 0` ($onehot); p = a * b with
+; a odd, so p's trailing-zero count is log2(b). Expect: sat.
+(set-logic QF_BV)
+(declare-const a (_ BitVec 32))
+(declare-const b (_ BitVec 32))
+(declare-const p (_ BitVec 32))
+(assert (not (= b #x00000000)))
+(assert (= (bvand b (bvsub b #x00000001)) #x00000000))
+(assert (= p (bvmul a b)))
+(assert (= ((_ extract 0 0) a) #b1))
+(assert (bvugt a #x000003e8))
+(assert (bvult a #x00010000))
+(assert (bvugt p #x00100000))
+(assert (bvult p #x00200000))
+(assert (bvuge b #x00000010))
+(check-sat)

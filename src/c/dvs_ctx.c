@@ -190,6 +190,12 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->divisors.alloc = ctx->alloc;
     ctx->dec_tier        = NULL;
     ctx->dec_tier_n      = 0;
+    ctx->sk_mask         = NULL;
+    ctx->sk_val          = NULL;
+    ctx->sk_n            = 0;
+    ctx->p2_link         = NULL;
+    ctx->n_p2 = ctx->p2_cap = 0;
+    ctx->p2_on           = 0;
     ctx->mul_count_max   = 0;
     ctx->mul_count_probed = 0;
     ctx->var_n_values    = NULL;
@@ -490,6 +496,11 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     dvs_divisors_free(&ctx->divisors);
     dvs_ctx_free(ctx, ctx->dec_tier, ctx->dec_tier_n);
     ctx->dec_tier = NULL; ctx->dec_tier_n = 0;
+    dvs_ctx_free(ctx, ctx->sk_mask, (size_t)ctx->sk_n * sizeof(uint64_t));
+    dvs_ctx_free(ctx, ctx->sk_val, (size_t)ctx->sk_n * sizeof(uint64_t));
+    ctx->sk_mask = ctx->sk_val = NULL; ctx->sk_n = 0;
+    dvs_ctx_free(ctx, ctx->p2_link, (size_t)ctx->p2_cap * 2 * sizeof(uint32_t));
+    ctx->p2_link = NULL; ctx->n_p2 = ctx->p2_cap = 0; ctx->p2_on = 0;
     if (ctx->phase_save)
         DVS_RELEASE(ctx->alloc, ctx->phase_save,
                     ctx->phase_save_cap * sizeof(int64_t));

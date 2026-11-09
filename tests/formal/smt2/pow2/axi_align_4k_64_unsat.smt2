@@ -1,0 +1,15 @@
+; AXI burst, 64-bit: aligned to 1<<size, size >= 6, at least 65 beats, inside one
+; 4 KB page. 65 * 64 = 4160 > 4096, so no burst fits. Expect: unsat.
+(set-logic QF_BV)
+(declare-const addr (_ BitVec 64))
+(declare-const size (_ BitVec 64))
+(declare-const len (_ BitVec 64))
+(define-fun b () (_ BitVec 64) (bvshl #x0000000000000001 size))
+(define-fun nbytes () (_ BitVec 64) (bvmul (bvadd len #x0000000000000001) b))
+(assert (bvule size #x0000000000000007))
+(assert (bvuge size #x0000000000000006))
+(assert (bvule len #x00000000000000ff))
+(assert (bvuge len #x0000000000000040))
+(assert (= (bvurem addr b) #x0000000000000000))
+(assert (bvule (bvadd (bvand addr #x0000000000000fff) nbytes) #x0000000000001000))
+(check-sat)

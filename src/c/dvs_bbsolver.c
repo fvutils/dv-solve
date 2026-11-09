@@ -117,6 +117,10 @@ struct dvs_bbsolver_s {
      * slice. Only then can a new substitution's right side reach v through
      * the substitution graph, so subst_reaches_var runs only for those. */
     uint8_t        *rhs_var;     /* size n_vars, or NULL (always walk) */
+    /* pow2v[v]: every value a permanent top-level constraint leaves v is a
+     * power of two (bb_note_pow2); a divisor or factor v is then a shift. */
+    uint8_t        *pow2v;
+    uint32_t        pow2v_n;
 
     /* Slice substitutions (piece 5.1): slice_head[var_id] starts the var's
      * chain in slices[], BB_NO_SLICE if none. A var has slices or a whole
@@ -542,9 +546,49 @@ static dvs_bv_t ext_ref(dvs_bbsolver_t *S, dvs_bv_t v, dvs_expr_t ref,
     return bb_signed(S, ref, 0) ? sext_to(S, v, target) : zext_to(S, v, target);
 }
 
+/* Is `ref` structurally always 0 or a power of two, read unsigned: a
+ * variable bb_note_pow2 confined to powers of two, `1 << s`, a zero-extend
+ * of one, or a choice between two. */
+static int bb_pow2_ref(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
+    if (ref == EXPR_NULL || depth > 16 || bb_signed(S, ref, 0)) return 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    /* Follow substituted variables to their definitions. */
+    for (int k = 0; kp && *kp == EXPR_VAR && k < 8; k++) {
+        uint32_t id = ((const ExprVar *)kp)->var_id;
+        if (id < S->pow2v_n && S->pow2v[id]) return 1;
+        if (!S->subst || id >= S->n_vars || S->subst[id] == EXPR_NULL) break;
+        ref = S->subst[id];
+        kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    }
+    if (!kp || bb_signed(S, ref, 0)) return 0;
+    switch (*kp) {
+    case EXPR_CONST: {
+        uint64_t v = (uint64_t)((const ExprConst *)kp)->value;
+        return v == 0 || (v & (v - 1)) == 0;
+    }
+    case EXPR_EXTEND: {
+        const ExprExtend *e = (const ExprExtend *)kp;
+        return !e->sign_extend && bb_pow2_ref(S, e->operand, depth + 1);
+    }
+    case EXPR_ITE: {
+        const ExprITE *t = (const ExprITE *)kp;
+        return bb_pow2_ref(S, t->then_e, depth + 1)
+            && bb_pow2_ref(S, t->else_e, depth + 1);
+    }
+    case EXPR_BINARY: {
+        const ExprBinary *b = (const ExprBinary *)kp;
+        if (b->op != DVS_BIN_LSHIFT) return 0;
+        ExprKind *lk = (ExprKind *)POOL_PTR(S->problem, b->lhs);
+        return lk && *lk == EXPR_CONST && ((const ExprConst *)lk)->value == 1;
+    }
+    default:
+        return 0;
+    }
+}
+
 /* Is the divisor `r` (the bits of `ref`, extended) always 0 or a power of
- * two? True for constant bits with at most one set, and for an unsigned
- * `1 << s` (one-hot, or 0 once s reaches the width). DV_URW_POW2=0 = never. */
+ * two? True for constant bits with at most one set, and for what
+ * bb_pow2_ref finds. DV_URW_POW2=0 = never. */
 static int bb_pow2_or_zero(dvs_bbsolver_t *S, dvs_expr_t ref, dvs_bv_t r) {
     static int off = -1;
     if (off < 0) { const char *e = getenv("DV_URW_POW2"); off = e && *e == '0'; }
@@ -556,20 +600,154 @@ static int bb_pow2_or_zero(dvs_bbsolver_t *S, dvs_expr_t ref, dvs_bv_t r) {
     }
     if (i == r.size) return ones <= 1;
     /* A signed divisor would be sign-extended: 1 << (w-1) is then not one-hot. */
-    if (bb_signed(S, ref, 0)) return 0;
-    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
-    /* Follow substituted variables to their definitions. */
-    for (int k = 0; kp && *kp == EXPR_VAR && k < 8; k++) {
-        uint32_t id = ((const ExprVar *)kp)->var_id;
-        if (!S->subst || id >= S->n_vars || S->subst[id] == EXPR_NULL) break;
-        ref = S->subst[id];
-        kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    return bb_pow2_ref(S, ref, 0);
+}
+
+/* The position of r's set bit, r one-hot or zero (0 for zero), at r's
+ * width: bit j of it is the OR of r's bits whose position has bit j set. */
+static dvs_bv_t bb_onehot_index(dvs_bbsolver_t *S, dvs_bv_t r) {
+    dvs_bv_t k = dvs_bb_value_u64(S->bb, r.size, 0);
+    for (uint32_t j = 0; j < 32 && ((uint64_t)1 << j) < r.size; j++) {
+        dvs_aig_node_t o = DVS_AIG_FALSE;
+        for (uint32_t p = 0; p < r.size; p++)
+            if ((p >> j) & 1) o = dvs_aig_mk_or(S->aig, o, r.bits[r.size - 1 - p]);
+        k.bits[k.size - 1 - j] = o;
     }
-    if (!kp || *kp != EXPR_BINARY || bb_signed(S, ref, 0)) return 0;
+    return k;
+}
+
+/* l / r and l * r for r one-hot or zero, as shifts by r's index: x / 0 is
+ * all ones and x * 0 is 0, so a zero r selects those. */
+static dvs_aig_node_t bb_any_bit(dvs_bbsolver_t *S, dvs_bv_t r) {
+    dvs_aig_node_t o = DVS_AIG_FALSE;
+    for (uint32_t i = 0; i < r.size; i++) o = dvs_aig_mk_or(S->aig, o, r.bits[i]);
+    return o;
+}
+
+static dvs_bv_t bb_pow2_div(dvs_bbsolver_t *S, dvs_bv_t l, dvs_bv_t r) {
+    dvs_bv_t q = dvs_bb_shr(S->bb, l, bb_onehot_index(S, r));
+    dvs_aig_node_t nz = bb_any_bit(S, r);
+    return dvs_bb_ite(S->bb, nz, q, dvs_bb_value_u64(S->bb, l.size, ~(uint64_t)0));
+}
+
+static dvs_bv_t bb_pow2_mul(dvs_bbsolver_t *S, dvs_bv_t l, dvs_bv_t r) {
+    dvs_bv_t p = dvs_bb_shl(S->bb, l, bb_onehot_index(S, r));
+    dvs_aig_node_t nz = bb_any_bit(S, r);
+    return dvs_bb_ite(S->bb, nz, p, dvs_bb_value_u64(S->bb, l.size, 0));
+}
+
+/* A permanent top-level constraint that confines a variable to powers of
+ * two: `v inside {c..}` or `v == c0 || v == c1 || ...`, v unsigned and
+ * every c a power of two. Walks the root's top-level conjunction. */
+static int bb_pow2_leaf(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t *var, int depth) {
+    if (ref == EXPR_NULL || depth > 64) return 0;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp || *kp != EXPR_BINARY) return 0;
     const ExprBinary *b = (const ExprBinary *)kp;
-    if (b->op != DVS_BIN_LSHIFT) return 0;
+    if (b->op == DVS_BIN_OR)
+        return bb_pow2_leaf(S, b->lhs, var, depth + 1)
+            && bb_pow2_leaf(S, b->rhs, var, depth + 1);
+    if (b->op != DVS_BIN_EQ) return 0;
     ExprKind *lk = (ExprKind *)POOL_PTR(S->problem, b->lhs);
-    return lk && *lk == EXPR_CONST && ((const ExprConst *)lk)->value == 1;
+    ExprKind *rk = (ExprKind *)POOL_PTR(S->problem, b->rhs);
+    if (!lk || !rk) return 0;
+    if (*lk == EXPR_CONST) { ExprKind *t = lk; lk = rk; rk = t; }
+    if (*lk != EXPR_VAR || *rk != EXPR_CONST) return 0;
+    uint32_t id = ((const ExprVar *)lk)->var_id;
+    int64_t c = ((const ExprConst *)rk)->value;
+    if (c <= 0 || (c & (c - 1)) != 0) return 0;
+    if (*var == UINT32_MAX) *var = id;
+    return *var == id;
+}
+
+static void bb_pow2_set(dvs_bbsolver_t *S, uint32_t id) {
+    if (id >= S->n_vars || !S->vars[id].defined || S->vars[id].is_signed) return;
+    if (id >= S->pow2v_n) {
+        uint32_t n = S->n_vars;
+        uint8_t *p = (uint8_t *)realloc(S->pow2v, n);
+        if (!p) return;
+        memset(p + S->pow2v_n, 0, n - S->pow2v_n);
+        S->pow2v = p; S->pow2v_n = n;
+    }
+    S->pow2v[id] = 1;
+}
+
+/* ref with substituted variables replaced by their definitions; a variable
+ * that is not substituted stays. */
+static const ExprKind *bb_deref(dvs_bbsolver_t *S, dvs_expr_t ref) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, ref);
+    for (int i = 0; k && *k == EXPR_VAR && i < 8; i++) {
+        uint32_t id = ((const ExprVar *)k)->var_id;
+        if (!S->subst || id >= S->n_vars || S->subst[id] == EXPR_NULL) break;
+        k = (const ExprKind *)POOL_PTR(S->problem, S->subst[id]);
+    }
+    return k;
+}
+
+/* The variable underneath ref (through substitutions), or UINT32_MAX. */
+static uint32_t bb_deref_var(dvs_bbsolver_t *S, dvs_expr_t ref) {
+    const ExprKind *k = (const ExprKind *)POOL_PTR(S->problem, ref);
+    uint32_t id = UINT32_MAX;
+    for (int i = 0; k && *k == EXPR_VAR && i < 8; i++) {
+        id = ((const ExprVar *)k)->var_id;
+        if (!S->subst || id >= S->n_vars || S->subst[id] == EXPR_NULL) break;
+        k = (const ExprKind *)POOL_PTR(S->problem, S->subst[id]);
+    }
+    return k && *k == EXPR_VAR ? ((const ExprVar *)k)->var_id : id;
+}
+
+static int bb_deref_const(dvs_bbsolver_t *S, dvs_expr_t ref, int64_t v) {
+    const ExprKind *k = bb_deref(S, ref);
+    return k && *k == EXPR_CONST && ((const ExprConst *)k)->value == v;
+}
+
+/* `(v & (v - 1)) == 0`, either way round, read through the front end's
+ * named intermediates (substitutions): v is 0 or a power of two. The
+ * variable, or UINT32_MAX. */
+static uint32_t bb_pow2_clear_low(dvs_bbsolver_t *S, dvs_expr_t ref) {
+    const ExprBinary *b = (const ExprBinary *)POOL_PTR(S->problem, ref);
+    if (!b || b->kind != EXPR_BINARY || b->op != DVS_BIN_EQ) return UINT32_MAX;
+    for (int side = 0; side < 2; side++) {
+        if (!bb_deref_const(S, side ? b->lhs : b->rhs, 0)) continue;
+        const ExprBinary *a = (const ExprBinary *)bb_deref(S, side ? b->rhs : b->lhs);
+        if (!a || a->kind != EXPR_BINARY || a->op != DVS_BIN_BAND) continue;
+        for (int o = 0; o < 2; o++) {
+            uint32_t v = bb_deref_var(S, o ? a->rhs : a->lhs);
+            const ExprBinary *m = (const ExprBinary *)bb_deref(S, o ? a->lhs : a->rhs);
+            if (v == UINT32_MAX || !m || m->kind != EXPR_BINARY || m->op != DVS_BIN_SUB)
+                continue;
+            if (bb_deref_var(S, m->lhs) == v && bb_deref_const(S, m->rhs, 1)) return v;
+        }
+    }
+    return UINT32_MAX;
+}
+
+static void bb_note_pow2(dvs_bbsolver_t *S, dvs_expr_t ref, int depth) {
+    if (ref == EXPR_NULL || depth > 64) return;
+    ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
+    if (!kp) return;
+    if (*kp == EXPR_BINARY && ((const ExprBinary *)kp)->op == DVS_BIN_AND) {
+        bb_note_pow2(S, ((const ExprBinary *)kp)->lhs, depth + 1);
+        bb_note_pow2(S, ((const ExprBinary *)kp)->rhs, depth + 1);
+        return;
+    }
+    if (*kp == EXPR_IN_SET) {
+        const ExprInSet *st = (const ExprInSet *)kp;
+        ExprKind *vk = (ExprKind *)POOL_PTR(S->problem, st->value);
+        if (!vk || *vk != EXPR_VAR || st->n_elems == 0) return;
+        const dvs_expr_t *el = expr_in_set_elems(S->problem, ref);
+        for (uint32_t i = 0; i < st->n_elems; i++) {
+            ExprKind *ek = (ExprKind *)POOL_PTR(S->problem, el[i]);
+            if (!ek || *ek != EXPR_CONST) return;
+            int64_t c = ((const ExprConst *)ek)->value;
+            if (c <= 0 || (c & (c - 1)) != 0) return;
+        }
+        bb_pow2_set(S, ((const ExprVar *)vk)->var_id);
+        return;
+    }
+    uint32_t id = UINT32_MAX;
+    if (bb_pow2_leaf(S, ref, &id, 0) && id != UINT32_MAX) bb_pow2_set(S, id);
+    else if ((id = bb_pow2_clear_low(S, ref)) != UINT32_MAX) bb_pow2_set(S, id);
 }
 
 /* Forward decl — needed because bv_for_var may recurse through bb_expr. */
@@ -1779,22 +1957,63 @@ static dvs_bv_t bb_word_eq(dvs_bbsolver_t *S, dvs_expr_t lref, dvs_expr_t rref,
     return all;
 }
 
+/* k when the constant bits r are +2^k or -2^k (the MSB-first word read
+ * signed), else -1. */
+static int bb_const_pow2_mag(dvs_bv_t r, uint32_t w) {
+    if (w == 0 || w > 64 || r.size != w) return -1;
+    uint64_t v = 0;
+    for (uint32_t i = 0; i < w; i++) {
+        if (r.bits[i] == DVS_AIG_TRUE) v = (v << 1) | 1;
+        else if (r.bits[i] == DVS_AIG_FALSE) v <<= 1;
+        else return -1;
+    }
+    if (r.bits[0] == DVS_AIG_TRUE)                   /* negative: magnitude */
+        v = (~v + 1) & (w == 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1));
+    if (v == 0 || (v & (v - 1)) != 0) return -1;
+    int k = 0;
+    while (!((v >> k) & 1)) k++;
+    return k;
+}
+
 /* Signed division of two w-bit words, as SMT-LIB defines it: truncate toward
  * zero by dividing the magnitudes; the quotient is negative when the signs
  * differ, the remainder takes the dividend's sign (SMOD: the divisor's). MIN /
  * -1 wraps to MIN with remainder 0; x / 0 is -1 (x >= 0) or 1, x rem 0 is x. */
-static dvs_bv_t bb_sdivrem(dvs_bbsolver_t *S, dvs_bv_t l, dvs_bv_t r, uint32_t w, int op) {
+static dvs_bv_t bb_sdivrem(dvs_bbsolver_t *S, dvs_bv_t l, dvs_bv_t r, uint32_t w, int op,
+                           int r_pow2) {
     dvs_aig_node_t sa = l.bits[0], sb = r.bits[0];   /* MSB-first */
+    /* Quotient by a constant +-2^k: an arithmetic shift floors, so bias a
+     * negative dividend by 2^k - 1 to truncate instead, with no magnitudes:
+     * q = (l + (l < 0 ? 2^k - 1 : 0)) >>> k, negated for a negative divisor
+     * (MIN / -1 wraps; |MIN| = 2^(w-1) is covered). 64 bits: 2,087 clauses
+     * down to 757. The remainder stays below: its magnitude path folds to a
+     * mask, already cheaper than l - (q << k). */
+    int k = op == DVS_BIN_SDIV ? bb_const_pow2_mag(r, w) : -1;
+    if (k >= 0) {
+        dvs_bv_t bias = dvs_bb_value_u64(S->bb, w, 0);
+        for (int i = 0; i < k; i++) bias.bits[w - 1 - i] = sa;
+        dvs_bv_t t = dvs_bb_add(S->bb, l, bias);
+        dvs_bv_t q = dvs_bb_ashr(S->bb, t, dvs_bb_value_u64(S->bb, w, (uint64_t)k));
+        return sb == DVS_AIG_TRUE ? dvs_bb_neg(S->bb, q) : q;
+    }
     dvs_bv_t al = dvs_bb_ite(S->bb, sa, dvs_bb_neg(S->bb, l), l);
     dvs_bv_t ar = dvs_bb_ite(S->bb, sb, dvs_bb_neg(S->bb, r), r);
+    /* r one-hot or zero (r_pow2): so is |r|, since only MIN is one-hot and
+     * negative, and |MIN| = MIN. The magnitudes divide by a shift and a
+     * mask, |l| / 0 all ones and |l| rem 0 = |l| as below. */
     if (op == DVS_BIN_SDIV) {
-        dvs_bv_t q = dvs_bb_udiv(S->bb, al, ar);
+        dvs_bv_t q = r_pow2 ? bb_pow2_div(S, al, ar) : dvs_bb_udiv(S->bb, al, ar);
         dvs_bv_t diff = dvs_bb_xor(S->bb, dvs_bb_extract(S->bb, l, w - 1, w - 1),
                                    dvs_bb_extract(S->bb, r, w - 1, w - 1));
         return dvs_bb_ite(S->bb, diff.bits[0], dvs_bb_neg(S->bb, q), q);
     }
-    dvs_bv_t m = dvs_bb_urem(S->bb, al, ar);
-    dvs_bbword_note_urem(S->word, al, ar, m);   /* |l| urem |r|, as SV % notes */
+    dvs_bv_t m;
+    if (r_pow2) {
+        m = dvs_bb_and(S->bb, al, dvs_bb_sub(S->bb, ar, dvs_bb_value_u64(S->bb, w, 1)));
+    } else {
+        m = dvs_bb_urem(S->bb, al, ar);
+        dvs_bbword_note_urem(S->word, al, ar, m);   /* |l| urem |r|, as SV % notes */
+    }
     dvs_bv_t rem = dvs_bb_ite(S->bb, sa, dvs_bb_neg(S->bb, m), m);
     if (op == DVS_BIN_SREM) return rem;
     /* SMOD: a non-zero remainder whose sign differs from the divisor's
@@ -1980,7 +2199,10 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
             return sum;
         }
         case DVS_BIN_SUB:  return dvs_bb_sub(S->bb, l, r);
-        case DVS_BIN_MUL:  return dvs_bbword_mul(S->word, S->bb, l, r);
+        case DVS_BIN_MUL:
+            if (bb_pow2_or_zero(S, b->rhs, r)) return bb_pow2_mul(S, l, r);
+            if (bb_pow2_or_zero(S, b->lhs, l)) return bb_pow2_mul(S, r, l);
+            return dvs_bbword_mul(S->word, S->bb, l, r);
         case DVS_BIN_BAND: return dvs_bb_and(S->bb, l, r);
         case DVS_BIN_BOR:  return dvs_bb_or (S->bb, l, r);
         case DVS_BIN_BXOR: return dvs_bbword_xor(S->word, S->bb, l, r);
@@ -2006,7 +2228,9 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
         l = ext_ref(S, l, b->lhs, w);
         r = ext_ref(S, r, b->rhs, w);
         if (!sgn) {
-            if (b->op == DVS_BIN_DIV) return dvs_bb_udiv(S->bb, l, r);
+            if (b->op == DVS_BIN_DIV)
+                return bb_pow2_or_zero(S, b->rhs, r) ? bb_pow2_div(S, l, r)
+                                                     : dvs_bb_udiv(S->bb, l, r);
             /* r is 0 or a power of two: x urem r == x & (r - 1), exactly
              * (r == 0 gives an all-ones mask, and x urem 0 == x). */
             if (bb_pow2_or_zero(S, b->rhs, r)) {
@@ -2020,7 +2244,7 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
             return m;
         }
         /* Signed: truncate toward zero (bb_sdivrem). */
-        return bb_sdivrem(S, l, r, w, b->op == DVS_BIN_DIV ? DVS_BIN_SDIV : DVS_BIN_SREM);
+        return bb_sdivrem(S, l, r, w, b->op == DVS_BIN_DIV ? DVS_BIN_SDIV : DVS_BIN_SREM, 0);
     }
     case DVS_BIN_ULT: case DVS_BIN_ULE: case DVS_BIN_UGT: case DVS_BIN_UGE:
     case DVS_BIN_SLT: case DVS_BIN_SLE: case DVS_BIN_SGT: case DVS_BIN_SGE: {
@@ -2040,13 +2264,19 @@ static BB_NOINLINE dvs_bv_t bb_binary(dvs_bbsolver_t *S, const ExprBinary *b, dv
         int sg = dvs_binop_typed_signed(b->op);
         dvs_bv_t l, r;
         if (bb_typed_opnds(S, b, sg, &l, &r) != 0) return l;
-        if (b->op == DVS_BIN_UDIV) return dvs_bb_udiv(S->bb, l, r);
+        if (b->op == DVS_BIN_UDIV)
+            return bb_pow2_or_zero(S, b->rhs, r) ? bb_pow2_div(S, l, r)
+                                                 : dvs_bb_udiv(S->bb, l, r);
         if (b->op == DVS_BIN_UREM) {
             dvs_bv_t m = dvs_bb_urem(S->bb, l, r);
             dvs_bbword_note_urem(S->word, l, r, m);
             return m;
         }
-        return bb_sdivrem(S, l, r, l.size, b->op);
+        /* A divisor known one-hot only at its own width: a sign extension
+         * would smear a set MSB. */
+        int p2 = sg && bb_self_width(S, b->rhs, 0) == r.size
+              && bb_pow2_or_zero(S, b->rhs, r);
+        return bb_sdivrem(S, l, r, l.size, b->op, p2);
     }
     case DVS_BIN_LSHR: {
         /* At the value's own width; the amount read unsigned. */
@@ -2596,6 +2826,7 @@ void dvs_bbsolver_free(dvs_bbsolver_t *S) {
     xfree(S->alloc, S->resolving, S->n_vars * sizeof(uint8_t));
     free(S->reach_mark);
     free(S->rhs_var);
+    free(S->pow2v);
     free(S->slice_head);
     free(S->uses);
     free(S->fo_seen);
@@ -3845,6 +4076,13 @@ static int _bb_encode(dvs_bbsolver_t *S) {
     int subst_enabled = getenv("DV_BB_NO_SUBST") == NULL;
 
     if (subst_enabled) run_subst_pass(S);
+    /* Before anything is encoded (a fact changes how a divisor encodes),
+     * after the substitutions it may read through. */
+    for (dvs_expr_t cur = S->problem->constraints_head; cur != EXPR_NULL; ) {
+        ConstraintSpec *cs = (ConstraintSpec *)POOL_PTR(S->problem, cur);
+        bb_note_pow2(S, cs->root, 0);
+        cur = cs->next;
+    }
     count_fanout(S);
     /* Component census for the decomposition ladder; stats-only for now. */
     /* Pins ignore softs/dist/alldiff (bb_eval checks only constraints), so
@@ -5496,6 +5734,7 @@ int dvs_bbsolver_sess_pop(dvs_bbsolver_t *S) {
         S->resolving[v] = 0;
         if (S->rhs_var) S->rhs_var[v] = 0;
         if (S->slice_head) S->slice_head[v] = BB_NO_SLICE;
+        if (v < S->pow2v_n) S->pow2v[v] = 0;
     }
     S->n_slices  = f->n_slices;
     S->sub_floor = S->n_frames ? S->frames[S->n_frames - 1].var_mark : 0;
@@ -5531,6 +5770,10 @@ int dvs_bbsolver_sess_add(dvs_bbsolver_t *S, const dvs_expr_t *roots, uint32_t n
         for (uint32_t i = n; i-- > 0; ) skip[i] = (uint8_t)collect_substs_from(S, roots[i]);
     count_fanout_from(S, roots, skip, n);
     memset(S->resolving, 0, S->n_vars);
+    /* Facts only from the base scope, which no pop retracts: an encoding
+     * built on one outlives its scope in the memo cache. */
+    if (S->n_frames == 0)
+        for (uint32_t i = 0; i < n; i++) bb_note_pow2(S, roots[i], 0);
 
     S->assert_frame = S->n_frames;
     for (uint32_t i = 0; i < n && !S->had_error && !S->had_unsupported; i++) {

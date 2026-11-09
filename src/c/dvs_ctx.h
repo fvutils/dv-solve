@@ -269,6 +269,19 @@ typedef struct dvs_ctx_s {
     uint8_t           *dec_tier;      /* [dec_tier_n] decision tier from the
                                        * multiply links; NULL: all equal  */
     uint32_t           dec_tier_n;
+    /* Static known bits [sk_n]: bit i of var v is sk_val[v]'s bit i wherever
+     * sk_mask[v] has it set, in every solution (a top-level constraint of the
+     * initial compile says so: _static_known_bits). Need no explanation. */
+    uint64_t          *sk_mask;
+    uint64_t          *sk_val;
+    uint32_t           sk_n;
+    /* Power-of-two links [n_p2 pairs]: p2_link[2i] == 1 << p2_link[2i+1] in
+     * every solution (an aux var defined by a shift of 1, or a fact of the
+     * initial compile: _pow2_facts). A product with such a factor is
+     * propagated as a shift by its index (_mul_as_shift). */
+    uint32_t          *p2_link;
+    uint32_t           n_p2, p2_cap;
+    uint8_t            p2_on;         /* recording links (initial compile) */
     uint64_t           mul_count_max; /* largest leftover-product count
                                        * seen (_mul_count_accept); kept
                                        * across solves of the problem    */

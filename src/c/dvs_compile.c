@@ -999,6 +999,70 @@ static int _binop_exact(dvs_ctx_t *ctx, dvs_binop_t op, uint32_t r_id,
     return 1;
 }
 
+/* ---- Power-of-two links (docs/structural_reasoning_design.md, step 3
+ * part 4) ----
+ *
+ * A factor that is 1 << k makes a product a shift: x * (1 << k) == x << k at
+ * width w for every k (both are 0 once k >= w). The shift propagator rounds
+ * the result to the stride 2^k and solves k from the result's trailing zeros
+ * (part 1-2), where the multiplier only bounds the product. A link is
+ * recorded only while it holds in every solution: an aux var materialised as
+ * `1 << k`, or a top-level fact of the initial compile (_pow2_facts).
+ * DV_NO_POW2_REWRITE=1 turns it off. */
+static int _pow2_rewrite_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("DV_NO_POW2_REWRITE") == NULL;
+    return on;
+}
+
+static uint32_t _p2_index(dvs_ctx_t *ctx, uint32_t v) {
+    v = _resolve(ctx, v);
+    for (uint32_t i = 0; i < ctx->n_p2; i++)
+        if (ctx->p2_link[2 * i] == v) return ctx->p2_link[2 * i + 1];
+    return UINT32_MAX;
+}
+
+/* Record v == 1 << k. v is unsigned and at most 64 bits wide. */
+static void _p2_note(dvs_ctx_t *ctx, uint32_t v, uint32_t k) {
+    if (!ctx->p2_on || !_pow2_rewrite_on()) return;
+    v = _resolve(ctx, v);
+    const Variable *vv = &ctx->vars[v];
+    if ((vv->flags & VAR_SIGNED) || vv->width == 0 || vv->width > 64) return;
+    if (_p2_index(ctx, v) != UINT32_MAX) return;
+    if (ctx->n_p2 == ctx->p2_cap) {
+        uint32_t nc = ctx->p2_cap ? 2 * ctx->p2_cap : 8;
+        uint32_t *nl = (uint32_t *)DVS_ALLOC(ctx->alloc, (size_t)nc * 2 * sizeof(uint32_t));
+        if (!nl) return;
+        if (ctx->n_p2) memcpy(nl, ctx->p2_link, (size_t)ctx->n_p2 * 2 * sizeof(uint32_t));
+        dvs_ctx_free(ctx, ctx->p2_link, (size_t)ctx->p2_cap * 2 * sizeof(uint32_t));
+        ctx->p2_link = nl;
+        ctx->p2_cap = nc;
+    }
+    ctx->p2_link[2 * ctx->n_p2] = v;
+    ctx->p2_link[2 * ctx->n_p2 + 1] = _resolve(ctx, k);
+    ctx->n_p2++;
+}
+
+/* Emit r = a * b as r = x << k when a or b is 1 << k. All three unsigned,
+ * the factors as wide as r: a narrower 1 << k wraps to 0 at its own width
+ * while x << k need not. */
+static int _mul_as_shift(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id, uint32_t b_id) {
+    if (ctx->n_p2 == 0) return 0;
+    const Variable *rv = &ctx->vars[r_id];
+    uint32_t w = rv->width;
+    if (w == 0 || w > 64 || (rv->flags & VAR_SIGNED)) return 0;
+    if ((ctx->vars[a_id].flags & VAR_SIGNED) || (ctx->vars[b_id].flags & VAR_SIGNED))
+        return 0;
+    uint32_t x = a_id, k = _p2_index(ctx, b_id);
+    if (k == UINT32_MAX || ctx->vars[_resolve(ctx, b_id)].width != w) {
+        x = b_id;
+        k = _p2_index(ctx, a_id);
+        if (k == UINT32_MAX || ctx->vars[_resolve(ctx, a_id)].width != w) return 0;
+    }
+    prop_add_bvshl_64(ctx, r_id, x, k, (uint8_t)w, 0);
+    return 1;
+}
+
 /* Helper: compile r_id == BinaryExpr(expr_ref) without allocating in sp pool.
  * Used when the sp pool may be full (e.g. after builder finalization). */
 static int _compile_binexpr_eq_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
@@ -1131,8 +1195,14 @@ static int _compile_binexpr_eq_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         switch (binop->op) {
         case DVS_BIN_ADD:    prop_add_bvadd_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
         case DVS_BIN_SUB:    prop_add_bvsub_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
-        case DVS_BIN_MUL:    prop_add_bvmul_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
-        case DVS_BIN_LSHIFT: prop_add_bvshl_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case DVS_BIN_MUL:
+            if (!_mul_as_shift(ctx, r_id, a_id, b_id))
+                prop_add_bvmul_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0);
+            return 1;
+        case DVS_BIN_LSHIFT:
+            prop_add_bvshl_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0);
+            if (has_const_var && cv == 1) _p2_note(ctx, r_id, b_id);
+            return 1;
         default: break;
         }
     }
@@ -1388,7 +1458,10 @@ static int _emit_binop_prop(dvs_ctx_t *ctx, dvs_binop_t op,
         switch (op) {
         case DVS_BIN_ADD:    prop_add_bvadd_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
         case DVS_BIN_SUB:    prop_add_bvsub_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
-        case DVS_BIN_MUL:    prop_add_bvmul_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
+        case DVS_BIN_MUL:
+            if (!_mul_as_shift(ctx, r_id, a_id, b_id))
+                prop_add_bvmul_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0);
+            return 1;
         case DVS_BIN_LSHIFT: prop_add_bvshl_64(ctx, r_id, a_id, b_id, (uint8_t)r_w, 0); return 1;
         default: break;
         }
@@ -2433,6 +2506,11 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         }
         if (!_emit_binop_prop(ctx, eb->op, r_id, a_id, b_id))
             return EXPR_NULL;   /* operator with no propagator: leave uncompiled */
+        {
+            int64_t one;
+            if (eb->op == DVS_BIN_LSHIFT && _is_const(sp, eb->lhs, &one) && one == 1)
+                _p2_note(ctx, r_id, b_id);
+        }
         return r_id;
     }
     return EXPR_NULL;
@@ -4389,6 +4467,343 @@ int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     return rc;
 }
 
+/* ---- Static known bits (docs/structural_reasoning_design.md, Principle 1) --
+ * Bits of an unsigned variable that a top-level constraint fixes: x[h:l] ==
+ * c, x == c, and x == {pieces} with known pieces (a field split writes
+ * `a[0] == 1` as a == {f1, f0}, f0 == 1, hence two passes). They hold in every
+ * solution, so a propagator may use them with no literal in its explanation.
+ * Only the initial compile records them: an incremental add may be retracted
+ * (checkpoints, scopes), and so may anything read from current bounds (pins). */
+
+/* Known bits of e at width *w: mask and value, or 0 when e's width is unknown
+ * or above 64. */
+static int _sk_expr(const dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t e, uint32_t *w,
+                    uint64_t *km, uint64_t *kv, int depth) {
+    if (e == EXPR_NULL || depth > 32) return 0;
+    const ExprKind *k = (const ExprKind *)dvs_pool_ptr(&sp->pool, e);
+    switch (*k) {
+    case EXPR_CONST: {
+        const ExprConst *c = (const ExprConst *)k;
+        if (c->width == 0 || c->width > 64) return 0;
+        *w = c->width;
+        *km = c->width == 64 ? ~(uint64_t)0 : (((uint64_t)1 << c->width) - 1);
+        *kv = (uint64_t)c->value & *km;
+        return 1;
+    }
+    case EXPR_VAR: {
+        uint32_t id = ((const ExprVar *)k)->var_id;
+        if (id < ctx->n_vars) id = _resolve(ctx, id);
+        if (id >= ctx->n_vars || ctx->vars[id].width == 0 || ctx->vars[id].width > 64
+                || (ctx->vars[id].flags & VAR_SIGNED))
+            return 0;
+        *w = ctx->vars[id].width;
+        *km = id < ctx->sk_n ? ctx->sk_mask[id] : 0;
+        *kv = id < ctx->sk_n ? ctx->sk_val[id] : 0;
+        return 1;
+    }
+    case EXPR_CONCAT: {
+        const ExprConcat *c = (const ExprConcat *)k;
+        uint32_t hw, lw;
+        uint64_t hm, hv, lm, lv;
+        if (!_sk_expr(ctx, sp, c->hi, &hw, &hm, &hv, depth + 1)
+                || !_sk_expr(ctx, sp, c->lo, &lw, &lm, &lv, depth + 1)
+                || lw != c->lo_width || hw + lw > 64)
+            return 0;
+        *w = hw + lw;
+        *km = lw == 64 ? lm : (hm << lw) | lm;
+        *kv = lw == 64 ? lv : (hv << lw) | lv;
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
+static void _sk_note(dvs_ctx_t *ctx, uint32_t id, uint64_t m, uint64_t v) {
+    if (id < ctx->n_vars) id = _resolve(ctx, id);   /* x == y kept one var */
+    if (id >= ctx->sk_n || m == 0) return;
+    /* Two facts that disagree make the problem unsat; compile finds that, so
+     * keep the first rather than record a contradiction. */
+    uint64_t both = ctx->sk_mask[id] & m;
+    if ((ctx->sk_val[id] & both) != (v & both)) return;
+    ctx->sk_mask[id] |= m;
+    ctx->sk_val[id] |= v & m;
+}
+
+static void _sk_root(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t r, int depth) {
+    if (r == EXPR_NULL || depth > 64) return;
+    const ExprBinary *b = (const ExprBinary *)dvs_pool_ptr(&sp->pool, r);
+    if (b->kind != EXPR_BINARY) return;
+    if (b->op == DVS_BIN_AND) {
+        _sk_root(ctx, sp, b->lhs, depth + 1);
+        _sk_root(ctx, sp, b->rhs, depth + 1);
+        return;
+    }
+    if (b->op != DVS_BIN_EQ) return;
+    for (int side = 0; side < 2; side++) {
+        dvs_expr_t x = side ? b->rhs : b->lhs, y = side ? b->lhs : b->rhs;
+        const ExprKind *xk = (const ExprKind *)dvs_pool_ptr(&sp->pool, x);
+        uint32_t yw, xw;
+        uint64_t ym, yv, xm, xv;
+        if (!_sk_expr(ctx, sp, y, &yw, &ym, &yv, 0)) continue;
+        if (*xk == EXPR_VAR) {
+            uint32_t id = ((const ExprVar *)xk)->var_id;
+            if (_sk_expr(ctx, sp, x, &xw, &xm, &xv, 0) && xw == yw)
+                _sk_note(ctx, id, ym, yv);
+        } else if (*xk == EXPR_EXTRACT) {
+            const ExprExtract *ex = (const ExprExtract *)xk;
+            const ExprKind *ok = (const ExprKind *)dvs_pool_ptr(&sp->pool, ex->operand);
+            uint32_t n = ex->hi_bit - ex->lo_bit + 1;
+            if (*ok != EXPR_VAR || ex->hi_bit < ex->lo_bit || n != yw
+                    || !_sk_expr(ctx, sp, ex->operand, &xw, &xm, &xv, 0) || ex->hi_bit >= xw)
+                continue;
+            _sk_note(ctx, ((const ExprVar *)ok)->var_id, ym << ex->lo_bit, yv << ex->lo_bit);
+        }
+    }
+}
+
+static void _static_known_bits(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    dvs_ctx_free(ctx, ctx->sk_mask, (size_t)ctx->sk_n * sizeof(uint64_t));
+    dvs_ctx_free(ctx, ctx->sk_val, (size_t)ctx->sk_n * sizeof(uint64_t));
+    ctx->sk_mask = ctx->sk_val = NULL;
+    ctx->sk_n = 0;
+    uint32_t n = ctx->n_vars;
+    if (n == 0 || getenv("DV_NO_STATIC_BITS")) return;
+    ctx->sk_mask = (uint64_t *)DVS_ALLOC(ctx->alloc, (size_t)n * sizeof(uint64_t));
+    ctx->sk_val  = (uint64_t *)DVS_ALLOC(ctx->alloc, (size_t)n * sizeof(uint64_t));
+    if (!ctx->sk_mask || !ctx->sk_val) {
+        dvs_ctx_free(ctx, ctx->sk_mask, (size_t)n * sizeof(uint64_t));
+        dvs_ctx_free(ctx, ctx->sk_val, (size_t)n * sizeof(uint64_t));
+        ctx->sk_mask = ctx->sk_val = NULL;
+        return;
+    }
+    memset(ctx->sk_mask, 0, (size_t)n * sizeof(uint64_t));
+    memset(ctx->sk_val, 0, (size_t)n * sizeof(uint64_t));
+    ctx->sk_n = n;
+    for (int pass = 0; pass < 2; pass++)
+        for (dvs_expr_t c = sp->constraints_head; c != EXPR_NULL; ) {
+            const ConstraintSpec *cs = (const ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+            _sk_root(ctx, sp, cs->root, 0);
+            c = cs->next;
+        }
+}
+
+/* ---- Power-of-two facts (docs/structural_reasoning_design.md, part 4) ----
+ * A top-level `(x & (x - 1)) == 0` says x is 0 or a power of two: x == 1 << k
+ * for a new index k in [0, w] (1 << w is 0 at width w). The constraint stays;
+ * k gives the search a variable whose values are the exponents, and a product
+ * with x becomes a shift by k (_mul_as_shift). Initial compile only. */
+
+/* The front end names intermediates (`t == x - 1`, `u == x & t`, `u == 0`),
+ * so a variable with a top-level definition `v == <binary>` reads as that
+ * definition. def[] is indexed by resolved variable id. */
+static const ExprBinary *_p2_binary(dvs_ctx_t *ctx, dvs_problem_t *sp,
+                                    const dvs_expr_t *def, dvs_expr_t e) {
+    uint32_t id;
+    if (_is_var(sp, e, &id)) {
+        id = _resolve(ctx, id);
+        if (id >= ctx->n_vars || def[id] == EXPR_NULL) return NULL;
+        e = def[id];
+    }
+    const ExprBinary *b = (const ExprBinary *)dvs_pool_ptr(&sp->pool, e);
+    return b->kind == EXPR_BINARY ? b : NULL;
+}
+
+/* x's resolved id when e is `x - 1` with x a variable, else UINT32_MAX. */
+static uint32_t _p2_dec_of(dvs_ctx_t *ctx, dvs_problem_t *sp, const dvs_expr_t *def,
+                           dvs_expr_t e) {
+    const ExprBinary *b = _p2_binary(ctx, sp, def, e);
+    int64_t c;
+    uint32_t id;
+    if (b && b->op == DVS_BIN_SUB && _is_const(sp, b->rhs, &c) && c == 1
+            && _is_var(sp, b->lhs, &id))
+        return _resolve(ctx, id);
+    return UINT32_MAX;
+}
+
+static void _p2_fact(dvs_ctx_t *ctx, dvs_problem_t *sp, const dvs_expr_t *def,
+                     dvs_expr_t r, int depth) {
+    if (r == EXPR_NULL || depth > 64) return;
+    const ExprBinary *b = (const ExprBinary *)dvs_pool_ptr(&sp->pool, r);
+    if (b->kind != EXPR_BINARY) return;
+    if (b->op == DVS_BIN_AND) {
+        _p2_fact(ctx, sp, def, b->lhs, depth + 1);
+        _p2_fact(ctx, sp, def, b->rhs, depth + 1);
+        return;
+    }
+    if (b->op != DVS_BIN_EQ) return;
+    int64_t z;
+    dvs_expr_t m = EXPR_NULL;
+    if (_is_const(sp, b->rhs, &z) && z == 0) m = b->lhs;
+    else if (_is_const(sp, b->lhs, &z) && z == 0) m = b->rhs;
+    if (m == EXPR_NULL) return;
+    const ExprBinary *a = _p2_binary(ctx, sp, def, m);
+    if (!a || a->op != DVS_BIN_BAND) return;
+    uint32_t xid;
+    if (_is_var(sp, a->lhs, &xid) && _resolve(ctx, xid) == _p2_dec_of(ctx, sp, def, a->rhs)) ;
+    else if (_is_var(sp, a->rhs, &xid) && _resolve(ctx, xid) == _p2_dec_of(ctx, sp, def, a->lhs)) ;
+    else return;
+    xid = _resolve(ctx, xid);
+    const Variable *xv = &ctx->vars[xid];
+    uint32_t w = xv->width;
+    if ((xv->flags & VAR_SIGNED) || w == 0 || w > 64) return;
+    if (_p2_index(ctx, xid) != UINT32_MAX) return;
+    if (!dvs_ctx_room(ctx, 2)) return;
+    uint32_t one = ctx->n_vars, k = one + 1;
+    if (_init_aux_tiered(ctx, &ctx->vars[one], w, VAR_AUX, 1, 1) != 0) return;
+    /* k is a decision variable and x follows from it (_is_defined in
+     * dvs_search.c): drawing x would almost never give a power of two. */
+    if (_init_aux_tiered(ctx, &ctx->vars[k], w, 0, 0, (int64_t)w) != 0) return;
+    ctx->n_vars = k + 1;
+    if (ctx->watcher_heads) ctx->watcher_heads[one] = ctx->watcher_heads[k] = EXPR_NULL;
+    if (k < 64) ctx->unassigned_mask |= 1ULL << k;
+    prop_add_bvshl_64(ctx, xid, one, k, (uint8_t)w, 0);
+    if (xid < ctx->box_skip_n) ctx->box_skip[xid] = 1;
+    _p2_note(ctx, xid, k);
+}
+
+/* ---- Division links (docs/structural_reasoning_design.md, part 4) ----
+ * For q = a div b and r = a rem b on the same operands (SMT-LIB bvudiv/bvurem
+ * or bvsdiv/bvsrem, lowered with their zero-divisor guard), a == q * b + r
+ * mod 2^w for every a and b, b == 0 included (x rem 0 == x). Adding it as a
+ * redundant modular link lets the search decide q, b and r and have a follow,
+ * where the division propagators learn one bound of a per conflict. It is
+ * not the division's definition (that would need r < |b| and no overflow),
+ * only implied by it, so it needs no side conditions. */
+
+/* Strip same-width reinterpreting casts. */
+static dvs_expr_t _dl_strip(dvs_problem_t *sp, dvs_expr_t e) {
+    for (int i = 0; i < 4 && e != EXPR_NULL; i++) {
+        ExprKind k = *(const ExprKind *)dvs_pool_ptr(&sp->pool, e);
+        if (k != EXPR_SV_CAST && k != EXPR_EXTEND) break;
+        const ExprExtend *x = (const ExprExtend *)dvs_pool_ptr(&sp->pool, e);
+        if (x->from_bits != x->to_bits) break;
+        e = x->operand;
+    }
+    return e;
+}
+
+static int _dl_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t e, uint32_t *id) {
+    if (!_is_var(sp, _dl_strip(sp, e), id)) return 0;
+    *id = _resolve(ctx, *id);
+    return 1;
+}
+
+/* def = ite(b == 0, z, a OP b), casts allowed around each piece. Returns OP
+ * (DVS_BIN_DIV or DVS_BIN_MOD) with *a, *b, or -1. A remainder's z must be a
+ * (x rem 0 == x); a quotient's z is irrelevant to the link (q * 0 == 0). */
+static int _dl_match(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t def,
+                     uint32_t *a, uint32_t *b) {
+    def = _dl_strip(sp, def);
+    if (*(const ExprKind *)dvs_pool_ptr(&sp->pool, def) != EXPR_ITE) return -1;
+    const ExprITE *t = (const ExprITE *)dvs_pool_ptr(&sp->pool, def);
+    const ExprBinary *c = (const ExprBinary *)dvs_pool_ptr(&sp->pool, t->cond);
+    const ExprBinary *o = (const ExprBinary *)dvs_pool_ptr(&sp->pool, _dl_strip(sp, t->else_e));
+    int64_t z;
+    uint32_t cb;
+    if (c->kind != EXPR_BINARY || c->op != DVS_BIN_EQ || !_is_const(sp, c->rhs, &z) || z != 0
+            || !_dl_var(ctx, sp, c->lhs, &cb))
+        return -1;
+    if (o->kind != EXPR_BINARY || (o->op != DVS_BIN_DIV && o->op != DVS_BIN_MOD)
+            || !_dl_var(ctx, sp, o->lhs, a) || !_dl_var(ctx, sp, o->rhs, b) || *b != cb)
+        return -1;
+    if (o->op == DVS_BIN_MOD) {
+        uint32_t za;
+        if (!_dl_var(ctx, sp, t->then_e, &za) || za != *a) return -1;
+    }
+    return (int)o->op;
+}
+
+#define DL_MAX 64
+static void _divrem_links(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    static int on = -1;
+    if (on < 0) on = getenv("DV_NO_DIVREM_LINK") == NULL;
+    if (!on) return;
+    /* Top-level `v == <guarded div or rem>`: a variable can have several
+     * definitions (aliases), so read the roots rather than one per variable. */
+    struct { uint32_t v, a, b; int op; } d[DL_MAX];
+    uint32_t nd = 0;
+    for (dvs_expr_t c = sp->constraints_head; c != EXPR_NULL && nd < DL_MAX; ) {
+        const ConstraintSpec *cs = (const ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+        const ExprBinary *e = (const ExprBinary *)dvs_pool_ptr(&sp->pool, cs->root);
+        uint32_t v, a, b;
+        int op;
+        if (e->kind == EXPR_BINARY && e->op == DVS_BIN_EQ && _is_var(sp, e->lhs, &v)
+                && (op = _dl_match(ctx, sp, e->rhs, &a, &b)) >= 0) {
+            d[nd].v = _resolve(ctx, v); d[nd].a = a; d[nd].b = b; d[nd].op = op;
+            nd++;
+        }
+        c = cs->next;
+    }
+    for (uint32_t i = 0; i < nd; i++) {
+        if (d[i].op != (int)DVS_BIN_DIV) continue;
+        uint32_t q = d[i].v, a = d[i].a, b = d[i].b;
+        uint32_t w = ctx->vars[q].width;
+        if (w == 0 || w > 64) continue;
+        uint32_t kb = _p2_index(ctx, b);
+        for (uint32_t j = 0; j < nd; j++) {
+            if (d[j].op != (int)DVS_BIN_MOD || d[j].a != a) continue;
+            if (d[j].b != b && (kb == UINT32_MAX || _p2_index(ctx, d[j].b) != kb)) continue;
+            /* The unsigned w-bit patterns: q and r are the typed results,
+             * a and b the operands as the user declared them. */
+            const uint32_t ids[4] = { q, d[j].v, a, b };
+            int ok = 1;
+            for (int t = 0; t < 4; t++)
+                if (ctx->vars[ids[t]].width != w || (ctx->vars[ids[t]].flags & VAR_SIGNED)) ok = 0;
+            if (!ok || !dvs_ctx_room(ctx, 1)) break;
+            uint32_t t = ctx->n_vars;
+            int64_t hi = (w >= 64) ? (int64_t)UINT64_MAX : (int64_t)((1ULL << w) - 1);
+            if (_init_aux_tiered(ctx, &ctx->vars[t], w, VAR_AUX, 0, hi) != 0) return;
+            ctx->n_vars = t + 1;
+            if (ctx->watcher_heads) ctx->watcher_heads[t] = EXPR_NULL;
+            if (kb != UINT32_MAX) prop_add_bvshl_64(ctx, t, q, kb, (uint8_t)w, 0);
+            else                  prop_add_bvmul_64(ctx, t, q, b, (uint8_t)w, 0);
+            prop_add_bvadd_64(ctx, a, t, d[j].v, (uint8_t)w, 0);
+            break;
+        }
+    }
+}
+
+static void _pow2_facts(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    uint32_t n = ctx->n_vars;
+    if (!_pow2_rewrite_on() || n == 0) return;
+    dvs_expr_t *def = (dvs_expr_t *)DVS_ALLOC(ctx->alloc, (size_t)n * sizeof(dvs_expr_t));
+    if (!def) return;
+    for (uint32_t i = 0; i < n; i++) def[i] = EXPR_NULL;
+    for (dvs_expr_t c = sp->constraints_head; c != EXPR_NULL; ) {
+        const ConstraintSpec *cs = (const ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+        const ExprBinary *b = (const ExprBinary *)dvs_pool_ptr(&sp->pool, cs->root);
+        uint32_t id;
+        ExprKind rk = b->kind == EXPR_BINARY
+            ? *(const ExprKind *)dvs_pool_ptr(&sp->pool, b->rhs) : EXPR_VAR;
+        if (b->kind == EXPR_BINARY && b->op == DVS_BIN_EQ && _is_var(sp, b->lhs, &id)
+                && (rk == EXPR_BINARY || rk == EXPR_ITE || rk == EXPR_SV_CAST
+                    || rk == EXPR_EXTEND)) {
+            id = _resolve(ctx, id);
+            if (id < n && def[id] == EXPR_NULL) def[id] = b->rhs;
+        }
+        c = cs->next;
+    }
+    /* `v == 1 << k`, recorded before the walk: the product may come first. */
+    for (uint32_t i = 0; i < n; i++) {
+        if (def[i] == EXPR_NULL) continue;
+        const ExprBinary *b = (const ExprBinary *)dvs_pool_ptr(&sp->pool, def[i]);
+        int64_t one;
+        uint32_t k;
+        if (b->kind == EXPR_BINARY && b->op == DVS_BIN_LSHIFT
+                && _is_const(sp, b->lhs, &one) && one == 1
+                && _is_var(sp, b->rhs, &k))
+            _p2_note(ctx, i, k);
+    }
+    for (dvs_expr_t c = sp->constraints_head; c != EXPR_NULL; ) {
+        const ConstraintSpec *cs = (const ConstraintSpec *)dvs_pool_ptr(&sp->pool, c);
+        _p2_fact(ctx, sp, def, cs->root, 0);
+        c = cs->next;
+    }
+    _divrem_links(ctx, sp);
+    dvs_ctx_free(ctx, def, (size_t)n * sizeof(dvs_expr_t));
+}
+
 static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     uint32_t n = sp->n_vars;
     /* A new problem: what earlier contexts learnt about it, if anything
@@ -4632,6 +5047,11 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         }
     }
 
+    _static_known_bits(ctx, sp);
+    ctx->n_p2 = 0;
+    ctx->p2_on = 1;
+    _pow2_facts(ctx, sp);
+
     /* ---- Walk ConstraintSpec list → create propagators ---- */
     int n_uncompiled = 0;
     dvs_expr_t cref = sp->constraints_head;
@@ -4651,6 +5071,9 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         cref = cs->next;
     }
 
+    if (_pow2_rewrite_on() && !getenv("DV_NO_SLICE_MOD"))
+        prop_add_lowslice_mod_links(ctx);
+    ctx->p2_on = 0;
 
     /* ---- Walk AllDiffSpec list -> create AllDifferent propagators ---- */
     dvs_expr_t adref = sp->allDiff_head;

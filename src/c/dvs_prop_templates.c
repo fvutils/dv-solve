@@ -2142,6 +2142,76 @@ static PropResult _bvsum_exact_back(dvs_ctx_t *ctx, uint32_t X, uint32_t Y, uint
     return PROP_OK;
 }
 
+/* r's low t bits are zero (a shift by at least t, a product with t trailing
+ * zeros between its fixed operands): round an unsigned r's bounds to
+ * multiples of 2^t. An interval cannot say this, so without it a decision on
+ * r was drawn from the whole hull and nearly always rejected (a 64-bit
+ * `a << k`, k = 24: one value in 2^24; docs/structural_reasoning_design.md,
+ * "Why CDCL stalls"). The new bounds rest on r's own (which conflict
+ * analysis adds) and on the bounds that gave t, which the explainer cites. */
+static PropResult _round_to_stride(dvs_ctx_t *ctx, uint32_t rid, uint64_t t, uint8_t w) {
+    static int off = -1;                       /* DV_NO_STRIDE: A/B switch */
+    if (off < 0) off = getenv("DV_NO_STRIDE") != NULL;
+    const Variable *rv = &ctx->vars[rid];
+    if (off || t == 0 || (rv->flags & VAR_SIGNED) || rv->width != w) return PROP_OK;
+    uint64_t lo = (uint64_t)var_lo64(ctx, rv), hi = (uint64_t)var_hi64(ctx, rv);
+    if (lo > hi) return PROP_OK;
+    if (t >= w || t >= 64) {
+        if (lo > 0) return PROP_CONFLICT;
+        return ctx_tighten_ub64(ctx, rid, 0);
+    }
+    uint64_t m = ((uint64_t)1 << t) - 1;
+    uint64_t nhi = hi & ~m, nlo;
+    if (dvs_add_u64_ovf(lo, m, &nlo)) return PROP_CONFLICT;
+    nlo &= ~m;
+    if (nlo > nhi) return PROP_CONFLICT;
+    PropResult res;
+    if (nlo != lo && (res = ctx_tighten_lb64(ctx, rid, (int64_t)nlo)) != PROP_OK) return res;
+    if (nhi != hi && (res = ctx_tighten_ub64(ctx, rid, (int64_t)nhi)) != PROP_OK) return res;
+    return PROP_OK;
+}
+
+/* r == (2q + 1) * 2^j for some q: its low j bits zero and bit j one. */
+static PropResult _round_to_odd_multiple(dvs_ctx_t *ctx, uint32_t rid, uint64_t j, uint8_t w) {
+    const Variable *rv = &ctx->vars[rid];
+    if ((rv->flags & VAR_SIGNED) || rv->width != w || j >= w || j >= 63) return PROP_OK;
+    uint64_t lo = (uint64_t)var_lo64(ctx, rv), hi = (uint64_t)var_hi64(ctx, rv);
+    if (lo > hi) return PROP_OK;
+    uint64_t step = (uint64_t)1 << j, m = step - 1, nlo, nhi = hi & ~m;
+    if (dvs_add_u64_ovf(lo, m, &nlo)) return PROP_CONFLICT;
+    nlo &= ~m;
+    if (!(nlo & step) && dvs_add_u64_ovf(nlo, step, &nlo)) return PROP_CONFLICT;
+    if (!(nhi & step)) {
+        if (nhi < step) return PROP_CONFLICT;
+        nhi -= step;
+    }
+    if (nlo > nhi || nhi > _bv_mask(w)) return PROP_CONFLICT;
+    PropResult res;
+    if (nlo != lo && (res = ctx_tighten_lb64(ctx, rid, (int64_t)nlo)) != PROP_OK) return res;
+    if (nhi != hi && (res = ctx_tighten_ub64(ctx, rid, (int64_t)nhi)) != PROP_OK) return res;
+    return PROP_OK;
+}
+
+/* How many low bits of v are zero in every solution (static known bits,
+ * ctx->sk_mask), and in *exact whether the next one is known one. */
+static uint64_t _sk_low_zeros(const dvs_ctx_t *ctx, uint32_t v, uint8_t w, int *exact) {
+    *exact = 0;
+    if (v >= ctx->sk_n || (ctx->vars[v].flags & VAR_SIGNED)) return 0;
+    uint64_t m = ctx->sk_mask[v], x = ctx->sk_val[v];
+    uint64_t z = 0;
+    while (z < w && ((m >> z) & 1) && !((x >> z) & 1)) z++;
+    *exact = z < w && ((m >> z) & 1);
+    return z;
+}
+
+static uint64_t _ctz_single(ModIv v, uint8_t w) {
+    if (!_modiv_single(v)) return 0;
+    if (v.start == 0) return w;
+    return (uint64_t)__builtin_ctzll(v.start);
+}
+
+static PropResult _tighten_u64(dvs_ctx_t *ctx, uint32_t id, uint64_t lo, uint64_t hi);
+
 static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
@@ -2199,6 +2269,9 @@ static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
          * the operands follow from r by interval division. (Without this an
          * interval of r taught the operands nothing; only a fixed r did, so
          * `n == k * 512 or k * 4096` was searched one value of n at a time.) */
+        if ((res = _round_to_stride(ctx, rid, _ctz_single(Ac, w) + _ctz_single(Bc, w), w))
+                != PROP_OK)
+            return res;
         if ((res = _bv_mul_divide(ctx, rid, aid, bid, w)) != PROP_OK) return res;
         if (aid == bid) {
             if ((res = _bv_square(ctx, rid, aid, w)) != PROP_OK) return res;
@@ -2210,6 +2283,56 @@ static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
         if (_shift_amount_range(ctx, bid, B, w, &s0, &s1)) {
             ModIv R = _modiv_shl(A, s0, s1, w);
             if ((res = _tighten_to_modiv(ctx, rid, R, w)) != PROP_OK) return res;
+            /* a's static trailing zeros add to the shift's: r = a << s has
+             * at least z + s0 of them, exactly z + s when a's next bit is
+             * known one (a odd: z = 0). Then r fixed gives s = ctz(r) - z,
+             * the one fact an interval of s cannot reach from r. */
+            int exact;
+            uint64_t z = _sk_low_zeros(ctx, aid, w, &exact);
+            if ((res = _round_to_stride(ctx, rid, s0 + z, w)) != PROP_OK) return res;
+            if (exact && s0 == s1 && s0 + z < w
+                    && (res = _round_to_odd_multiple(ctx, rid, s0 + z, w)) != PROP_OK)
+                return res;
+            ModIv Rf = _var_modiv(ctx, rid, w);
+            const Variable *bv = &ctx->vars[bid];
+            if (exact && _modiv_single(Rf) && bid != rid && !(bv->flags & VAR_SIGNED)
+                    && bv->width <= 64) {
+                if (Rf.start == 0) {
+                    if ((res = ctx_tighten_lb64(ctx, bid, (int64_t)(w - z))) != PROP_OK)
+                        return res;
+                } else {
+                    uint64_t t = (uint64_t)__builtin_ctzll(Rf.start);
+                    if (t < z) return PROP_CONFLICT;
+                    if ((res = ctx_tighten_lb64(ctx, bid, (int64_t)(t - z))) != PROP_OK)
+                        return res;
+                    if ((res = ctx_tighten_ub64(ctx, bid, (int64_t)(t - z))) != PROP_OK)
+                        return res;
+                }
+            }
+        }
+        /* r = 1 << s, r nonzero: r is a power of two 2^s with s < w, so
+         * r's bounds round to powers of two and s's follow (r >= 37: s >= 6,
+         * r >= 64). Without it a bound on r reached s only once r was fixed,
+         * and the search tried r one non-power at a time. */
+        {
+            static int p2_off = -1;
+            if (p2_off < 0) p2_off = getenv("DV_NO_POW2_REWRITE") != NULL;
+            const Variable *rv = &ctx->vars[rid], *sv = &ctx->vars[bid];
+            uint64_t rlo = (uint64_t)var_lo64(ctx, rv), rhi = (uint64_t)var_hi64(ctx, rv);
+            if (!p2_off && _modiv_single(A) && A.start == 1 && bid != rid
+                    && !((rv->flags | sv->flags) & VAR_SIGNED) && sv->width <= 64
+                    && rlo >= 1 && rlo <= rhi) {
+                uint64_t lo_s = rlo == 1 ? 0 : (uint64_t)(64 - __builtin_clzll(rlo - 1));
+                uint64_t hi_s = (uint64_t)(63 - __builtin_clzll(rhi));
+                if (hi_s > (uint64_t)w - 1) hi_s = (uint64_t)w - 1;
+                if (lo_s > hi_s) return PROP_CONFLICT;
+                if ((res = _tighten_u64(ctx, bid, lo_s, hi_s)) != PROP_OK) return res;
+                uint64_t k0 = (uint64_t)var_lo64(ctx, sv), k1 = (uint64_t)var_hi64(ctx, sv);
+                if (k1 > (uint64_t)w - 1) k1 = (uint64_t)w - 1;
+                if (k0 > k1) return PROP_CONFLICT;
+                if ((res = _tighten_u64(ctx, rid, (uint64_t)1 << k0, (uint64_t)1 << k1)) != PROP_OK)
+                    return res;
+            }
         }
         /* Backward (keeps the search complete when r is a decision var):
          * when r is fixed to rr, rr must be producible by SOME feasible
@@ -3230,6 +3353,31 @@ static PropResult _fire_bit_slice_64(Propagator *self, dvs_ctx_t *ctx) {
         if ((r = ctx_tighten_ub64(ctx, rid, (int64_t)v)) != PROP_OK) return r;
         return PROP_ENTAILED;
     }
+    /* A slice up to a's top bit is a >> lo, monotone: bounds pass both ways
+     * by shifting. Without it a's bounds reached the decided field a[63:1]
+     * only once a was fixed, so whatever narrowed a (a stride from a shift)
+     * never steered the search (docs/structural_reasoning_design.md, "Why
+     * CDCL stalls", part 3). The explainer cites the other side's bounds. */
+    {
+        const Variable *av = &ctx->vars[aid];
+        if (!(av->flags & VAR_SIGNED) && av->width == (uint32_t)bself->hi_bit + 1
+                && bself->lo_bit >= 1 && av->width <= 64
+                && !(ctx->vars[rid].flags & VAR_SIGNED)
+                && (uint64_t)alo <= (uint64_t)ahi && rid != aid) {
+            uint32_t lo = bself->lo_bit;
+            if ((r = ctx_tighten_lb64(ctx, rid, (int64_t)((uint64_t)alo >> lo))) != PROP_OK) return r;
+            if ((r = ctx_tighten_ub64(ctx, rid, (int64_t)((uint64_t)ahi >> lo))) != PROP_OK) return r;
+            uint64_t rl = (uint64_t)var_lo64(ctx, &ctx->vars[rid]);
+            uint64_t rh = (uint64_t)var_hi64(ctx, &ctx->vars[rid]);
+            if (rl <= rh) {
+                if ((r = ctx_tighten_lb64(ctx, aid, (int64_t)(rl << lo))) != PROP_OK) return r;
+                uint64_t ah = (rh << lo) | (((uint64_t)1 << lo) - 1);
+                if ((r = ctx_tighten_ub64(ctx, aid, (int64_t)ah)) != PROP_OK) return r;
+                alo = var_lo64(ctx, av);
+                ahi = var_hi64(ctx, av);
+            }
+        }
+    }
     /* Backward bounds-consistency when the slice result is fixed (BUG-2). */
     {
         int64_t rlo = var_lo64(ctx, &ctx->vars[rid]);
@@ -3251,6 +3399,7 @@ uint32_t prop_add_bit_slice_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
     p->hi_bit = hi_bit; p->lo_bit = lo_bit;
     return ref;
 }
+
 
 
 /* The values y with every bit of `must` set and no bit outside `allow`
@@ -4127,6 +4276,88 @@ uint32_t prop_add_bounds_concat_64(dvs_ctx_t *ctx, uint32_t r_id,
     BoundsConcat_64_t *p = (BoundsConcat_64_t *)dvs_spool_ptr(&ctx->pool, ref);
     p->lo_width = lo_width;
     return ref;
+}
+
+/* r = a % b and s = a[j-1:0]: once b is a power of two 2^k with k <= j,
+ * a % b == s % b, so r = s % b; with k > j, r = a[k-1:0], so s = r[j-1:0]. Redundant, but it lets a congruence on a
+ * reach a decided low slice: `a % 64 == 0` against `a[11:0] == 216` used
+ * to move a's bounds one page at a time between the two propagators
+ * (docs/structural_reasoning_design.md, axi_burst_bytes_64). The explainer
+ * is the remainder's, over (r, s, b): b's singleton bounds give the
+ * condition. */
+typedef struct { Propagator hdr; PropWatchSect ws; uint32_t j; } LowSliceMod_t;
+
+static PropResult _fire_lowslice_mod(Propagator *self, dvs_ctx_t *ctx) {
+    PropWatchSect *ws = PROP_WS(self);
+    uint32_t rid = ws->var_ids[0], sid = ws->var_ids[1], bid = ws->var_ids[2];
+    uint64_t blo = (uint64_t)var_lo64(ctx, &ctx->vars[bid]);
+    uint64_t bhi = (uint64_t)var_hi64(ctx, &ctx->vars[bid]);
+    uint32_t j = ((LowSliceMod_t *)self)->j;
+    if (blo != bhi || blo == 0 || (blo & (blo - 1)) != 0) return PROP_OK;
+    if (j >= 64 || blo <= ((uint64_t)1 << j))
+        return _mod_u64(ctx, rid, sid, bid);
+    /* k > j: r = a[k-1:0], so s = r[j-1:0]. */
+    PropResult res;
+    uint64_t rlo = (uint64_t)var_lo64(ctx, &ctx->vars[rid]);
+    uint64_t rhi = (uint64_t)var_hi64(ctx, &ctx->vars[rid]);
+    if (rlo == rhi) {
+        uint64_t v = rlo & (((uint64_t)1 << j) - 1);
+        return _tighten_u64(ctx, sid, v, v);
+    }
+    int64_t slo = var_lo64(ctx, &ctx->vars[sid]);
+    if (slo == var_hi64(ctx, &ctx->vars[sid])
+            && (res = _bit_slice_backward(ctx, rid, 0, j - 1, (uint64_t)slo,
+                                          (int64_t)rlo, (int64_t)rhi)) != PROP_OK)
+        return res;
+    return PROP_OK;
+}
+
+/* After the compile walk: link each unsigned remainder r = a % b to the
+ * low slices s = a[j-1:0] of the same a, from a bit slice or the low half
+ * of a concat (at most 64 links). */
+void prop_add_lowslice_mod_links(dvs_ctx_t *ctx) {
+    enum { MAXL = 64 };
+    uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
+                   ? ctx->n_props : ctx->n_prop_refs_capacity;
+    uint32_t n_links = 0;
+    for (uint32_t mi = 0; mi < lim && n_links < MAXL; mi++) {
+        if (ctx->prop_refs[mi] == EXPR_NULL) continue;
+        Propagator *m = (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[mi]);
+        if (m->fire != _fire_bounds_mod_64 && m->fire != _fire_bounds_mod_32) continue;
+        PropWatchSect *mw = PROP_WS(m);
+        uint32_t rid = mw->var_ids[0], aid = mw->var_ids[1], bid = mw->var_ids[2];
+        if (((ctx->vars[rid].flags | ctx->vars[aid].flags |
+              ctx->vars[bid].flags) & VAR_SIGNED) || ctx->vars[aid].width > 64)
+            continue;
+        for (uint32_t si = 0; si < lim && n_links < MAXL; si++) {
+            if (ctx->prop_refs[si] == EXPR_NULL) continue;
+            Propagator *sp = (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[si]);
+            PropWatchSect *sw = PROP_WS(sp);
+            uint32_t sid, src, j;
+            if (sp->fire == _fire_bit_slice_64 || sp->fire == _fire_bit_slice_32) {
+                uint32_t lo = sp->fire == _fire_bit_slice_64
+                    ? ((BitSlice_64_t *)sp)->lo_bit : ((BitSlice_32_t *)sp)->lo_bit;
+                if (lo != 0) continue;
+                sid = sw->var_ids[0]; src = sw->var_ids[1];
+                j = 1u + (sp->fire == _fire_bit_slice_64
+                    ? ((BitSlice_64_t *)sp)->hi_bit : ((BitSlice_32_t *)sp)->hi_bit);
+            } else if (sp->fire == _fire_bounds_concat_64) {
+                /* a = {h, s}: s is a's low lo_width bits (`a[j-1:0] == c`
+                 * compiles to this, the constant as s). */
+                sid = sw->var_ids[2]; src = sw->var_ids[0];
+                j = ((BoundsConcat_64_t *)sp)->lo_width;
+            } else continue;
+            if (src != aid || sid == aid || j == 0) continue;
+            if (ctx->vars[sid].flags & VAR_SIGNED) continue;
+            if (j >= ctx->vars[aid].width) continue;   /* whole of a */
+            uint32_t ids[3] = { rid, sid, bid };
+            uint32_t ref = _alloc_prop(ctx, _fire_lowslice_mod, 0, 3, ids,
+                                       sizeof(LowSliceMod_t));
+            if (ref == EXPR_NULL) return;
+            ((LowSliceMod_t *)dvs_spool_ptr(&ctx->pool, ref))->j = j;
+            n_links++;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -5069,6 +5300,7 @@ const char *prop_fire_name(PropResult (*fire)(Propagator *, dvs_ctx_t *)) {
     FN_NAME(_fire_in_set_64);
     FN_NAME(_fire_in_ranges_64);
     FN_NAME(_fire_bit_slice_64);
+    FN_NAME(_fire_lowslice_mod);
     FN_NAME(_fire_bounds_band_64);
     FN_NAME(_fire_bounds_bor_64);
     FN_NAME(_fire_bounds_bxor_64);
@@ -5120,6 +5352,7 @@ void contra_register_explanations(dvs_ctx_t *ctx) {
          * through it fell back to chronological backtracking. */
         { _fire_in_ranges_64,       explain_in_set },
         { _fire_bit_slice_64,       explain_bit_slice },
+        { _fire_lowslice_mod,       explain_bounds_mod },
         { _fire_bounds_band_64,     explain_bounds_band },
         { _fire_bounds_bor_64,      explain_bounds_bor },
         { _fire_bounds_bxor_64,     explain_bounds_bxor },

@@ -1,0 +1,13 @@
+; mul_pow2var_64 at 32 bits (width contrast: pure CDCL solves in ~0.02 s). Expect: sat.
+(set-logic QF_BV)
+(declare-const a (_ BitVec 32))
+(declare-const k (_ BitVec 32))
+(declare-const p (_ BitVec 32))
+(assert (bvule k #x0000001f))
+(assert (= p (bvmul a (bvshl #x00000001 k))))
+(assert (= ((_ extract 0 0) a) #b1))
+(assert (bvugt a #x00000100))
+(assert (bvugt p #x01234000))
+(assert (bvult p #x01235000))
+(assert (bvuge k #x0000000a))
+(check-sat)

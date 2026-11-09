@@ -1,0 +1,15 @@
+; b a power of two by (b & (b-1)) == 0, b != 0 ($onehot); p = a * b, a odd,
+; p in a narrow window, 64 bits. Pure CDCL times out (>29 s). Expect: sat.
+(set-logic QF_BV)
+(declare-const a (_ BitVec 64))
+(declare-const b (_ BitVec 64))
+(declare-const p (_ BitVec 64))
+(assert (not (= b #x0000000000000000)))
+(assert (= (bvand b (bvsub b #x0000000000000001)) #x0000000000000000))
+(assert (= p (bvmul a b)))
+(assert (= ((_ extract 0 0) a) #b1))
+(assert (bvugt a #x0000000000010000))
+(assert (bvult a #x0000000100000000))
+(assert (bvugt p #x0123456700000000 ))
+(assert (bvult p #x0123456800000000 ))
+(check-sat)
