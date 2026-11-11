@@ -8,10 +8,9 @@ were untrailed writes that no restore undid. Inside a checkpoint scope a reset
 now rewinds to the start of the last solve, and the relaxations go on the
 trail.
 
-The problem makes the soft constraint conflict only through search, so pins
-are accepted (an active soft constraint is propagated like a hard one, so a
-pin that contradicts it by propagation alone is refused -- a separate
-limitation):
+The problem makes the soft constraint conflict only through search, so the
+pins do not conflict when made (a pin that contradicts a soft constraint by
+propagation is accepted too, and the solve relaxes the soft: test_soft_pin):
 
     a, b, c in {0, 1};  e, d free bytes
     hard:  e == 1  ->  (a != c && b != c)        (two values: then a == b)

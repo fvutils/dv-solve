@@ -3,6 +3,9 @@
 `DV_ENGINE`
 : Choose the solving engine: `cdcl` or `bitblast`. Unset means automatic.
   The `--engine` option does the same thing. See {doc}`../concepts/engines`.
+  It also sets the engine of a problem handle (Verilator's built-in solver),
+  except that a problem with soft constraints, `dist`, `solve ... before`,
+  state or `randc` variables stays on `cdcl`.
 
 `DV_CHECK_MODEL`
 : `1` turns the model check on, `0` turns it off. Unset, it is on, except in

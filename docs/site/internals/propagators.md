@@ -79,7 +79,7 @@ variable is 1, retires when it is 0, and waits while it is undecided.
 | `r == a[hi:lo]` | `r` follows the selected bits of `a`, and a fixed `r` narrows `a` |
 | `r == {hi, lo}` | `r` follows from the parts; `hi` follows from `r`, and so does `lo` once `hi` is fixed |
 | an OR of up to 16 comparisons | once all comparisons but one are false, the last is enforced; a variable that every comparison bounds is kept within the union of those bounds. Longer ORs are compiled through guard variables |
-| all-different, up to 16 variables of up to 32 bits | a fixed variable's value is removed from the others; fails when the variables have fewer values between them than there are variables, and narrows around sets of variables that use up a range (Hall intervals) |
+| all-different, variables of up to 32 bits | a fixed variable's value is removed from the others; fails when the variables have fewer values between them than there are variables, and narrows around sets of variables that use up a range (Hall intervals) |
 
 ## Aggregates
 

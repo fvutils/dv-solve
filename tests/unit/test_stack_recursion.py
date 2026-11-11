@@ -120,6 +120,9 @@ BOUNDED = {
     ("dvs_bbsolver", "_ds_vars"): "depth cap 64",
     ("dvs_bbsolver", "_en_bits"): "depth cap 64",
     ("dvs_bbsolver", "_en_colwise"): "depth cap 64",
+    # The null-read check of dvs_randomize_parts
+    ("dvs_parts", "known"): "dvs_stack_low (unknown)",
+    ("dvs_parts", "live"): "dvs_stack_low (a read)",
     # Model validator and the oracle's SMT-LIB2 emitter
     ("dvs_validate", "_ev"): "dvs_stack_low (skip)",
     ("dvs_validate", "_vtype"): "dvs_stack_low (skip)",
@@ -132,6 +135,9 @@ BOUNDED = {
     # Arithmetic
     ("dvs_prop_templates", "_egcd"): "logarithmic in the operands",
     ("dvs_search", "_luby"): "logarithmic in the restart count",
+    ("dvs_search", "_pd_bool"): "depth cap PD_DEPTH (8) and a node budget",
+    ("dvs_search", "_pd_reach"): "depth cap PD_DEPTH (8)",
+    ("dvs_search", "_pd_class"): "one level: a concatenation's result",
 }
 
 _NODE = re.compile(r'node: \{ title: "([^"]+)" label: "[^\\]*\\n[^\\]*\\n(\d+) bytes')

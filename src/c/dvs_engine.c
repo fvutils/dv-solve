@@ -6,12 +6,17 @@
  * later (a CDCL search that gave up). Bit-blast checks the
  * problem on its first solve and resamples it on every later one, with the
  * front end's one-shot defaults, as dvs_handle did before it moved here.
+ *
+ * AUTO picks by shape (dvs_shape_route_rand) and gives a CDCL search that
+ * could move a work budget (DVS_ENGINE_CDCL_WORK), so a shape the rule
+ * misses costs one budgeted search, not a slow one on every call.
  */
 #include <stdlib.h>
 #include <string.h>
 #include "dvs_engine.h"
 #include "dvs_ctx.h"
 #include "dvs_bbsolver.h"
+#include "dvs_shape.h"
 
 typedef struct dvs_engine_s {
     int             eng;       /* DVS_ENGINE_CDCL or DVS_ENGINE_BITBLAST     */
@@ -117,13 +122,13 @@ int dvs_engine_compile(dvs_ctx_t *ctx, dvs_problem_t *p, int rc) {
     } else if (cdcl_only) {
         return rc;
     } else {
-        /* CDCL first: it is the engine tuned for randomization (its own
-         * product, divisor and dist sampling). Bit-blast takes what CDCL
-         * cannot compile whole, and (dvs_engine_take_over) what its search
-         * gives up on. Routing by shape (dvs_shape_route) suits the SMT-LIB
-         * front end's encodings; whether it should apply here waits on
-         * measurement (docs/solver_gap_plan.md, step 3). */
-        bitblast = rc > 0;
+        /* CDCL unless the shape says otherwise: it is the engine tuned for
+         * randomization (its own product, divisor and dist sampling).
+         * Bit-blast takes what CDCL cannot compile whole, the shapes CDCL
+         * searches slowly (dvs_shape_route_rand), and (dvs_engine_take_over)
+         * what its search gives up on. */
+        dvs_shape_t sh;
+        bitblast = rc > 0 || (dvs_shape_compute(p, &sh) == 0 && dvs_shape_route_rand(&sh));
     }
     dvs_engine_t *e = _engine_new(p);
     if (!e) return rc;           /* no memory for the copy: CDCL, as before */
@@ -177,10 +182,30 @@ static dvs_result_t _bb_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     return DVS_SOLVE_OK;
 }
 
+/* Whether a CDCL search that gives up may move the context to bit-blast. A
+ * caller's own time budget is kept: bit-blast has none to honour. */
+static int _movable(const dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
+    const dvs_engine_t *e = ctx->engine;
+    return e && !e->locked && e->eng == DVS_ENGINE_CDCL && ctx->engine_pref == DVS_ENGINE_AUTO
+           && !(opts && opts->time_limit_ms);
+}
+
+/* The work (dvs_ctx_work) a movable CDCL search may take before bit-blast
+ * takes over for good: a floor of 5x the most one call of a CDCL-routed
+ * simbench needs (nonoverlap_regions_8's first, 4.2e5), and more per
+ * variable, as a large problem needs (all-different over 1000 variables,
+ * test_arrays: under 2.2e7). A count, not time, so the move and the values
+ * after it are a function of the seeds. */
+#define DVS_ENGINE_CDCL_WORK     2000000ull
+#define DVS_ENGINE_CDCL_VAR_WORK 100000ull
+
 int dvs_engine_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts, dvs_result_t *r) {
     dvs_engine_t *e = ctx ? ctx->engine : NULL;
     if (!e || e->eng != DVS_ENGINE_BITBLAST) {
-        if (e) e->have_x = 0;
+        if (e) {
+            e->have_x = 0;
+            if (_movable(ctx, opts) && !ctx->work_budget) ctx->work_budget = DVS_ENGINE_CDCL_WORK + DVS_ENGINE_CDCL_VAR_WORK * ctx->n_vars;
+        }
         return 0;
     }
     *r = _bb_solve(ctx, opts);
@@ -188,12 +213,8 @@ int dvs_engine_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts, dvs_result_t 
 }
 
 int dvs_engine_take_over(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts, dvs_result_t *r) {
-    dvs_engine_t *e = ctx ? ctx->engine : NULL;
-    if (!e || e->locked || e->eng != DVS_ENGINE_CDCL || ctx->engine_pref != DVS_ENGINE_AUTO)
-        return 0;
-    /* A caller's own time budget is kept: bit-blast has none to honour. */
-    if (opts && opts->time_limit_ms) return 0;
-    e->eng = DVS_ENGINE_BITBLAST;
+    if (!ctx || !_movable(ctx, opts)) return 0;
+    ctx->engine->eng = DVS_ENGINE_BITBLAST;
     *r = _bb_solve(ctx, opts);
     return 1;
 }

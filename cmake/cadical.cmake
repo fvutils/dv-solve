@@ -131,7 +131,8 @@ target_compile_options(cadical_objs PRIVATE -O3 -fPIC -Wno-unused-parameter)
 #    DW.ref.* personality pointers. Those are hidden (never exported) and hold
 #    the same value in every object; a static libstdc++ (dv-solve-smt2 links
 #    one) resolves its own references to them, and a localized copy leaves
-#    them undefined.
+#    them undefined. Weak (COMDAT) definitions stay global too: see
+#    dvs_localize.cmake.
 set(CADICAL_MERGED  ${CMAKE_CURRENT_BINARY_DIR}/cadical_merged.o)
 set(CADICAL_LOCALIZED ${CMAKE_CURRENT_BINARY_DIR}/cadical_localized.o)
 if(APPLE)
@@ -169,10 +170,11 @@ else()
     add_custom_command(
         OUTPUT ${CADICAL_LOCALIZED}
         COMMAND ${CMAKE_LINKER} -r $<TARGET_OBJECTS:cadical_objs> -o ${CADICAL_MERGED}
-        COMMAND ${CMAKE_OBJCOPY} -w --keep-global-symbol=ccadical_*
-                --keep-global-symbol=DW.ref.*
-                ${CADICAL_MERGED} ${CADICAL_LOCALIZED}
-        DEPENDS cadical_objs
+        COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DOBJCOPY=${CMAKE_OBJCOPY}
+                -DIN=${CADICAL_MERGED} -DOUT=${CADICAL_LOCALIZED}
+                -DKEEP=ccadical_*,DW.ref.*
+                -P ${CMAKE_CURRENT_LIST_DIR}/dvs_localize.cmake
+        DEPENDS cadical_objs ${CMAKE_CURRENT_LIST_DIR}/dvs_localize.cmake
         COMMAND_EXPAND_LISTS
         VERBATIM
         COMMENT "Merging + localizing CaDiCaL (keeps only ccadical_* global)")

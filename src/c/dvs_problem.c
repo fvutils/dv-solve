@@ -23,6 +23,8 @@ dvs_problem_t *solve_problem_init(void *buf, size_t buf_size) {
         return NULL;
 
     dvs_problem_t *sp = (dvs_problem_t *)buf;
+    sp->magic            = DVS_PROBLEM_MAGIC;
+    sp->format_version   = DVS_PROBLEM_FORMAT_VERSION;
     sp->n_vars           = 0;
     sp->n_constraints    = 0;
     sp->n_sources        = 0;
@@ -37,6 +39,16 @@ dvs_problem_t *solve_problem_init(void *buf, size_t buf_size) {
     sp->dists_head       = EXPR_NULL;
     sp->next_constraint_id = 0;
     sp->flags            = 0;
+    sp->n_arrays         = 0;
+    sp->arrays_head      = EXPR_NULL;
+    sp->n_foreachs       = 0;
+    sp->foreachs_head    = EXPR_NULL;
+    sp->n_slots          = 0;
+    sp->n_exports        = 0;
+    sp->exports_head     = EXPR_NULL;
+    sp->n_imports        = 0;
+    sp->imports_head     = EXPR_NULL;
+    sp->_p32             = 0;
 
     size_t pool_buf_size = buf_size - pool_offset;
     if (!dvs_pool_init(&sp->pool, pool_buf_size))
@@ -68,6 +80,15 @@ void solve_problem_reset(dvs_problem_t *sp) {
     sp->dists_head       = EXPR_NULL;
     sp->next_constraint_id = 0;
     sp->flags            = 0;
+    sp->n_arrays         = 0;
+    sp->arrays_head      = EXPR_NULL;
+    sp->n_foreachs       = 0;
+    sp->foreachs_head    = EXPR_NULL;
+    sp->n_slots          = 0;
+    sp->n_exports        = 0;
+    sp->exports_head     = EXPR_NULL;
+    sp->n_imports        = 0;
+    sp->imports_head     = EXPR_NULL;
     dvs_pool_reset(&sp->pool);
 }
 
@@ -82,14 +103,14 @@ void solve_problem_destroy(dvs_problem_t *sp) {
 dvs_expr_t expr_const_sized(dvs_problem_t *sp, int64_t value, uint8_t is_signed,
                          uint32_t width) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprConst),
-                              (uint32_t)_Alignof(ExprConst));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprConst *n = (ExprConst *)POOL_PTR(sp, ref);
     n->kind      = EXPR_CONST;
     n->is_signed = is_signed;
     n->width     = width;
     n->_p8      = 0;
-    n->value     = value;
+    n->value     = dvs_const_wrap(value, width, is_signed);
     return ref;
 }
 
@@ -108,7 +129,7 @@ dvs_expr_t expr_const_wide(dvs_problem_t *sp, uint32_t n_limbs,
                                 (uint32_t)width);
     dvs_expr_t ref = _pool_alloc(sp,
         (uint32_t)(sizeof(ExprConstWide) + n_limbs * sizeof(uint64_t)),
-        (uint32_t)_Alignof(ExprConstWide));
+        DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprConstWide *n = (ExprConstWide *)POOL_PTR(sp, ref);
     dvs_const_wide_init(n, n_limbs, limbs, width, is_signed);
@@ -117,7 +138,7 @@ dvs_expr_t expr_const_wide(dvs_problem_t *sp, uint32_t n_limbs,
 
 dvs_expr_t expr_var(dvs_problem_t *sp, uint32_t var_id) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprVar),
-                              (uint32_t)_Alignof(ExprVar));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprVar *n = (ExprVar *)POOL_PTR(sp, ref);
     n->kind   = EXPR_VAR;
@@ -127,7 +148,7 @@ dvs_expr_t expr_var(dvs_problem_t *sp, uint32_t var_id) {
 
 dvs_expr_t expr_binary(dvs_problem_t *sp, dvs_binop_t op, dvs_expr_t lhs, dvs_expr_t rhs) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprBinary),
-                              (uint32_t)_Alignof(ExprBinary));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprBinary *n = (ExprBinary *)POOL_PTR(sp, ref);
     n->kind = EXPR_BINARY;
@@ -139,7 +160,7 @@ dvs_expr_t expr_binary(dvs_problem_t *sp, dvs_binop_t op, dvs_expr_t lhs, dvs_ex
 
 dvs_expr_t expr_unary(dvs_problem_t *sp, dvs_unop_t op, dvs_expr_t operand) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprUnary),
-                              (uint32_t)_Alignof(ExprUnary));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprUnary *n = (ExprUnary *)POOL_PTR(sp, ref);
     n->kind    = EXPR_UNARY;
@@ -150,7 +171,7 @@ dvs_expr_t expr_unary(dvs_problem_t *sp, dvs_unop_t op, dvs_expr_t operand) {
 
 dvs_expr_t expr_ite(dvs_problem_t *sp, dvs_expr_t cond, dvs_expr_t then_e, dvs_expr_t else_e) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprITE),
-                              (uint32_t)_Alignof(ExprITE));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprITE *n = (ExprITE *)POOL_PTR(sp, ref);
     n->kind   = EXPR_ITE;
@@ -162,7 +183,7 @@ dvs_expr_t expr_ite(dvs_problem_t *sp, dvs_expr_t cond, dvs_expr_t then_e, dvs_e
 
 dvs_expr_t expr_in_range(dvs_problem_t *sp, dvs_expr_t value, dvs_expr_t lo, dvs_expr_t hi) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprInRange),
-                              (uint32_t)_Alignof(ExprInRange));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprInRange *n = (ExprInRange *)POOL_PTR(sp, ref);
     n->kind  = EXPR_IN_RANGE;
@@ -176,7 +197,7 @@ dvs_expr_t expr_in_set(dvs_problem_t *sp, dvs_expr_t value,
                     uint32_t n_elems, const dvs_expr_t *elems) {
     /* Allocate struct + trailing element array in one shot */
     uint32_t total = (uint32_t)sizeof(ExprInSet) + n_elems * (uint32_t)sizeof(dvs_expr_t);
-    dvs_expr_t ref = _pool_alloc(sp, total, (uint32_t)_Alignof(ExprInSet));
+    dvs_expr_t ref = _pool_alloc(sp, total, DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprInSet *n = (ExprInSet *)POOL_PTR(sp, ref);
     n->kind    = EXPR_IN_SET;
@@ -191,7 +212,7 @@ dvs_expr_t expr_in_set(dvs_problem_t *sp, dvs_expr_t value,
 dvs_expr_t expr_extend(dvs_problem_t *sp, dvs_expr_t operand,
                     uint32_t from_bits, uint32_t to_bits, uint8_t sign_extend) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprExtend),
-                              (uint32_t)_Alignof(ExprExtend));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprExtend *n = (ExprExtend *)POOL_PTR(sp, ref);
     n->kind         = EXPR_EXTEND;
@@ -207,7 +228,7 @@ dvs_expr_t expr_cast(dvs_problem_t *sp, dvs_expr_t operand,
                   uint32_t to_bits, uint8_t to_signed) {
     if (to_bits == 0) return EXPR_NULL;
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprCast),
-                              (uint32_t)_Alignof(ExprCast));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprCast *n = (ExprCast *)POOL_PTR(sp, ref);
     n->kind      = EXPR_CAST;
@@ -221,7 +242,7 @@ dvs_expr_t expr_cast(dvs_problem_t *sp, dvs_expr_t operand,
 dvs_expr_t expr_extract(dvs_problem_t *sp, dvs_expr_t operand,
                      uint32_t hi_bit, uint32_t lo_bit) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprExtract),
-                              (uint32_t)_Alignof(ExprExtract));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprExtract *n = (ExprExtract *)POOL_PTR(sp, ref);
     n->kind    = EXPR_EXTRACT;
@@ -234,7 +255,7 @@ dvs_expr_t expr_extract(dvs_problem_t *sp, dvs_expr_t operand,
 dvs_expr_t expr_concat(dvs_problem_t *sp, dvs_expr_t hi, dvs_expr_t lo,
                     uint32_t lo_width) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprConcat),
-                              (uint32_t)_Alignof(ExprConcat));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprConcat *n = (ExprConcat *)POOL_PTR(sp, ref);
     n->kind     = EXPR_CONCAT;
@@ -248,7 +269,7 @@ dvs_expr_t expr_concat(dvs_problem_t *sp, dvs_expr_t hi, dvs_expr_t lo,
 dvs_expr_t expr_array_select(dvs_problem_t *sp, uint32_t base_var_id,
                           uint32_t n_elems, dvs_expr_t result, dvs_expr_t index) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprArraySelect),
-                              (uint32_t)_Alignof(ExprArraySelect));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprArraySelect *n = (ExprArraySelect *)POOL_PTR(sp, ref);
     n->kind        = EXPR_ARRAY_SELECT;
@@ -262,7 +283,7 @@ dvs_expr_t expr_array_select(dvs_problem_t *sp, uint32_t base_var_id,
 dvs_expr_t expr_sum(dvs_problem_t *sp, dvs_expr_t result,
                  uint32_t n_vars, const dvs_expr_t *var_refs) {
     uint32_t total = (uint32_t)sizeof(ExprSum) + n_vars * (uint32_t)sizeof(dvs_expr_t);
-    dvs_expr_t ref = _pool_alloc(sp, total, (uint32_t)_Alignof(ExprSum));
+    dvs_expr_t ref = _pool_alloc(sp, total, DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprSum *n = (ExprSum *)POOL_PTR(sp, ref);
     n->kind    = EXPR_SUM;
@@ -276,7 +297,7 @@ dvs_expr_t expr_sum(dvs_problem_t *sp, dvs_expr_t result,
 
 dvs_expr_t expr_countones(dvs_problem_t *sp, dvs_expr_t result, dvs_expr_t operand) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprCountones),
-                              (uint32_t)_Alignof(ExprCountones));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprCountones *n = (ExprCountones *)POOL_PTR(sp, ref);
     n->kind    = EXPR_COUNTONES;
@@ -287,7 +308,7 @@ dvs_expr_t expr_countones(dvs_problem_t *sp, dvs_expr_t result, dvs_expr_t opera
 
 dvs_expr_t expr_clog2(dvs_problem_t *sp, dvs_expr_t result, dvs_expr_t operand) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ExprClog2),
-                              (uint32_t)_Alignof(ExprClog2));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ExprClog2 *n = (ExprClog2 *)POOL_PTR(sp, ref);
     n->kind    = EXPR_CLOG2;
@@ -305,7 +326,7 @@ dvs_expr_t problem_add_var(dvs_problem_t *sp, uint32_t var_id,
                         int64_t lo, int64_t hi) {
     if (width == 0 || width > DVS_MAX_WIDTH) return EXPR_NULL;
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(VarSpec),
-                              (uint32_t)_Alignof(VarSpec));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     VarSpec *v    = (VarSpec *)POOL_PTR(sp, ref);
     v->next       = sp->vars_head;
@@ -323,7 +344,7 @@ dvs_expr_t problem_add_var(dvs_problem_t *sp, uint32_t var_id,
 
 dvs_expr_t problem_add_constraint(dvs_problem_t *sp, dvs_expr_t root) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(ConstraintSpec),
-                              (uint32_t)_Alignof(ConstraintSpec));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     ConstraintSpec *c     = (ConstraintSpec *)POOL_PTR(sp, ref);
     c->next               = sp->constraints_head;
@@ -337,7 +358,7 @@ dvs_expr_t problem_add_constraint(dvs_problem_t *sp, dvs_expr_t root) {
 dvs_expr_t problem_add_source(dvs_problem_t *sp,
                            uint32_t n_vars, const uint32_t *var_ids) {
     uint32_t total = (uint32_t)sizeof(SourceSpec) + n_vars * (uint32_t)sizeof(uint32_t);
-    dvs_expr_t ref = _pool_alloc(sp, total, (uint32_t)_Alignof(SourceSpec));
+    dvs_expr_t ref = _pool_alloc(sp, total, DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     SourceSpec *s    = (SourceSpec *)POOL_PTR(sp, ref);
     s->next          = sp->sources_head;
@@ -355,7 +376,7 @@ dvs_expr_t problem_add_source(dvs_problem_t *sp,
 dvs_expr_t problem_add_all_different(dvs_problem_t *sp,
                                   uint32_t n_vars, const uint32_t *var_ids) {
     uint32_t total = (uint32_t)sizeof(AllDiffSpec) + n_vars * (uint32_t)sizeof(uint32_t);
-    dvs_expr_t ref = _pool_alloc(sp, total, (uint32_t)_Alignof(AllDiffSpec));
+    dvs_expr_t ref = _pool_alloc(sp, total, DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     AllDiffSpec *ad = (AllDiffSpec *)POOL_PTR(sp, ref);
     ad->next         = sp->allDiff_head;
@@ -372,7 +393,7 @@ dvs_expr_t problem_add_all_different(dvs_problem_t *sp,
 dvs_expr_t problem_add_soft_constraint(dvs_problem_t *sp, dvs_expr_t root,
                                     uint32_t priority) {
     dvs_expr_t ref = _pool_alloc(sp, (uint32_t)sizeof(SoftSpec),
-                              (uint32_t)_Alignof(SoftSpec));
+                              DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     SoftSpec *s       = (SoftSpec *)POOL_PTR(sp, ref);
     s->next           = sp->softs_head;
@@ -387,12 +408,13 @@ dvs_expr_t problem_add_dist(dvs_problem_t *sp, uint32_t var_id,
                         uint32_t n_entries, const dvs_dist_entry_t *entries) {
     uint32_t total = (uint32_t)sizeof(DistSpec) +
                      n_entries * (uint32_t)sizeof(dvs_dist_entry_t);
-    dvs_expr_t ref = _pool_alloc(sp, total, (uint32_t)_Alignof(DistSpec));
+    dvs_expr_t ref = _pool_alloc(sp, total, DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
     DistSpec *ds      = (DistSpec *)POOL_PTR(sp, ref);
     ds->next          = sp->dists_head;
     ds->var_id        = var_id;
     ds->n_entries     = n_entries;
+    ds->index         = EXPR_NULL;
     dvs_dist_entry_t *dst    = (dvs_dist_entry_t *)(ds + 1);
     for (uint32_t i = 0; i < n_entries; i++)
         dst[i] = entries[i];

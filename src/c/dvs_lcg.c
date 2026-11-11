@@ -168,8 +168,8 @@ uint32_t clause_db_add(ClauseDB *db, uint32_t n_lits, const Literal *lits,
 
     cl->n_lits = n_lits;
     cl->lbd = lbd;
-    cl->watch0 = 0;
-    cl->watch1 = n_lits > 1 ? 1 : 0;
+    cl->last_used = db->epoch;
+    cl->_pad = 0;
     memcpy((Literal *)(cl + 1), lits, n_lits * sizeof(Literal));
 
     uint32_t idx = db->n_clauses++;
@@ -324,7 +324,10 @@ uint32_t lcg_n_clauses(const LCGCtx *lcg)  { return lcg ? lcg->clause_db.n_claus
 
 void lcg_reset(LCGCtx *lcg) {
     ClauseDB *db = &lcg->clause_db;
-    if (db->clauses) memset(db->clauses, 0, db->clauses_cap * sizeof(Clause *));
+    /* Only slots below n_clauses are ever read (clause_db_add fills each
+     * before it counts it): clearing all clauses_cap of them was most of a
+     * small solve's reset. */
+    if (db->clauses) memset(db->clauses, 0, db->n_clauses * sizeof(Clause *));
     db->n_clauses = 0;
     if (db->watch_lb) memset(db->watch_lb, 0, db->n_watch_vars * sizeof(WatchEntry *));
     if (db->watch_ub) memset(db->watch_ub, 0, db->n_watch_vars * sizeof(WatchEntry *));
@@ -342,6 +345,76 @@ void lcg_reset(LCGCtx *lcg) {
     if (lcg->seen)     memset(lcg->seen, 0, 2u * vs->n_vars * sizeof(uint8_t));
     if (lcg->seen_lit) memset(lcg->seen_lit, 0, 2u * vs->n_vars * sizeof(Literal));
     lcg->n_learnt   = 0;
+    lcg->n_analyses = 0;
+}
+
+/* Does `cl` exclude one value of a variable: x <= k-1 \/ x >= k+1? */
+static int _excludes_value(const Clause *cl) {
+    const Literal *l = (const Literal *)(cl + 1);
+    for (uint32_t i = 0; i < cl->n_lits; i++)
+        for (uint32_t j = 0; j < cl->n_lits; j++)
+            if (l[i].var_id == l[j].var_id && !l[i].is_lb && l[j].is_lb
+                    && (uint64_t)l[j].bound - (uint64_t)l[i].bound == 2u)
+                return 1;
+    return 0;
+}
+
+/* A learnt clause is implied by the constraints and the root bounds it was
+ * learnt under (its root literals are dropped), so keeping it is sound while
+ * the next solve's root is at least as tight. The caller resets instead when
+ * the last solve's root had bounds the next one lacks: pins, a relaxed soft
+ * constraint. (randc exclusions only grow until the handle recompiles.)
+ * Which clauses are worth
+ * keeping is another matter. Most learnt under one seed exclude a value a
+ * pick tried (`x != k`, perhaps under a condition; the full-assignment nogood
+ * of an all-different is a disjunction of them): another seed seldom picks
+ * k again, and kept they pile up and slow every bound change, so they are
+ * never kept. A few (`x` lies in one of two ranges, from a wrapping
+ * `x + y <= c`) fire on every call, and dropped they are learnt again at the
+ * cost of hundreds of conflicts. A clause gets one epoch to fire; each time
+ * it does, it gets another. So what is kept is bounded by the work of the
+ * last call. */
+void lcg_retain_used(LCGCtx *lcg) {
+    ClauseDB *db = &lcg->clause_db;
+    size_t bytes = 0;
+    for (uint32_t i = 0; i < db->n_clauses; i++) {
+        const Clause *cl = db->clauses[i];
+        if (cl && cl->last_used == db->epoch && !_excludes_value(cl))
+            bytes += sizeof(Clause) + cl->n_lits * sizeof(Literal);
+    }
+    /* Copy the kept clauses out of the arena, empty it, and add them back:
+     * that compacts the array and rebuilds the watch lists. Out of memory,
+     * keep none (dropping a clause is always sound). */
+    char *keep = bytes ? (char *)DVS_ALLOC(db->alloc, bytes) : NULL;
+    size_t at = 0;
+    for (uint32_t i = 0; keep && i < db->n_clauses; i++) {
+        const Clause *cl = db->clauses[i];
+        if (!cl || cl->last_used != db->epoch || _excludes_value(cl)) continue;
+        size_t sz = sizeof(Clause) + cl->n_lits * sizeof(Literal);
+        memcpy(keep + at, cl, sz);
+        at += sz;
+    }
+    memset(db->clauses, 0, db->n_clauses * sizeof(Clause *));
+    db->n_clauses = 0;
+    memset(db->watch_lb, 0, db->n_watch_vars * sizeof(WatchEntry *));
+    memset(db->watch_ub, 0, db->n_watch_vars * sizeof(WatchEntry *));
+    dvs_spool_release(&db->arena, db->arena_empty);
+    for (size_t p = 0; p < at;) {
+        const Clause *cl = (const Clause *)(keep + p);
+        clause_db_add(db, cl->n_lits, (const Literal *)(cl + 1), cl->lbd);
+        p += sizeof(Clause) + cl->n_lits * sizeof(Literal);
+    }
+    if (keep) DVS_RELEASE(db->alloc, keep, bytes);
+    db->epoch++;
+
+    /* The next call orders its decisions as the first did (smallest domain
+     * first until a conflict). With n_analyses kept, zero activity decides
+     * in declaration order, which drew dist.dist_mixed's `sz` against its
+     * weights; that was the pre-2026-11-08 behaviour. */
+    VSIDS *vs = &lcg->vsids;
+    if (vs->activity) memset(vs->activity, 0, vs->n_vars * sizeof(double));
+    vs->var_inc = 1.0;
+    lcg->n_learnt = 0;
     lcg->n_analyses = 0;
 }
 

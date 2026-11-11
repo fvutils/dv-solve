@@ -58,6 +58,9 @@ def _which(prog: str) -> Optional[str]:
     return shutil.which(prog)
 
 
+# The capture a native_replay config's run writes, in its run directory.
+NATIVE_CAPTURE = "capture.dvscap"
+
 @dc.dataclass
 class Config:
     id: str
@@ -73,6 +76,9 @@ class Config:
     replay_pass: str = "api-cache"   # the one bench_vlt_replay pass timed
     replay_cmd: Optional[str] = None  # e.g. "z3 -smt2": time the captured session text as one process
     replay_reps: int = 1
+    # dvs_capture_replay: time the dv-solve calls of a --solver-dvs image, captured
+    # (DVS_CAPTURE) from its run, without Verilator: the floor of the native flow
+    native_replay: Optional[str] = None
     available: bool = False
     reason: str = ""
 
@@ -85,6 +91,8 @@ class Config:
         env = dict(self.env)
         if self.solver and self.simulator == "verilator":
             env["VERILATOR_SOLVER"] = self.solver
+        if self.native_replay:
+            env["DVS_CAPTURE"] = NATIVE_CAPTURE
         return env
 
     def run_plusargs(self) -> List[str]:
@@ -109,7 +117,7 @@ class Config:
                 self.simulator, ", ".join(SIMULATORS))
             return self
         if self.simulator != "verilator" and (self.solver or self.sampler or self.replay
-                                              or self.replay_cmd):
+                                              or self.replay_cmd or self.native_replay):
             self.available, self.reason = False, \
                 "solver/sampler/replay are Verilator-only (simulator %s)" % self.simulator
             return self
@@ -129,6 +137,13 @@ class Config:
                 self.available, self.reason = False, "replay tool not found: %s" % self.replay
                 return self
             self.replay = replay
+        if self.native_replay:
+            native_replay = _which(self.native_replay)
+            if native_replay is None:
+                self.available, self.reason = False, \
+                    "native replay tool not found: %s" % self.native_replay
+                return self
+            self.native_replay = native_replay
         if self.replay_cmd:
             words = shlex.split(self.replay_cmd)
             exe = _which(words[0]) if words else None
@@ -145,14 +160,15 @@ class Config:
 
 def dvs_defaults() -> Dict[str, str]:
     """When simbench runs from a dv-solve checkout (bench/simbench), default the
-    dv-solve tools to that checkout's build: SIMBENCH_DVS_SMT2 and
-    SIMBENCH_DVS_REPLAY. Benchmarking any other dv-solve needs them set."""
+    dv-solve tools to that checkout's build: SIMBENCH_DVS_SMT2,
+    SIMBENCH_DVS_REPLAY and SIMBENCH_DVS_CAPTURE_REPLAY. Benchmarking any other dv-solve needs them set."""
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
     build = os.environ.get("SIMBENCH_DVS_BUILD") or os.path.join(root, "build")
     if not os.path.exists(os.path.join(root, "src", "c", "dv_solve.h")):
         return {}
     return {"SIMBENCH_DVS_SMT2": os.path.join(build, "dv-solve-smt2"),
-            "SIMBENCH_DVS_REPLAY": os.path.join(build, "bench_vlt_replay")}
+            "SIMBENCH_DVS_REPLAY": os.path.join(build, "bench_vlt_replay"),
+            "SIMBENCH_DVS_CAPTURE_REPLAY": os.path.join(build, "dvs_capture_replay")}
 
 
 def default_path() -> str:
@@ -179,7 +195,9 @@ def _parse(path: str, environ) -> List[Config]:
             replay=expand(str(c["replay"]), environ) if c.get("replay") else None,
             replay_pass=str(c.get("replay_pass") or "api-cache"),
             replay_cmd=expand(str(c["replay_cmd"]), environ) if c.get("replay_cmd") else None,
-            replay_reps=int(c.get("replay_reps") or 1)))
+            replay_reps=int(c.get("replay_reps") or 1),
+            native_replay=expand(str(c["native_replay"]), environ)
+            if c.get("native_replay") else None))
     return ret
 
 

@@ -3,8 +3,10 @@
  *
  * This header declares everything a C program needs to build a constraint
  * problem, solve it and read the solution. It is installed as
- * <dv_solve/dv_solve.h>. The other headers installed beside it are internal:
- * they may change or disappear in any release.
+ * <dv_solve/dv_solve.h>. The problem-building half is in dvs_writer.h, which
+ * this header includes and which can be used alone. The other headers
+ * installed beside them are internal: they may change or disappear in any
+ * release.
  *
  * A problem is built with a dvs_builder_t, finalized into a dvs_problem_t,
  * and compiled into a dvs_ctx_t, which solves it:
@@ -36,6 +38,9 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "dvs_api.h"
+#include "dvs_writer.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,101 +49,15 @@ extern "C" {
 /* Types                                                               */
 /* ------------------------------------------------------------------ */
 
-/** Builds a problem; see dvs_builder_create(). */
-typedef struct dvs_builder_s dvs_builder_t;
-
-/** A finalized problem, ready to compile; see dvs_builder_finalize(). */
-typedef struct dvs_problem_s dvs_problem_t;
-
 /** A solver context holding one compiled problem; see dvs_solver_create(). */
 typedef struct dvs_ctx_s dvs_ctx_t;
-
-/** A memory allocator. Every function that takes one accepts NULL, meaning
- *  malloc and free. Its members are in dvs_alloc.h: alloc, release, and an
- *  optional resize (leave it NULL and the solver copies to grow a block). */
-typedef struct dvs_alloc_s dvs_alloc_t;
 
 /** Supplies the solver context's working memory; see dvs_block_alloc_create(). */
 typedef struct dvs_block_alloc_s dvs_block_alloc_t;
 
-/** A reference to an expression or a constraint inside a builder. */
-typedef uint32_t dvs_expr_t;
-
-/** The dvs_expr_t a builder function returns when it cannot allocate memory. */
-#define DVS_EXPR_NULL ((dvs_expr_t)0xFFFFFFFFu)
-
-/** The widest variable, constant or expression the engine solves, in bits.
- *  Widths are 32-bit in the API; this is the engine's own ceiling, set so
- *  bit-blasting stays within 32-bit node and buffer arithmetic. A wider
- *  variable or constant is refused when it is built (DVS_EXPR_NULL), and a
- *  wider intermediate expression fails the solve. Variables of 1 to 64 bits
- *  go to the CDCL engine; wider ones are bit-blasted (BV-SAT). */
-#define DVS_MAX_WIDTH (1u << 24)
-
 /** DVS_MAX_WIDTH of the loaded library, for bindings that can't read the
  *  header. */
-uint32_t dvs_max_width(void);
-
-/** Binary operators, for dvs_builder_expr_binary(). */
-typedef enum {
-    DVS_BIN_ADD = 0,    /* +   */
-    DVS_BIN_SUB,        /* -   */
-    DVS_BIN_MUL,        /* *   */
-    DVS_BIN_DIV,        /* /   */
-    DVS_BIN_MOD,        /* %   */
-    DVS_BIN_BAND,       /* &   */
-    DVS_BIN_BOR,        /* |   */
-    DVS_BIN_BXOR,       /* ^   */
-    DVS_BIN_LSHIFT,     /* <<  */
-    DVS_BIN_RSHIFT,     /* >>  (logical)                                  */
-    DVS_BIN_EQ,         /* ==  */
-    DVS_BIN_NEQ,        /* !=  */
-    DVS_BIN_LT,         /* <   */
-    DVS_BIN_LTE,        /* <=  */
-    DVS_BIN_GT,         /* >   */
-    DVS_BIN_GTE,        /* >=  */
-    DVS_BIN_AND,        /* &&  */
-    DVS_BIN_OR,         /* ||  */
-    DVS_BIN_ASHR,       /* >>> (arithmetic in a signed expression, else >>) */
-    /* Typed operators: the operator, not the operand types, says how the
-     * operands are read. Each operand is extended to the wider operand's
-     * width by the operator's signedness (sign for S*, zero for U* and
-     * LSHR), and the operator works at that width: the node is
-     * self-determined, as an SMT-LIB term is. Division by zero is defined as
-     * in SMT-LIB (no SV x): x UDIV 0 is all ones, x UREM 0 is x, x SDIV 0 is
-     * -1 for x >= 0 and 1 for x < 0, x SREM 0 and x SMOD 0 are x. */
-    DVS_BIN_ULT,        /* <  unsigned (bvult)                            */
-    DVS_BIN_ULE,        /* <= unsigned (bvule)                            */
-    DVS_BIN_UGT,        /* >  unsigned (bvugt)                            */
-    DVS_BIN_UGE,        /* >= unsigned (bvuge)                            */
-    DVS_BIN_SLT,        /* <  signed (bvslt)                              */
-    DVS_BIN_SLE,        /* <= signed (bvsle)                              */
-    DVS_BIN_SGT,        /* >  signed (bvsgt)                              */
-    DVS_BIN_SGE,        /* >= signed (bvsge)                              */
-    DVS_BIN_UDIV,       /* /  unsigned (bvudiv)                           */
-    DVS_BIN_UREM,       /* %  unsigned (bvurem)                           */
-    DVS_BIN_SDIV,       /* /  signed, truncating (bvsdiv)                 */
-    DVS_BIN_SREM,       /* %  signed, the dividend's sign (bvsrem)        */
-    DVS_BIN_SMOD,       /* signed modulo, the divisor's sign (bvsmod)     */
-    DVS_BIN_LSHR,       /* >> logical, whatever the operand (bvlshr)      */
-} dvs_binop_t;
-
-/** Unary operators, for dvs_builder_expr_unary(). */
-typedef enum {
-    DVS_UN_NEG    = 0,  /* -  */
-    DVS_UN_NOT    = 1,  /* !  */
-    DVS_UN_INVERT = 2,  /* ~  */
-} dvs_unop_t;
-
-/** One entry of a weighted distribution; see dvs_builder_add_dist(). */
-typedef struct {
-    int64_t  lo;           /* lowest value of the range                     */
-    int64_t  hi;           /* highest value of the range (== lo for a value) */
-    uint32_t weight;
-    uint8_t  is_per_value; /* 1: each value gets `weight` (SV :=);
-                            * 0: the range shares `weight` (SV :/)          */
-    uint8_t  _dpad[3];
-} dvs_dist_entry_t;
+DVS_API uint32_t dvs_max_width(void);
 
 /** The result of dvs_solver_solve(). */
 typedef enum {
@@ -168,6 +87,11 @@ typedef struct {
     uint32_t max_shave_iters; /* search tuning; leave 0                     */
     uint32_t time_limit_ms;   /* wall-clock budget for this solve; 0 = the
                                * default                                    */
+    uint8_t  canonical;       /* 1: the values depend only on the
+                               * constraints, the pinned values and the
+                               * seed, never on what earlier solves learnt
+                               * (a fixed variable order, per-variable
+                               * candidate draws; clauses only reject)      */
 } dvs_solve_opts_t;
 
 /* dvs_solver_compile() return codes. A positive value is the number of
@@ -179,198 +103,14 @@ typedef struct {
                                              * an expression wider than
                                              * DVS_MAX_WIDTH bits or nested
                                              * too deeply, or
-                                             * an all-different over more
-                                             * than 16 variables or one
-                                             * wider than 32 bits            */
+                                             * an all-different over a
+                                             * variable wider than 32 bits   */
 #define DVS_COMPILE_BAD_VAR           (-4)  /* variable ids are not 0..n-1, each
                                              * declared once, or an expression
                                              * names an undeclared variable  */
-
-/* ------------------------------------------------------------------ */
-/* Building a problem                                                  */
-/* ------------------------------------------------------------------ */
-
-/**
- * Create a builder.
- *
- * @param block_size  Size of each memory block the builder grows by; 0 for
- *                    the default (4096 bytes).
- * @param alloc       Allocator, or NULL for malloc.
- * @return  The builder, or NULL if memory could not be allocated.
- */
-dvs_builder_t *dvs_builder_create(uint32_t block_size, dvs_alloc_t *alloc);
-
-/** Free the builder. Problems it finalized are not freed. */
-void dvs_builder_destroy(dvs_builder_t *b);
-
-/** Empty the builder so it can build another problem, keeping its memory. */
-void dvs_builder_reset(dvs_builder_t *b);
-
-/**
- * Declare variable `var_id`.
- *
- * @param var_id     The variable's id, used in dvs_builder_expr_var() and
- *                   dvs_solver_get_value(). A problem with n variables uses
- *                   the ids 0 to n-1, each declared once.
- * @param width      Width in bits, 1 to DVS_MAX_WIDTH. Over 64 bits the
- *                   variable is solved by bit-blasting (BV-SAT), and lo/hi
- *                   do not bound it. DVS_EXPR_NULL for a width of 0 or over
- *                   DVS_MAX_WIDTH.
- * @param is_signed  1 if the variable is signed.
- * @param lo, hi     The variable's value must lie in [lo, hi].
- */
-dvs_expr_t dvs_builder_add_var(dvs_builder_t *b, uint32_t var_id,
-                               uint32_t width, uint8_t is_signed,
-                               int64_t lo, int64_t hi);
-
-/** Require the Boolean expression `root` to hold. */
-dvs_expr_t dvs_builder_add_constraint(dvs_builder_t *b, dvs_expr_t root);
-
-/** Require the variables to take pairwise different values (SV `unique`). */
-dvs_expr_t dvs_builder_add_all_different(dvs_builder_t *b, uint32_t n_vars,
-                                         const uint32_t *var_ids);
-
-/**
- * Ask for `root` to hold where possible. Priority 0 is the most important:
- * when soft constraints conflict, those with the highest priority number are
- * dropped first.
- */
-dvs_expr_t dvs_builder_add_soft_constraint(dvs_builder_t *b, dvs_expr_t root,
-                                           uint32_t priority);
-
-/**
- * Put variable `var_id` in solve-order stage `stage` (SV `solve ... before`):
- * the variables of stage 1 are chosen first, then those of stage 2, and so
- * on; variables in stage 0 (the default) come last. Each stage is chosen
- * among the values that leave the constraints satisfiable, and in a seeded
- * fair_pick solve the last stage is uniform over the solutions that remain.
- * Declare the variable first.
- *
- * @return 0, or -1 if no variable `var_id` has been declared.
- */
-int dvs_builder_set_var_order(dvs_builder_t *b, uint32_t var_id,
-                              uint8_t stage);
-
-/**
- * What a variable is to the solve (SV terms). The value is stored in the
- * problem, so the numbers are fixed.
- */
-typedef enum {
-    DVS_VAR_RAND  = 0,  /* rand: a search decision (the default)          */
-    DVS_VAR_AUX   = 1,  /* compiler-generated: never a search decision; its
-                         * value follows from the constraints that define it */
-    DVS_VAR_RANDC = 2,  /* randc: solved as RAND; dvs_randomize() keeps the
-                         * per-var history                                */
-    DVS_VAR_STATE = 3   /* state: read per call and pinned, never sampled;
-                         * solved as RAND when nothing pins it            */
-} dvs_var_kind_t;
-
-/**
- * Set the kind of variable `var_id`. Declare the variable first.
- *
- * @return 0, or -1 if no variable `var_id` has been declared or `kind` is
- *         not a dvs_var_kind_t.
- */
-int dvs_builder_set_var_kind(dvs_builder_t *b, uint32_t var_id,
-                             dvs_var_kind_t kind);
-
-/** Give variable `var_id` a weighted distribution (SV `dist`). */
-dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,
-                                uint32_t n_entries,
-                                const dvs_dist_entry_t *entries);
-
-/** A constant. Like an unsized SystemVerilog literal it is 32 bits wide,
- *  unless the value doesn't fit in 32 bits. */
-dvs_expr_t dvs_builder_expr_const(dvs_builder_t *b, int64_t value,
-                                  uint8_t is_signed);
-
-/** A sized constant of `width` bits (1..DVS_MAX_WIDTH), signed when `is_signed`,
- *  given as `n_limbs` = ceil(width / 64) 64-bit limbs, least significant
- *  first: limbs[0] holds bits 63:0. Bits at and above `width` are ignored.
- *  It is one node whatever its width, so it is how to spell a constant wider
- *  than 64 bits. Returns EXPR_NULL for a bad width or limb count. */
-dvs_expr_t dvs_builder_expr_const_wide(dvs_builder_t *b, uint32_t n_limbs,
-                                       const uint64_t *limbs, uint32_t width,
-                                       uint8_t is_signed);
-
-/** A reference to variable `var_id`. */
-dvs_expr_t dvs_builder_expr_var(dvs_builder_t *b, uint32_t var_id);
-
-/** `lhs op rhs`. */
-dvs_expr_t dvs_builder_expr_binary(dvs_builder_t *b, dvs_binop_t op,
-                                   dvs_expr_t lhs, dvs_expr_t rhs);
-
-/** `op operand`. */
-dvs_expr_t dvs_builder_expr_unary(dvs_builder_t *b, dvs_unop_t op,
-                                  dvs_expr_t operand);
-
-/** `cond ? then_e : else_e`. With Boolean arms, an if/else constraint. */
-dvs_expr_t dvs_builder_expr_ite(dvs_builder_t *b, dvs_expr_t cond,
-                                dvs_expr_t then_e, dvs_expr_t else_e);
-
-/** `value inside {[lo:hi]}`. */
-dvs_expr_t dvs_builder_expr_in_range(dvs_builder_t *b, dvs_expr_t value,
-                                     dvs_expr_t lo, dvs_expr_t hi);
-
-/** `value inside {elems[0], elems[1], ...}`. */
-dvs_expr_t dvs_builder_expr_in_set(dvs_builder_t *b, dvs_expr_t value,
-                                   uint32_t n_elems, const dvs_expr_t *elems);
-
-/** `value inside {[los[0]:his[0]], [los[1]:his[1]], ...}`. */
-dvs_expr_t dvs_builder_expr_in_ranges(dvs_builder_t *b, dvs_expr_t value,
-                                      uint32_t n_ranges, const dvs_expr_t *los,
-                                      const dvs_expr_t *his);
-
-/** Zero-extend (sign_extend 0) or sign-extend `operand` from `from_bits`
- *  to `to_bits`. */
-dvs_expr_t dvs_builder_expr_extend(dvs_builder_t *b, dvs_expr_t operand,
-                                   uint32_t from_bits, uint32_t to_bits,
-                                   uint8_t sign_extend);
-
-/** A cast of `operand` to a `to_bits`-bit integer, signed when `to_signed`:
- *  SystemVerilog's `T'(operand)`. When `to_bits` is wider than the operand,
- *  the operand is evaluated at `to_bits` (an assignment-like context), so
- *  `cast(a * b, 64, 0)` of two 32-bit variables does not wrap at 32 bits.
- *  The value is truncated to `to_bits`, or extended by the operand's own
- *  signedness, and then read as signed or unsigned. */
-dvs_expr_t dvs_builder_expr_cast(dvs_builder_t *b, dvs_expr_t operand,
-                                 uint32_t to_bits, uint8_t to_signed);
-
-/** `operand[hi_bit:lo_bit]`. */
-dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand,
-                                    uint32_t hi_bit, uint32_t lo_bit);
-
-/** `{hi, lo}`, where `lo` is `lo_width` bits wide. */
-dvs_expr_t dvs_builder_expr_concat(dvs_builder_t *b, dvs_expr_t hi,
-                                   dvs_expr_t lo, uint32_t lo_width);
-
-/** The constraint `result == var_refs[0] + var_refs[1] + ...`. Pass it to
- *  dvs_builder_add_constraint(). */
-dvs_expr_t dvs_builder_expr_sum(dvs_builder_t *b, dvs_expr_t result,
-                                uint32_t n_vars, const dvs_expr_t *var_refs);
-
-/** The constraint `result == $countones(operand)`. */
-dvs_expr_t dvs_builder_expr_countones(dvs_builder_t *b, dvs_expr_t result,
-                                      dvs_expr_t operand);
-
-/** The constraint `result == $clog2(operand)`. */
-dvs_expr_t dvs_builder_expr_clog2(dvs_builder_t *b, dvs_expr_t result,
-                                  dvs_expr_t operand);
-
-/**
- * Produce the finished problem. The builder is unchanged and can go on to be
- * reset or destroyed.
- *
- * @param size  If not NULL, receives the problem's size in bytes, which
- *              dvs_builder_free_problem() needs.
- * @return  The problem, or NULL if memory could not be allocated. Free it
- *          with dvs_builder_free_problem(), and not before every context
- *          compiled from it is destroyed.
- */
-dvs_problem_t *dvs_builder_finalize(dvs_builder_t *b, size_t *size);
-
-/** Free a problem returned by dvs_builder_finalize(). */
-void dvs_builder_free_problem(dvs_builder_t *b, dvs_problem_t *p, size_t size);
+#define DVS_COMPILE_ARRAYS            (-5)  /* the problem has arrays: only a
+                                             * handle solves it
+                                             * (dvs_randomize_arrays)        */
 
 /* ------------------------------------------------------------------ */
 /* Solving                                                             */
@@ -382,11 +122,11 @@ void dvs_builder_free_problem(dvs_builder_t *b, dvs_problem_t *p, size_t size);
  * @param alloc       Allocator, or NULL for malloc.
  * @param block_size  Size of each block; 1 MiB is a good default.
  */
-dvs_block_alloc_t *dvs_block_alloc_create(dvs_alloc_t *alloc,
-                                          size_t block_size);
+DVS_API dvs_block_alloc_t *dvs_block_alloc_create(dvs_alloc_t *alloc,
+                                                  size_t block_size);
 
 /** Free a block allocator. Destroy every context using it first. */
-void dvs_block_alloc_destroy(dvs_block_alloc_t *ba);
+DVS_API void dvs_block_alloc_destroy(dvs_block_alloc_t *ba);
 
 /**
  * Create a solver context. Its memory comes from `alloc` and grows with
@@ -396,10 +136,10 @@ void dvs_block_alloc_destroy(dvs_block_alloc_t *ba);
  * @return  The context, or NULL when memory runs out. Release it with
  *          dvs_solver_free().
  */
-dvs_ctx_t *dvs_solver_new(dvs_alloc_t *alloc);
+DVS_API dvs_ctx_t *dvs_solver_new(dvs_alloc_t *alloc);
 
 /** Release a context made by dvs_solver_new(), and all its memory. */
-void dvs_solver_free(dvs_ctx_t *ctx);
+DVS_API void dvs_solver_free(dvs_ctx_t *ctx);
 
 /**
  * Create a solver context inside a buffer you supply: the embedded option,
@@ -415,12 +155,12 @@ void dvs_solver_free(dvs_ctx_t *ctx);
  *                     fit makes dvs_solver_compile() return DVS_COMPILE_NOMEM.
  * @return  The context (at static_buf), or NULL if static_size is too small.
  */
-dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
-                             dvs_block_alloc_t *block_alloc);
+DVS_API dvs_ctx_t *dvs_solver_create(void *static_buf, size_t static_size,
+                                     dvs_block_alloc_t *block_alloc);
 
 /** Release the memory of a context made by dvs_solver_create(). static_buf
  *  itself is yours to free. */
-void dvs_solver_destroy(dvs_ctx_t *ctx);
+DVS_API void dvs_solver_destroy(dvs_ctx_t *ctx);
 
 /** The engines a context solves on (dvs_solver_set_engine). */
 enum {
@@ -465,34 +205,37 @@ int dvs_solver_engine(const dvs_ctx_t *ctx);
  *          and returns DVS_COMPILE_OK, unless it needs CDCL
  *          (dvs_solver_set_engine).
  */
-int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *p);
+DVS_API int dvs_solver_compile(dvs_ctx_t *ctx, dvs_problem_t *p);
 
 /**
  * Search for a solution.
  *
  * @param opts  Options, or NULL for the defaults.
  */
-dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts);
+DVS_API dvs_result_t dvs_solver_solve(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts);
 
 /** The value of variable `var_id` in the solution. Valid after
  *  dvs_solver_solve() returns DVS_SOLVE_OK. */
-int64_t dvs_solver_get_value(const dvs_ctx_t *ctx, uint32_t var_id);
+DVS_API int64_t dvs_solver_get_value(const dvs_ctx_t *ctx, uint32_t var_id);
 
 /** The values of `n` variables: out[i] receives the value of var_ids[i]. */
-void dvs_solver_get_values(const dvs_ctx_t *ctx, uint32_t n,
-                           const uint32_t *var_ids, int64_t *out);
+DVS_API void dvs_solver_get_values(const dvs_ctx_t *ctx, uint32_t n,
+                                   const uint32_t *var_ids, int64_t *out);
 
 /** Clear the previous solution so dvs_solver_solve() can run again. Call it
  *  before every solve after the first; it also removes pins. */
-void dvs_solver_reset(dvs_ctx_t *ctx);
+DVS_API void dvs_solver_reset(dvs_ctx_t *ctx);
 
 /**
  * Fix variable `var_id` to `value` for the following solves, until
- * dvs_solver_reset() (SV rand_mode(0), or a state variable).
+ * dvs_solver_reset() (SV rand_mode(0), or a state variable). The pin is
+ * hard: soft constraints give way to it.
  *
- * @return  0, or -1 if the value contradicts the constraints.
+ * @return  0, or -1 if the value contradicts the constraints. With soft
+ *          constraints a contradiction is left to the solve, which relaxes
+ *          them and is DVS_SOLVE_UNSAT if that is not enough.
  */
-int dvs_solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
+DVS_API int dvs_solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
 
 /**
  * Remove `value` from the values variable `var_id` may take. Unlike a pin,
@@ -501,7 +244,7 @@ int dvs_solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
  *
  * @return  0, or -1 if no value would remain.
  */
-int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
+DVS_API int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
 
 /**
  * Add the constraints of problem `p` to an already compiled context. As with
@@ -516,12 +259,12 @@ int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
  * @return  The same codes as dvs_solver_compile(). `p` may name variables
  *          the context already has without declaring them.
  */
-int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *p);
+DVS_API int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *p);
 
 /** The number of variables in the context: those its problems declared and
  *  those the compile made for itself. A problem passed to
  *  dvs_solver_add_constraint() numbers its new variables from here. */
-uint32_t dvs_solver_n_vars(const dvs_ctx_t *ctx);
+DVS_API uint32_t dvs_solver_n_vars(const dvs_ctx_t *ctx);
 
 /**
  * Save the context's state.
@@ -531,12 +274,12 @@ uint32_t dvs_solver_n_vars(const dvs_ctx_t *ctx);
  *          32 open checkpoints; one from dvs_solver_new() grows its stack
  *          (to about 65,000), and fails only when out of memory.
  */
-int dvs_solver_checkpoint(dvs_ctx_t *ctx);
+DVS_API int dvs_solver_checkpoint(dvs_ctx_t *ctx);
 
 /** Return to the state saved by dvs_solver_checkpoint(), dropping pins and
  *  constraints added since. Checkpoint `cp` and every later one are
  *  discarded; take a new checkpoint to restore to the same state again. */
-void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp);
+DVS_API void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp);
 
 /**
  * Check the current solution against every constraint of `p`, the problem
@@ -549,7 +292,7 @@ void dvs_solver_restore(dvs_ctx_t *ctx, uint32_t cp);
  * @return  0 if every checked constraint holds, otherwise the number
  *          violated.
  */
-int dvs_solver_validate_model(dvs_ctx_t *ctx, dvs_problem_t *p, FILE *err);
+DVS_API int dvs_solver_validate_model(dvs_ctx_t *ctx, dvs_problem_t *p, FILE *err);
 
 /* ------------------------------------------------------------------ */
 /* Oracle check                                                        */
@@ -613,11 +356,11 @@ typedef struct {
  * @return  The oracle, or NULL if the solver could not be started or the run
  *          directory created (the reason is reported on `err`).
  */
-dvs_oracle_t *dvs_oracle_create(const dvs_oracle_opts_t *opts, FILE *err);
+DVS_API dvs_oracle_t *dvs_oracle_create(const dvs_oracle_opts_t *opts, FILE *err);
 
 /** Finalise run.json, stop the reference solver and free the oracle. Detach
  *  (or destroy) every context using it first. */
-void dvs_oracle_destroy(dvs_oracle_t *o);
+DVS_API void dvs_oracle_destroy(dvs_oracle_t *o);
 
 /**
  * Check every answer of `ctx` with `o` from now on; NULL detaches. Attach
@@ -628,16 +371,16 @@ void dvs_oracle_destroy(dvs_oracle_t *o);
  *               randomized), or NULL.
  * @return  0, or -1 if `ctx` is NULL or memory ran out.
  */
-int dvs_solver_set_oracle(dvs_ctx_t *ctx, dvs_oracle_t *o, const char *label);
+DVS_API int dvs_solver_set_oracle(dvs_ctx_t *ctx, dvs_oracle_t *o, const char *label);
 
 /** The result of the most recent query (DVS_ORACLE_RES_*). */
-int dvs_oracle_last_result(const dvs_oracle_t *o);
+DVS_API int dvs_oracle_last_result(const dvs_oracle_t *o);
 
 /** Totals so far. */
-void dvs_oracle_get_stats(const dvs_oracle_t *o, dvs_oracle_stats_t *st);
+DVS_API void dvs_oracle_get_stats(const dvs_oracle_t *o, dvs_oracle_stats_t *st);
 
 /** The run directory. Valid until dvs_oracle_destroy(). */
-const char *dvs_oracle_run_dir(const dvs_oracle_t *o);
+DVS_API const char *dvs_oracle_run_dir(const dvs_oracle_t *o);
 
 /**
  * Write problem `p` as a stand-alone SMT-LIB2 (QF_BV) script: the variables
@@ -647,7 +390,7 @@ const char *dvs_oracle_run_dir(const dvs_oracle_t *o);
  * @return  0; -1 if part of the problem could not be translated (the script
  *          says what) or the write failed.
  */
-int dvs_problem_write_smt2(const dvs_problem_t *p, FILE *out);
+DVS_API int dvs_problem_write_smt2(const dvs_problem_t *p, FILE *out);
 
 /* ------------------------------------------------------------------ */
 /* Problem handles: one randomize() call site (docs/verilator_problem_buffer.md) */
@@ -674,38 +417,56 @@ typedef struct {
 /**
  * Make a handle for the problem image `buf` of `size` bytes (as
  * dvs_builder_finalize() returns it). The image is copied: `buf` may be freed
- * or be read-only. It is compiled on the first dvs_randomize().
+ * or be read-only, and need not be aligned. It is compiled on the first
+ * dvs_randomize().
  *
- * @return  The handle, or NULL if `size` is too small or memory runs out.
+ * @return  The handle, or NULL if the image is not a well-formed problem of
+ *          DVS_PROBLEM_FORMAT_VERSION (checked before anything in it is
+ *          used: the header, then every offset is in range and aligned), or
+ *          memory runs out.
  */
-dvs_handle_t *dvs_handle_new(const void *buf, size_t size);
+DVS_API dvs_handle_t *dvs_handle_new(const void *buf, size_t size);
 
 /** Release a handle and its compiled context. NULL is ignored. */
-void dvs_handle_free(dvs_handle_t *h);
+DVS_API void dvs_handle_free(dvs_handle_t *h);
 
 /** The number of entries dvs_randomize() reads from `refs`: one past the
- *  highest variable id the problem declares. */
-uint32_t dvs_handle_n_vars(const dvs_handle_t *h);
+ *  highest variable id the problem declares. A problem with arrays is solved
+ *  by dvs_randomize_arrays() alone. */
+DVS_API uint32_t dvs_handle_n_vars(const dvs_handle_t *h);
 
 /**
  * Choose the engine before the first dvs_randomize(): the handle's context
- * gets it (dvs_solver_set_engine, which describes AUTO, the default).
+ * gets it (dvs_solver_set_engine, which describes AUTO, the default). A
+ * problem with STATE or RANDC variables, soft constraints, dist or
+ * solve-order stays on CDCL: the bit-blast engine has no pins or value
+ * exclusion yet, and its resample ignores the others.
  *
  * @return  0; -1 if `h` is NULL, has already solved, `engine` is unknown, or
- *          BITBLAST is asked of a problem with STATE or RANDC variables.
+ *          BITBLAST is asked of a problem that stays on CDCL.
  */
-int dvs_handle_set_engine(dvs_handle_t *h, int engine);
+DVS_API int dvs_handle_set_engine(dvs_handle_t *h, int engine);
 
 /** The engine the handle solves on: CDCL or BITBLAST once it has solved,
  *  else what dvs_handle_set_engine() set. */
-int dvs_handle_engine(const dvs_handle_t *h);
+DVS_API int dvs_handle_engine(const dvs_handle_t *h);
 
 /** dvs_randomize() return codes. */
 enum {
     DVS_RANDOMIZE_OK    = 0,   /* RAND and RANDC values were written      */
     DVS_RANDOMIZE_UNSAT = 1,   /* no solution with these STATE values     */
-    DVS_RANDOMIZE_ERROR = -1   /* unsupported ref or modes, a compile
+    DVS_RANDOMIZE_ERROR = -1,  /* unsupported ref or modes, a compile
                                 * error, or the search gave up           */
+    DVS_RANDOMIZE_TOO_LARGE = -2, /* arrays too large: a random size over
+                                   * 65535 (dvs_randomize_sizes), or, to
+                                   * solve together, over 65536 elements
+                                   * (dvs_randomize_arrays); or over
+                                   * 4096 objects or 65536 slot-array
+                                   * elements (dvs_randomize_parts)     */
+    DVS_RANDOMIZE_NULL = -3       /* a constraint reads a variable through
+                                   * a null handle, and no guard of STATE
+                                   * values rules the read out
+                                   * (dvs_randomize_parts)              */
 };
 
 /**
@@ -724,8 +485,142 @@ enum {
  * @param seed   The sampling seed; the same seed and STATE values give the
  *               same result.
  */
-int dvs_randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes,
-                  uint64_t seed);
+DVS_API int dvs_randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes,
+                          uint64_t seed);
+
+/** One array of a problem with arrays: `n_elems` elements, packed, each in
+ *  the smallest of 1, 2, 4 or 8 bytes that holds the element width (as a
+ *  DVS_REF_SCALAR ref), little-endian. */
+typedef struct {
+    void     *data;      /* NULL when n_elems is 0 */
+    uint32_t  n_elems;
+    uint32_t  _pad;
+} dvs_array_ref_t;
+
+/** The number of entries dvs_randomize_arrays() reads from `arrays`: the
+ *  arrays the problem declares (dvs_builder_add_array). */
+DVS_API uint32_t dvs_handle_n_arrays(const dvs_handle_t *h);
+
+/**
+ * Solve the random sizes of a problem with arrays
+ * (dvs_builder_set_array_size_random), the first part of a randomize() call
+ * whose constraints read sizes: with the constraints that read no element,
+ * before any element is solved (IEEE 1800-2023 18.5.8.1). Nothing is written
+ * through `refs`. The caller then gives each array its size and calls
+ * dvs_randomize_arrays().
+ *
+ * @param sizes  dvs_handle_n_arrays(h) entries: the current size of each
+ *               array on the call; on DVS_RANDOMIZE_OK, each random size is
+ *               replaced by the size solved.
+ * @return  as dvs_randomize(), or DVS_RANDOMIZE_TOO_LARGE if a size solved is
+ *          over 65535 (sizes unchanged). With no random size, DVS_RANDOMIZE_OK.
+ */
+DVS_API int dvs_randomize_sizes(dvs_handle_t *h, const dvs_ref_t *refs, uint32_t *sizes,
+                                uint64_t seed);
+
+/**
+ * Solve a problem with arrays once. The size of each array is its
+ * `n_elems`, fixed for the call (IEEE 1800-2023 18.5.8.1: sizes are solved
+ * before the elements' constraints). The elements of a STATE array are read;
+ * those of a RAND array are written, on DVS_RANDOMIZE_OK only. `refs`,
+ * `modes` and `seed` are as for dvs_randomize().
+ *
+ * An array whose elements are constrained only one at a time (in foreachs
+ * over it that read nothing random but its element) is solved element by
+ * element, for any size. The rest are instantiated for the sizes of the call
+ * and compiled; the handle keeps the last few such instantiations.
+ *
+ * @param arrays  dvs_handle_n_arrays(h) entries.
+ * @return  as dvs_randomize(), or DVS_RANDOMIZE_TOO_LARGE.
+ */
+DVS_API int dvs_randomize_arrays(dvs_handle_t *h, const dvs_ref_t *refs,
+                                 const dvs_array_ref_t *arrays, const uint32_t *modes,
+                                 uint64_t seed);
+
+/* ------------------------------------------------------------------ */
+/* Randomizing several objects together (IEEE 1800-2023 18.5.8)       */
+/* ------------------------------------------------------------------ */
+
+/** The number of slots of a part's problem (dvs_builder_set_n_slots). */
+DVS_API uint32_t dvs_handle_n_slots(const dvs_handle_t *h);
+
+/** dvs_slot_t.state values. */
+enum {
+    DVS_SLOT_NULL     = 0,  /* the handle is null                          */
+    DVS_SLOT_INACTIVE = 1,  /* rand_mode(0): the object is not randomized;
+                             * the exports imported through it are read   */
+    DVS_SLOT_ACTIVE   = 2   /* the object is randomized with this one      */
+};
+
+typedef struct dvs_part_s dvs_part_t;
+
+/** One slot of an object: its handle's state, and the object's part. The
+ *  slot of a slot array (dvs_builder_add_slot_array) instead gives the
+ *  handles the array holds: `n_elems` slots at `elems`. */
+typedef struct dvs_slot_s {
+    uint32_t    state;      /* DVS_SLOT_*; not read for a slot array */
+    uint32_t    n_elems;    /* a slot array: its handles */
+    dvs_part_t *child;      /* the object; ignored when state is DVS_SLOT_NULL */
+    const struct dvs_slot_s *elems;  /* a slot array: n_elems slots */
+} dvs_slot_t;
+
+/** The slot of array `array_id` if it is a slot array, else DVS_NO_SLOT. */
+DVS_API uint32_t dvs_handle_array_slot(const dvs_handle_t *h, uint32_t array_id);
+
+/** One object of a dvs_randomize_parts() call. The part's address is the
+ *  object's identity: an object reached through several slots is given by
+ *  the same dvs_part_t, and is solved once. The array ref of a slot array
+ *  gives its size, its `data` is not read. */
+struct dvs_part_s {
+    dvs_handle_t     *handle;  /* the problem of the object's class        */
+    const dvs_ref_t  *refs;    /* dvs_handle_n_vars(handle) entries; those of
+                                * imports are not read                      */
+    dvs_array_ref_t  *arrays;  /* dvs_handle_n_arrays(handle) entries       */
+    const dvs_slot_t *slots;   /* dvs_handle_n_slots(handle) entries        */
+};
+
+/**
+ * Solve the object `root` and the objects reached from it through active
+ * slots together (SV randomize() on `root`): the constraints of every such
+ * object, its imports bound to the exports they name.
+ *
+ *  - An import through an inactive slot is a STATE value: the export's
+ *    current value.
+ *  - An import through a null slot is a STATE value of 0. A constraint that
+ *    reads it must be guarded by STATE values that rule the read out
+ *    (`if (h != null) ... h.x ...`, the guard a STATE bit combined with !,
+ *    &&, || and conditions); else the call fails with DVS_RANDOMIZE_NULL.
+ *  - A slot array of `n` elements (its array ref's `n_elems`, the size of
+ *    the call) holds the handles of its slot's `elems`, then null handles
+ *    if it has fewer (a dynamic array resized larger). A foreach over it is
+ *    instantiated per element, each with the imports of that element.
+ *  - Soft constraints (IEEE 1800-2023 18.5.13): those of an object rank
+ *    above those of the objects it reaches, those reached through a later
+ *    slot (or a later element of a slot array) above those reached through
+ *    an earlier one, and an object reached twice takes the higher rank;
+ *    within an object, its own priorities.
+ *
+ * The problem assembled for a shape (the classes, the state of each slot,
+ * the size of each slot array) is kept on `root`'s handle, which keeps the
+ * last few shapes. A root
+ * with no slots is solved as dvs_randomize_arrays() solves it. Arrays are
+ * solved as by dvs_randomize_arrays(), each at its `n_elems`.
+ *
+ * @return  as dvs_randomize_arrays(); DVS_RANDOMIZE_NULL; or
+ *          DVS_RANDOMIZE_TOO_LARGE past 4096 objects or 65536 slot-array
+ *          elements.
+ */
+DVS_API int dvs_randomize_parts(dvs_part_t *root, uint64_t seed);
+
+/**
+ * The random sizes of a dvs_randomize_parts() call, solved first, as
+ * dvs_randomize_sizes() solves them: on DVS_RANDOMIZE_OK the `n_elems` of
+ * each array of a random size is replaced by the size solved; no data is
+ * read or written. The caller then gives each array its size and calls
+ * dvs_randomize_parts(). A foreach over a slot array is not instantiated
+ * here: it has no constraint on a size.
+ */
+DVS_API int dvs_randomize_parts_sizes(dvs_part_t *root, uint64_t seed);
 
 /**
  * How this copy of the library was built, as one line of key=value pairs:
@@ -733,7 +628,7 @@ int dvs_randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes,
  * optimized (compiled with optimisation), asan, ndebug, cc. Benchmark records
  * carry it, so a result can be traced to the build that produced it.
  */
-const char *dvs_build_info(void);
+DVS_API const char *dvs_build_info(void);
 
 /**
  * The file this library's code was loaded from: the shared library actually
@@ -741,7 +636,7 @@ const char *dvs_build_info(void);
  * RUNPATH), or the executable when linked statically. "unknown" where the
  * platform cannot tell.
  */
-const char *dvs_build_library_path(void);
+DVS_API const char *dvs_build_library_path(void);
 
 #ifdef __cplusplus
 }

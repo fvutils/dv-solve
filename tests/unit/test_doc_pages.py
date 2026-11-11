@@ -654,7 +654,9 @@ def _c_decls() -> dict:
 
 
 def _header_text() -> str:
-    text = (_REPO / "src" / "c" / "dv_solve.h").read_text(encoding="utf-8")
+    """dv_solve.h and dvs_writer.h, which it includes: the public API."""
+    text = "".join((_REPO / "src" / "c" / h).read_text(encoding="utf-8")
+                   for h in ("dv_solve.h", "dvs_writer.h"))
     return re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
 
 
@@ -681,7 +683,7 @@ def test_c_api_matches_header(tmp_path: Path) -> None:
             src.append(f"typedef {parts[0]} *_chk_{parts[0]};")       # declared
         else:
             src.append(f"typedef {sig};")                              # same type again
-    for name in decls["macro"]:
+    for name in (m.split("(")[0] for m in decls["macro"]):   # a function-like macro: its name
         src.append(f"#ifndef {name}\n#error {name} is not defined\n#endif")
     for name in decls["enumerator"]:
         src.append(f"int _chk_{name} = (int){name};")
@@ -707,7 +709,7 @@ def test_c_api_documents_whole_header() -> None:
     declared = set(re.findall(r"^[\w ]+?\**\s*\b(dvs_\w+)\s*\(", hdr, re.M))
     assert declared == documented, (sorted(declared - documented), sorted(documented - declared))
     names = set(re.findall(r"\b(DVS_[A-Z0-9_]+|dvs_\w+_t)\b", hdr))
-    names.discard("DV_SOLVE_H")
+    names -= {"DV_SOLVE_H", "DVS_WRITER_H"}
     absent = sorted(n for n in names if not re.search(rf"\b{n}\b", page))
     assert not absent, f"in dv_solve.h but not on the C API page: {absent}"
     for struct in ("dvs_dist_entry_t", "dvs_solve_opts_t"):

@@ -111,6 +111,25 @@ int dvs_search_insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
 void dvs_solver_set_seed(dvs_ctx_t *ctx, uint64_t seed);
 
 /**
+ * Create ctx's clause-learning state (the LCG) if it has none yet.
+ * @return 0, or -1 when it could not be made.
+ */
+int dvs_search_lcg_open(dvs_ctx_t *ctx);
+
+/**
+ * What a context carries from one seeded solve to the next besides its
+ * learnt clauses: the box tier's probe verdict, the enumeration tier's state
+ * and list, the multiply-count maximum. Each is settled by the first solves
+ * (at their roots), so a context compiled afresh decides them otherwise; a
+ * handle's eviction sidecar carries them (dvs_handle_export_state).
+ * Writes nothing unless `cap` holds it all; returns the number of words.
+ */
+size_t dvs_search_export_tiers(const dvs_ctx_t *ctx, int64_t *buf, size_t cap);
+/** Load what dvs_search_export_tiers gave for a context of the same problem.
+ *  0, or -1 (malformed, or out of memory). */
+int dvs_search_import_tiers(dvs_ctx_t *ctx, const int64_t *buf, size_t n);
+
+/**
  * Whether a soft constraint's assumption is still active after solve.
  * Assumption indices run in REVERSE order of addition (the soft list is
  * prepended): index 0 is the soft constraint added last.

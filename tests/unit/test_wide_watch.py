@@ -232,13 +232,12 @@ def test_dist_reaches_merged_variable(var: int) -> None:
     assert seen.count(5) > 40, seen
 
 
-@pytest.mark.parametrize("n, width", [(17, 8), (3, 33)])
-def test_unsupported_all_different_is_refused(n: int, width: int) -> None:
+def test_unsupported_all_different_is_refused() -> None:
     """Refused, not left unenforced: model validation does not check it."""
     from dv_solve.ctx import CompileUnsupportedError
     b = SolveProblemBuilder()
-    for i in range(n):
-        b.add_var(i, width=width, is_signed=False, lo=0, hi=(1 << width) - 1)
-    b.add_all_different(list(range(n)))
+    for i in range(3):
+        b.add_var(i, width=33, is_signed=False, lo=0, hi=(1 << 33) - 1)
+    b.add_all_different(list(range(3)))
     with pytest.raises(CompileUnsupportedError):
         SolveCtx(b.finalize()[0])

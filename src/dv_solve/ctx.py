@@ -45,6 +45,7 @@ class _SolveOpts(ctypes.Structure):
         ("seq_pick",       ctypes.c_uint8),
         ("max_shave_iters", ctypes.c_uint32),
         ("time_limit_ms",  ctypes.c_uint32),
+        ("canonical",      ctypes.c_uint8),
     ]
 
 
@@ -77,7 +78,7 @@ class CompileUnsupportedError(CompileIncompleteError):
 
     The Python API supports variables up to 64 bits wide, expressions up to
     255 bits wide, expressions nested up to 20000 deep, and all-different
-    constraints over up to 16 variables of up to 32 bits. Wider bit-vectors
+    constraints over variables of up to 32 bits. Wider bit-vectors
     are supported through the SMT-LIB2 front end (``dv-solve-smt2``).
     """
 
@@ -171,8 +172,8 @@ class SolveCtx:
             raise CompileUnsupportedError(
                 "problem goes beyond a supported limit: a variable wider than "
                 "64 bits, an expression wider than %d bits or nested more "
-                "than 20000 deep, or an all-different over more than 16 "
-                "variables or one wider than 32 bits" % self._lib.dvs_max_width()
+                "than 20000 deep, or an all-different over a variable "
+                "wider than 32 bits" % self._lib.dvs_max_width()
             )
         if rc == _COMPILE_BAD_VAR:
             self._drop_native()
@@ -348,6 +349,8 @@ class SolveCtx:
 
         Returns False if the pin conflicts with what is already known (the
         value is outside the variable's current domain, or propagation fails).
+        With soft constraints a conflict is left to :meth:`solve`, which
+        relaxes them, so the pin is accepted.
         A pin lasts until :meth:`restore` to a checkpoint taken before it, or
         :meth:`reset`; :meth:`solve` does not clear it. The incremental
         pattern: ``cp = checkpoint(); pin(...); solve(); ...; restore(cp)``.

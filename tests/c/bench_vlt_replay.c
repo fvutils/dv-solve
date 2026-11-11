@@ -92,6 +92,8 @@ static uint32_t g_warmup;   /* of which the first g_warmup are not timed (--warm
 static uint32_t g_skip;     /* sessions 1..g_skip are warm-up */
 static int      g_warm_in;  /* warm-up could not be separated: it is in the average */
 static int      g_vlt_mode; /* --mode verilator: the front end's Verilator mode */
+static int      g_canonical; /* DVS_CANONICAL=1: canonical CDCL solves (the buffer
+                              * pass's handles read it themselves) */
 
 /* A command or captured problem of session `call` counts toward per-call
  * time: not the start-up check, nor the warm-up calls (as the commercial
@@ -865,6 +867,7 @@ static int cdcl_solve(Cdcl *c, Built *bt, uint64_t seed) {
     o.use_lcg = 1;
     o.use_phase_save = 1;
     o.fair_pick = 1;
+    o.canonical = (uint8_t)g_canonical;
     dvs_result_t res = dvs_solver_solve(c->ctx, &o);
     if (g_want_unsat) return res == DVS_SOLVE_UNSAT ? 0 : -1;
     if (res != DVS_SOLVE_OK) return -1;
@@ -1798,6 +1801,7 @@ static dvs_result_t check_solve(dvs_ctx_t *c, uint64_t seed) {
     o.max_restarts = 1000;
     o.use_lcg = 1;
     o.fair_pick = 1;
+    o.canonical = (uint8_t)g_canonical;
     return dvs_solver_solve(c, &o);
 }
 
@@ -2099,6 +2103,8 @@ int main(int argc, char **argv) {
                 argv[0], argv[0]);
         return 2;
     }
+    const char *canon = getenv("DVS_CANONICAL");
+    g_canonical = canon && *canon == '1';
     printf("build-info %s\nlibrary %s\n", dvs_build_info(), dvs_build_library_path());
     load(path);
     size_t n_check = 0, n_bytes = 0;

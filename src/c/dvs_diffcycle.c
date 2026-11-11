@@ -52,6 +52,8 @@ typedef struct {
     uint32_t dist_off;
     uint32_t pred_off;
     uint32_t edges_off;
+    uint32_t pot_ok;       /* dist[] is a feasible potential from the last
+                            * run that found no negative cycle */
     uint32_t n_lits;       /* the last conflict's explanation */
     Literal  lits[MAX_EXPLAIN_LITS];
 } DcData;
@@ -167,22 +169,37 @@ static PropResult _fire_diffcycle(Propagator *self, dvs_ctx_t *ctx) {
     }
     if (ne == 0) return PROP_OK;
 
+    /* The distances the last run converged to are a potential: if every
+     * edge still holds under them (dist[v] <= dist[u] + w), the graph has no
+     * negative cycle, and the run below would find none. One pass instead of
+     * up to nv: most firings follow a tightening that closes no cycle. */
+    if (d->pot_ok) {
+        uint32_t e = 0;
+        while (e < ne && dist[edges[e].u] + edges[e].w >= dist[edges[e].v]) e++;
+        if (e == ne) return PROP_OK;
+    }
+
     /* Bellman-Ford from a virtual source (every dist starts at 0). Still
      * relaxing after nv passes means a negative cycle. */
+    d->pot_ok = 0;
     for (uint32_t i = 0; i < nv; i++) { dist[i] = 0; pred[i] = UINT32_MAX; }
     uint32_t last = UINT32_MAX;
     for (uint32_t pass = 0; pass <= nv; pass++) {
         last = UINT32_MAX;
+        int clipped = 0;
         for (uint32_t e = 0; e < ne; e++) {
             int64_t nd = dist[edges[e].u] + edges[e].w;   /* |dist| <= nv * 2^61 / ... */
             if (nd < dist[edges[e].v]) {
-                if (nd < -((int64_t)1 << 62)) continue;   /* keep sums in range */
+                if (nd < -((int64_t)1 << 62)) { clipped = 1; continue; }   /* keep sums in range */
                 dist[edges[e].v] = nd;
                 pred[edges[e].v] = e;
                 last = edges[e].v;
             }
         }
-        if (last == UINT32_MAX) return PROP_OK;           /* converged: no negative cycle */
+        if (last == UINT32_MAX) {                         /* converged: no negative cycle */
+            d->pot_ok = !clipped;
+            return PROP_OK;
+        }
     }
 
     /* `last` was relaxed on pass nv: walking pred nv times lands on the cycle. */

@@ -47,7 +47,9 @@ class ExprConst(ctypes.Structure):
         ("kind",      ctypes.c_uint32),
         ("is_signed", ctypes.c_uint8),
         ("_p8",       ctypes.c_uint8),
+        ("_p16",      ctypes.c_uint16),
         ("width",     ctypes.c_uint32),
+        ("_p32",      ctypes.c_uint32),
         ("value",     ctypes.c_int64),
     ]
 
@@ -100,6 +102,7 @@ class ExprExtend(ctypes.Structure):
         ("kind",         ctypes.c_uint32),
         ("sign_extend",  ctypes.c_uint8),
         ("_p8",          ctypes.c_uint8),
+        ("_p16",         ctypes.c_uint16),
         ("from_bits",    ctypes.c_uint32),
         ("to_bits",      ctypes.c_uint32),
         ("operand",      ctypes.c_uint32),
@@ -120,6 +123,8 @@ class VarSpec(ctypes.Structure):
         ("width",     ctypes.c_uint32),
         ("is_signed", ctypes.c_uint8),
         ("kind",      ctypes.c_uint8),
+        ("order",     ctypes.c_uint8),
+        ("_p8",       ctypes.c_uint8),
         ("lo",        ctypes.c_int64),
         ("hi",        ctypes.c_int64),
     ]
@@ -136,10 +141,12 @@ class SourceSpec(ctypes.Structure):
         ("n_vars", ctypes.c_uint32),
     ]
 
-# SolveProblem head — we only access the first 7 uint32 fields + pool address
+# SolveProblem head — we only access the first uint32 fields + pool address
 # (pool is embedded; we use solve_problem_pool_base to get &sp->pool)
 class SolveProblemHead(ctypes.Structure):
     _fields_ = [
+        ("magic",            ctypes.c_uint32),
+        ("format_version",   ctypes.c_uint32),
         ("n_vars",           ctypes.c_uint32),
         ("n_constraints",    ctypes.c_uint32),
         ("n_sources",        ctypes.c_uint32),

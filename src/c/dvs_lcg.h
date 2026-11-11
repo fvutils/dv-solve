@@ -72,8 +72,9 @@ static inline Literal literal_negate(Literal lit) {
 typedef struct {
     uint32_t n_lits;    /* number of literals */
     uint32_t lbd;       /* literal block distance (for clause quality) */
-    uint32_t watch0;    /* index of first watched literal */
-    uint32_t watch1;    /* index of second watched literal */
+    uint32_t last_used; /* ClauseDB.epoch it was learnt, or last propagated
+                         * or conflicted, in (see lcg_retain_used) */
+    uint32_t _pad;      /* keeps the literals 8-byte aligned */
     /* Literal lits[n_lits] follow immediately */
 } Clause;
 
@@ -121,6 +122,8 @@ typedef struct {
     /* Statistics */
     uint64_t  n_propagations;
     uint64_t  n_conflicts;
+
+    uint32_t  epoch;         /* advanced by each lcg_retain_used */
 } ClauseDB;
 
 /** Initialize a clause database.
@@ -240,6 +243,11 @@ void lcg_destroy(LCGCtx *lcg);
 /** Return `lcg` to the state lcg_init left it in: no clauses, no watches,
  *  an empty arena, zero activity, zero statistics. Keeps its allocations. */
 void lcg_reset(LCGCtx *lcg);
+/** Start a new epoch for a context solved again (a handle call): keep the
+ *  learnt clauses learnt, propagated or conflicted in the epoch now ending
+ *  and drop the rest; reset the activity and statistics as lcg_reset does.
+ *  Only between solves (the trail must hold no clause reason). */
+void lcg_retain_used(LCGCtx *lcg);
 /** Has `lcg` learnt nothing since lcg_init / lcg_reset? */
 int  lcg_is_pristine(const LCGCtx *lcg);
 

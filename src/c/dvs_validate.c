@@ -18,6 +18,9 @@
 #include <stdarg.h>
 #include "dvs_ctx.h"
 #include "dvs_problem.h"
+
+/* The engines read a node's 32-bit `kind` through an ExprKind pointer. */
+_Static_assert(sizeof(ExprKind) == sizeof(uint32_t), "ExprKind is 32 bits");
 #include "dvs_sv.h"
 #include "dvs_i128.h"
 

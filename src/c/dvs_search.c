@@ -13,6 +13,7 @@
 #include "dvs_trail.h"
 #include "dvs_shave.h"
 #include "dvs_lcg.h"
+#include "dvs_rng.h"
 #include "dvs_explain.h"
 #include "dvs_diffcycle.h"
 
@@ -265,6 +266,8 @@ void dvs_step_check_explanation(dvs_ctx_t *ctx, const char *who,
     (void)checked; (void)unknown;
 }
 #endif
+
+static void _solver_reset(dvs_ctx_t *ctx);
 
 /* Forward declarations for hole management */
 static int _is_hole(const dvs_ctx_t *ctx, uint32_t var_id, int64_t value);
@@ -534,69 +537,70 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
 /* Value selection                                                     */
 /* ------------------------------------------------------------------ */
 
+/* var_id's dist entries, and an entry's weight inside the feasible domain
+ * [lo, hi] (0: none of it is). Entry bounds are bit patterns like the var's
+ * own: order them per the var's signedness, or an unsigned 64-bit var's
+ * upper-half entries (negative as int64) never overlap its domain and are
+ * never drawn. */
+static const DistMetaEntry *_dist_entries(const dvs_ctx_t *ctx, uint32_t var_id,
+                                          uint32_t *ne) {
+    const DistMeta *dm = (const DistMeta *)dvs_spool_ptr(&ctx->pool,
+                                                         ctx->dist_offsets[var_id]);
+    *ne = dm->n_entries;
+    return (const DistMetaEntry *)(dm + 1);
+}
+
+static uint64_t _dist_weight(const Variable *var, const DistMetaEntry *e,
+                             int64_t lo, int64_t hi, int64_t *elo, int64_t *ehi) {
+    if (e->weight == 0) return 0;
+    *elo = var_b_max(var, e->lo, lo);
+    *ehi = var_b_min(var, e->hi, hi);
+    if (var_b_gt(var, *elo, *ehi)) return 0;  /* no overlap with feasible domain */
+    if (e->is_per_value)
+        return (uint64_t)e->weight * ((uint64_t)(*ehi - *elo) + 1u);
+    return (uint64_t)e->weight;
+}
+
+/* The total weight of var_id's entries inside [lo, hi]. */
+static uint64_t _dist_total(const dvs_ctx_t *ctx, uint32_t var_id,
+                            int64_t lo, int64_t hi) {
+    uint32_t ne;
+    const DistMetaEntry *entries = _dist_entries(ctx, var_id, &ne);
+    uint64_t total = 0;
+    int64_t elo, ehi;
+    for (uint32_t i = 0; i < ne; i++)
+        total += _dist_weight(&ctx->vars[var_id], &entries[i], lo, hi, &elo, &ehi);
+    return total;
+}
+
+/* The entry `roll` (below _dist_total) falls in, as its part of [lo, hi].
+ * 0 if none does (shouldn't happen). */
+static int _dist_entry(const dvs_ctx_t *ctx, uint32_t var_id, int64_t lo, int64_t hi,
+                       uint64_t roll, int64_t *elo, int64_t *ehi) {
+    uint32_t ne;
+    const DistMetaEntry *entries = _dist_entries(ctx, var_id, &ne);
+    uint64_t cum = 0;
+    for (uint32_t i = 0; i < ne; i++) {
+        cum += _dist_weight(&ctx->vars[var_id], &entries[i], lo, hi, elo, ehi);
+        if (roll < cum) return 1;
+    }
+    return 0;
+}
+
 /* Pick a value from a distribution-constrained variable using weighted
  * random selection.  Returns the chosen value, or falls through to
  * uniform random if no valid dist entry intersects the feasible domain. */
 static int64_t _pick_value_dist(dvs_ctx_t *ctx, uint32_t var_id,
                                  int64_t lo, int64_t hi) {
-    uint32_t dm_off = ctx->dist_offsets[var_id];
-    if (dm_off == 0) return _rand_range64(ctx, lo, hi);
-
-    DistMeta *dm = (DistMeta *)dvs_spool_ptr(&ctx->pool, dm_off);
-    DistMetaEntry *entries = (DistMetaEntry *)(dm + 1);
-    uint32_t ne = dm->n_entries;
-    /* Entry bounds are bit patterns like the var's own: order them per the
-     * var's signedness, or an unsigned 64-bit var's upper-half entries
-     * (negative as int64) never overlap its domain and are never drawn. */
-    const Variable *var = &ctx->vars[var_id];
-
-    /* Recompute effective weights considering only ranges that intersect
-     * the current feasible domain [lo, hi]. */
-    uint64_t total_weight = 0;
-    for (uint32_t i = 0; i < ne; i++) {
-        if (entries[i].weight == 0) continue;
-        int64_t elo = var_b_max(var, entries[i].lo, lo);
-        int64_t ehi = var_b_min(var, entries[i].hi, hi);
-        if (var_b_gt(var, elo, ehi)) continue;  /* no overlap with feasible domain */
-
-        uint64_t ew;
-        if (entries[i].is_per_value) {
-            uint64_t count = (uint64_t)(ehi - elo) + 1u;
-            ew = (uint64_t)entries[i].weight * count;
-        } else {
-            ew = (uint64_t)entries[i].weight;
-        }
-        total_weight += ew;
-    }
-
+    if (ctx->dist_offsets[var_id] == 0) return _rand_range64(ctx, lo, hi);
+    /* Only ranges that intersect the current feasible domain count. */
+    uint64_t total_weight = _dist_total(ctx, var_id, lo, hi);
     if (total_weight == 0) return _rand_range64(ctx, lo, hi);
-
-    /* Roll a random number in [0, total_weight) */
-    uint64_t roll = _rand64(ctx) % total_weight;
-
-    /* Walk entries to find which one the roll falls into */
-    uint64_t cum = 0;
-    for (uint32_t i = 0; i < ne; i++) {
-        if (entries[i].weight == 0) continue;
-        int64_t elo = var_b_max(var, entries[i].lo, lo);
-        int64_t ehi = var_b_min(var, entries[i].hi, hi);
-        if (var_b_gt(var, elo, ehi)) continue;
-
-        uint64_t ew;
-        if (entries[i].is_per_value) {
-            uint64_t count = (uint64_t)(ehi - elo) + 1u;
-            ew = (uint64_t)entries[i].weight * count;
-        } else {
-            ew = (uint64_t)entries[i].weight;
-        }
-
-        if (roll < cum + ew) {
-            /* This entry wins; pick a uniform value within [elo, ehi] */
-            return _rand_range64(ctx, elo, ehi);
-        }
-        cum += ew;
-    }
-
+    /* Roll a random number in [0, total_weight); the entry it falls in wins,
+     * and a value is drawn uniformly within it. */
+    int64_t elo, ehi;
+    if (_dist_entry(ctx, var_id, lo, hi, _rand64(ctx) % total_weight, &elo, &ehi))
+        return _rand_range64(ctx, elo, ehi);
     /* Fallback (shouldn't reach here) */
     return _rand_range64(ctx, lo, hi);
 }
@@ -726,6 +730,859 @@ static int64_t _pick_mul_divisor(dvs_ctx_t *ctx, uint32_t var_id, int64_t v,
     return v;
 }
 
+/* ---- Pick domain: draw only values the problem can still take ----------
+ *
+ * A variable's domain is its bounds (and a hole list), but propagators know
+ * more than bounds say, and a value drawn between the bounds that they rule
+ * out is a conflict: one point excluded per miss.
+ *   - known bits: `(x & m) == r` once m and r are fixed (the alignment
+ *     `(src & ((1 << width) - 1)) == 0` once width is decided), x == a << k
+ *     (low k_lo bits zero), x % 2^k fixed, x[h:l] fixed, and the static
+ *     known bits of the initial compile (sk_mask);
+ *   - a congruence: x % b == r with b and r fixed (b not a power of two);
+ *   - a value set: a disjunction whose live disjuncts all constrain x, such
+ *     as `len inside {0, 8, 16, 32, 64}` once `xfer == 2` falsified the
+ *     disjunct `xfer != 2`, or `a inside {[lo:hi], ...}`. The disjuncts reach
+ *     x through the front end's guard variables (reifications, an ITE for
+ *     `&&`, `g1 + g2 == 1` for `!`), which are decoded here.
+ * The value picker draws uniformly among the values that satisfy all three
+ * (and miss the holes), and the count-weighted picker counts them, so a
+ * selector such as `width` is weighted by the number of aligned values each
+ * of its values leaves (the uniform-over-solutions weights).
+ *
+ * Every fact is read from a propagator that holds -- unguarded, or guarded
+ * by a guard fixed to 1 -- given the current bounds, and each set is an over-
+ * approximation of x's feasible values: only values that are impossible are
+ * left out, so no solution is lost. When the facts leave no value inside the
+ * bounds, or cannot be drawn from, the picker draws as before and the search
+ * finds the conflict. Signed, 1-bit and wider-than-64-bit variables have no
+ * facts.
+ *
+ * The propagators each variable takes part in are indexed once per compiled
+ * problem (DvsPickIx); x shares the facts of every variable a plain equality
+ * makes equal to it (`len` and its 32-bit copy). DVS_PICKDOM=0 turns it off. */
+
+static int _pd_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("DVS_PICKDOM");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
+#define PD_NONE   UINT32_MAX
+#define PD_MAXIV  32u
+#define PD_DEPTH  8
+#define PD_BUDGET 256
+
+typedef struct DvsPickIx {
+    uint32_t  epoch, n_props, n_vars, restore_gen;
+    size_t    bytes;
+    uint32_t *rep;     /* [n_vars] class representative; PD_NONE: no facts
+                        * (signed, wider than 64 bits)                     */
+    uint32_t *def;     /* [n_vars] propagator that defines a guard var    */
+    uint32_t *off;     /* [n_vars + 1] facts of class rep r:              */
+    uint32_t *fact;    /*   fact[off[r] .. off[r + 1]), propagator ids    */
+    uint64_t *skm, *skv;  /* [n_vars] static known bits of the class      */
+    int       any;     /* some class has facts                            */
+} DvsPickIx;
+
+/* Class r has facts. */
+static inline int _pd_has(const DvsPickIx *ix, uint32_t r) {
+    return ix->off[r] != ix->off[r + 1] || ix->skm[r];
+}
+
+/* A set of unsigned values: sorted disjoint intervals, or everything. */
+typedef struct {
+    uint32_t n;
+    uint8_t  univ;
+    uint64_t lo[PD_MAXIV], hi[PD_MAXIV];
+} PdSet;
+
+/* What the facts say about one variable. */
+typedef struct {
+    uint64_t km, kv;      /* known bits: x & km == kv                  */
+    uint64_t cm, cr;      /* congruence: x % cm == cr (cm 1: none)     */
+    PdSet    set;
+    uint64_t maxv;        /* the variable's largest value              */
+} PdFacts;
+
+static inline uint64_t _pd_maxv(uint32_t w) {
+    return w >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1u);
+}
+
+static inline int _pd_fixed(const dvs_ctx_t *ctx, uint32_t v, uint64_t *val) {
+    const Variable *x = &ctx->vars[v];
+    int64_t lo = var_lo64(ctx, x);
+    if (lo != var_hi64(ctx, x)) return 0;
+    *val = (uint64_t)lo;
+    return 1;
+}
+
+/* Propagator `pid` holds: unguarded, or its guard is fixed to 1. */
+static inline int _pd_live(const dvs_ctx_t *ctx, uint32_t pid) {
+    if (!ctx->prop_guard_vars || pid >= ctx->n_prop_refs_capacity) return 1;
+    uint32_t g = ctx->prop_guard_vars[pid];
+    if (g == EXPR_NULL) return 1;
+    return var_lo64(ctx, &ctx->vars[g]) == 1 && var_hi64(ctx, &ctx->vars[g]) == 1;
+}
+
+static inline const Propagator *_pd_prop(const dvs_ctx_t *ctx, uint32_t pid) {
+    return (const Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[pid]);
+}
+
+/* ---- sets ---- */
+
+/* The set operations keep their temporary out of the recursive decoders'
+ * frames (_pd_bool). */
+#if defined(_MSC_VER)
+#define PD_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__)
+#define PD_NOINLINE __attribute__((noinline))
+#else
+#define PD_NOINLINE
+#endif
+
+static void _pd_iv(PdSet *s, uint64_t lo, uint64_t hi) {
+    s->univ = 0;
+    s->n = lo <= hi;
+    s->lo[0] = lo;
+    s->hi[0] = hi;
+}
+
+static PD_NOINLINE void _pd_and(PdSet *out, const PdSet *a, const PdSet *b) {
+    if (a->univ) { *out = *b; return; }
+    if (b->univ) { *out = *a; return; }
+    PdSet r;
+    r.univ = 0; r.n = 0;
+    uint32_t i = 0, j = 0;
+    while (i < a->n && j < b->n) {
+        uint64_t lo = a->lo[i] > b->lo[j] ? a->lo[i] : b->lo[j];
+        uint64_t hi = a->hi[i] < b->hi[j] ? a->hi[i] : b->hi[j];
+        if (lo <= hi) {
+            if (r.n == PD_MAXIV) { r.hi[r.n - 1] = hi; }   /* hull: wider */
+            else { r.lo[r.n] = lo; r.hi[r.n] = hi; r.n++; }
+        }
+        if (a->hi[i] < b->hi[j]) i++; else j++;
+    }
+    *out = r;
+}
+
+static PD_NOINLINE void _pd_or(PdSet *out, const PdSet *a, const PdSet *b) {
+    if (a->univ || b->univ) { out->univ = 1; out->n = 0; return; }
+    PdSet r;
+    r.univ = 0; r.n = 0;
+    uint32_t i = 0, j = 0;
+    while (i < a->n || j < b->n) {
+        int ta = j == b->n || (i < a->n && a->lo[i] <= b->lo[j]);
+        uint64_t lo = ta ? a->lo[i] : b->lo[j], hi = ta ? a->hi[i] : b->hi[j];
+        if (ta) i++; else j++;
+        if (r.n && (lo <= r.hi[r.n - 1] || lo - 1u == r.hi[r.n - 1])) {
+            if (hi > r.hi[r.n - 1]) r.hi[r.n - 1] = hi;
+        } else if (r.n == PD_MAXIV) {
+            r.hi[r.n - 1] = hi > r.hi[r.n - 1] ? hi : r.hi[r.n - 1];   /* hull */
+        } else {
+            r.lo[r.n] = lo; r.hi[r.n] = hi; r.n++;
+        }
+    }
+    *out = r;
+}
+
+/* The values v of [0, maxv] with `v op c` (op a DisjClause op). */
+static void _pd_cmp(PdSet *s, uint32_t op, int64_t c64, uint64_t maxv) {
+    s->univ = 0; s->n = 0;
+    if (c64 < 0 || (uint64_t)c64 > maxv) { s->univ = 1; return; }
+    uint64_t c = (uint64_t)c64;
+    switch (op) {
+    case DVS_BIN_EQ:  _pd_iv(s, c, c); return;
+    case DVS_BIN_LT:  if (c) _pd_iv(s, 0, c - 1u); return;
+    case DVS_BIN_LTE: _pd_iv(s, 0, c); return;
+    case DVS_BIN_GT:  if (c < maxv) _pd_iv(s, c + 1u, maxv); return;
+    case DVS_BIN_GTE: _pd_iv(s, c, maxv); return;
+    case DVS_BIN_NEQ:
+        if (c) { s->lo[s->n] = 0; s->hi[s->n] = c - 1u; s->n++; }
+        if (c < maxv) { s->lo[s->n] = c + 1u; s->hi[s->n] = maxv; s->n++; }
+        return;
+    default:
+        s->univ = 1;
+    }
+}
+
+/* ---- index ---- */
+
+static void _pd_free(dvs_ctx_t *ctx) {
+    dvs_ctx_free(ctx, ctx->pick_ix, ctx->pick_ix_bytes);
+    ctx->pick_ix = NULL;
+    ctx->pick_ix_bytes = 0;
+}
+
+static uint32_t _pd_find(uint32_t *rep, uint32_t v) {
+    while (rep[v] != v) { rep[v] = rep[rep[v]]; v = rep[v]; }
+    return v;
+}
+
+/* The variables a guard var's definition reads, through further guard vars,
+ * into out[] (at most cap); used to file a disjunction under each. */
+static uint32_t _pd_reach(const dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t v,
+                          uint32_t *out, uint32_t n, uint32_t cap, int depth) {
+    for (uint32_t i = 0; i < n; i++) if (out[i] == v) return n;
+    if (n == cap) return n;
+    out[n++] = v;
+    if (depth >= PD_DEPTH || ix->def[v] == PD_NONE) return n;
+    uint32_t nw;
+    const uint32_t *w = prop_watched_vars(_pd_prop(ctx, ix->def[v]), &nw);
+    for (uint32_t i = 1; i < nw; i++) n = _pd_reach(ctx, ix, w[i], out, n, cap, depth + 1);
+    return n;
+}
+
+static int _pd_is_bool(const dvs_ctx_t *ctx, uint32_t v) {
+    const Variable *x = &ctx->vars[v];
+    return !(x->flags & VAR_SIGNED) && (uint64_t)var_lo64(ctx, x) <= 1u
+           && (uint64_t)var_hi64(ctx, x) <= 1u;
+}
+
+/* The variables propagator pid gives facts on, into xs[] (at most cap):
+ * the count. */
+static uint32_t _pd_roles(const dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t pid,
+                          uint32_t *xs, uint32_t cap) {
+    const Propagator *p = _pd_prop(ctx, pid);
+    uint32_t h, l, nw, n = 0;
+    const uint32_t *w = prop_watched_vars(p, &nw);
+    switch (prop_pick_kind(p, &h, &l)) {
+    case PPK_BAND: case PPK_CONCAT:
+        if (nw == 3) { xs[n++] = w[0]; xs[n++] = w[1]; xs[n++] = w[2]; }
+        break;
+    case PPK_SHL:
+        if (nw == 3) xs[n++] = w[0];
+        break;
+    case PPK_MOD: case PPK_SLICE:
+        if (nw >= 2) xs[n++] = w[1];
+        break;
+    case PPK_DISJ: {
+        /* Filed under the classes that two or more disjuncts reach: with
+         * one, the clause's own propagator already narrows x's bounds to
+         * that disjunct once the others are false. */
+        const DisjClause_t *d = (const DisjClause_t *)p;
+        uint32_t reach[64], cls[64], cnt[64], last[64], nc = 0;
+        for (uint32_t j = 0; j < d->n_clauses; j++) {
+            if (d->clauses[j].rhs_var_id != UINT32_MAX) continue;
+            uint32_t m = _pd_reach(ctx, ix, d->clauses[j].var_id, reach, 0, 64, 0);
+            for (uint32_t i = 0; i < m; i++) {
+                if (reach[i] >= ix->n_vars || ix->rep[reach[i]] == PD_NONE) continue;
+                uint32_t r = ix->rep[reach[i]], k;
+                for (k = 0; k < nc; k++) if (cls[k] == r) break;
+                if (k == nc) {
+                    if (nc == 64) continue;
+                    cls[nc] = r; cnt[nc] = 0; last[nc] = UINT32_MAX; nc++;
+                }
+                if (last[k] != j) { last[k] = j; cnt[k]++; }
+            }
+        }
+        for (uint32_t k = 0; k < nc && n < cap; k++)
+            if (cnt[k] >= 2) xs[n++] = cls[k];
+        break;
+    }
+    default:
+        break;
+    }
+    return n;
+}
+
+static PD_NOINLINE DvsPickIx *_pd_build(dvs_ctx_t *ctx, uint32_t nv, uint32_t np);
+
+/* The index of the problem as it is now (rebuilt when it changed), or NULL. */
+static inline DvsPickIx *_pd_index(dvs_ctx_t *ctx) {
+    DvsPickIx *ix = (DvsPickIx *)ctx->pick_ix;
+    const uint32_t nv = ctx->n_vars;
+    const uint32_t np = ctx->n_props < ctx->n_prop_refs_capacity
+                        ? ctx->n_props : ctx->n_prop_refs_capacity;
+    if (ix && ix->epoch == ctx->wmemo_epoch && ix->n_props == np && ix->n_vars == nv
+            && ix->restore_gen == ctx->restore_gen)
+        return ix;
+    return _pd_build(ctx, nv, np);
+}
+
+static PD_NOINLINE DvsPickIx *_pd_build(dvs_ctx_t *ctx, uint32_t nv, uint32_t np) {
+    DvsPickIx *ix;
+    _pd_free(ctx);
+    if (nv == 0 || !ctx->prop_refs) return NULL;
+    /* One block: the header, the per-variable arrays, then fact[], whose
+     * size a first pass over the propagators counts (the block grows then). */
+    uint32_t xs[64];
+    size_t base = sizeof(DvsPickIx);
+    size_t arr = (size_t)nv * (3u * sizeof(uint32_t) + 2u * sizeof(uint64_t)) + sizeof(uint32_t);
+    ix = (DvsPickIx *)DVS_ALLOC(ctx->alloc, base + arr);
+    if (!ix) return NULL;
+    memset(ix, 0, base);
+    ix->bytes = base + arr;
+    char *m = (char *)(ix + 1);
+    ix->skm  = (uint64_t *)m;  m += (size_t)nv * sizeof(uint64_t);
+    ix->skv  = (uint64_t *)m;  m += (size_t)nv * sizeof(uint64_t);
+    ix->rep  = (uint32_t *)m;  m += (size_t)nv * sizeof(uint32_t);
+    ix->def  = (uint32_t *)m;  m += (size_t)nv * sizeof(uint32_t);
+    ix->off  = (uint32_t *)m;
+    ix->fact = NULL;
+    ix->epoch = ctx->wmemo_epoch; ix->n_props = np; ix->n_vars = nv;
+    ix->restore_gen = ctx->restore_gen;
+    for (uint32_t v = 0; v < nv; v++) {
+        const Variable *x = &ctx->vars[v];
+        /* A 1-bit variable's two values are its bounds: nothing to add. */
+        ix->rep[v] = ((x->flags & VAR_SIGNED) || VAR_IS_TIER2(x->flags) || x->width <= 1
+                      || x->width > 64) ? PD_NONE : v;
+        ix->def[v] = PD_NONE;
+        ix->skm[v] = ix->skv[v] = 0;
+    }
+    /* Classes: alias, then unguarded equalities between unsigned vars. */
+    for (uint32_t v = 0; v < nv; v++) {
+        if (ix->rep[v] == PD_NONE || !ctx->var_alias || ctx->var_alias[v] == v) continue;
+        uint32_t a = v;
+        while (ctx->var_alias[a] != a) a = ctx->var_alias[a];
+        if (ix->rep[a] != PD_NONE) ix->rep[_pd_find(ix->rep, v)] = _pd_find(ix->rep, a);
+    }
+    for (uint32_t pid = 0; pid < np; pid++) {
+        if (ctx->prop_refs[pid] == EXPR_NULL) continue;
+        const Propagator *p = _pd_prop(ctx, pid);
+        uint32_t h, l, nw;
+        const uint32_t *w = prop_watched_vars(p, &nw);
+        dvs_pick_kind_t k = prop_pick_kind(p, &h, &l);
+        if (k == PPK_EQ && nw == 2 && w[0] < nv && w[1] < nv && ix->rep[w[0]] != PD_NONE
+                && ix->rep[w[1]] != PD_NONE
+                && !(ctx->prop_guard_vars && pid < ctx->n_prop_refs_capacity
+                     && ctx->prop_guard_vars[pid] != EXPR_NULL)) {
+            uint32_t a = _pd_find(ix->rep, w[0]), b = _pd_find(ix->rep, w[1]);
+            if (a != b) ix->rep[a < b ? b : a] = a < b ? a : b;
+        }
+        /* A guard var's definition: a reification or ITE result, or either
+         * side of `g1 + g2 == 1`. */
+        if ((k == PPK_REIF_LE || k == PPK_REIF_EQ || k == PPK_ITE) && nw >= 3 && w[0] < nv
+                && ix->def[w[0]] == PD_NONE)
+            ix->def[w[0]] = pid;
+        if (k == PPK_ADD && nw == 3) {
+            uint64_t one;
+            if (_pd_fixed(ctx, w[0], &one) && one == 1 && _pd_is_bool(ctx, w[1])
+                    && _pd_is_bool(ctx, w[2])) {
+                if (ix->def[w[1]] == PD_NONE) ix->def[w[1]] = pid;
+                if (ix->def[w[2]] == PD_NONE) ix->def[w[2]] = pid;
+            }
+        }
+    }
+    for (uint32_t v = 0; v < nv; v++)
+        if (ix->rep[v] != PD_NONE) ix->rep[v] = _pd_find(ix->rep, v);
+    for (uint32_t v = 0; v < nv; v++) {
+        uint32_t r = ix->rep[v];
+        if (r == PD_NONE || v >= ctx->sk_n || !ctx->sk_mask[v]) continue;
+        /* Known high bits over free low ones are an interval, which the
+         * bounds already hold (a zero extension's top bits). */
+        uint64_t fr = ~ctx->sk_mask[v] & _pd_maxv(ctx->vars[v].width);
+        if ((fr & (fr + 1u)) == 0) continue;
+        uint64_t both = ix->skm[r] & ctx->sk_mask[v];
+        if ((ix->skv[r] & both) != (ctx->sk_val[v] & both)) continue;
+        ix->skm[r] |= ctx->sk_mask[v];
+        ix->skv[r] |= ctx->sk_val[v] & ctx->sk_mask[v];
+    }
+    /* Facts per class: count, then fill (off[] is the cursor). */
+    memset(ix->off, 0, ((size_t)nv + 1u) * sizeof(uint32_t));
+    for (int fill = 0; fill < 2; fill++) {
+        if (fill) {
+            for (uint32_t v = 0; v < nv; v++) ix->off[v + 1] += ix->off[v];
+            uint32_t nf = ix->off[nv];
+            size_t nb = base + arr + (size_t)nf * sizeof(uint32_t);
+            DvsPickIx *g = (DvsPickIx *)dvs_ctx_resize(ctx, ix, ix->bytes, nb);
+            if (!g) { dvs_ctx_free(ctx, ix, ix->bytes); return NULL; }
+            ix = g;
+            ix->bytes = nb;
+            m = (char *)(ix + 1);
+            ix->skm  = (uint64_t *)m;  m += (size_t)nv * sizeof(uint64_t);
+            ix->skv  = (uint64_t *)m;  m += (size_t)nv * sizeof(uint64_t);
+            ix->rep  = (uint32_t *)m;  m += (size_t)nv * sizeof(uint32_t);
+            ix->def  = (uint32_t *)m;  m += (size_t)nv * sizeof(uint32_t);
+            ix->off  = (uint32_t *)m;  m += ((size_t)nv + 1u) * sizeof(uint32_t);
+            ix->fact = (uint32_t *)m;
+        }
+        for (uint32_t pid = 0; pid < np; pid++) {
+            if (ctx->prop_refs[pid] == EXPR_NULL) continue;
+            uint32_t n = _pd_roles(ctx, ix, pid, xs, 64);
+            for (uint32_t i = 0; i < n; i++) {
+                if (xs[i] >= nv || ix->rep[xs[i]] == PD_NONE) continue;
+                uint32_t r = ix->rep[xs[i]], j;
+                for (j = 0; j < i; j++)            /* once per class */
+                    if (xs[j] < nv && ix->rep[xs[j]] == r) break;
+                if (j < i) continue;
+                if (fill) ix->fact[ix->off[r]++] = pid;
+                else ix->off[r + 1]++;
+            }
+        }
+    }
+    /* off[r] is now the end of r's facts: shift back. */
+    for (uint32_t v = nv; v > 0; v--) ix->off[v] = ix->off[v - 1];
+    ix->off[0] = 0;
+    /* A concatenation only carries facts between its result and its parts:
+     * keep it when the result's class has facts of its own. A field split,
+     * `x == {hi, lo}` with nothing else on x, would cost a look at every
+     * decision and give nothing. */
+    uint8_t *own = (uint8_t *)DVS_ALLOC(ctx->alloc, nv);
+    if (own) {
+        for (uint32_t v = 0; v < nv; v++) {
+            own[v] = ix->rep[v] == v && ix->skm[v] != 0;
+            for (uint32_t i = ix->off[v]; i < ix->off[v + 1] && !own[v]; i++) {
+                uint32_t h, l;
+                own[v] = prop_pick_kind(_pd_prop(ctx, ix->fact[i]), &h, &l) != PPK_CONCAT;
+            }
+        }
+        uint32_t o = 0, b = 0;
+        for (uint32_t v = 0; v < nv; v++) {
+            uint32_t e = ix->off[v + 1];
+            ix->off[v] = o;
+            for (uint32_t i = b; i < e; i++) {
+                uint32_t pid = ix->fact[i], h, l, nw;
+                const Propagator *p = _pd_prop(ctx, pid);
+                if (prop_pick_kind(p, &h, &l) == PPK_CONCAT) {
+                    const uint32_t r = ix->rep[prop_watched_vars(p, &nw)[0]];
+                    if (r == PD_NONE || !own[r]) continue;
+                }
+                ix->fact[o++] = pid;
+            }
+            b = e;
+        }
+        ix->off[nv] = o;
+        dvs_ctx_free(ctx, own, nv);
+    }
+    for (uint32_t v = 0; v < nv && !ix->any; v++) ix->any = ix->rep[v] == v && _pd_has(ix, v);
+    ctx->pick_ix = ix;
+    ctx->pick_ix_bytes = ix->bytes;
+    return ix;
+}
+
+/* ---- facts ---- */
+
+static int _pd_bool(const dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t r, uint64_t maxv,
+                    uint32_t g, uint64_t want, PdSet *out, int depth, int *budget);
+
+/* The values of class r for which variable `v` can take value `want` (v is
+ * then in r's class) or, v a guard var, can be `want`. */
+static void _pd_var_is(const dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t r, uint64_t maxv,
+                       uint32_t v, uint64_t want, PdSet *out, int depth, int *budget) {
+    uint64_t f;
+    out->univ = 1; out->n = 0;
+    if (v >= ix->n_vars) return;
+    if (ix->rep[v] == r) { _pd_cmp(out, DVS_BIN_EQ, (int64_t)want, maxv); return; }
+    if (_pd_fixed(ctx, v, &f)) { if (f != want) { out->univ = 0; } return; }
+    if (want <= 1u && _pd_is_bool(ctx, v)) _pd_bool(ctx, ix, r, maxv, v, want, out, depth + 1, budget);
+}
+
+/* The values of class r (largest maxv) under which guard var g can be
+ * `want` (0 or 1): an over-approximation, everything when unknown. */
+static int _pd_bool(const dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t r, uint64_t maxv,
+                    uint32_t g, uint64_t want, PdSet *out, int depth, int *budget) {
+    out->univ = 1; out->n = 0;
+    if (depth > PD_DEPTH || --*budget < 0 || ix->def[g] == PD_NONE || !_pd_live(ctx, ix->def[g]))
+        return 0;
+    const Propagator *p = _pd_prop(ctx, ix->def[g]);
+    uint32_t h, l, nw;
+    const uint32_t *w = prop_watched_vars(p, &nw);
+    uint64_t c;
+    switch (prop_pick_kind(p, &h, &l)) {
+    case PPK_REIF_LE: case PPK_REIF_EQ: {
+        if (w[0] != g) return 0;
+        int eq = prop_pick_kind(p, &h, &l) == PPK_REIF_EQ;
+        if (w[1] < ix->n_vars && ix->rep[w[1]] == r && _pd_fixed(ctx, w[2], &c)) {
+            /* g <-> x <= c,  g <-> x == c */
+            if (c > maxv) return 0;
+            if (eq) _pd_cmp(out, want ? DVS_BIN_EQ : DVS_BIN_NEQ, (int64_t)c, maxv);
+            else    _pd_cmp(out, want ? DVS_BIN_LTE : DVS_BIN_GT, (int64_t)c, maxv);
+        } else if (w[2] < ix->n_vars && ix->rep[w[2]] == r && _pd_fixed(ctx, w[1], &c)) {
+            /* g <-> c <= x,  g <-> c == x */
+            if (c > maxv) return 0;
+            if (eq) _pd_cmp(out, want ? DVS_BIN_EQ : DVS_BIN_NEQ, (int64_t)c, maxv);
+            else    _pd_cmp(out, want ? DVS_BIN_GTE : DVS_BIN_LT, (int64_t)c, maxv);
+        }
+        return 0;
+    }
+    case PPK_ITE: {
+        /* g == (c ? a : b): (c and a == want) or (not c and b == want). */
+        if (w[0] != g || nw != 4) return 0;
+        PdSet t, u;      /* two sets a frame: this recursion's frame is small */
+        _pd_var_is(ctx, ix, r, maxv, w[1], 1, &t, depth, budget);
+        _pd_var_is(ctx, ix, r, maxv, w[2], want, &u, depth, budget);
+        _pd_and(&t, &t, &u);                    /* c and a == want */
+        _pd_var_is(ctx, ix, r, maxv, w[1], 0, &u, depth, budget);
+        _pd_var_is(ctx, ix, r, maxv, w[3], want, out, depth, budget);
+        _pd_and(&u, &u, out);                   /* not c and b == want */
+        _pd_or(out, &t, &u);
+        return 0;
+    }
+    case PPK_ADD:
+        /* g + o == 1, both 0/1: g == want exactly when o == 1 - want. */
+        if (nw != 3) return 0;
+        _pd_var_is(ctx, ix, r, maxv, w[1] == g ? w[2] : w[1], 1u - want, out, depth, budget);
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+/* The values of class r a live disjunction allows. */
+static void _pd_disj(const dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t r, uint64_t maxv,
+                     const DisjClause_t *d, PdSet *out) {
+    int budget = PD_BUDGET;
+    out->univ = 0; out->n = 0;
+    for (uint32_t j = 0; j < d->n_clauses && !out->univ; j++) {
+        uint32_t v = d->clauses[j].var_id, op = d->clauses[j].op;
+        int64_t c = d->clauses[j].constant;
+        PdSet s;
+        s.univ = 1; s.n = 0;
+        if (d->clauses[j].rhs_var_id != UINT32_MAX || v >= ix->n_vars) {
+            /* var-var: anything */
+        } else if (ix->rep[v] == r) {
+            _pd_cmp(&s, op, c, maxv);
+        } else {
+            const Variable *x = &ctx->vars[v];
+            uint64_t f;
+            if (_pd_fixed(ctx, v, &f)) {
+                /* Decided: true leaves everything, false nothing. */
+                int t;
+                if (x->flags & VAR_SIGNED) t = 1;    /* order: leave it */
+                else switch (op) {
+                case DVS_BIN_EQ:  t = f == (uint64_t)c; break;
+                case DVS_BIN_NEQ: t = f != (uint64_t)c; break;
+                case DVS_BIN_LT:  t = c >= 0 && f <  (uint64_t)c; break;
+                case DVS_BIN_LTE: t = c >= 0 && f <= (uint64_t)c; break;
+                case DVS_BIN_GT:  t = c < 0 || f >  (uint64_t)c; break;
+                case DVS_BIN_GTE: t = c < 0 || f >= (uint64_t)c; break;
+                default: t = 1;
+                }
+                if (!t) s.univ = 0;
+            } else if (_pd_is_bool(ctx, v) && c >= 0 && c <= 1
+                       && (op == DVS_BIN_EQ || op == DVS_BIN_GTE || op == DVS_BIN_NEQ
+                           || op == DVS_BIN_LT || op == DVS_BIN_LTE || op == DVS_BIN_GT)) {
+                /* g op c over g in {0, 1}: which value of g satisfies it. */
+                int ok0, ok1;
+                switch (op) {
+                case DVS_BIN_EQ:  ok0 = c == 0; ok1 = c == 1; break;
+                case DVS_BIN_NEQ: ok0 = c != 0; ok1 = c != 1; break;
+                case DVS_BIN_LT:  ok0 = c > 0;  ok1 = c > 1;  break;
+                case DVS_BIN_LTE: ok0 = 1;      ok1 = c >= 1; break;
+                case DVS_BIN_GT:  ok0 = 0;      ok1 = c < 1;  break;
+                default:          ok0 = c <= 0; ok1 = 1;      break;   /* GTE */
+                }
+                if (ok0 != ok1) _pd_bool(ctx, ix, r, maxv, v, (uint64_t)ok1, &s, 0, &budget);
+                else if (!ok0) s.univ = 0;
+            }
+        }
+        _pd_or(out, out, &s);
+    }
+}
+
+/* Fold `x % b == r` into F's congruence; 0 when they contradict. A
+ * modulus past 2^62 is not kept (the facts only get weaker). */
+static int _pd_congr(PdFacts *F, uint64_t b, uint64_t r) {
+    if (b <= 1u) return 1;
+    r %= b;
+    if (F->cm == 1u) {
+        if (b > ((uint64_t)1 << 62)) return 1;
+        F->cm = b; F->cr = r;
+        return 1;
+    }
+    /* x = cr + cm * t; cm * t == r - cr (mod b). g = gcd(cm, b), and
+     * u * (cm / g) == 1 (mod b / g) by the extended Euclid. */
+    int64_t g = (int64_t)F->cm, h = (int64_t)b, u = 1, u1 = 0;
+    if (F->cm > ((uint64_t)1 << 62) || b > ((uint64_t)1 << 62)) return 1;
+    while (h) {
+        int64_t q = g / h, t = g - q * h;
+        g = h; h = t;
+        t = u - q * u1; u = u1; u1 = t;
+    }
+    uint64_t d = (r + b - F->cr % b) % b;
+    if (d % (uint64_t)g) return 0;
+    uint64_t bg = b / (uint64_t)g;
+    if (bg == 1u) return 1;
+    if (F->cm > ((uint64_t)1 << 62) / bg) return 1;
+    uint64_t inv = (uint64_t)(((u % (int64_t)bg) + (int64_t)bg) % (int64_t)bg);
+    uint64_t t = (uint64_t)(((unsigned __int128)((d / (uint64_t)g) % bg) * inv) % bg);
+    F->cr += F->cm * t;
+    F->cm *= bg;
+    F->cr %= F->cm;
+    return 1;
+}
+
+/* Known bits m, v of class r; 0 when they contradict F's. */
+static int _pd_bits(PdFacts *F, uint64_t m, uint64_t v) {
+    m &= F->maxv;
+    uint64_t both = F->km & m;
+    if ((F->kv & both) != (v & both)) return 0;
+    F->km |= m;
+    F->kv |= v & m;
+    return 1;
+}
+
+/* The facts on x now. 0: none (draw as before); -1: they contradict (draw
+ * as before; the search finds the conflict); 1: in *F. */
+static int _pd_class(dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t x, PdFacts *F, int depth);
+
+static int _pd_facts(dvs_ctx_t *ctx, uint32_t x, PdFacts *F) {
+    if (!ctx->prop_refs || ctx->n_props == 0 || !_pd_enabled()) return 0;
+    DvsPickIx *ix = _pd_index(ctx);
+    if (!ix || !ix->any || x >= ix->n_vars || ix->rep[x] == PD_NONE) return 0;
+    return _pd_class(ctx, ix, x, F, 0);
+}
+
+/* The facts on x's class. depth > 0: a concatenation's result, for its
+ * known bits only (no value set, no further concatenation). */
+static int _pd_class(dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t x, PdFacts *F, int depth) {
+    const uint32_t r = ix->rep[x];
+    F->maxv = _pd_maxv(ctx->vars[x].width);
+    F->km = F->kv = 0;
+    F->cm = 1; F->cr = 0;
+    F->set.univ = 1; F->set.n = 0;
+    if (!_pd_has(ix, r)) return 0;
+    if (ix->skm[r] && !_pd_bits(F, ix->skm[r], ix->skv[r])) return -1;
+    for (uint32_t i = ix->off[r]; i < ix->off[r + 1]; i++) {
+        uint32_t pid = ix->fact[i];
+        if (!_pd_live(ctx, pid)) continue;
+        const Propagator *p = _pd_prop(ctx, pid);
+        uint32_t h = 0, l = 0, nw;
+        const uint32_t *w = prop_watched_vars(p, &nw);
+        uint64_t a, b, c;
+        switch (prop_pick_kind(p, &h, &l)) {
+        case PPK_BAND:
+            /* x & m == c with m, c fixed; x == a & m: x has no bit outside m. */
+            for (int s = 1; s <= 2; s++) {
+                if (ix->rep[w[s]] == r && _pd_fixed(ctx, w[3 - s], &b) && _pd_fixed(ctx, w[0], &c)
+                        && !_pd_bits(F, b, c))
+                    return -1;
+            }
+            if (ix->rep[w[0]] == r) {
+                if (_pd_fixed(ctx, w[1], &b) && !_pd_bits(F, ~b, 0)) return -1;
+                if (_pd_fixed(ctx, w[2], &b) && !_pd_bits(F, ~b, 0)) return -1;
+            }
+            break;
+        case PPK_SHL: {
+            /* x == a << k: the low k bits are zero, k at least its lower bound. */
+            if (ix->rep[w[0]] != r) break;
+            uint64_t k = (uint64_t)var_lo64(ctx, &ctx->vars[w[2]]);
+            if (ctx->vars[w[2]].flags & VAR_SIGNED) break;
+            if (k >= 64) k = 63;
+            if (k && !_pd_bits(F, ((uint64_t)1 << k) - 1u, 0)) return -1;
+            break;
+        }
+        case PPK_MOD:
+            /* c == x % b with b, c fixed. */
+            if (ix->rep[w[1]] != r || !_pd_fixed(ctx, w[2], &b) || !_pd_fixed(ctx, w[0], &c)
+                    || b == 0 || (ctx->vars[w[2]].flags & VAR_SIGNED)
+                    || (ctx->vars[w[0]].flags & VAR_SIGNED))
+                break;
+            if (c >= b) return -1;
+            if ((b & (b - 1u)) == 0) { if (!_pd_bits(F, b - 1u, c)) return -1; }
+            else if (!_pd_congr(F, b, c)) return -1;
+            break;
+        case PPK_SLICE:
+            /* c == x[h:l] with c fixed. */
+            if (ix->rep[w[1]] != r || h < l || h >= 64 || !_pd_fixed(ctx, w[0], &c)) break;
+            a = _pd_maxv(h - l + 1u);
+            if (!_pd_bits(F, a << l, (c & a) << l)) return -1;
+            break;
+        case PPK_CONCAT: {
+            /* r == {hi, lo}: x is r, with a part fixed; or x is a part, with
+             * r's known bits. */
+            if (nw != 3 || l == 0 || l >= 64) break;
+            const uint64_t lm = _pd_maxv(l);
+            if (ix->rep[w[0]] == r) {
+                if (_pd_fixed(ctx, w[2], &c) && !_pd_bits(F, lm, c)) return -1;
+                if (_pd_fixed(ctx, w[1], &c) && !_pd_bits(F, ~lm, c << l)) return -1;
+            } else if (depth == 0 && ix->rep[w[0]] != PD_NONE) {
+                PdFacts G;
+                if (_pd_class(ctx, ix, w[0], &G, 1) < 0) return -1;
+                if (ix->rep[w[2]] == r && !_pd_bits(F, G.km & lm, G.kv & lm)) return -1;
+                if (ix->rep[w[1]] == r && !_pd_bits(F, G.km >> l, G.kv >> l)) return -1;
+            }
+            break;
+        }
+        case PPK_DISJ: {
+            if (depth) break;
+            PdSet s;
+            _pd_disj(ctx, ix, r, F->maxv, (const DisjClause_t *)p, &s);
+            _pd_and(&F->set, &F->set, &s);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    /* Fold the low known bits into the congruence (x % 2^t == kv's low t
+     * bits) when there is one, or when they are all the known bits (an
+     * alignment): an arithmetic progression counts and draws in O(1).
+     * Known bits elsewhere are counted by rank (_pd_kcount). */
+    if (~F->km) {
+        uint32_t t = (uint32_t)__builtin_ctzll(~F->km);
+        if (t > 40) t = 40;
+        const uint64_t low = ((uint64_t)1 << t) - 1u;
+        if (t && (F->cm > 1u || !(F->km & ~low))
+                && !_pd_congr(F, (uint64_t)1 << t, F->kv & low))
+            return -1;
+    }
+    if (!F->km && F->cm == 1u && F->set.univ) return 0;
+    return 1;
+}
+
+/* #{y in [0, z) : y & km == kv}. */
+static uint64_t _pd_rank(uint64_t z, uint64_t km, uint64_t kv) {
+    uint64_t n = 0;
+    for (int i = 63; i >= 0; i--) {
+        uint64_t bit = (uint64_t)1 << i;
+        if (z & bit) {
+            /* y agrees with z above i and has 0 at i. */
+            if (!(km & bit) || !(kv & bit)) {
+                uint64_t below = bit - 1u;
+                n += (uint64_t)1 << __builtin_popcountll(~km & below);
+            }
+            if ((km & bit) && !(kv & bit)) return n;   /* z's 1 not allowed */
+        } else if ((km & bit) && (kv & bit)) {
+            return n;                                    /* y would exceed z */
+        }
+    }
+    return n;
+}
+
+/* #{y in [lo, hi] : y & km == kv}. */
+static uint64_t _pd_kcount(uint64_t lo, uint64_t hi, uint64_t km, uint64_t kv) {
+    uint64_t n = _pd_rank(hi, km, kv) + ((hi & km) == kv) - _pd_rank(lo, km, kv);
+    return n;
+}
+
+/* The i-th (from 0) value with y & km == kv. */
+static uint64_t _pd_kunrank(uint64_t i, uint64_t km, uint64_t kv) {
+    uint64_t y = kv & km, free_ = ~km;
+    while (free_ && i) {
+        uint64_t bit = free_ & (~free_ + 1u);
+        if (i & 1u) y |= bit;
+        i >>= 1;
+        free_ &= free_ - 1u;
+    }
+    return y;
+}
+
+/* #{y in [lo, hi] : y % cm == cr}. */
+static uint64_t _pd_ccount(uint64_t lo, uint64_t hi, uint64_t cm, uint64_t cr) {
+    uint64_t f = lo + (cr + cm - lo % cm) % cm;      /* first >= lo */
+    if (f < lo || f > hi) return 0;
+    return (hi - f) / cm + 1u;
+}
+
+/* Interval j of [lo, hi] cut by F's set: *a, *b; 0 past the last. */
+static int _pd_part(const PdFacts *F, uint64_t lo, uint64_t hi, uint32_t j,
+                    uint64_t *a, uint64_t *b) {
+    if (F->set.univ) { *a = lo; *b = hi; return j == 0; }
+    for (uint32_t i = 0, k = 0; i < F->set.n; i++) {
+        uint64_t x = F->set.lo[i] > lo ? F->set.lo[i] : lo;
+        uint64_t y = F->set.hi[i] < hi ? F->set.hi[i] : hi;
+        if (x > y) continue;
+        if (k++ == j) { *a = x; *b = y; return 1; }
+    }
+    return 0;
+}
+
+/* Values of [a, b] the lattice allows (the congruence's count when there is
+ * one: its other known bits are checked when drawn). */
+static uint64_t _pd_icount(const PdFacts *F, uint64_t a, uint64_t b) {
+    if (F->cm > 1u) return _pd_ccount(a, b, F->cm, F->cr);
+    if (F->km) return _pd_kcount(a, b, F->km, F->kv);
+    return b - a == ~(uint64_t)0 ? b - a : b - a + 1u;     /* all 2^64: saturate */
+}
+
+/* How many values of [lo, hi] the facts allow (as a double: may exceed
+ * 2^53, and the count-weighted picker multiplies them). */
+static double _pd_count(const PdFacts *F, uint64_t lo, uint64_t hi) {
+    double n = 0.0;
+    uint64_t a, b;
+    for (uint32_t j = 0; _pd_part(F, lo, hi, j, &a, &b); j++) n += (double)_pd_icount(F, a, b);
+    return n;
+}
+
+/* The count of _pd_count exactly: 1 and *n, or 0 when it overflows. */
+static int _pd_total(const PdFacts *F, uint64_t lo, uint64_t hi, uint64_t *n) {
+    uint64_t a, b, t = 0;
+    for (uint32_t j = 0; _pd_part(F, lo, hi, j, &a, &b); j++) {
+        uint64_t c = _pd_icount(F, a, b);
+        if (t + c < t) return 0;
+        t += c;
+    }
+    *n = t;
+    return 1;
+}
+
+/* The value of rank i (from 0) among those _pd_total counts. */
+static uint64_t _pd_nth(const PdFacts *F, uint64_t lo, uint64_t hi, uint64_t i) {
+    uint64_t a = lo, b = hi;
+    for (uint32_t j = 0; _pd_part(F, lo, hi, j, &a, &b); j++) {
+        uint64_t c = _pd_icount(F, a, b);
+        if (i < c) {
+            if (F->cm > 1u) return a + (F->cr + F->cm - a % F->cm) % F->cm + i * F->cm;
+            if (!F->km) return a + i;
+            return _pd_kunrank(_pd_rank(a, F->km, F->kv) + i, F->km, F->kv);
+        }
+        i -= c;
+    }
+    return b;
+}
+
+/* A value of x in [lo, hi] (unsigned) drawn uniformly among those the facts
+ * allow, missing holes: 1 and *out, or 0 (none found). */
+static int _pd_draw(dvs_ctx_t *ctx, uint32_t x, const PdFacts *F, uint64_t lo, uint64_t hi,
+                    int64_t *out) {
+    uint64_t a, b, tot = 0;
+    uint64_t cnt[PD_MAXIV];
+    uint32_t np = 0;
+    for (; np < PD_MAXIV && _pd_part(F, lo, hi, np, &a, &b); np++) {
+        cnt[np] = _pd_icount(F, a, b);
+        if (tot + cnt[np] < tot) return 0;              /* overflow */
+        tot += cnt[np];
+    }
+    if (tot == 0) return 0;
+    for (int tries = 0; tries < 64; tries++) {
+        uint64_t k = _rand64(ctx) % tot;
+        uint32_t j = 0;
+        while (k >= cnt[j]) { k -= cnt[j]; j++; }
+        _pd_part(F, lo, hi, j, &a, &b);
+        uint64_t y;
+        if (F->cm > 1u) {
+            y = a + (F->cr + F->cm - a % F->cm) % F->cm + k * F->cm;
+            if ((y & F->km) != F->kv) continue;
+        } else {
+            y = F->km ? _pd_kunrank(_pd_rank(a, F->km, F->kv) + k, F->km, F->kv) : a + k;
+        }
+        if (_is_hole(ctx, x, (int64_t)y)) continue;
+        *out = (int64_t)y;
+        return 1;
+    }
+    return 0;
+}
+
+/* v allowed by the facts on x (1 when there are none). */
+static int _pd_allows(dvs_ctx_t *ctx, uint32_t x, int64_t v) {
+    PdFacts F;
+    if (_pd_facts(ctx, x, &F) != 1) return 1;
+    uint64_t y = (uint64_t)v;
+    if ((y & F.km) != F.kv || (F.cm > 1u && y % F.cm != F.cr)) return 0;
+    return _pd_count(&F, y, y) > 0.0;
+}
+
+/* Draw x in [lo, hi] by its facts: 1 and *out, else 0 (draw as before). */
+static int _pd_pick(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t hi, int64_t *out) {
+    PdFacts F;
+    if (_pd_facts(ctx, x, &F) != 1) return 0;
+    return _pd_draw(ctx, x, &F, (uint64_t)lo, (uint64_t)hi, out);
+}
+
+/* A value of x in [lo, hi]: by its facts (the pick domain), else uniform
+ * avoiding holes. */
+static int64_t _pick_in(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t hi) {
+    int64_t v;
+    if (_pd_pick(ctx, x, lo, hi, &v)) return v;
+    v = _rand_range64(ctx, lo, hi);
+    return _pick_avoiding_holes(ctx, x, v, lo, hi);
+}
+
 enum { KEEP_NONE = 0, KEEP_SET = 1, KEEP_DEAD = 2 };
 
 /* Count-weighted value choice (docs/accuracy_closure_plan.md A3).
@@ -751,8 +1608,14 @@ enum { KEEP_NONE = 0, KEEP_SET = 1, KEEP_DEAD = 2 };
  * popped, with no learning. Each solve may spend DVS_WPICK_PROBES bucket
  * probes; past that, and for a dist, a multiply link (_pick_mul_divisor
  * draws those) or a seed-0 solve, the draw is uniform as before.
- * DVS_WPICK=0 turns it off. */
-#define DVS_WPICK_BUCKETS 16u
+ * DVS_WPICK=0 turns it off.
+ *
+ * The probes are most of a small solve's time (usb_pkt: 280 a call, 90%
+ * of it), and the same weights are asked for again and again: a decision
+ * the search retakes after a conflict, and a site's first decisions on
+ * every call. So the weights are kept by search state (ctx->wmemo, see
+ * _wmemo_find) and reused, with the probes' firings still counted as work
+ * so the work budget falls where it did. */
 #define DVS_WPICK_PROBES  1024u
 
 static int _wpick_enabled(void) {
@@ -771,16 +1634,27 @@ static int _wpick_enabled(void) {
 #define DVS_WPICK_SCALE 512
 typedef struct { double m; int e; } WBox;
 
-static WBox _wpick_box(const dvs_ctx_t *ctx) {
+static WBox _wpick_box(dvs_ctx_t *ctx) {
     uint32_t n = ctx->n_decl_vars < ctx->n_vars ? ctx->n_decl_vars : ctx->n_vars;
     WBox b = { 1.0, 0 };
+    const DvsPickIx *ix = ctx->prop_refs && ctx->n_props && _pd_enabled() ? _pd_index(ctx) : NULL;
+    if (ix && !ix->any) ix = NULL;
     for (uint32_t i = 0; i < n; i++) {
         const Variable *v = &ctx->vars[i];
         if ((v->flags & VAR_AUX) || (ctx->var_alias && ctx->var_alias[i] != i)
                 || _is_defined(ctx, i)) continue;
         int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
         if (lo == hi) continue;
-        b.m *= (double)_dom_size(ctx, i, lo, hi) + 1.0;
+        /* The values its facts allow (aligned, in its value set), when it
+         * has any: what makes a selector's buckets weigh what they leave. */
+        PdFacts F;
+        double d = (double)_dom_size(ctx, i, lo, hi) + 1.0;
+        if (ix && ix->rep[i] != PD_NONE && _pd_has(ix, ix->rep[i])
+                && _pd_class(ctx, ix, i, &F, 0) == 1) {
+            double c = _pd_count(&F, (uint64_t)lo, (uint64_t)hi);
+            if (c < d) d = c;
+        }
+        b.m *= d;
         if (b.m > 0x1p512) { b.m *= 0x1p-512; b.e++; }
     }
     /* A linear equality with two or more variables open fixes one of them
@@ -832,6 +1706,112 @@ static int _wpick_in_product(const dvs_ctx_t *ctx, uint32_t x) {
     return 0;
 }
 
+static int _no_learnt(const dvs_ctx_t *ctx) {
+    const LCGCtx *L = (const LCGCtx *)ctx->lcg;
+    return !L || L->clause_db.n_clauses == 0;
+}
+
+/* The weights for deciding x (nb buckets) in the current search state, if
+ * kept: the entry, else NULL. *put is then the slot for the probes' result
+ * (NULL: no memo), and the state's key is in *k1, *k2.
+ *
+ * The key hashes every variable's bounds, which with the compiled problem
+ * (wmemo_epoch: compile, add_constraint and value exclusion bump it;
+ * restore_gen) and the active soft constraints settle what the probes find
+ * -- but for the learnt clauses, which can only prune more. Two tables:
+ *
+ *  - this solve's (slots DVS_WMEMO_KEPT on, direct-mapped; an entry of
+ *    another solve is an empty slot). Reused with the clauses learnt since
+ *    by rejection (_pick_value_weighted).
+ *  - across solves (the first DVS_WMEMO_KEPT slots, two ways a set): only
+ *    entries made with no learnt clause, used with none, which are exactly
+ *    what the probes would find. A hit is also copied into this solve's
+ *    table, as the probes' result would have been.
+ *
+ * So what a solve draws depends on the problem, the state and the seed, not
+ * on what the tables kept from earlier calls: a reused handle draws what a
+ * fresh one would (test_evict). In the kept table a new entry replaces the
+ * way reused less (each reuse counts, to 3; on a tie the older), and the
+ * way kept loses a count: a site's first decisions, asked on every call,
+ * outlast the deeper states that mostly come once. Wider than 64 bits the
+ * bounds are not all in vars[]: no memo. */
+static DvsWMemo *_wmemo_find(dvs_ctx_t *ctx, uint32_t x, uint32_t nb,
+                             DvsWMemo **put, uint64_t *k1, uint64_t *k2) {
+    *put = NULL;
+    if (!ctx->wmemo) {
+        ctx->wmemo = (DvsWMemo *)DVS_ALLOC(ctx->alloc, DVS_WMEMO_SLOTS * sizeof(DvsWMemo));
+        if (!ctx->wmemo) return NULL;
+        memset(ctx->wmemo, 0, DVS_WMEMO_SLOTS * sizeof(DvsWMemo));
+    }
+    uint64_t a = 0x9E3779B97F4A7C15ULL, b = 0xC2B2AE3D27D4EB4FULL;
+#define WMIX(v) do { uint64_t v_ = (uint64_t)(v); \
+        a = (a ^ v_) * 0x100000001B3ULL; b = ((b ^ v_) * 0xFF51AFD7ED558CCDULL); b ^= b >> 29; } while (0)
+    WMIX(x); WMIX(ctx->wmemo_epoch);
+    WMIX(ctx->n_vars); WMIX(ctx->n_props); WMIX(ctx->assumption_active_mask);
+    WMIX(ctx->restore_gen);
+    for (uint32_t i = 0; i < ctx->n_vars; i++) {
+        const Variable *v = &ctx->vars[i];
+        if (VAR_IS_TIER2(v->flags)) return NULL;
+        WMIX(var_lo64(ctx, v)); WMIX(var_hi64(ctx, v));
+    }
+#undef WMIX
+    *k1 = a | 1u;
+    *k2 = b;
+    const uint32_t h = (uint32_t)(b >> 32);
+    DvsWMemo *s = &ctx->wmemo[DVS_WMEMO_KEPT + h % (DVS_WMEMO_SLOTS - DVS_WMEMO_KEPT)];
+    if (s->solve == ctx->wmemo_solve && s->k1 == *k1 && s->k2 == *k2 && s->nb == nb)
+        return s;
+    *put = s;
+    if (!_no_learnt(ctx)) return NULL;
+    DvsWMemo *w = &ctx->wmemo[(h % (DVS_WMEMO_KEPT / 2u)) * 2u];
+    for (int i = 0; i < 2; i++)
+        if (w[i].k1 == *k1 && w[i].k2 == *k2 && w[i].nb == nb) {
+            if (w[i].hits < 3) w[i].hits++;
+            *s = w[i];
+            s->solve = ctx->wmemo_solve;
+            return s;
+        }
+    return NULL;
+}
+
+/* Keep the probes' result `m` (exact: made with no learnt clause) across
+ * solves too. */
+static void _wmemo_keep(dvs_ctx_t *ctx, const DvsWMemo *m) {
+    DvsWMemo *w = &ctx->wmemo[((uint32_t)(m->k2 >> 32) % (DVS_WMEMO_KEPT / 2u)) * 2u];
+    int v = w[1].hits < w[0].hits || (w[1].hits == w[0].hits && w[1].solve < w[0].solve);
+    if (w[!v].hits) w[!v].hits--;
+    w[v] = *m;
+    w[v].hits = 0;
+}
+
+/* One bucket probe: x in [blo, bhi] at a level of its own, propagated. 1 when
+ * it holds, with what propagation left of the bucket in *plo, *phi and the
+ * box in *w; 0 when it conflicts or propagation gave up (prop_aborted). */
+static int _wpick_probe(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi,
+                        uint32_t level, int64_t *plo, int64_t *phi, WBox *w) {
+    trail_push_level(ctx);
+    ctx->conflict_prop_ref   = EXPR_NULL;
+    ctx->conflict_clause_idx = EXPR_NULL;
+    PropResult pr = ctx_tighten_lb64(ctx, x, blo);
+    if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, bhi);
+    if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+    int ok = pr == PROP_OK && !ctx->prop_aborted;
+    *plo = blo;
+    *phi = bhi;
+    if (ok) {
+        /* Draw inside what propagation left of the bucket: a bucket
+         * across a gap (`x inside {[10:20],[100:150]}`) weighs only
+         * its feasible part, so its value must come from that part. */
+        *plo = var_lo64(ctx, &ctx->vars[x]);
+        *phi = var_hi64(ctx, &ctx->vars[x]);
+        *w = _wpick_box(ctx);
+    }
+    trail_backtrack(ctx, level);
+    ctx->conflict_prop_ref   = EXPR_NULL;
+    ctx->conflict_clause_idx = EXPR_NULL;
+    return ok;
+}
+
 /* 1: a value for x is in *out. 0: draw uniformly instead. */
 static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t hi,
                                 int64_t *out) {
@@ -840,8 +1820,19 @@ static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t 
      * domain still add correctly). span+1 may not fit, so: bucket k
      * starts at k*q + k*(r+1)/nb, with span = q*nb + r. */
     const uint64_t span = (uint64_t)hi - (uint64_t)lo;
-    const uint32_t nb = span < DVS_WPICK_BUCKETS - 1u ? (uint32_t)span + 1u
-                                                      : DVS_WPICK_BUCKETS;
+    uint32_t nb = span < DVS_WPICK_BUCKETS - 1u ? (uint32_t)span + 1u : DVS_WPICK_BUCKETS;
+    /* With facts on x (the pick domain), the buckets split the N values they
+     * allow into nb runs of about N/nb values each, so that a short value
+     * set (`len inside {1, 2, 4, ..., 64}`) is probed one value at a time:
+     * a fixed len fixes `len - 1`, and the box then counts addr's values
+     * aligned to it. */
+    PdFacts F;
+    uint64_t pdn = 0;
+    if (_pd_facts(ctx, x, &F) == 1) {
+        if (!_pd_total(&F, (uint64_t)lo, (uint64_t)hi, &pdn)) pdn = 0;
+        else if (pdn < 2) return 0;
+        else nb = pdn < DVS_WPICK_BUCKETS ? (uint32_t)pdn : DVS_WPICK_BUCKETS;
+    }
     if (nb < 2 || ctx->wpick_left < nb || ctx->decision_level + 1 >= ctx->max_depth)
         return 0;
     /* `solve x before y` asks for x uniform over its feasible values
@@ -863,40 +1854,87 @@ static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t 
         if (i == nd) return 0;
     }
     ctx->wpick_left -= nb;
-    const uint64_t q = span / nb, r1 = span % nb + 1u;
     int64_t blo[DVS_WPICK_BUCKETS], bhi[DVS_WPICK_BUCKETS];
+    double wt[DVS_WPICK_BUCKETS], tot = 0.0;
+    const uint32_t level = ctx->decision_level;
+    uint64_t k1 = 0, k2 = 0;
+    DvsWMemo *put, *m = _wmemo_find(ctx, x, nb, &put, &k1, &k2);
+    if (m && m->exact && _no_learnt(ctx)) {
+        /* Exactly what the probes would find: draw as they would have. */
+        memcpy(blo, m->blo, nb * sizeof *blo);
+        memcpy(bhi, m->bhi, nb * sizeof *bhi);
+        memcpy(wt, m->wt, nb * sizeof *wt);
+        for (uint32_t k = 0; k < nb; k++) tot += wt[k];
+        ctx->prop_fires += m->fires;
+        ctx->conflict_prop_ref   = EXPR_NULL;
+        ctx->conflict_clause_idx = EXPR_NULL;
+        goto draw;
+    }
+    if (m) {
+        /* Made earlier in this solve: the clauses learnt since can only have
+         * pruned, so each weight is an upper bound of the bucket's weight
+         * now. Rejection sampling draws by the weights now with one probe a
+         * try: draw a bucket by the kept weights, probe it, keep it with
+         * probability now/kept, else store what the probe found and draw
+         * again. A rejected bucket's weight is then current, and it is kept
+         * if drawn again, so this ends within nb + 1 tries. A weight that
+         * grew (the equality-group correction is not monotone) means a full
+         * probe. */
+        m->exact = 0;
+        for (;;) {
+            tot = 0.0;
+            for (uint32_t k = 0; k < nb; k++) tot += m->wt[k];
+            if (tot == 0.0) return 0;
+            double u = (double)(_rand64(ctx) >> 11) * 0x1p-53 * tot;
+            uint32_t k = 0;
+            while (k + 1 < nb && u >= m->wt[k]) { u -= m->wt[k]; k++; }
+            while (m->wt[k] == 0.0) k--;
+            int64_t plo, phi;
+            WBox b;
+            int ok = _wpick_probe(ctx, x, m->blo[k], m->bhi[k], level, &plo, &phi, &b);
+            if (ctx->prop_aborted) return 0;
+            double now = 0.0;
+            if (ok) {
+                if (b.e > m->emax) goto probe_all;
+                now = b.m;
+                for (int d = b.e; d < m->emax && now > 0.0; d++) now *= 0x1p-512;
+                if (now > m->wt[k]) goto probe_all;
+                m->blo[k] = plo;
+                m->bhi[k] = phi;
+            }
+            int keep = ok && (double)(_rand64(ctx) >> 11) * 0x1p-53 * m->wt[k] < now;
+            m->wt[k] = now;
+            if (keep) {
+                *out = _pick_in(ctx, x, plo, phi);
+                return 1;
+            }
+        }
+    }
+probe_all:;
+    if (m) put = m;
+    const uint64_t fires0 = ctx->prop_fires;
+    const uint64_t q = span / nb, r1 = span % nb + 1u;
     WBox w[DVS_WPICK_BUCKETS];
     int ok[DVS_WPICK_BUCKETS], emax = 0, any = 0;
-    const uint32_t level = ctx->decision_level;
     for (uint32_t k = 0; k < nb; k++) {
         uint64_t o0 = k * q + (k * r1) / nb;
         uint64_t o1 = k + 1 == nb ? span : (k + 1) * q + ((k + 1) * r1) / nb - 1u;
-        blo[k] = (int64_t)((uint64_t)lo + o0);
-        bhi[k] = (int64_t)((uint64_t)lo + o1);
-        trail_push_level(ctx);
-        ctx->conflict_prop_ref   = EXPR_NULL;
-        ctx->conflict_clause_idx = EXPR_NULL;
-        PropResult pr = ctx_tighten_lb64(ctx, x, blo[k]);
-        if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, bhi[k]);
-        if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
-        ok[k] = pr == PROP_OK && !ctx->prop_aborted;
+        int64_t b0 = (int64_t)((uint64_t)lo + o0), b1 = (int64_t)((uint64_t)lo + o1);
+        if (pdn) {
+            /* Values of rank pdn*k/nb .. pdn*(k+1)/nb - 1 among those allowed. */
+            uint64_t r0 = (uint64_t)(((unsigned __int128)pdn * k) / nb);
+            uint64_t r1_ = (uint64_t)(((unsigned __int128)pdn * (k + 1)) / nb) - 1u;
+            b0 = (int64_t)_pd_nth(&F, (uint64_t)lo, (uint64_t)hi, r0);
+            b1 = (int64_t)_pd_nth(&F, (uint64_t)lo, (uint64_t)hi, r1_);
+        }
+        ok[k] = _wpick_probe(ctx, x, b0, b1, level, &blo[k], &bhi[k], &w[k]);
         if (ok[k]) {
-            /* Draw inside what propagation left of the bucket: a bucket
-             * across a gap (`x inside {[10:20],[100:150]}`) weighs only
-             * its feasible part, so its value must come from that part. */
-            blo[k] = var_lo64(ctx, &ctx->vars[x]);
-            bhi[k] = var_hi64(ctx, &ctx->vars[x]);
-            w[k] = _wpick_box(ctx);
             if (!any || w[k].e > emax) emax = w[k].e;
             any = 1;
         }
-        trail_backtrack(ctx, level);
         if (ctx->prop_aborted) break;
     }
-    ctx->conflict_prop_ref   = EXPR_NULL;
-    ctx->conflict_clause_idx = EXPR_NULL;
     if (ctx->prop_aborted || !any) return 0;
-    double wt[DVS_WPICK_BUCKETS], tot = 0.0;
     for (uint32_t k = 0; k < nb; k++) {
         wt[k] = 0.0;
         if (!ok[k]) continue;
@@ -904,12 +1942,25 @@ static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t 
         for (int d = w[k].e; d < emax && wt[k] > 0.0; d++) wt[k] *= 0x1p-512;
         tot += wt[k];
     }
+    if (put) {
+        m = put;
+        m->k1 = k1; m->k2 = k2; m->nb = (uint8_t)nb; m->hits = 0;
+        m->solve = ctx->wmemo_solve;
+        m->exact = (uint8_t)_no_learnt(ctx);
+        m->emax = emax;
+        m->fires = ctx->prop_fires - fires0;
+        memcpy(m->blo, blo, nb * sizeof *blo);
+        memcpy(m->bhi, bhi, nb * sizeof *bhi);
+        memcpy(m->wt, wt, nb * sizeof *wt);
+        if (m->exact) _wmemo_keep(ctx, m);
+    }
+draw:;
+    if (tot == 0.0) return 0;          /* no bucket has a value its facts allow */
     double u = (double)(_rand64(ctx) >> 11) * 0x1p-53 * tot;
     uint32_t k = 0;
     while (k + 1 < nb && u >= wt[k]) { u -= wt[k]; k++; }
     while (wt[k] == 0.0) k--;          /* rounding ran past the last weight */
-    int64_t v = _rand_range64(ctx, blo[k], bhi[k]);
-    *out = _pick_avoiding_holes(ctx, x, v, blo[k], bhi[k]);
+    *out = _pick_in(ctx, x, blo[k], bhi[k]);
     return 1;
 }
 
@@ -985,7 +2036,7 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
         const Variable *v = &ctx->vars[var_id];
         int64_t kv = ctx->keep_val[var_id];
         if (!var_b_lt(v, kv, lo) && !var_b_gt(v, kv, hi)
-                && !_is_hole(ctx, var_id, kv))
+                && !_is_hole(ctx, var_id, kv) && _pd_allows(ctx, var_id, kv))
             return kv;
     }
 
@@ -998,7 +2049,7 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
                && !_wpick_in_product(ctx, var_id) && !(ctx->vars[var_id].flags & VAR_AUX)
                && _wpick_enabled() && _pick_value_weighted(ctx, var_id, lo, hi, &v)) {
         /* drawn by weight, holes already avoided */
-    } else {
+    } else if (!_pd_pick(ctx, var_id, lo, hi, &v)) {
         v = _rand_range64(ctx, lo, hi);
         v = _pick_mod_aligned(ctx, var_id, v, lo, hi);
         v = _pick_mul_divisor(ctx, var_id, v, lo, hi);
@@ -1918,6 +2969,348 @@ static int _enum_sample(dvs_ctx_t *ctx, uint32_t base) {
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Canonical sampling (dvs_solve_opts_t.canonical)                     */
+/* ------------------------------------------------------------------ */
+
+/* A canonical solve's values depend only on the constraints, the pinned
+ * values and the seed. The variables are decided one at a time
+ * (_canon_select), and each takes the first of its candidates that extends
+ * the values before it to a solution. Candidate k is drawn from the random word k of the variable's
+ * stream (dvs_rng.h), uniformly (or by its dist weights) over the domain the
+ * problem's own propagators leave it, less the values earlier candidates
+ * ruled out. No learnt clause is read or learnt (see the LCG setup in
+ * _solver_solve_core), so nothing an earlier solve left behind can matter.
+ *
+ * A rejected candidate is ruled out with the largest aligned block around it
+ * that a propagation refutes (a binary search over the block size, about
+ * six probes). Values are only ever ruled out when they have no solution,
+ * so every draw is uniform over a superset of the feasible values, and the
+ * first feasible one drawn is uniform over them: rejection sampling that
+ * learns where not to draw, and still finds a sparse feasible set (`addr`
+ * aligned in a 4 KB window of 32 bits) in a few dozen candidates. A variable
+ * with nothing left sends the search back to the previous variable's next
+ * candidate (no backjump: the candidates in between must be tried in
+ * order). */
+
+typedef struct { uint64_t a, b; } CanonGap;   /* ruled-out offsets [a, b] */
+
+typedef struct {
+    uint32_t x;        /* this frame's variable                           */
+    uint32_t k;        /* candidates drawn                                */
+    uint32_t gap0;     /* this frame's ruled-out offsets: gaps[gap0..n)   */
+    int64_t  lo;       /* the domain the candidates come from: lo + [0, span] */
+    uint64_t span;
+    uint64_t v;        /* the candidate being tried, as an offset         */
+} CanonFrame;
+
+typedef struct {
+    CanonGap *gaps;    /* every open frame's, sorted and disjoint per frame */
+    uint32_t  n, cap;
+} CanonGaps;
+
+/* x <= y + 1, without the overflow of y + 1. */
+static inline int _le_succ(uint64_t x, uint64_t y) { return x <= y || x - y == 1u; }
+
+/* Rule out [a, b] for the top frame f. -1 when out of memory. */
+static int _canon_gap_add(dvs_ctx_t *ctx, CanonGaps *g, const CanonFrame *f,
+                          uint64_t a, uint64_t b) {
+    if (g->n == g->cap) {
+        uint32_t cap = g->cap ? 2u * g->cap : 64u;
+        CanonGap *ng = (CanonGap *)dvs_ctx_resize(ctx, g->gaps, g->cap * sizeof(CanonGap),
+                                                  cap * sizeof(CanonGap));
+        if (!ng) return -1;
+        g->gaps = ng;
+        g->cap = cap;
+    }
+    /* The first gap that is not wholly below a - 1, then the run that
+     * overlaps or touches [a, b]. */
+    uint32_t i = f->gap0, hi = g->n;
+    while (i < hi) {
+        uint32_t m = i + (hi - i) / 2u;
+        if (_le_succ(a, g->gaps[m].b)) hi = m; else i = m + 1u;
+    }
+    uint32_t j = i;
+    for (; j < g->n && _le_succ(g->gaps[j].a, b); j++) {
+        if (g->gaps[j].a < a) a = g->gaps[j].a;
+        if (g->gaps[j].b > b) b = g->gaps[j].b;
+    }
+    memmove(&g->gaps[i + 1u], &g->gaps[j], (g->n - j) * sizeof(CanonGap));
+    g->n = g->n - (j - i) + 1u;
+    g->gaps[i] = (CanonGap){ a, b };
+    return 0;
+}
+
+/* The offset of the i-th value of [0, span] not ruled out. */
+static uint64_t _canon_nth(const CanonGaps *g, const CanonFrame *f, uint64_t i) {
+    uint64_t cur = 0;
+    for (uint32_t j = f->gap0; j < g->n; j++) {
+        uint64_t len = g->gaps[j].a - cur;
+        if (i < len) break;
+        i -= len;
+        cur = g->gaps[j].b + 1u;
+    }
+    return cur + i;
+}
+
+/* Is offset o ruled out? */
+static int _canon_out(const CanonGaps *g, const CanonFrame *f, uint64_t o) {
+    for (uint32_t j = f->gap0; j < g->n && g->gaps[j].a <= o; j++)
+        if (o <= g->gaps[j].b) return 1;
+    return 0;
+}
+
+/* Draw frame f's next candidate (variable x) into f->v; 0 when every value
+ * is ruled out. */
+static int _canon_draw(dvs_ctx_t *ctx, const CanonGaps *g, CanonFrame *f, uint32_t x,
+                       uint64_t key) {
+    uint64_t out = 0;
+    for (uint32_t j = f->gap0; j < g->n; j++) out += g->gaps[j].b - g->gaps[j].a + 1u;
+    if (g->n > f->gap0 && out == f->span + 1u) return 0;   /* (0: 2^64 all ruled out) */
+    const uint64_t r = dvs_rng_draw(key, f->k++);
+    /* A dist draws by its weights (an entry, then a value in it), rejecting
+     * ruled-out values: exact while they are rare; then uniform. */
+    if (ctx->dist_offsets && x < ctx->n_vars_capacity && ctx->dist_offsets[x]) {
+        const int64_t hi = (int64_t)((uint64_t)f->lo + f->span);
+        uint64_t total = _dist_total(ctx, x, f->lo, hi);
+        for (uint32_t t = 0; total && t < 64u; t++) {
+            uint64_t rt = dvs_rng_mix(r + t);
+            int64_t elo, ehi;
+            if (!_dist_entry(ctx, x, f->lo, hi, dvs_rng_below(rt, total), &elo, &ehi)) break;
+            uint64_t o = (uint64_t)elo - (uint64_t)f->lo
+                         + dvs_rng_below(dvs_rng_mix(rt), (uint64_t)ehi - (uint64_t)elo + 1u);
+            if (!_canon_out(g, f, o)) { f->v = o; return 1; }
+        }
+    }
+    f->v = _canon_nth(g, f, dvs_rng_below(r, f->span + 1u - out));
+    return 1;
+}
+
+/* Does propagation refute x in lo + [a, b]? */
+static int _canon_refuted(dvs_ctx_t *ctx, const CanonFrame *f, uint32_t x,
+                          uint64_t a, uint64_t b) {
+    const uint32_t lvl = ctx->decision_level;
+    trail_push_level(ctx);
+    ctx->conflict_prop_ref   = EXPR_NULL;
+    ctx->conflict_clause_idx = EXPR_NULL;
+    PropResult pr = ctx_tighten_lb64(ctx, x, (int64_t)((uint64_t)f->lo + a));
+    if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, (int64_t)((uint64_t)f->lo + b));
+    if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+    trail_backtrack(ctx, lvl);
+    return pr != PROP_OK && !ctx->prop_aborted;
+}
+
+/* f->v has no solution: rule it out with the largest aligned block around
+ * it that propagation refutes. Refuting a block refutes the blocks inside
+ * it, so the size is a binary search. */
+static int _canon_reject(dvs_ctx_t *ctx, CanonGaps *g, const CanonFrame *f, uint32_t x) {
+    const uint64_t o = f->v;
+    uint32_t lo_j = 0, hi_j = 63u - (uint32_t)__builtin_clzll(f->span);
+    while (lo_j < hi_j && !ctx->prop_aborted) {
+        uint32_t j = lo_j + (hi_j - lo_j + 1u) / 2u;
+        uint64_t a = o & ~((1ull << j) - 1u);
+        uint64_t b = a + ((1ull << j) - 1u);
+        if (b > f->span) b = f->span;
+        if (_canon_refuted(ctx, f, x, a, b)) lo_j = j; else hi_j = j - 1u;
+    }
+    uint64_t a = lo_j ? o & ~((1ull << lo_j) - 1u) : o;
+    uint64_t b = lo_j ? a + ((1ull << lo_j) - 1u) : o;
+    return _canon_gap_add(ctx, g, f, a, b > f->span ? f->span : b);
+}
+
+/* The variable a canonical solve decides next, EXPR_NULL when all are
+ * fixed: as _select_unassigned without VSIDS -- the open solve-order stage,
+ * the highest decision tier, then the smallest domain (derived variables
+ * after every other), ties broken by a hash of (seed, variable). Domains
+ * are the problem's propagators' alone, so the order is canonical. */
+static uint32_t _canon_select(const dvs_ctx_t *ctx, uint64_t seed) {
+    const uint32_t stage = ctx->var_order ? _open_stage(ctx) : 0;
+    uint32_t best = EXPR_NULL;
+    uint64_t best_key[4] = {0};
+    for (uint32_t i = 0; i < ctx->n_vars; i++) {
+        const Variable *v = &ctx->vars[i];
+        int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
+        if (lo == hi) continue;
+        const int derived = (v->flags & VAR_AUX) || _is_defined(ctx, i);
+        if (!derived && stage && _order_key(ctx, i) != stage) continue;
+        uint64_t key[4] = { (uint64_t)derived, derived ? 0u : 3u - _tier(ctx, i),
+                            _dom_size(ctx, i, lo, hi), dvs_rng_key(seed, i) };
+        int lt = best == EXPR_NULL;
+        for (int k = 0; k < 4 && !lt && key[k] <= best_key[k]; k++)
+            lt = key[k] < best_key[k];
+        if (lt) { best = i; memcpy(best_key, key, sizeof key); }
+    }
+    return best;
+}
+
+static dvs_result_t _canon_search(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
+                                  uint32_t base, double deadline) {
+    const size_t bytes = (size_t)ctx->n_vars * sizeof(CanonFrame);
+    CanonFrame *fr = ctx->n_vars ? (CanonFrame *)DVS_ALLOC(ctx->alloc, bytes) : NULL;
+    if (ctx->n_vars && !fr) return DVS_SOLVE_TIMEOUT;
+    CanonGaps gaps = { NULL, 0, 0 };
+    const uint64_t max_conf = opts->max_conflicts && opts->max_restarts
+        ? (uint64_t)opts->max_conflicts * opts->max_restarts : 0;
+    const uint64_t c0 = ctx->conflict_count;
+    dvs_result_t res;
+    uint64_t tick = 0;
+    uint32_t depth = 0;
+    int open = 1;    /* the last candidate held: open the next variable's frame */
+    int failed = 0;  /* the top frame's candidate f->v has no solution */
+    for (;;) {
+        if (deadline > 0.0 && (++tick & 0x3FF) == 0 && _now_sec() > deadline) {
+            ctx->bail_reason = DVS_BAIL_DEADLINE;
+            res = DVS_SOLVE_TIMEOUT;
+            break;
+        }
+        if (ctx->work_limit && dvs_ctx_work(ctx) > ctx->work_limit) {
+            ctx->work_hit = 1;
+            res = DVS_SOLVE_TIMEOUT;
+            break;
+        }
+        if (open) {
+            open = 0;
+            const uint32_t x = _canon_select(ctx, opts->seed);
+            if (x == EXPR_NULL) { res = DVS_SOLVE_OK; break; }
+            if (ctx->decision_level + 1u >= ctx->max_depth) {
+                ctx->bail_reason = DVS_BAIL_MAX_DEPTH;
+                res = DVS_SOLVE_TIMEOUT;
+                break;
+            }
+            const int64_t lo = var_lo64(ctx, &ctx->vars[x]);
+            CanonFrame *f = &fr[depth++];
+            *f = (CanonFrame){ .x = x, .gap0 = gaps.n, .lo = lo,
+                               .span = (uint64_t)var_hi64(ctx, &ctx->vars[x]) - (uint64_t)lo };
+            /* Holes are ruled out from the start. */
+            for (const HoleEntry *he = _has_holes(ctx, x) ? dvs_hole_first(ctx, x) : NULL;
+                    he; he = he->next) {
+                uint64_t o = (uint64_t)he->value - (uint64_t)lo;
+                if (o <= f->span && _canon_gap_add(ctx, &gaps, f, o, o) != 0) break;
+            }
+        }
+        CanonFrame *f = &fr[depth - 1];
+        const uint32_t x = f->x;
+        if (failed && _canon_reject(ctx, &gaps, f, x) != 0) { res = DVS_SOLVE_TIMEOUT; break; }
+        failed = 0;
+        if (ctx->prop_aborted) { res = DVS_SOLVE_TIMEOUT; break; }
+        if (!_canon_draw(ctx, &gaps, f, x, dvs_rng_key(opts->seed, x))) {
+            /* x has nothing left: the values before it do not extend. */
+            gaps.n = f->gap0;
+            if (--depth == 0) { res = DVS_SOLVE_UNSAT; break; }
+            trail_backtrack(ctx, base + depth - 1u);
+            failed = 1;
+            continue;
+        }
+        const int64_t v = (int64_t)((uint64_t)f->lo + f->v);
+        trail_push_level(ctx);
+        ctx->conflict_prop_ref   = EXPR_NULL;   /* see the decision push */
+        ctx->conflict_clause_idx = EXPR_NULL;
+        PropResult pr = ctx_tighten_lb64(ctx, x, v);
+        if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, v);
+        if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+        if (pr == PROP_OK) { open = 1; continue; }
+        if (ctx->prop_aborted) { res = DVS_SOLVE_TIMEOUT; break; }
+        failed = 1;
+        ctx->conflict_count++;
+        if (max_conf && ctx->conflict_count - c0 >= max_conf) {
+            ctx->bail_reason = DVS_BAIL_MAX_RESTARTS;
+            res = DVS_SOLVE_TIMEOUT;
+            break;
+        }
+        trail_backtrack(ctx, base + depth - 1u);
+    }
+    dvs_ctx_free(ctx, gaps.gaps, gaps.cap * sizeof(CanonGap));
+    dvs_ctx_free(ctx, fr, bytes);
+    return res;
+}
+
+/* Words ahead of the enumeration list in dvs_search_export_tiers. */
+#define TIERS_HEAD 13
+
+size_t dvs_search_export_tiers(const dvs_ctx_t *ctx, int64_t *buf, size_t cap) {
+    const int on = ctx->enum_state == ENUM_ON;
+    const uint32_t nv = on ? ctx->enum_nv : 0, ns = on ? ctx->enum_nsol : 0;
+    const uint32_t nr = on && ctx->enum_restore_gen == ctx->restore_gen ? ctx->enum_root_n : 0;
+    const int64_t head[TIERS_HEAD] = {
+        ctx->box_state, ctx->box_probe_acc, ctx->box_probe_n, (int64_t)ctx->mul_count_max,
+        ctx->mul_count_probed, ctx->enum_state, ctx->enum_redo, (int64_t)ctx->enum_key,
+        nv, ns, nr, ctx->enum_n_props, ctx->enum_n_decl };
+    size_t n = TIERS_HEAD + nv + (size_t)ns * nv + 2u * (size_t)nr;
+    if (n > cap) return n;
+    memcpy(buf, head, sizeof head);
+    int64_t *w = buf + TIERS_HEAD;
+    for (uint32_t i = 0; i < nv; i++) *w++ = ctx->enum_vars[i];
+    if (ns) memcpy(w, ctx->enum_vals, (size_t)ns * nv * sizeof *w);
+    w += (size_t)ns * nv;
+    if (nr) memcpy(w, ctx->enum_root, 2u * (size_t)nr * sizeof *w);
+    return n;
+}
+
+int dvs_search_import_tiers(dvs_ctx_t *ctx, const int64_t *buf, size_t n) {
+    if (n < TIERS_HEAD) return -1;
+    const uint64_t nv = (uint64_t)buf[8], ns = (uint64_t)buf[9], nr = (uint64_t)buf[10];
+    if (nv > ctx->n_vars || nr > ctx->n_vars || (nv ? ns > (n - TIERS_HEAD) / nv : ns > 0)
+            || n != TIERS_HEAD + nv + ns * nv + 2 * nr)
+        return -1;
+    const int64_t *w = buf + TIERS_HEAD;
+    if (nv) {
+        uint32_t *ev = (uint32_t *)dvs_ctx_resize(ctx, ctx->enum_vars,
+                                                  (size_t)ctx->enum_nv * sizeof(uint32_t),
+                                                  nv * sizeof(uint32_t));
+        if (!ev) return -1;
+        ctx->enum_vars = ev;
+        ctx->enum_nv = (uint32_t)nv;
+        for (uint32_t i = 0; i < nv; i++) ev[i] = (uint32_t)*w++;
+    }
+    if (ns * nv > ctx->enum_cap) {
+        int64_t *ev = (int64_t *)dvs_ctx_resize(ctx, ctx->enum_vals,
+                                                (size_t)ctx->enum_cap * sizeof(int64_t),
+                                                ns * nv * sizeof(int64_t));
+        if (!ev) return -1;
+        ctx->enum_vals = ev;
+        ctx->enum_cap = (uint32_t)(ns * nv);
+    }
+    if (ns) memcpy(ctx->enum_vals, w, ns * nv * sizeof *w);
+    w += ns * nv;
+    if (nr > ctx->enum_root_cap) {
+        int64_t *r = (int64_t *)dvs_ctx_resize(ctx, ctx->enum_root,
+                                               (size_t)ctx->enum_root_cap * 2u * sizeof(int64_t),
+                                               nr * 2u * sizeof(int64_t));
+        if (!r) return -1;
+        ctx->enum_root = r;
+        ctx->enum_root_cap = (uint32_t)nr;
+    }
+    if (nr) memcpy(ctx->enum_root, w, 2 * nr * sizeof *w);
+    ctx->box_state        = (uint8_t)buf[0];
+    ctx->box_probe_acc    = (uint8_t)buf[1];
+    ctx->box_probe_n      = (uint8_t)buf[2];
+    ctx->mul_count_max    = (uint64_t)buf[3];
+    ctx->mul_count_probed = (uint8_t)buf[4];
+    ctx->enum_state       = (uint8_t)buf[5];
+    ctx->enum_redo        = (uint8_t)buf[6];
+    ctx->enum_key         = (uint64_t)buf[7];
+    ctx->enum_nsol        = (uint32_t)ns;
+    ctx->enum_root_n      = (uint32_t)nr;
+    ctx->enum_n_props     = (uint32_t)buf[11];
+    ctx->enum_n_decl      = (uint32_t)buf[12];
+    ctx->enum_restore_gen = ctx->restore_gen;
+    return 0;
+}
+
+int dvs_search_lcg_open(dvs_ctx_t *ctx) {
+    if (ctx->lcg || ctx->n_vars == 0) return ctx->lcg ? 0 : -1;
+    LCGCtx *lcg = (LCGCtx *)DVS_ALLOC(ctx->alloc, sizeof(LCGCtx));
+    if (!lcg) return -1;
+    uint32_t nv = ctx->n_vars_capacity > 0 ? ctx->n_vars_capacity : ctx->n_vars;
+    if (lcg_init_alloc(lcg, nv, ctx->alloc) != 0) {
+        dvs_ctx_free(ctx, lcg, sizeof(LCGCtx));
+        return -1;
+    }
+    lcg->enabled = 0;   /* each solve turns it on or off */
+    ctx->lcg = lcg;
+    return 0;
+}
+
 static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
     ctx->bail_reason = DVS_BAIL_NONE;
     /* Seed or preserve RNG. Sequential seeds must be avalanched first. Under
@@ -1934,9 +3327,14 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
      * ~1024 iters) in both the decision loop and the conflict loop. */
     double _deadline = 0.0;
     {
-        double tl = 10.0;
-        const char *e = getenv("DV_CDCL_TIME_LIMIT");
-        if (e && *e) tl = atof(e);
+        /* Read once: a getenv per solve was 4% of a small one. */
+        static double env_tl = -1.0;
+        if (env_tl < 0.0) {
+            const char *e = getenv("DV_CDCL_TIME_LIMIT");
+            env_tl = e && *e ? atof(e) : 10.0;
+            if (env_tl < 0.0) env_tl = 0.0;
+        }
+        double tl = env_tl;
         /* A per-solve budget wins over the env default: used for the Verilator
          * CDCL-viability probe, which must be bounded without touching env. */
         if (opts && opts->time_limit_ms > 0) tl = (double)opts->time_limit_ms / 1000.0;
@@ -1955,24 +3353,17 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
     ctx->fair_pick = (opts && opts->fair_pick) ? 1 : 0;
     _build_dec_tier(ctx);
 
-    /* Lazy LCG initialization on first solve when use_lcg is requested. */
-    if (opts && opts->use_lcg && !ctx->lcg && ctx->n_vars > 0) {
-        LCGCtx *lcg = (LCGCtx *)DVS_ALLOC(ctx->alloc, sizeof(LCGCtx));
-        if (lcg) {
-            uint32_t nv = ctx->n_vars_capacity > 0
-                          ? ctx->n_vars_capacity : ctx->n_vars;
-            if (lcg_init_alloc(lcg, nv, ctx->alloc) == 0) {
-                ctx->lcg = lcg;
-            } else {
-                dvs_ctx_free(ctx, lcg, sizeof(LCGCtx));
-            }
-        }
-    }
+    /* Lazy LCG initialization on first solve when use_lcg is requested. A
+     * canonical solve learns nothing and reads no learnt clause: what it
+     * returns must not depend on them, and as evidence only (no unit
+     * propagation) they cost more than they saved. */
+    const int use_lcg = opts && opts->use_lcg && !opts->canonical;
+    if (use_lcg) (void)dvs_search_lcg_open(ctx);
     /* `use_lcg` is per solve: an LCG created by an earlier solve learns only
      * in solves that ask for it. (It used to stay on once created, so a
      * caller could not run a plain chronological solve on the context.) */
     if (ctx->lcg)
-        ((LCGCtx *)ctx->lcg)->enabled = (opts && opts->use_lcg) ? 1 : 0;
+        ((LCGCtx *)ctx->lcg)->enabled = use_lcg;
 
     /* Register explain callbacks every solve — propagators added by
      * compile-time aux materialisation or incremental paths after the
@@ -2052,6 +3443,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
     uint32_t local_conflicts = 0;
     uint32_t mul_rejects    = 0;   /* _mul_count_accept */
     ctx->wpick_left = DVS_WPICK_PROBES;
+    ctx->wmemo_solve++;
     uint32_t luby_idx       = 1;  /* 1-indexed Luby sequence */
     uint32_t luby_limit     = (max_conflicts > 0)
                               ? _luby(luby_idx) * max_conflicts
@@ -2110,6 +3502,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (ABORTED()) return DVS_SOLVE_TIMEOUT;   /* a probe's verdict is void */
         if (sr == PROP_CONFLICT) return DVS_SOLVE_UNSAT;
     }
+    if (opts && opts->canonical) return _canon_search(ctx, opts, base, _deadline);
 
     /* Box-rejection tier: uniform over solutions when it succeeds. With a
      * solve order, the search decides the ordered stages first, and the
@@ -2531,16 +3924,16 @@ static void _refine_readd_softs(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts) {
 
         uint64_t saved = ctx->assumption_active_mask;
         ctx->assumption_active_mask |= (1ULL << best);
-        dvs_solver_reset(ctx);
+        _solver_reset(ctx);
         _pin_inactive_assumptions(ctx);
-        if (dvs_solver_propagate(ctx) == PROP_CONFLICT ||
+        if (ctx->pin_conflict || dvs_solver_propagate(ctx) == PROP_CONFLICT ||
                 _solver_solve_core(ctx, opts) != DVS_SOLVE_OK) {
             ctx->assumption_active_mask = saved;   /* keep it dropped */
         }
     }
     /* Materialize the final accepted set: the last trial may have been a revert,
      * leaving stale search state. The final mask was proven SAT, so this resolves. */
-    dvs_solver_reset(ctx);
+    _solver_reset(ctx);
     _pin_inactive_assumptions(ctx);
     dvs_solver_propagate(ctx);
     _solver_solve_core(ctx, opts);
@@ -2711,7 +4104,8 @@ static dvs_result_t _solver_solve_relax(dvs_ctx_t *ctx, const dvs_solve_opts_t *
      * such a primary non-OK to the complete BV-SAT engine.) */
     int relaxed_any = 0;
     for (;;) {
-        dvs_result_t res = _solver_solve_core(ctx, opts);
+        dvs_result_t res = ctx->pin_conflict ? DVS_SOLVE_UNSAT
+                                             : _solver_solve_core(ctx, opts);
         if (ctx->prop_aborted) return DVS_SOLVE_TIMEOUT;   /* never relax on it */
         if (res == DVS_SOLVE_OK) {
             /* If we shed any soft to get here, the subtractive walk may have
@@ -2744,8 +4138,8 @@ static dvs_result_t _solver_solve_relax(dvs_ctx_t *ctx, const dvs_solve_opts_t *
         ctx->assumption_active_mask &= ~(1ULL << worst_idx);
         relaxed_any = 1;
 
-        /* Reset solver to post-compile state */
-        dvs_solver_reset(ctx);
+        /* Reset solver to post-compile state, keeping the pins */
+        _solver_reset(ctx);
 
         /* Pin all relaxed assumptions to 0 by directly setting bounds.
          * We can't use ctx_tighten because the assumption var starts
@@ -2755,7 +4149,7 @@ static dvs_result_t _solver_solve_relax(dvs_ctx_t *ctx, const dvs_solve_opts_t *
         _pin_inactive_assumptions(ctx);
 
         /* Propagate the relaxations before retrying */
-        if (dvs_solver_propagate(ctx) == PROP_CONFLICT) {
+        if (ctx->pin_conflict || dvs_solver_propagate(ctx) == PROP_CONFLICT) {
             /* Still conflicting — try relaxing more assumptions */
             continue;
         }
@@ -2826,13 +4220,21 @@ static void _reset_in_scope(dvs_ctx_t *ctx) {
         PropResult r = ctx->scope_log_is_lb[i]
             ? ctx_tighten_lb64(ctx, v, ctx->scope_log_bound[i])
             : ctx_tighten_ub64(ctx, v, ctx->scope_log_bound[i]);
-        if (r == PROP_CONFLICT) break;
+        if (r == PROP_CONFLICT) {
+            ctx->pin_conflict = 1;
+            break;
+        }
     }
 }
 
-static void _solver_reset(dvs_ctx_t *ctx);
-
 void dvs_solver_reset(dvs_ctx_t *ctx) {
+    if (ctx && ctx->n_checkpoints == 0 && ctx->n_root_pins > 0) {
+        /* A learnt clause drops its root literals, and a pin is one: what
+         * was learnt under the pins (`x != 7` from `x != i`, i pinned to 7)
+         * would outlive them, losing solutions on every later solve. */
+        ctx->n_root_pins = 0;
+        if (ctx->lcg) lcg_reset((LCGCtx *)ctx->lcg);
+    }
     _solver_reset(ctx);
     if (ctx && ctx->oracle) dvs_oracle_on_reset(ctx);
 }
@@ -2840,6 +4242,7 @@ void dvs_solver_reset(dvs_ctx_t *ctx) {
 static void _solver_reset(dvs_ctx_t *ctx) {
     if (!ctx || !ctx->initial_vars || ctx->initial_n_vars == 0) return;
     ctx->search_sealed = 0;            /* undone below */
+    ctx->pin_conflict = 0;             /* the pins are re-established below */
     if (ctx->n_checkpoints > 0 && ctx->prop_refs) {
         _reset_in_scope(ctx);
         return;
@@ -2877,11 +4280,13 @@ static void _solver_reset(dvs_ctx_t *ctx) {
         }
     }
 
-    /* Reset search state */
+    /* Reset search state. The trail and entailment records live on the
+     * dynamic stack; release them, or every solve grows it. */
     ctx->decision_level = 0;
     ctx->trail_top      = NULL;
     ctx->trail_count    = 0;
     ctx->entail_top     = NULL;
+    if (ctx->dynamic) dvs_stack_pop(ctx->dynamic, (dvs_stack_mark_t){0});
     ctx->conflict_count = 0;
 
     /* Clear propagator queue */
@@ -2916,6 +4321,17 @@ static void _solver_reset(dvs_ctx_t *ctx) {
         }
     }
     }
+
+    /* Re-establish the pins (none after dvs_solver_reset, which drops them
+     * first). */
+    for (uint32_t i = 0; i < ctx->n_root_pins; i++) {
+        const DvsRootPin *rp = &ctx->root_pins[i];
+        if (ctx_tighten_lb64(ctx, rp->var, rp->value) == PROP_CONFLICT
+                || ctx_tighten_ub64(ctx, rp->var, rp->value) == PROP_CONFLICT) {
+            ctx->pin_conflict = 1;
+            break;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -2935,17 +4351,33 @@ static int _solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx || var_id >= ctx->n_vars) return -1;
     dvs_search_discard(ctx);
     var_id = _alias_root(ctx, var_id);
-    if (ctx->n_checkpoints > 0 &&
-        (dvs_scope_log_bound(ctx, var_id, 1, value) != 0 ||
-         dvs_scope_log_bound(ctx, var_id, 0, value) != 0))
-        return -1;
+    if (ctx->n_checkpoints > 0) {
+        if (dvs_scope_log_bound(ctx, var_id, 1, value) != 0 ||
+                dvs_scope_log_bound(ctx, var_id, 0, value) != 0)
+            return -1;
+    } else {
+        /* Kept so relaxing a soft constraint, which resets the context,
+         * keeps the pin (see _solver_reset). */
+        if (ctx->n_root_pins == ctx->root_pins_cap) {
+            uint32_t cap = ctx->root_pins_cap ? 2 * ctx->root_pins_cap : 8;
+            DvsRootPin *n = (DvsRootPin *)dvs_ctx_resize(ctx, ctx->root_pins,
+                (size_t)ctx->root_pins_cap * sizeof(DvsRootPin),
+                (size_t)cap * sizeof(DvsRootPin));
+            if (!n) return -1;
+            ctx->root_pins = n;
+            ctx->root_pins_cap = cap;
+        }
+        ctx->root_pins[ctx->n_root_pins++] = (DvsRootPin){ var_id, 0, value };
+    }
 
+    /* With soft constraints the propagation below assumes them all, so a
+     * conflict may only mean some must be relaxed: the pin stands, and the
+     * solve decides (it relaxes softs, and is UNSAT only when the pins
+     * contradict the hard constraints). */
+    const int soft = ctx->n_assumptions > 0;
     PropResult r = ctx_tighten_lb64(ctx, var_id, value);
-    if (r == PROP_CONFLICT) return -1;
-    r = ctx_tighten_ub64(ctx, var_id, value);
-    if (r == PROP_CONFLICT) return -1;
-
-    r = dvs_solver_propagate(ctx);
+    if (r != PROP_CONFLICT) r = ctx_tighten_ub64(ctx, var_id, value);
+    if (r != PROP_CONFLICT) r = dvs_solver_propagate(ctx);
     if (r == PROP_CONFLICT && ctx->prop_aborted) {
         /* Abandoned at the trail cap (a strict compare climbing one value a
          * round, B61), not refuted: the pin stands and the solve carries on
@@ -2955,8 +4387,10 @@ static int _solver_pin_var(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
         ctx->prop_aborted = 0;
         return 0;
     }
-    if (r == PROP_CONFLICT) return -1;
-
+    if (r == PROP_CONFLICT) {
+        if (!soft) return -1;
+        ctx->pin_conflict = 1;
+    }
     return 0;
 }
 
@@ -3072,6 +4506,7 @@ static uint32_t _count_holes_in_range(const dvs_ctx_t *ctx, uint32_t var_id,
  * Returns 0 on success, 1 if already present, -1 on alloc failure. */
 static int _insert_hole(dvs_ctx_t *ctx, uint32_t var_id, int64_t value) {
     if (!ctx->var_holes_head) return -1;
+    ctx->wmemo_epoch++;
 
     /* Find the place (sorted ascending) before allocating. */
     HoleEntry *prev = NULL, *cur = dvs_hole_first(ctx, var_id);

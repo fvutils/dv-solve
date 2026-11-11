@@ -82,9 +82,12 @@ class _ProblemHeader(ctypes.Structure):
     pool's header. Offsets in the pool are relative to the pool, so the whole
     buffer can be copied into a bigger one."""
     _fields_ = [(n, ctypes.c_uint32) for n in (
+        "magic", "format_version",
         "n_vars", "n_constraints", "n_sources", "vars_head", "constraints_head",
         "sources_head", "n_alldiffs", "allDiff_head", "n_softs", "softs_head",
         "n_dists", "dists_head", "next_constraint_id", "flags",
+        "n_arrays", "arrays_head", "n_foreachs", "foreachs_head",
+        "n_slots", "n_exports", "exports_head", "n_imports", "imports_head", "_p32",
         "pool_capacity", "pool_used", "pool_overflow", "pool_flags")]
 
 

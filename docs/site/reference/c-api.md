@@ -2,8 +2,10 @@
 
 The C API builds a constraint problem, compiles it and solves it. It is
 declared in one header, `dv_solve.h`, and implemented in `libdv_solve`.
-Everything on this page is declared in that header; the other headers
-installed beside it are internal and may change in any release.
+Everything on this page is declared in that header, or in `dvs_writer.h`,
+which it includes and which declares the problem-building half on its own;
+the other headers installed beside them are internal and may change in any
+release.
 
 ```c
 #include "dv_solve.h"
@@ -145,8 +147,8 @@ Require the Boolean expression `root` to hold.
 
 ```{c:function} dvs_expr_t dvs_builder_add_all_different(dvs_builder_t *b, uint32_t n_vars, const uint32_t *var_ids)
 Require the variables to take pairwise different values (SystemVerilog
-`unique`). Up to 16 variables, each at most 32 bits wide; beyond that,
-compiling returns {c:macro}`DVS_COMPILE_UNSUPPORTED_WIDTH`.
+`unique`). Any number of variables, each at most 32 bits wide; a wider one
+makes compiling return {c:macro}`DVS_COMPILE_UNSUPPORTED_WIDTH`.
 ```
 
 ```{c:function} dvs_expr_t dvs_builder_add_soft_constraint(dvs_builder_t *b, dvs_expr_t root, uint32_t priority)
@@ -186,6 +188,11 @@ keeps the variable's history, so it takes each value once per cycle.
 State: read on each {c:func}`dvs_randomize` call and pinned, never sampled.
 Solved as {c:enumerator}`DVS_VAR_RAND` when nothing pins it.
 ```
+
+```{c:enumerator} DVS_VAR_IMPORT
+Another object's variable (see [Parts](#parts)). Set by
+{c:func}`dvs_builder_add_import`, not by {c:func}`dvs_builder_set_var_kind`.
+```
 ````
 
 ```{c:function} int dvs_builder_set_var_kind(dvs_builder_t *b, uint32_t var_id, dvs_var_kind_t kind)
@@ -221,6 +228,89 @@ shares `weight` (SystemVerilog `:/`).
 ```
 ````
 
+### Arrays
+
+A problem can declare arrays whose size is given on each call (SystemVerilog
+dynamic arrays and queues). Array ids are their own space, 0 to *n*−1, apart
+from variable ids. The constraints on the elements are written once, over a
+loop index, and instantiated for the sizes of each call. Only a handle solves
+such a problem ({c:func}`dvs_randomize_arrays`);
+{c:func}`dvs_solver_compile` refuses it ({c:macro}`DVS_COMPILE_ARRAYS`).
+
+```{c:function} int dvs_builder_add_array(dvs_builder_t *b, uint32_t array_id, uint32_t elem_width, uint8_t elem_signed, dvs_var_kind_t kind)
+Declare array `array_id` with elements of `elem_width` bits (1 to 64).
+`kind` is {c:enumerator}`DVS_VAR_RAND` (the elements are solved) or
+{c:enumerator}`DVS_VAR_STATE` (they are read). Returns 0, or −1 for another
+width or kind.
+```
+
+```{c:function} int dvs_builder_set_array_order(dvs_builder_t *b, uint32_t array_id, uint8_t stage)
+Put every element of the array in solve-order stage `stage`, as
+{c:func}`dvs_builder_set_var_order`.
+```
+
+```{c:function} int dvs_builder_set_array_size_random(dvs_builder_t *b, uint32_t array_id)
+Make the size of a RAND array, or of a slot array, random:
+{c:func}`dvs_randomize_sizes` solves it, with the constraints that read no
+element, before the elements are solved at that size (IEEE 1800-2023
+18.5.8.1). A size solved above 65535 fails the call
+({c:enumerator}`DVS_RANDOMIZE_TOO_LARGE`).
+
+:returns: 0, or -1 if the array is not declared, or is neither RAND nor a
+  slot array.
+```
+
+```{c:function} dvs_expr_t dvs_builder_expr_array_size(dvs_builder_t *b, uint32_t array_id)
+The size of the array, a 32-bit signed int.
+```
+
+```{c:function} dvs_expr_t dvs_builder_expr_loop_index(dvs_builder_t *b, uint32_t level)
+The index bound at `level` (below {c:macro}`DVS_MAX_LOOP_LEVELS`) by the
+enclosing {c:func}`dvs_builder_foreach_begin` or
+{c:func}`dvs_builder_expr_reduce`, a 32-bit signed int.
+```
+
+```{c:function} dvs_expr_t dvs_builder_expr_elem(dvs_builder_t *b, uint32_t array_id, dvs_expr_t index)
+Element `index` of the array, of its element type; 0 when the index is out of
+range. A random index selects among the elements.
+```
+
+```{c:function} dvs_expr_t dvs_builder_expr_reduce(dvs_builder_t *b, dvs_binop_t op, uint32_t array_id, uint32_t level, dvs_expr_t body)
+A reduction over the array (SystemVerilog `sum()`, `product()`, `and()`,
+`or()`, `xor()`, with or without `with`): `body`, built with
+{c:func}`dvs_builder_expr_loop_index` of `level` as the element's index,
+folded with `op` ({c:enumerator}`DVS_BIN_ADD`, `MUL`, `BAND`, `BOR` or
+`BXOR`). Of the type of `body`; over an empty array, the identity of `op`.
+```
+
+```{c:function} int dvs_builder_foreach_begin(dvs_builder_t *b, uint32_t array_id, uint32_t level)
+Open a foreach over the array (SystemVerilog `foreach (a[i])`). Until the
+matching {c:func}`dvs_builder_foreach_end`, {c:func}`dvs_builder_add_constraint`,
+{c:func}`dvs_builder_add_soft_constraint` and
+{c:func}`dvs_builder_add_dist_elem` add to its body, which holds once per
+element with {c:func}`dvs_builder_expr_loop_index` of `level` its index.
+Foreachs nest, each with a level of its own. Returns 0, or −1 if `level` is
+{c:macro}`DVS_MAX_LOOP_LEVELS` or more, or already bound.
+```
+
+```{c:function} int dvs_builder_foreach_end(dvs_builder_t *b)
+Close the innermost open foreach. Returns 0, or −1 if none is open.
+```
+
+```{c:function} dvs_expr_t dvs_builder_add_dist_elem(dvs_builder_t *b, uint32_t array_id, dvs_expr_t index, uint32_t n_entries, const dvs_dist_entry_t *entries)
+Give element `index` of the array a weighted distribution, in the body of an
+open foreach ({c:func}`dvs_builder_add_dist` is refused there).
+```
+
+```{c:macro} DVS_ARRAY_MEMBER(id)
+A member of {c:func}`dvs_builder_add_all_different` that is all the elements
+of array `id`.
+```
+
+```{c:macro} DVS_MAX_LOOP_LEVELS
+The levels one expression may bind: 8.
+```
+
 ```{c:function} dvs_problem_t *dvs_builder_finalize(dvs_builder_t *b, size_t *size)
 Produce the finished problem. The builder is unchanged and can go on to be
 reset or destroyed.
@@ -235,6 +325,98 @@ Free a problem returned by {c:func}`dvs_builder_finalize`. Destroy every
 context compiled from it first.
 ```
 
+```{c:function} void dvs_builder_set_explicit(dvs_builder_t *b)
+Mark the problems finalized after this call EXPLICIT: every constant is
+sized, and every operator's operands already have the width and signedness
+it works at (SMT-LIB bit-vector semantics), so the solver skips
+SystemVerilog width elaboration.
+```
+
+```{c:macro} DVS_PROBLEM_FORMAT_VERSION
+The version of the problem image format. A runtime solves only images of its
+own version: {c:func}`dvs_handle_new` refuses any other. The image is
+little-endian and the same bytes on every host (a 32-bit writer and a 64-bit
+one produce identical images); a big-endian runtime refuses it.
+```
+
+```{c:function} int dvs_problem_validate(const dvs_problem_t *p, char *why, size_t whylen)
+Check a finalized problem against what the runtime solves, so a program that
+writes problems (a compiler embedding them) can refuse one when it writes it
+rather than have it fail at run time. It checks that the image is well formed,
+then makes the checks {c:func}`dvs_solver_compile` makes:
+
+- variable ids are 0 to n-1, each declared once, 1 to 64 bits wide
+  ({c:macro}`DVS_COMPILE_BAD_VAR`, {c:macro}`DVS_COMPILE_UNSUPPORTED_WIDTH`);
+- an all-different is over variables of at most 32 bits;
+- every variable an expression, all-different, source group or distribution
+  names is declared;
+- no width over {c:macro}`DVS_MAX_WIDTH`, no reversed slice, and no expression
+  nested more than 20000 deep.
+
+It needs only libc, and is in the writer library. A problem it passes can
+still fail where the solve's own stack is smaller than that nesting needs.
+
+:param why: If not `NULL`, receives the reason for a refusal, starting with
+  the compile code it stands for (`BAD_VAR: ...`, `UNSUPPORTED_WIDTH: ...`).
+:param whylen: Size of `why`.
+:returns: 0 if the problem passes, -1 if not.
+```
+
+```{c:function} uint32_t dvs_problem_format_version(void)
+{c:macro}`DVS_PROBLEM_FORMAT_VERSION` of the linked library.
+```
+
+### Parts
+
+A part is the problem of one class in a `randomize()` over several objects
+(IEEE 1800-2023 18.5.8): its own constraints, its exports (the variables other
+objects' constraints may name) and its slots (its handles to other objects,
+whose parts are given on each call). A constraint on another object's variable
+reads an import, bound to an export of the object at a slot path.
+{c:func}`dvs_randomize_parts` solves the parts together; a part with slots is
+solved by it alone.
+
+```{c:function} void dvs_builder_set_n_slots(dvs_builder_t *b, uint32_t n_slots)
+Give the part `n_slots` slots, numbered 0 to `n_slots`−1.
+```
+
+```{c:function} int dvs_builder_add_export(dvs_builder_t *b, uint32_t var_id)
+Export a variable, at the next export index. A derived class's part declares
+its base class's exports first, in the same order, so a part imports through
+a slot without knowing the class of the object in it. Returns the export
+index, or −1 if the variable is not declared or is an import.
+```
+
+```{c:function} int dvs_builder_add_import(dvs_builder_t *b, uint32_t var_id, uint32_t n_path, const uint32_t *path, uint32_t export_index)
+Make a declared variable an import of export `export_index` of the object
+reached through slot `path[0]` of this part, then slot `path[1]` of that
+object's part, and so on. A slot that is a slot array is followed by the word
+that selects its element: a constant index, or {c:macro}`DVS_PATH_LOOP` (at
+most one per path). Declare it with the export's width and signedness.
+Returns 0, or −1 if the variable is not declared or already an import, or
+`n_path` is 0.
+```
+
+```{c:function} int dvs_builder_add_slot_array(dvs_builder_t *b, uint32_t array_id, uint32_t slot)
+Declare array `array_id` as a slot array taking slot `slot`: the handles of an
+SV dynamic array or queue of class handles. Its size is the number of handles
+(random with {c:func}`dvs_builder_set_array_size_random`), a foreach over it
+iterates them, and its element `i` is 1 if handle `i` is not null.
+{c:func}`dvs_randomize_parts` instantiates a foreach over it once per element.
+Returns 0, or −1 if the array could not be added.
+```
+
+```{c:macro} DVS_PATH_LOOP(level)
+In an import path, after a slot array: the element at the index bound to loop
+`level`, so a foreach over the slot array reads each element's export.
+```
+
+```{c:macro} DVS_API
+Marks every function on this page. A program linking the static libraries
+(`libdv_solve.a`, or the writer `libdv_solve_writer.a`) defines `DVS_STATIC`,
+as their pkg-config `Cflags` do.
+```
+
 ## Expressions
 
 Each function returns a reference to the new expression. Expressions follow
@@ -244,6 +426,13 @@ SystemVerilog's sizing and signedness rules; see
 ```{c:function} dvs_expr_t dvs_builder_expr_const(dvs_builder_t *b, int64_t value, uint8_t is_signed)
 A constant. Like an unsized SystemVerilog literal it is a 32-bit signed
 value, unless it doesn't fit in 32 bits.
+```
+
+```{c:function} dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value, uint8_t is_signed, uint32_t width)
+A sized constant: the low `width` bits (1 to 64) of `value`, signed when
+`is_signed`, like the SystemVerilog literal `8'd3`. A `width` of 0 is the
+unsized constant of {c:func}`dvs_builder_expr_const`. Spell a wider constant
+with {c:func}`dvs_builder_expr_const_wide`.
 ```
 
 ```{c:function} dvs_expr_t dvs_builder_expr_const_wide(dvs_builder_t *b, uint32_t n_limbs, const uint64_t *limbs, uint32_t width, uint8_t is_signed)
@@ -294,7 +483,16 @@ SystemVerilog's `T'(operand)`. When `to_bits` is wider than the operand, the
 operand is evaluated at `to_bits`, so a 64-bit cast of the product of two
 32-bit variables does not wrap at 32 bits. The value is then truncated to
 `to_bits`, or extended by the operand's own signedness, and read as signed or
-unsigned.
+unsigned. Not for an explicit problem: see {c:func}`dvs_builder_expr_sv_cast`.
+```
+
+```{c:function} dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand, uint32_t from_bits, uint32_t to_bits, uint8_t sign_extend, uint8_t dst_signed)
+The conversion of an explicit problem ({c:func}`dvs_builder_set_explicit`), in
+which no operator converts its operands: the low `from_bits` bits of
+`operand`, zero-extended (`sign_extend` 0) or sign-extended (1) to `to_bits`,
+read as signed when `dst_signed`, else unsigned. With `from_bits` equal to
+`to_bits` it only changes how the value reads, e.g. an unsigned bit pattern as
+signed.
 ```
 
 ```{c:function} dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand, uint32_t hi_bit, uint32_t lo_bit)
@@ -516,6 +714,12 @@ order the values are drawn in.
 Wall-clock budget for this solve, or 0 for the default.
 ```
 
+```{c:member} uint8_t canonical
+1 makes the values depend only on the constraints, the pinned values and the
+seed, never on what earlier solves learnt: a fixed variable order,
+per-variable candidate draws, and clauses that only reject.
+```
+
 ```{c:member} uint32_t max_conflicts
 Conflicts allowed per restart, or 0 for no limit.
 ```
@@ -564,8 +768,8 @@ or the problem needs more than 65,535 propagators).
 ```{c:macro} DVS_COMPILE_UNSUPPORTED_WIDTH
 −3: the problem goes beyond a supported limit of the CDCL engine: a variable
 is wider than 64 bits, an expression is wider than {c:macro}`DVS_MAX_WIDTH`
-bits or nested more than 20000 deep, or an all-different constraint has more
-than 16 variables or one wider than 32 bits. Wider bit-vectors are solved by
+bits or nested more than 20000 deep, or an all-different constraint has a
+variable wider than 32 bits. Wider bit-vectors are solved by
 the bit-blaster, and through the SMT-LIB2 front end
 ({doc}`../guides/smt2-solver`).
 ```
@@ -577,6 +781,11 @@ names a variable that was never declared. For
 already uses for a variable of its own, or re-declares one at another width.
 ```
 
+```{c:macro} DVS_COMPILE_ARRAYS
+−5: the problem declares arrays ({c:func}`dvs_builder_add_array`). Only a
+handle solves such a problem, with {c:func}`dvs_randomize_arrays`.
+```
+
 ## Incremental solving
 
 These functions change what the following solves may return, without
@@ -586,9 +795,11 @@ recompiling.
 Fix a variable to a value for the following solves, until
 {c:func}`dvs_solver_reset` or a {c:func}`dvs_solver_restore` to a checkpoint
 taken before the pin. Use it for SystemVerilog `rand_mode(0)` or for state
-variables.
+variables. The pin is hard: soft constraints give way to it.
 
-:returns: 0, or −1 if the value contradicts the constraints.
+:returns: 0, or −1 if the value contradicts the constraints. With soft
+  constraints a contradiction is left to the solve, which relaxes them and is
+  `DVS_SOLVE_UNSAT` if that is not enough.
 ```
 
 ```{c:function} int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t value)
@@ -678,9 +889,13 @@ types).
 ```{c:function} dvs_handle_t *dvs_handle_new(const void *buf, size_t size)
 Make a handle for the problem image `buf` of `size` bytes, as
 {c:func}`dvs_builder_finalize` returns it. The image is copied, so `buf` may
-be freed or be read-only. It is compiled on the first {c:func}`dvs_randomize`.
+be freed or be read-only, and need not be aligned. It is compiled on the
+first {c:func}`dvs_randomize`.
 
-:returns: The handle, or `NULL` if `size` is too small or memory runs out.
+:returns: The handle, or `NULL` if the image is not a well-formed problem of
+  {c:macro}`DVS_PROBLEM_FORMAT_VERSION`, or memory runs out. Before anything
+  in the image is used, its header is checked against `size`, and every
+  offset reachable from it is checked to be in range and aligned.
 ```
 
 ```{c:function} void dvs_handle_free(dvs_handle_t *h)
@@ -695,11 +910,14 @@ highest variable id the problem declares.
 ```{c:function} int dvs_handle_set_engine(dvs_handle_t *h, int engine)
 Choose the engine, before the first {c:func}`dvs_randomize`: the handle's
 context gets it ({c:func}`dvs_solver_set_engine`, which describes
-{c:enumerator}`DVS_ENGINE_AUTO`, the default).
+{c:enumerator}`DVS_ENGINE_AUTO`, the default). A problem with
+{c:enumerator}`DVS_VAR_STATE` or {c:enumerator}`DVS_VAR_RANDC` variables, soft
+constraints, a `dist` or a solve-order stays on CDCL: the bit-blast engine has
+no pins or value exclusion yet, and its resample ignores the others.
 
 :returns: 0; −1 if `h` is `NULL` or has already solved, `engine` is unknown,
-  or {c:enumerator}`DVS_ENGINE_BITBLAST` is asked of a problem with STATE or
-  RANDC variables.
+  or {c:enumerator}`DVS_ENGINE_BITBLAST` is asked of a problem that stays on
+  CDCL.
 ```
 
 ```{c:function} int dvs_handle_engine(const dvs_handle_t *h)
@@ -718,6 +936,18 @@ No solution exists with these STATE values.
 
 ```{c:enumerator} DVS_RANDOMIZE_ERROR
 An unsupported ref or `modes`, a compile error, or the search gave up.
+```
+
+```{c:enumerator} DVS_RANDOMIZE_TOO_LARGE
+{c:func}`dvs_randomize_arrays`: the arrays the call must solve together are
+too large (over 65536 elements).
+{c:func}`dvs_randomize_parts`: also over 4096 objects or 65536 slot-array
+elements.
+```
+
+```{c:enumerator} DVS_RANDOMIZE_NULL
+{c:func}`dvs_randomize_parts`: a constraint reads a variable through a null
+handle, and no guard of STATE values rules the read out.
 ```
 
 ```{c:function} int dvs_randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *modes, uint64_t seed)
@@ -739,6 +969,127 @@ must not overlap.
   result.
 :returns: {c:enumerator}`DVS_RANDOMIZE_OK`, {c:enumerator}`DVS_RANDOMIZE_UNSAT`
   or {c:enumerator}`DVS_RANDOMIZE_ERROR`.
+```
+
+```{c:type} dvs_array_ref_t
+One array of a problem with arrays: `n_elems` elements at `data`, packed,
+each in the smallest of 1, 2, 4 or 8 bytes that holds the element width (as a
+{c:enumerator}`DVS_REF_SCALAR` ref), little-endian. `data` may be `NULL` when
+`n_elems` is 0.
+```
+
+```{c:function} uint32_t dvs_handle_n_arrays(const dvs_handle_t *h)
+The number of entries {c:func}`dvs_randomize_arrays` reads from `arrays`: the
+arrays the problem declares.
+```
+
+```{c:function} int dvs_randomize_sizes(dvs_handle_t *h, const dvs_ref_t *refs, uint32_t *sizes, uint64_t seed)
+Solve the random sizes of a problem with arrays
+({c:func}`dvs_builder_set_array_size_random`): the first part of a
+randomize() call whose constraints read sizes, with the constraints that read
+no element, before any element is solved (IEEE 1800-2023 18.5.8.1). Nothing
+is written through `refs`. The caller then gives each array its size and
+calls {c:func}`dvs_randomize_arrays`.
+
+:param sizes: {c:func}`dvs_handle_n_arrays` entries: the current size of each
+  array; on {c:enumerator}`DVS_RANDOMIZE_OK`, each random size is replaced by
+  the size solved.
+:returns: as {c:func}`dvs_randomize`, or
+  {c:enumerator}`DVS_RANDOMIZE_TOO_LARGE` if a size solved is over 65535
+  (sizes unchanged). With no random size, {c:enumerator}`DVS_RANDOMIZE_OK`.
+```
+
+```{c:function} int dvs_randomize_arrays(dvs_handle_t *h, const dvs_ref_t *refs, const dvs_array_ref_t *arrays, const uint32_t *modes, uint64_t seed)
+Solve a problem with arrays once. Each array's size is its `n_elems`, fixed
+for the call: as in SystemVerilog (IEEE 1800-2023 18.5.8.1), sizes are solved
+before the constraints on the elements, so a caller with constrained sizes
+solves them first, as a problem of their own. The elements of a STATE array
+are read; those of a RAND array are written, on
+{c:enumerator}`DVS_RANDOMIZE_OK` only. `refs`, `modes` and `seed` are as for
+{c:func}`dvs_randomize`.
+
+An array whose elements are constrained one at a time (only in foreachs over
+it whose bodies read nothing random but the element) is solved element by
+element, for any size. The rest are instantiated for the sizes of the call
+and compiled; the handle keeps the last few instantiations, so a size seen
+again costs no compile.
+
+:param arrays: {c:func}`dvs_handle_n_arrays` entries.
+:returns: as {c:func}`dvs_randomize`, or
+  {c:enumerator}`DVS_RANDOMIZE_TOO_LARGE`.
+```
+
+### Several objects
+
+```{c:function} uint32_t dvs_handle_n_slots(const dvs_handle_t *h)
+The number of slots of a part ({c:func}`dvs_builder_set_n_slots`).
+```
+
+````{c:struct} dvs_part_t
+One object of a {c:func}`dvs_randomize_parts` call. Its address is the
+object's identity: an object reached through several slots is given by the
+same `dvs_part_t`, and solved once.
+
+```{c:member} dvs_handle_t *handle
+The problem of the object's class.
+```
+
+```{c:member} const dvs_ref_t *refs
+{c:func}`dvs_handle_n_vars` entries; those of imports are not read.
+```
+
+```{c:member} dvs_array_ref_t *arrays
+{c:func}`dvs_handle_n_arrays` entries.
+```
+
+```{c:member} const dvs_slot_t *slots
+{c:func}`dvs_handle_n_slots` entries.
+```
+
+The array ref of a slot array gives its size; its `data` is not read.
+````
+
+```{c:type} dvs_slot_t
+One slot of an object: `state`, one of {c:enumerator}`DVS_SLOT_NULL` (the
+handle is null), {c:enumerator}`DVS_SLOT_INACTIVE` (`rand_mode(0)`: the
+object is not randomized, and the exports imported through it are read) and
+{c:enumerator}`DVS_SLOT_ACTIVE` (the object is randomized with this one); and
+`child`, the object's part. The slot of a slot array instead gives the handles
+the array holds: `n_elems` slots at `elems`. Past them, up to the array's size
+in the call, its elements are null (a dynamic array resized larger).
+```
+
+```{c:function} uint32_t dvs_handle_array_slot(const dvs_handle_t *h, uint32_t array_id)
+The slot of array `array_id` if it is a slot array, else `DVS_NO_SLOT`.
+```
+
+```{c:function} int dvs_randomize_parts(dvs_part_t *root, uint64_t seed)
+Solve `root` and the objects reached from it through active slots together:
+the constraints of each, its imports bound to the exports they name. An import
+through an inactive slot is the export's current value; one through a null
+slot is 0, and a constraint that reads it must be guarded by STATE values that
+rule the read out (`if (h != null) ... h.x ...`, the guard a STATE bit with
+`!`, `&&`, `||` and conditions), or the call returns
+{c:enumerator}`DVS_RANDOMIZE_NULL`. Soft constraints (IEEE 1800-2023 18.5.13)
+of an object rank above those of the objects it reaches, those through a later
+slot (or a later element of a slot array) above those through an earlier one,
+and an object reached twice takes the higher rank. A foreach over a slot array
+is instantiated per element, each with that element's imports. The problem
+assembled for each shape (the classes, the slot states and the slot array
+sizes) is kept on `root`'s handle; a root without slots is solved as by
+{c:func}`dvs_randomize_arrays`.
+
+:returns: as {c:func}`dvs_randomize_arrays`,
+  {c:enumerator}`DVS_RANDOMIZE_NULL`, or
+  {c:enumerator}`DVS_RANDOMIZE_TOO_LARGE` past 4096 objects or 65536
+  slot-array elements.
+```
+
+```{c:function} int dvs_randomize_parts_sizes(dvs_part_t *root, uint64_t seed)
+The random sizes of a {c:func}`dvs_randomize_parts` call, solved first, as
+{c:func}`dvs_randomize_sizes` solves them: each such size replaces its array's
+`n_elems`. The caller then gives each array its size and calls
+{c:func}`dvs_randomize_parts`. A foreach over a slot array is not part of it.
 ```
 
 ## Oracle check

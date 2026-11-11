@@ -246,6 +246,11 @@ int dvs_bbsolver_sample_stale(const dvs_bbsolver_t *bb);
 void dvs_bbsolver_work(const dvs_bbsolver_t *bb, uint64_t *clauses,
                        uint64_t *sat_work, int *cadical, uint64_t *aux);
 
+/* Expression nodes evaluated outside SAT and simulation (the samplers'
+ * model checks and enumeration), a deterministic count, for the native
+ * path's measured route (dvs_engine.c). */
+uint64_t dvs_bbsolver_eval_work(const dvs_bbsolver_t *bb);
+
 int dvs_bbsolver_prepare(dvs_bbsolver_t *bb, uint64_t seed);
 int dvs_bbsolver_is_incremental(const dvs_bbsolver_t *bb);
 /* Why the last check or solve gave no verdict, for (get-info :reason-unknown).

@@ -25,9 +25,7 @@
 
 #define SV_POOL_HDR   ((uint32_t)sizeof(dvs_pool_t))
 #define SV_MAX_W      DVS_MAX_WIDTH   /* keeps width sums inside a uint32_t */
-/* Nesting limit where the stack cannot be measured (dvs_stack_deep); where it
- * can, the stack itself is the limit. */
-#define SV_MAX_DEPTH  20000
+#define SV_MAX_DEPTH  DVS_SV_MAX_DEPTH
 
 void dvs_sv_const_type(const ExprConst *c, uint32_t *width, uint8_t *is_signed) {
     if (c->width) {
@@ -45,11 +43,7 @@ void dvs_sv_const_type(const ExprConst *c, uint32_t *width, uint8_t *is_signed) 
 }
 
 int64_t dvs_sv_wrap(int64_t v, uint32_t width, uint8_t is_signed) {
-    if (width == 0 || width >= 64) return v;
-    uint64_t m = ((uint64_t)1 << width) - 1;
-    uint64_t u = (uint64_t)v & m;
-    if (is_signed && ((u >> (width - 1)) & 1u)) u |= ~m;
-    return (int64_t)u;
+    return dvs_const_wrap(v, width, is_signed);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1684,7 +1678,11 @@ static int _mrw_is_bool(SvE *E, dvs_expr_t ref) {
  * `!(a && b)`. Pushed down, both are ordinary conjunctions and disjunctions
  * of comparisons. */
 static dvs_expr_t _mrw_neg(SvE *E, dvs_expr_t ref, int depth) {
-    if (depth > 64 || !_mrw_is_bool(E, ref)) return EXPR_NULL;
+    /* A bitwise or is zero exactly when both operands are, whatever their
+     * width: !(a | b) is !a && !b. An or reduction (`!(x inside {arr})` over
+     * an array) expands to a chain of them. */
+    int bor = _kind(E, ref) == EXPR_BINARY && ((ExprBinary *)_P(E, ref))->op == DVS_BIN_BOR;
+    if (depth > 64 || !(bor || _mrw_is_bool(E, ref))) return EXPR_NULL;
     if (_kind(E, ref) == EXPR_UNARY) {
         dvs_expr_t x = ((ExprUnary *)_P(E, ref))->operand;
         return _mrw_is_bool(E, x) ? x : EXPR_NULL;
@@ -1694,6 +1692,7 @@ static dvs_expr_t _mrw_neg(SvE *E, dvs_expr_t ref, int depth) {
     switch (b.op) {
     case DVS_BIN_AND: op = DVS_BIN_OR;  break;
     case DVS_BIN_OR:  op = DVS_BIN_AND; break;
+    case DVS_BIN_BOR: op = DVS_BIN_AND; break;
     case DVS_BIN_EQ:  return _mk_bin(E, DVS_BIN_NEQ, b.lhs, b.rhs);
     case DVS_BIN_NEQ: return _mk_bin(E, DVS_BIN_EQ,  b.lhs, b.rhs);
     case DVS_BIN_LT:  return _mk_bin(E, DVS_BIN_GTE, b.lhs, b.rhs);

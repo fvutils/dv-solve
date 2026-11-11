@@ -177,8 +177,8 @@ class SolveProblemBuilder:
     def add_all_different(self, var_ids: Sequence[int]) -> int:
         """Require the given variables to take pairwise different values.
 
-        Up to 16 variables, each at most 32 bits wide; a larger set raises
-        :class:`~dv_solve.ctx.CompileUnsupportedError` when compiled.
+        Any number of variables, each at most 32 bits wide; a wider one
+        raises :class:`~dv_solve.ctx.CompileUnsupportedError` when compiled.
 
         Args:
             var_ids: Variable ids (not expressions).

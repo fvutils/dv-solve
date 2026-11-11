@@ -433,26 +433,26 @@ void prop_add_lowslice_mod_links(dvs_ctx_t *ctx);
 
 
 /* ------------------------------------------------------------------ */
-/* AllDifferent: x0, x1, ..., xN are all distinct (up to 16 vars)    */
+/* AllDifferent: x0, x1, ..., xN are all distinct                    */
 /*                                                                     */
 /* Uses PROP_FLAG_WIDE_WATCH because it watches more variables than   */
 /* PropWatchSect supports (>4).  _wake_var checks this flag to use    */
 /* the custom watcher_nexts array instead of PropWatchSect.           */
+/* Sized to its variable count: var_ids[_capacity], then              */
+/* watcher_nexts[_capacity], then the fire scratch (int64_t lo[n],    */
+/* hi[n], then uint32_t order[n]), so there is no variable limit.     */
 /* ------------------------------------------------------------------ */
-#define MAX_ALLDIFF_VARS 16u
-
 typedef struct {
     Propagator    hdr;
     uint32_t      n_vars;
-    uint32_t      _capacity;   /* max var_ids/watcher_nexts entries */
-    uint32_t      var_ids[MAX_ALLDIFF_VARS];
-    uint32_t      watcher_nexts[MAX_ALLDIFF_VARS];
+    uint32_t      _capacity;   /* var_ids/watcher_nexts entries (= n_vars) */
+    uint32_t      var_ids[];   /* var_ids[_capacity], watcher_nexts[_capacity] */
 } AllDifferent_t;
 
 /**
  * AllDifferent constraint: all watched variables must have distinct values.
  *
- * @param n_vars   Number of variables (2 <= n_vars <= MAX_ALLDIFF_VARS).
+ * @param n_vars   Number of variables (>= 2).
  * @param var_ids  Array of variable IDs.
  * @param priority Queue priority level.
  * @return Pool offset of the propagator, or EXPR_NULL on failure.
@@ -511,6 +511,26 @@ uint32_t prop_add_disj_clause(dvs_ctx_t *ctx,
  */
 uint32_t prop_disj_eq_set(const Propagator *p, uint32_t *out_var,
                           int64_t *out_vals, uint32_t max_vals);
+
+/* What the value picker (dvs_search.c, the pick domain) reads from a
+ * propagator. The watched variables are, in order:
+ *   PPK_EQ       x, y                 x == y
+ *   PPK_BAND     r, a, b              r == a & b
+ *   PPK_SHL      r, a, k              r == a << k (bounded or modular)
+ *   PPK_MOD      r, a, b              r == a % b
+ *   PPK_SLICE    r, a                 r == a[*hi_bit:*lo_bit]
+ *   PPK_REIF_LE  g, x, y              g <-> (x <= y)
+ *   PPK_REIF_EQ  g, x, y              g <-> (x == y)
+ *   PPK_ITE      r, c, a, b           r == (c ? a : b)
+ *   PPK_ADD      r, a, b              r == a + b
+ *   PPK_CONCAT   r, hi, lo            r == {hi, lo}, lo *lo_bit bits wide
+ *   PPK_DISJ     a DisjClause_t
+ * Anything else is PPK_OTHER. */
+typedef enum {
+    PPK_OTHER = 0, PPK_EQ, PPK_BAND, PPK_SHL, PPK_MOD, PPK_SLICE,
+    PPK_REIF_LE, PPK_REIF_EQ, PPK_ITE, PPK_ADD, PPK_CONCAT, PPK_DISJ
+} dvs_pick_kind_t;
+dvs_pick_kind_t prop_pick_kind(const Propagator *p, uint32_t *hi_bit, uint32_t *lo_bit);
 
 /* ------------------------------------------------------------------ */
 /* SumEq: result == var_ids[1] + ... + var_ids[n_vars-1]              */

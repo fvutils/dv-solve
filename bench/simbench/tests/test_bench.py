@@ -64,7 +64,9 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
         out = run(cfg, exe, str(tmp_path), plusargs)
         provenance.check_banner(cfg.simulator, out.log, provenance.simulator_build(
             cfg.simulator, cfg.tool, cfg.version_flag))
-        if cfg.replay_cmd:
+        if cfg.native_replay:
+            out = standalone.native_replay(cfg, out, str(tmp_path))
+        elif cfg.replay_cmd:
             out = standalone.replay_text(cfg, out, session, str(tmp_path))
         elif cfg.replay:
             out = standalone.replay(cfg, out, session, str(tmp_path))

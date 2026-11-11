@@ -573,6 +573,9 @@ int explain_bit_slice(Propagator *self, dvs_ctx_t *ctx,
     uint32_t src = (var_id == rid) ? aid : rid;
     out->lits[out->n_lits++] = _mk_lb(src, var_lo64(ctx, &ctx->vars[src]));
     out->lits[out->n_lits++] = _mk_ub(src, var_hi64(ctx, &ctx->vars[src]));
+    /* A signed a narrowed from r: the monotone rule holds while a >= 0. */
+    if (var_id == aid && (ctx->vars[aid].flags & VAR_SIGNED))
+        out->lits[out->n_lits++] = _mk_lb(aid, 0);
     (void)is_lb; (void)new_bound;
     return 0;
 }

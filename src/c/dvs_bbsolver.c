@@ -285,6 +285,9 @@ struct dvs_bbsolver_s {
      * pass and pre-solve simulation. Deterministic, for engine routing
      * (dvs_bbsolver_work). */
     uint64_t        aux_work;
+    /* Expression nodes bb_eval visited (the samplers' model checks and
+     * enumeration): dvs_bbsolver_eval_work. */
+    uint64_t        eval_work;
 };
 
 /* ----------------------------- helpers ------------------------------------ */
@@ -3616,6 +3619,7 @@ static int bb_eval(dvs_bbsolver_t *S, dvs_expr_t ref, uint32_t w,
                    const uint64_t *val, uint64_t *out) {
     if (ref == EXPR_NULL || w == 0 || w > 64) return 0;
     if (dvs_stack_low(&S->sg)) return 0;
+    S->eval_work++;
     ExprKind *kp = (ExprKind *)POOL_PTR(S->problem, ref);
     if (!kp) return 0;
     switch (*kp) {
@@ -5075,6 +5079,8 @@ void dvs_bbsolver_work(const dvs_bbsolver_t *S, uint64_t *clauses,
     *sat_work = S && S->sat ? dvs_sat_work(S->sat) : 0;
     *cadical  = S && S->sat && dvs_sat_backend(S->sat) == DVS_SAT_BACKEND_CADICAL;
 }
+
+uint64_t dvs_bbsolver_eval_work(const dvs_bbsolver_t *S) { return S ? S->eval_work : 0; }
 
 int dvs_bbsolver_sample_stale(const dvs_bbsolver_t *S) {
     if (!S || !S->sample_ready) return 0;
@@ -8807,6 +8813,18 @@ static int _en_build(dvs_bbsolver_t *S) {
             dlf[fill[ldep[li]]++] = (uint32_t)li;
         }
         free(fill);
+    }
+    /* Nothing prunes above the shallowest leaf, so the DFS visits every
+     * value of the slots down to it: a box there past DVS_EN_MAX_NODES is
+     * bound to decline, so decline before the walk. */
+    {
+        uint64_t box = 1;
+        for (uint32_t k = 0; k < n_sl; k++) {
+            uint64_t d = shi[dord[k]] - slo[dord[k]] + 1;
+            if (box > DVS_EN_MAX_NODES / d) goto out;
+            box *= d;
+            if (dhead[k + 1] > dhead[k]) break;
+        }
     }
 #define EN_GET(s) ((vval[sv[s]] >> sl[s]) & sm[s])
 #define EN_SET(s, x) (vval[sv[s]] = (vval[sv[s]] & ~(sm[s] << sl[s])) | ((x) << sl[s]))

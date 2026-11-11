@@ -113,6 +113,32 @@ typedef struct {
     uint8_t  _pad;
 } DvsExtMemo;
 
+/* A pin made outside any checkpoint (dvs_solver_pin_var). */
+typedef struct {
+    uint32_t var;
+    uint32_t _pad;
+    int64_t  value;
+} DvsRootPin;
+
+/* The bucket weights _pick_value_weighted found for a variable in one search
+ * state, keyed by a hash of that state (dvs_search.c, _wmemo_find): the
+ * first DVS_WMEMO_KEPT slots are kept across solves, the rest serve one. */
+#define DVS_WPICK_BUCKETS 16u
+#define DVS_WMEMO_KEPT    32u
+#define DVS_WMEMO_SLOTS   64u
+typedef struct DvsWMemo {
+    uint64_t k1, k2;          /* state hash; k1 == 0: empty slot          */
+    uint64_t fires;           /* propagator firings the probes took        */
+    uint32_t solve;           /* wmemo_solve of the solve that made it     */
+    uint8_t  nb;              /* buckets                                   */
+    uint8_t  exact;           /* made with no learnt clause                */
+    uint8_t  hits;            /* reuses, less the newcomers it turned away */
+    uint8_t  _pad;
+    int32_t  emax;            /* wt[k] is the box / 2^(DVS_WPICK_SCALE*emax) */
+    int64_t  blo[DVS_WPICK_BUCKETS], bhi[DVS_WPICK_BUCKETS];
+    double   wt[DVS_WPICK_BUCKETS];   /* 0: bucket refuted                 */
+} DvsWMemo;
+
 typedef struct dvs_ctx_s {
     Variable          *vars;          /* pointer into static pool      */
     uint32_t           n_vars;        /* number of compiled variables  */
@@ -288,6 +314,12 @@ typedef struct dvs_ctx_s {
     uint8_t            mul_count_probed;
     uint32_t           wpick_left;    /* bucket probes left in this solve
                                        * for _pick_value_weighted        */
+    struct DvsWMemo   *wmemo;         /* its weights by search state
+                                       * [DVS_WMEMO_SLOTS], made on use  */
+    uint32_t           wmemo_solve;   /* solves so far: the memo's
+                                       * entries of this solve           */
+    uint32_t           wmemo_epoch;   /* bumped when the problem changes
+                                       * other than through bounds       */
     CheckpointMark    *checkpoints;   /* array[checkpoints_cap]: from
                                        * the fixed pool, else ctx->alloc */
     uint32_t           n_checkpoints;
@@ -317,6 +349,15 @@ typedef struct dvs_ctx_s {
     uint32_t          *assumption_priorities;/* priority per assumption*/
     uint32_t           n_assumptions;        /* number of assumptions  */
     uint64_t           assumption_active_mask;/* bit set = active      */
+    /* The pins since the last dvs_solver_reset() outside any checkpoint.
+     * Relaxing a soft constraint resets the context to its compiled state,
+     * so they are re-applied (a checkpoint's scope_log does the same for
+     * the pins made in it). */
+    DvsRootPin        *root_pins;
+    uint32_t           n_root_pins, root_pins_cap;
+    /* A pin conflicted while soft constraints were assumed: the next solve
+     * starts by relaxing them (see dvs_solver_pin_var). */
+    uint8_t            pin_conflict;
     /* Distribution constraint metadata (Sprint 7) */
     uint32_t          *dist_offsets;  /* pool offset per var -> DistMeta, 0=none */
     /* Per-variable hole list for randc exclusions (Sprint 8) */
@@ -393,6 +434,9 @@ typedef struct dvs_ctx_s {
     uint64_t           work_budget;
     uint64_t           work_limit;    /* dvs_ctx_work past which this solve stops */
     uint8_t            work_hit;      /* this solve reached work_limit            */
+    void              *pick_ix;       /* the value picker's propagator index
+                                       * (dvs_search.c DvsPickIx), made on use    */
+    size_t             pick_ix_bytes;
 } dvs_ctx_t;
 
 /* Search work so far, in units of one propagator firing: firings plus

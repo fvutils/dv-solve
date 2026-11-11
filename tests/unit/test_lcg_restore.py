@@ -10,7 +10,8 @@ the previous solve's conflicts) and the arena was never reclaimed, so after
 enough solves learning silently stopped.
 
 8-queens is the problem: satisfiable, and a random first placement conflicts
-often enough that every few seeds learn.
+often enough that every few seeds learn. On CDCL: AUTO bit-blasts it (a sum
+shape, dvs_shape_route_rand), and a checkpoint moves a context back to CDCL.
 """
 from dv_solve.builder import SolveProblemBuilder
 from dv_solve.ctx import SolveCtx
@@ -40,7 +41,7 @@ def _is_solution(q):
 
 
 def _fresh(buf, seed):
-    ctx = SolveCtx(buf)
+    ctx = SolveCtx(buf, engine="cdcl")
     try:
         assert ctx.solve(seed=seed, use_lcg=True) == SOLVE_OK
         return [ctx.get_value(i) for i in range(N)]
@@ -59,7 +60,7 @@ def _reused(ctx, seed):
 
 def test_reused_context_answers_as_a_fresh_one():
     b, buf = _queens()
-    ctx = SolveCtx(buf)
+    ctx = SolveCtx(buf, engine="cdcl")
     try:
         for seed in range(1, 201):
             got = _reused(ctx, seed)
@@ -73,7 +74,7 @@ def test_reused_context_answers_as_a_fresh_one():
 def test_thousands_of_reuses_keep_answering_as_fresh():
     """The arena is reclaimed: late solves still learn, and still match."""
     b, buf = _queens()
-    ctx = SolveCtx(buf)
+    ctx = SolveCtx(buf, engine="cdcl")
     try:
         for seed in range(1, 4001):
             got = _reused(ctx, seed)

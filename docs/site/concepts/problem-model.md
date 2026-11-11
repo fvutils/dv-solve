@@ -121,8 +121,8 @@ Some relations are constraints in their own right. Pass what they return to
 
 - `add_constraint(e)` requires `e` to hold.
 - `add_all_different([id1, id2, ...])` requires the variables to take
-  pairwise different values (SystemVerilog `unique`): up to 16 variables,
-  each at most 32 bits wide.
+  pairwise different values (SystemVerilog `unique`): any number of
+  variables, each at most 32 bits wide.
 - `add_soft_constraint(e, priority)` asks for `e` to hold where possible.
   See {doc}`soft-constraints`.
 - `add_dist(id, entries)` gives a variable a weighted distribution

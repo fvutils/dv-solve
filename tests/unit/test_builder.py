@@ -40,6 +40,8 @@ _CTX_BUF_SIZE = 1048576
 
 class SolveProblemHead(ctypes.Structure):
     _fields_ = [
+        ("magic",            ctypes.c_uint32),
+        ("format_version",   ctypes.c_uint32),
         ("n_vars",           ctypes.c_uint32),
         ("n_constraints",    ctypes.c_uint32),
         ("n_sources",        ctypes.c_uint32),

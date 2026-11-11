@@ -80,6 +80,9 @@ typedef int (*dvs_sv_var_type_fn)(void *ud, uint32_t var_id,
  * caller must then refuse the problem: `sp` itself is NOT in explicit form, and
  * an engine that used it would apply different sizing rules from the ones the
  * problem was written for. */
+/* Nesting limit where the stack cannot be measured (dvs_stack_deep); where it
+ * can, the stack itself is the limit. dvs_problem_validate() applies it. */
+#define DVS_SV_MAX_DEPTH  20000
 #define DVS_SV_ERR_UNSUPPORTED  1  /* a width over 255 bits, or nesting too deep */
 #define DVS_SV_ERR_NOMEM        2
 #define DVS_SV_ERR_UNKNOWN_VAR  3  /* an expression names an undeclared variable */

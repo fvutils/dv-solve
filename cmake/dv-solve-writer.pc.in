@@ -1,0 +1,11 @@
+# The dv-solve problem writer: builds problem images, needs only libc.
+prefix=${pcfiledir}/../..
+libdir=${prefix}/lib
+includedir=${prefix}/include
+format_version=@DVS_PROBLEM_FORMAT_VERSION@
+
+Name: dv-solve-writer
+Description: dv-solve problem writer (static)
+Version: @DVS_VERSION@
+Cflags: -I${includedir} -DDVS_STATIC
+Libs: -L${libdir} -ldv_solve_writer

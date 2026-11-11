@@ -77,9 +77,19 @@ This is a `dvs_problem_t` image. The pool format already fits:
   builds;
 - `DVS_PROBLEM_F_EXPLICIT` already marks problems whose widths and signedness are
   explicit (SMT-LIB semantics).
+- the image is the same bytes on every host (format version 5): the header starts
+  with the magic `DVSP` and `DVS_PROBLEM_FORMAT_VERSION`, every field is fixed-width,
+  every node is 8-aligned with its 8-byte fields at 8-aligned offsets, and the format
+  is little-endian (a big-endian runtime refuses it). `src/c/dvs_image.c` pins the
+  layout with `_Static_assert`s that both libraries compile;
+- `dvs_handle_new` checks an image before it uses it (header, then every reachable
+  offset in range and aligned), and the writer's `dvs_problem_validate` refuses at
+  write time what `dvs_solver_compile` would refuse.
 
-Verilator emits SV semantics (`dvs_sv.h`, see the builder SV-width decision), so the
-flag stays clear and the core elaborates on first load.
+Verilator sets the flag (`dvs_builder_set_explicit`): V3Width has already fixed every
+width, extension and signedness, and its SMT back-end emits the same explicit form, so
+the core does no SV elaboration (`dvs_sv.h`) on load. (Decided 2026-11-06, replacing
+SV semantics here; see Verilator's `docs/design/dv_solve_integration.md`, Q3.)
 
 Changes to the problem format:
 
@@ -119,7 +129,7 @@ chains and sorted chains from text).
 | `foreach (a[i]) if (i > 0) a[i] OP a[i-1]` (sorted/ordered chain) | new `ChainSpec {vars, op, signed}` | n separate compares |
 | `solve a before b` | `VarSpec.order` | per-stage solve |
 
-Every construct keeps SV sizing and signedness from elaboration (`dvs_sv.h`): unsized
+Every construct keeps the SV sizing and signedness V3Width gave it: unsized
 constants are 32-bit, signed `%` and `/` follow the dividend's sign, and the sampler for
 a construct uses the same semantics as its SMT encoding. Only `ChainSpec` is new; it
 is a recognition hint, and the core also accepts the same chain as plain compares.
@@ -174,29 +184,83 @@ The solver does word-level reads and writes directly. There is no per-variable
 
 ## Arrays and queues with variable size
 
-This is the one place where structure depends on run-time values.
+This is the one place where structure depends on run-time values. Implemented
+2026-11-07 (`src/c/dvs_tmpl.c`, `dvs_randomize_arrays`; Verilator's side of the
+design is its `docs/design/dvs_dynamic_arrays.md`).
 
-- **Fixed size** (unpacked arrays, or a dynamic array whose size is state on this
-  call): the buffer is emitted per **size class**, as a template. The element
-  constraints are written once over a symbolic index, and the core instantiates them
-  for a concrete size the first time it sees that size. The handle keeps a small map
-  from size to compiled context.
-  - Most benches have one size per site.
-  - `foreach` unrolling moves from Verilator's per-call C++ loop into a one-time
-    instantiation.
-- **Random size** (`.size()` constrained): the buffer carries the size constraints as
-  their own group, solved first. That is the same two-phase solve Verilator does
-  today, but inside one `dvs_randomize` call and without rebuilding any text. The
-  element phase then uses the size-class context for the chosen size.
+- **Sizes first.** IEEE 1800-2023 18.5.8.1 solves the size constraints before the
+  iterative ones, so inside an array's `foreach` its `size()` is a state value.
+  A call with constrained sizes is therefore two problems: the sizes (an
+  ordinary scalar problem, its own image) and then the elements, with every size
+  fixed. Between the two, the caller allocates each array at its exact size. It
+  never needs a maximum.
+- **The element problem keeps the arrays.** The image declares array variables
+  (`dvs_builder_add_array`) and writes the element constraints once, over a loop
+  index: `EXPR_ELEM`, `EXPR_ARRAY_SIZE`, `EXPR_LOOP_INDEX`, `EXPR_REDUCE`, and
+  `ForeachSpec` bodies. `dvs_randomize_arrays` takes each array as a packed
+  buffer of its current size.
+- **Strategy by reach**, chosen when the handle loads the image:
+  - **element-local**: the elements appear only as `a[i]` in top-level foreachs
+    over the array, whose bodies read nothing random but that element (STATE
+    values, the index, sizes, `[i]` of STATE arrays). One problem over a single
+    element is compiled once and solved per element, for any size: no
+    expansion, no cache miss;
+  - **otherwise expanded**: the template is instantiated into a plain problem for
+    the sizes it reads (index arithmetic folded; a constant index out of range
+    reads 0; a random index is a choice over the elements; reductions folded),
+    compiled, and kept in a per-handle LRU of 4 keyed by those sizes.
 
-The cap on distinct size classes per handle (queues that grow every call) is a small
-LRU with a miss count; see decision 2 at the end.
+  Chain, sum and all-different propagators that would solve more classes without
+  expansion can come later behind the same call.
+- A RAND value reaches the caller only when the whole call succeeds.
+
+## Parts: constraints across objects
+
+Implemented 2026-11-07 (format version 4; `src/c/dvs_parts.c`,
+`dvs_randomize_parts`; Verilator's side is its
+`docs/design/dvs_global_constraints.md`).
+
+- **Image.** A part is one class's image plus `n_slots` (its handles to other
+  objects), `ExportSpec`s (its layout: export index to variable) and
+  `ImportSpec`s (a variable of kind `DVS_VAR_IMPORT` bound to export *k* at a
+  slot path). Expressions read an import as any variable.
+- **Call.** `dvs_randomize_parts(root)` takes a graph of `dvs_part_t` (handle,
+  refs, arrays, slots); each slot is null, inactive or active. The walk follows
+  active slots depth first, slots in order; a part reached again (by address)
+  is one part, which also ends cycles. An import active all the way is the
+  exported variable; any other import is a STATE variable read through the
+  slots of the call, 0 through a null slot. A constraint or soft constraint
+  that reads a null import where the STATE values do not rule the read out (a
+  false `ITE` condition, a false `&&` or true `||` operand, from constants and
+  STATE values with `!`, `&&`, `||`) fails the call (`DVS_RANDOMIZE_NULL`).
+- **Soft bands.** Parts rank by a post-order walk (the root last, highest); a
+  part reached again after its walk takes a later place. Each part's distinct
+  soft priorities are ranked densely and placed after those of every
+  higher-ranked part, so the soft count is unchanged.
+- **Cache.** The key is the walk: each part's handle, each slot's state, and the
+  walk index of each active slot's object. The assembled problem is rebuilt
+  through the builder (`dvs_tmpl_assemble`: variables renumbered, arrays offset)
+  and kept in an LRU of 4 on the root's handle. Arrays in parts go through the
+  assembled handle's template unchanged (`dvs_randomize_parts_sizes`, then
+  `dvs_randomize_parts`). A root with no slots is solved directly.
+- **Slot arrays** (format version 5; dynamic arrays and queues of handles). An
+  array of the image takes a slot (`ArraySpec.slot`,
+  `dvs_builder_add_slot_array`): its size is the number of handles, its element
+  `i` is 1 if handle `i` is not null, and an import path selects an element by a
+  constant or by `DVS_PATH_LOOP(level)`. The slot's `dvs_slot_t` gives the
+  handles (`n_elems`, `elems`); past them, up to the array's size of the call,
+  the elements are null. The walk takes the elements in index order at the
+  slot's place, and the key adds each slot array's size and the phase.
+  Assembly instantiates a foreach over a slot array per element (loop index and
+  element bit constants, each import mapped to its element's export or a STATE
+  variable); the size phase has no such foreach. At most 65536 elements walked
+  per call.
 
 ## Lifecycle
 
 ```
 first call on a handle:
-    load buffer → elaborate (SV semantics) → apply/derive analysis
+    load buffer (EXPLICIT: no elaboration) → apply/derive analysis
     → compile one context per variable group (engine per group)
 every call:
     for each group:
@@ -259,16 +323,23 @@ The SMT front end's Verilator-mode logic falls into three kinds:
    expressions in `DistSpec`; the solver draws the bucket. This removes the per-call
    soft chain and gives exact weights. Verilator's C++ bucket pick stays only on the
    pipe fallback.
-2. **Size classes: concrete sizes first, templates later.** V2 and the first V3 build one
-   context per concrete size seen (from the capture or at run time), held in a small
-   per-handle LRU (start at 4 entries; count misses). A symbolic index in the problem
-   format is added only if the miss count shows queues that grow every call.
+2. **Size classes: a template from the start, concrete contexts behind it.**
+   (Revised 2026-11-07.) Verilator writes its image at verilation time, before any
+   size is known, so the image carries the array constraints as a template. The
+   handle solves element-local arrays per element and expands the rest into one
+   context per concrete size seen, in a per-handle LRU of 4. The earlier wording
+   (concrete sizes from a run-time capture, a template only if misses demand it)
+   assumed the problem was captured at run time.
 3. **Global constraints across sub-objects** map to mode bits plus per-object refs:
    a disabled var (`set_var_disabled`) is a rand_mode bit that is clear, and a null
    handle clears the mode bits of everything under it. Still unchecked against
    `V3Randomize`'s global-constraint paths; V3 verifies it, and sites it does not
    cover stay on the pipe.
-4. **Both sections carry a version.** The problem section's version is checked on
-   load. On a mismatch the handle refuses the buffer and the call takes the pipe
-   fallback (the generated code always keeps it), so a simulation linked against a
-   newer library still runs. The analysis section is ignored on a mismatch, as above.
+4. **Both sections carry a version.** The problem section's magic and
+   `DVS_PROBLEM_FORMAT_VERSION` are checked on load: on a mismatch `dvs_handle_new`
+   refuses the buffer. That is a hard error, with no fallback to the SMT pipe: the
+   generated code checks the version at compile time (a `static_assert` against the
+   header), and a mismatch at run time is fatal, telling the user to re-verilate.
+   (Decided 2026-11-06, replacing the pipe fallback; see Verilator's
+   `docs/design/dv_solve_integration.md`, D2/Q11.) The analysis section is ignored on
+   a mismatch, as above.

@@ -21,7 +21,7 @@ import time
 from typing import Optional
 
 from . import provenance
-from .config import Config
+from .config import NATIVE_CAPTURE, Config
 from .result import Result
 from .runner import RunOutput
 
@@ -188,4 +188,62 @@ def replay_text(cfg: Config, sim: RunOutput, session: str, rundir: str,
     log = "%s\n# replay_text (%d check-sats, best of %d: %.3f s, rc=%d): %s\n%s" % (
         sim.log, n_check, max(1, cfg.replay_reps), best, p.returncode, " ".join(cmd),
         p.stdout[-2000:])
+    return RunOutput(cmd=cmd, returncode=p.returncode, log=log, result=res, info=info)
+
+
+_NATIVE_HEAD = r"^capture .*: (\d+) handles, (\d+) calls, (\d+) parts calls not replayed"
+_NATIVE_CHECK = r"^check (\d+) mismatches"
+_NATIVE_TOTAL = r"^total (\d+) timed calls, ([\d.]+) us, "
+
+
+def native_replay(cfg: Config, sim: RunOutput, rundir: str, passes: int = 3,
+                  timeout: float = 600) -> RunOutput:
+    """Replay the dv-solve calls a --solver-dvs run captured (DVS_CAPTURE) and
+    return a RunOutput whose result is their time per randomize(): the native
+    flow without Verilator. Counts and check errors come from the run. The
+    replay must reproduce every captured result, and the run must have made
+    the same number of dv-solve calls for each randomize()."""
+    capture = os.path.join(rundir, NATIVE_CAPTURE)
+    if sim.result is None:
+        return sim
+    if not os.path.exists(capture):
+        raise RuntimeError("%s: the run wrote no %s: the image's dv-solve has no "
+                           "DVS_CAPTURE, or it made no dv-solve call; rebuild the image"
+                           % (cfg.id, NATIVE_CAPTURE))
+    calls = sim.result.n + sim.result.warmup
+    p = subprocess.run([cfg.native_replay, capture, "--passes", "1"], cwd=rundir,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                       timeout=timeout)
+    head = re.search(_NATIVE_HEAD, p.stdout, re.M)
+    info = {"native_replay": {"capture_bytes": os.path.getsize(capture),
+                              "handles": int(head.group(1)) if head else None,
+                              "calls": int(head.group(2)) if head else None,
+                              "parts_calls": int(head.group(3)) if head else None}}
+    if head is None:
+        raise ReplayError(info, "native replay failed (rc=%d):\n%s"
+                          % (p.returncode, p.stdout[-2000:]))
+    if int(head.group(3)):
+        raise ReplayError(info, "the run made %s dvs_randomize_parts calls, which the "
+                          "capture does not record yet" % head.group(3))
+    n_api = int(head.group(2))
+    if not n_api or n_api % calls:
+        raise ReplayError(info, "%d dv-solve calls for %d randomize() calls: not the same "
+                          "number per call" % (n_api, calls))
+    per = n_api // calls
+    cmd = [cfg.native_replay, capture, "--passes", str(passes),
+           "--warmup", str(per * sim.result.warmup)]
+    p = subprocess.run(cmd, cwd=rundir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       text=True, timeout=timeout)
+    with open(os.path.join(rundir, "replay.log"), "w") as fp:
+        fp.write(p.stdout)
+    info["native_replay"].update(args=cmd[1:], returncode=p.returncode, calls_per_randomize=per)
+    check = re.search(_NATIVE_CHECK, p.stdout, re.M)
+    total = re.search(_NATIVE_TOTAL, p.stdout, re.M)
+    if p.returncode != 0 or check is None or int(check.group(1)) or total is None:
+        raise ReplayError(info, "native replay failed or differs from the run (rc=%d): %s\n%s"
+                          % (p.returncode, " ".join(cmd), p.stdout[-2000:]))
+    us = float(total.group(2))
+    res = dc.replace(sim.result, elapsed_ns=int(round(us * 1e3)))
+    log = "%s\n# native replay (%d dv-solve calls per randomize(), %.2f us/call): %s\n%s" % (
+        sim.log, per, us / sim.result.n, " ".join(cmd), p.stdout)
     return RunOutput(cmd=cmd, returncode=p.returncode, log=log, result=res, info=info)

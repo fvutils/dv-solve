@@ -4429,7 +4429,9 @@ static int _nomem_check(const dvs_ctx_t *ctx, int rc) {
 }
 
 static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
+    if (sp && (sp->n_arrays || sp->n_foreachs)) return DVS_COMPILE_ARRAYS;
     if (ctx) ctx->problem_fp = sp ? dvs_problem_fingerprint(sp) : 0;
+    if (ctx) ctx->wmemo_epoch++;
 #ifdef DVS_STEP_CHECK
     /* The checker validates models against the problem after the call, and
      * a caller may free it then: keep a copy. */
@@ -5083,21 +5085,21 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         /* Variables merged by an `x == y` constraint are one variable, so
          * map each through the alias table; two that map to the same one
          * can never differ. */
-        uint32_t vids[MAX_ALLDIFF_VARS];
-        /* Refuse what the propagator can't take rather than leave it
-         * uncompiled: model validation does not check all-different, so an
-         * uncompiled one would go unenforced. */
-        if (ad->n_vars > MAX_ALLDIFF_VARS) return DVS_COMPILE_UNSUPPORTED_WIDTH;
-        for (uint32_t i = 0; i < ad->n_vars; i++) {
+        uint32_t *vids = malloc((ad->n_vars ? ad->n_vars : 1) * sizeof *vids);
+        if (!vids) return DVS_COMPILE_NOMEM;
+        int rc = 0;
+        for (uint32_t i = 0; i < ad->n_vars && !rc; i++) {
             vids[i] = _resolve(ctx, spec_vids[i]);
-            if (vids[i] >= ctx->n_vars) return DVS_COMPILE_BAD_VAR;
-            if (ctx->vars[vids[i]].width > 32) return DVS_COMPILE_UNSUPPORTED_WIDTH;
-            for (uint32_t j = 0; j < i; j++)
-                if (vids[j] == vids[i]) return -2;  /* UNSAT */
+            if (vids[i] >= ctx->n_vars) rc = DVS_COMPILE_BAD_VAR;
+            else if (ctx->vars[vids[i]].width > 32) rc = DVS_COMPILE_UNSUPPORTED_WIDTH;
+            for (uint32_t j = 0; j < i && !rc; j++)
+                if (vids[j] == vids[i]) rc = -2;  /* UNSAT */
         }
-        if (ad->n_vars >= 2 &&
+        if (!rc && ad->n_vars >= 2 &&
             prop_add_all_different(ctx, ad->n_vars, vids, 1) == EXPR_NULL)
-            return DVS_COMPILE_NOMEM;
+            rc = DVS_COMPILE_NOMEM;
+        free(vids);
+        if (rc) return rc;
         adref = ad->next;
     }
 
@@ -5377,6 +5379,7 @@ int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
     /* Another problem now: keep this context's memory, but stop sharing it
      * under the old problem's key. */
     if (ctx) ctx->problem_fp = 0;
+    if (ctx) ctx->wmemo_epoch++;
     dvs_search_discard(ctx);
     int rc = _solver_add_constraint(ctx, aux_sp);
     if (ctx && ctx->oracle) dvs_oracle_on_add(ctx, aux_sp, rc);

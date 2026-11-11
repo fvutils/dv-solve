@@ -468,6 +468,10 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     }
     dvs_ctx_free(ctx, ctx->keep_val, (size_t)ctx->keep_cap * (sizeof(int64_t) + 1u));
     ctx->keep_val = NULL; ctx->keep_state = NULL; ctx->keep_cap = 0;
+    dvs_ctx_free(ctx, ctx->wmemo, DVS_WMEMO_SLOTS * sizeof(DvsWMemo));
+    ctx->wmemo = NULL;
+    dvs_ctx_free(ctx, ctx->pick_ix, ctx->pick_ix_bytes);
+    ctx->pick_ix = NULL; ctx->pick_ix_bytes = 0;
     dvs_ctx_free(ctx, ctx->box_val, (size_t)ctx->box_cap * sizeof(int64_t));
     ctx->box_val = NULL; ctx->box_cap = 0;
     dvs_ctx_free(ctx, ctx->box_skip, ctx->box_skip_n);
@@ -487,6 +491,8 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     ctx->var_order = NULL; ctx->var_order_n = 0;
     dvs_ctx_free(ctx, ctx->value_fails, ctx->value_fails_cap);
     ctx->value_fails = NULL; ctx->value_fails_cap = 0;
+    dvs_ctx_free(ctx, ctx->root_pins, (size_t)ctx->root_pins_cap * sizeof(DvsRootPin));
+    ctx->root_pins = NULL; ctx->n_root_pins = ctx->root_pins_cap = 0;
     dvs_ctx_free(ctx, ctx->mod_links, (size_t)ctx->mod_links_cap * sizeof(DvsModLink));
     ctx->mod_links = NULL; ctx->n_mod_links = ctx->mod_links_cap = 0;
     dvs_ctx_free(ctx, ctx->mul_links, (size_t)ctx->mul_links_cap * sizeof(DvsMulLink));

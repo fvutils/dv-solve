@@ -1,0 +1,8 @@
+# dv-solve CMake package. Targets:
+#   dv_solve::writer          the problem writer (static, libc only)
+#   dv_solve::dv_solve        the shared runtime
+#   dv_solve::dv_solve_static the static runtime, libdv_solve.a
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+include(${CMAKE_CURRENT_LIST_DIR}/dv-solveTargets.cmake)
+set(dv-solve_PROBLEM_FORMAT_VERSION @DVS_PROBLEM_FORMAT_VERSION@)

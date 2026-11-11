@@ -30,10 +30,16 @@ typedef enum {
     EXPR_CLOG2    = 12, /* r == ceil(log2(x))           */
     EXPR_ARRAY_SELECT = 13, /* r = base[index]              */
     EXPR_IN_RANGES = 14, /* value in [lo0,hi0] U [lo1,hi1] U ... */
-    EXPR_SV_CAST  = 15, /* INTERNAL: explicit width/signedness conversion,
-                         * produced only by SV elaboration (dvs_sv.h) */
+    EXPR_SV_CAST  = 15, /* explicit width/signedness conversion, of an
+                         * EXPLICIT problem (SV elaboration, dvs_sv.h) */
     EXPR_CAST     = 16, /* cast to a type: SV `T'(x)`  */
     EXPR_CONST_WIDE = 17, /* integer constant wider than 64 bits */
+    /* Array templates (dvs_tmpl.h): only in a problem with arrays, which a
+     * handle expands per size before anything compiles it. */
+    EXPR_ARRAY_SIZE = 18, /* the size of an array: int              */
+    EXPR_LOOP_INDEX = 19, /* the index of an enclosing foreach: int */
+    EXPR_ELEM     = 20, /* array[index]: an element, 0 out of range */
+    EXPR_REDUCE   = 21, /* body(item 0) op body(item 1) op ...     */
 } ExprKind;
 
 
@@ -41,9 +47,14 @@ typedef enum {
 /* ------------------------------------------------------------------ */
 /* Expression node structs                                             */
 /*                                                                     */
-/* Every node begins with `ExprKind kind` so any dvs_expr_t can be cast  */
-/* to `ExprKind *` to read its type before casting to the specific     */
-/* struct.                                                             */
+/* Every node begins with a 32-bit `kind` (an ExprKind) so any         */
+/* dvs_expr_t can be cast to `ExprKind *` to read its type before      */
+/* casting to the specific struct.                                     */
+/*                                                                     */
+/* These structs are the problem image format (DVS_PROBLEM_FORMAT_     */
+/* VERSION, little-endian): fixed-width fields only, explicit padding, */
+/* every 8-byte field 8-aligned, every node DVS_IMAGE_ALIGN-aligned in */
+/* the pool. dvs_image.c pins their layout.                            */
 /* ------------------------------------------------------------------ */
 
 /** Integer literal
@@ -58,12 +69,26 @@ typedef enum {
  * selects its signedness and `value` supplies its low `width` bits (the
  * SMT-LIB front end emits these, e.g. #x03 is an 8-bit 3). */
 typedef struct {
-    ExprKind kind;       /* EXPR_CONST                           */
+    uint32_t kind;       /* EXPR_CONST                           */
     uint8_t  is_signed;  /* non-zero for signed interpretation   */
     uint8_t  _p8;
+    uint16_t _p16;
     uint32_t width;      /* 0 = unsized, else the literal's width */
+    uint32_t _p32;       /* `value` at offset 16 on every host    */
     int64_t  value;      /* bit pattern / signed value           */
 } ExprConst;
+
+/** The value of `v` read as a `width`-bit (1..64) number of the given
+ * signedness: its low `width` bits, sign-extended when signed. A sized
+ * ExprConst holds its value in this form, which is what the CDCL compile
+ * reads it as; width 0 or 64 returns `v`. */
+static inline int64_t dvs_const_wrap(int64_t v, uint32_t width, uint8_t is_signed) {
+    if (width == 0 || width >= 64) return v;
+    uint64_t m = ((uint64_t)1 << width) - 1;
+    uint64_t u = (uint64_t)v & m;
+    if (is_signed && ((u >> (width - 1)) & 1u)) u |= ~m;
+    return (int64_t)u;
+}
 
 /** A sized constant wider than an int64 can spell: `width` bits (65..DVS_MAX_WIDTH),
  * read as signed when `is_signed`. `n_limbs` = ceil(width / 64) 64-bit limbs
@@ -73,7 +98,7 @@ typedef struct {
  * refused one 1024 limbs deep). The builder emits a plain ExprConst for a
  * width of 64 or less. */
 typedef struct {
-    ExprKind kind;       /* EXPR_CONST_WIDE                      */
+    uint32_t kind;       /* EXPR_CONST_WIDE                      */
     uint8_t  is_signed;
     uint8_t  _p8[3];
     uint32_t width;
@@ -103,28 +128,28 @@ static inline int dvs_const_wide_bit(const ExprConstWide *n, uint32_t i) {
 
 /** Variable reference */
 typedef struct {
-    ExprKind kind;      /* EXPR_VAR   */
+    uint32_t kind;      /* EXPR_VAR   */
     uint32_t var_id;    /* 0-based variable index               */
 } ExprVar;
 
 /** Binary operation */
 typedef struct {
-    ExprKind kind;  /* EXPR_BINARY */
-    dvs_binop_t    op;
+    uint32_t kind;  /* EXPR_BINARY */
+    uint32_t    op;     /* dvs_binop_t */
     dvs_expr_t  lhs;
     dvs_expr_t  rhs;
 } ExprBinary;
 
 /** Unary operation */
 typedef struct {
-    ExprKind kind;    /* EXPR_UNARY */
-    dvs_unop_t  op;
+    uint32_t kind;    /* EXPR_UNARY */
+    uint32_t    op;   /* dvs_unop_t */
     dvs_expr_t  operand;
 } ExprUnary;
 
 /** If-then-else */
 typedef struct {
-    ExprKind kind;    /* EXPR_ITE */
+    uint32_t kind;    /* EXPR_ITE */
     dvs_expr_t  cond;
     dvs_expr_t  then_e;
     dvs_expr_t  else_e;
@@ -132,7 +157,7 @@ typedef struct {
 
 /** Range membership: value in [lo, hi] */
 typedef struct {
-    ExprKind kind;    /* EXPR_IN_RANGE */
+    uint32_t kind;    /* EXPR_IN_RANGE */
     dvs_expr_t  value;
     dvs_expr_t  lo;
     dvs_expr_t  hi;
@@ -145,7 +170,7 @@ typedef struct {
  * memory.  Use expr_in_set_elems() to obtain the pointer.
  */
 typedef struct {
-    ExprKind kind;     /* EXPR_IN_SET */
+    uint32_t kind;     /* EXPR_IN_SET */
     dvs_expr_t  value;
     uint32_t n_elems;
 } ExprInSet;
@@ -158,22 +183,24 @@ typedef struct {
  * expr_in_ranges_los()/expr_in_ranges_his() to obtain the pointers.
  */
 typedef struct {
-    ExprKind kind;     /* EXPR_IN_RANGES */
+    uint32_t kind;     /* EXPR_IN_RANGES */
     dvs_expr_t  value;
     uint32_t n_ranges;
 } ExprInRanges;
 
 /** Zero / sign extend operand from `from_bits` to `to_bits` bits */
 typedef struct {
-    ExprKind kind;        /* EXPR_EXTEND      */
+    uint32_t kind;        /* EXPR_EXTEND      */
     uint8_t  sign_extend; /* 0=zero, 1=sign   */
     uint8_t  _p8;
+    uint16_t _p16;
     uint32_t from_bits;   /* source width     */
     uint32_t to_bits;     /* destination width */
     dvs_expr_t  operand;
 } ExprExtend;
 
-/** INTERNAL explicit conversion (EXPR_SV_CAST), never built by a front end.
+/** Explicit conversion (EXPR_SV_CAST), the cast of an EXPLICIT problem
+ * (dvs_builder_expr_sv_cast()).
  *
  * Takes the low `from_bits` bits of `operand`, extends them to `to_bits`
  * (sign-extending when `sign_extend`), and reads the result as a signed value
@@ -182,9 +209,10 @@ typedef struct {
  * an unsigned context -- so the engines downstream never have to infer that
  * conversion themselves. Same layout as ExprExtend. */
 typedef struct {
-    ExprKind kind;        /* EXPR_SV_CAST     */
+    uint32_t kind;        /* EXPR_SV_CAST     */
     uint8_t  sign_extend; /* 0=zero, 1=sign   */
     uint8_t  dst_signed;  /* result signedness */
+    uint16_t _p16;
     uint32_t from_bits;   /* source width     */
     uint32_t to_bits;     /* destination width */
     dvs_expr_t  operand;
@@ -202,16 +230,17 @@ typedef struct {
  * elaboration rewrites it into extracts and EXPR_SV_CAST nodes, so no engine
  * sees it. */
 typedef struct {
-    ExprKind kind;        /* EXPR_CAST        */
+    uint32_t kind;        /* EXPR_CAST        */
     uint32_t to_bits;     /* result width     */
     uint8_t  to_signed;   /* result signedness */
     uint8_t  _p8;
+    uint16_t _p16;
     dvs_expr_t  operand;
 } ExprCast;
 
 /** Bit-slice extract: result = operand[hi_bit:lo_bit] */
 typedef struct {
-    ExprKind kind;     /* EXPR_EXTRACT */
+    uint32_t kind;     /* EXPR_EXTRACT */
     uint32_t hi_bit;
     uint32_t lo_bit;
     dvs_expr_t  operand;
@@ -221,7 +250,7 @@ typedef struct {
 /** Bit concatenation: result = {hi, lo}
  *  lo_width is the bit width of the lo operand. */
 typedef struct {
-    ExprKind kind;       /* EXPR_CONCAT  */
+    uint32_t kind;       /* EXPR_CONCAT  */
     uint32_t lo_width;   /* width of lo operand in bits */
     dvs_expr_t  hi;
     dvs_expr_t  lo;
@@ -230,7 +259,7 @@ typedef struct {
 /** N-ary sum: result == var_ids[0] + var_ids[1] + ... + var_ids[n-1].
  *  n_vars uint32_t var_ids follow immediately after this struct in pool. */
 typedef struct {
-    ExprKind kind;       /* EXPR_SUM */
+    uint32_t kind;       /* EXPR_SUM */
     dvs_expr_t  result;     /* result variable dvs_expr_t   */
     uint32_t n_vars;     /* number of summand variables */
     /* dvs_expr_t refs[n_vars] follow in pool (each an EXPR_VAR) */
@@ -238,14 +267,14 @@ typedef struct {
 
 /** Popcount: result == number of 1-bits in operand. */
 typedef struct {
-    ExprKind kind;       /* EXPR_COUNTONES */
+    uint32_t kind;       /* EXPR_COUNTONES */
     dvs_expr_t  result;     /* result variable dvs_expr_t  */
     dvs_expr_t  operand;    /* input variable dvs_expr_t   */
 } ExprCountones;
 
 /** Ceil-log2: result == ceil(log2(operand)). operand must be > 0. */
 typedef struct {
-    ExprKind kind;       /* EXPR_CLOG2   */
+    uint32_t kind;       /* EXPR_CLOG2   */
     dvs_expr_t  result;     /* result variable dvs_expr_t  */
     dvs_expr_t  operand;    /* input variable dvs_expr_t   */
 } ExprClog2;
@@ -254,12 +283,46 @@ typedef struct {
  *  Elements are contiguous variables: base_var_id .. base_var_id+n_elems-1.
  *  The compiler lowers this into an ITE chain for small n_elems. */
 typedef struct {
-    ExprKind kind;          /* EXPR_ARRAY_SELECT         */
+    uint32_t kind;          /* EXPR_ARRAY_SELECT         */
     uint32_t base_var_id;   /* first element variable ID */
     uint32_t n_elems;       /* number of elements        */
     dvs_expr_t  result;        /* result variable dvs_expr_t   */
     dvs_expr_t  index;         /* index expression dvs_expr_t  */
 } ExprArraySelect;
+
+/** The size of an array (EXPR_ARRAY_SIZE): a 32-bit signed int. */
+typedef struct {
+    uint32_t kind;          /* EXPR_ARRAY_SIZE */
+    uint32_t array_id;
+} ExprArraySize;
+
+/** The index of the enclosing foreach or reduction that binds `level`
+ *  (EXPR_LOOP_INDEX): a 32-bit signed int. */
+typedef struct {
+    uint32_t kind;          /* EXPR_LOOP_INDEX */
+    uint32_t level;
+} ExprLoopIndex;
+
+/** An element of an array (EXPR_ELEM), of the array's element type; 0 when
+ *  `index` is out of range. */
+typedef struct {
+    uint32_t   kind;        /* EXPR_ELEM */
+    uint32_t   array_id;
+    dvs_expr_t index;
+    uint32_t   _pad;
+} ExprElem;
+
+/** A reduction over an array (EXPR_REDUCE): `body`, with LOOP_INDEX(level)
+ *  bound to each index in turn, folded with `op` (DVS_BIN_ADD, MUL, BAND,
+ *  BOR or BXOR). Of the type of `body`; over an empty array, the identity of
+ *  `op`. */
+typedef struct {
+    uint32_t   kind;        /* EXPR_REDUCE */
+    uint32_t   op;
+    uint32_t   array_id;
+    uint32_t   level;
+    dvs_expr_t body;
+} ExprReduce;
 
 /* ------------------------------------------------------------------ */
 /* Variable / Constraint / Source specifications                       */
@@ -278,6 +341,7 @@ typedef struct {
     uint8_t  kind;       /* dvs_var_kind_t (DVS_VAR_RAND, ...)          */
     uint8_t  order;      /* solve-order stage: 0 none, else 1.. earliest
                           * first (dvs_builder_set_var_order)          */
+    uint8_t  _p8;
     int64_t  lo;         /* initial lower bound        */
     int64_t  hi;         /* initial upper bound        */
 } VarSpec;
@@ -334,7 +398,74 @@ typedef struct {
     dvs_expr_t  next;       /* next DistSpec, or EXPR_NULL */
     uint32_t var_id;     /* variable this distribution applies to   */
     uint32_t n_entries;  /* number of dvs_dist_entry_t items that follow   */
+    dvs_expr_t index;    /* in a ForeachSpec body: var_id is an array id and
+                          * this the element's index; else EXPR_NULL      */
 } DistSpec;
+
+/**
+ * ArraySpec -- declares one array of variables whose size is given on each
+ * call (dvs_randomize_arrays). Array ids are their own space, 0..n-1.
+ */
+typedef struct {
+    dvs_expr_t next;        /* next ArraySpec, or EXPR_NULL */
+    uint32_t   array_id;
+    uint32_t   elem_width;  /* 1..64 */
+    uint8_t    elem_signed;
+    uint8_t    kind;        /* dvs_var_kind_t: RAND or STATE */
+    uint8_t    order;       /* solve-order stage of every element, as VarSpec */
+    uint8_t    size_random; /* its size is solved before the call's elements
+                             * (dvs_builder_set_array_size_random)         */
+    uint32_t   slot;        /* a slot array: the slot it takes
+                             * (dvs_builder_add_slot_array); else DVS_NO_SLOT */
+    uint32_t   _p32;
+} ArraySpec;
+
+/**
+ * ForeachSpec -- constraints instantiated once per element of an array,
+ * with EXPR_LOOP_INDEX(level) bound to the element's index. Its body is its
+ * own lists of constraints, soft constraints and distributions; a nested
+ * foreach names this one as its `parent`. Every ForeachSpec, nested or not,
+ * is in the problem's foreach list.
+ */
+typedef struct {
+    dvs_expr_t next;            /* next ForeachSpec, or EXPR_NULL */
+    dvs_expr_t parent;          /* the enclosing ForeachSpec, or EXPR_NULL */
+    uint32_t   array_id;
+    uint32_t   level;
+    dvs_expr_t constraints_head;
+    uint32_t   n_constraints;
+    dvs_expr_t softs_head;
+    uint32_t   n_softs;
+    dvs_expr_t dists_head;
+    uint32_t   n_dists;
+} ForeachSpec;
+
+/** An all-different member that is a whole array (its elements), not a
+ *  variable. */
+#define DVS_ARRAY_MEMBER_BIT  0x80000000u
+
+/**
+ * ExportSpec -- one export of a part (dvs_builder_add_export): a variable
+ * other parts may import. Its export index is its place in the order the
+ * exports were declared; the list links them newest first.
+ */
+typedef struct {
+    dvs_expr_t next;        /* next ExportSpec, or EXPR_NULL */
+    uint32_t   var_id;
+} ExportSpec;
+
+/**
+ * ImportSpec -- binds variable `var_id` (of kind DVS_VAR_IMPORT) to export
+ * `export_index` of the object reached through slot path[0] of this part,
+ * then slot path[1] of that object's part, and so on. `n_path` (at least 1)
+ * uint32_t slot indices follow in pool memory.
+ */
+typedef struct {
+    dvs_expr_t next;        /* next ImportSpec, or EXPR_NULL */
+    uint32_t   var_id;
+    uint32_t   export_index;
+    uint32_t   n_path;
+} ImportSpec;
 
 
 /* ------------------------------------------------------------------ */
@@ -349,6 +480,8 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 struct dvs_problem_s {
+    uint32_t   magic;             /* DVS_PROBLEM_MAGIC                 */
+    uint32_t   format_version;    /* DVS_PROBLEM_FORMAT_VERSION        */
     uint32_t   n_vars;            /* number of variables added         */
     uint32_t   n_constraints;     /* number of constraints added       */
     uint32_t   n_sources;         /* number of source groups added     */
@@ -363,6 +496,16 @@ struct dvs_problem_s {
     dvs_expr_t    dists_head;         /* head of DistSpec linked list       */
     uint32_t   next_constraint_id; /* auto-incrementing constraint ID counter */
     uint32_t   flags;             /* DVS_PROBLEM_F_* */
+    uint32_t   n_arrays;          /* number of ArraySpecs (0: no template) */
+    dvs_expr_t    arrays_head;       /* head of ArraySpec linked list    */
+    uint32_t   n_foreachs;        /* number of ForeachSpecs            */
+    dvs_expr_t    foreachs_head;     /* head of ForeachSpec linked list  */
+    uint32_t   n_slots;           /* slots of a part (0: not a part with slots) */
+    uint32_t   n_exports;         /* number of ExportSpecs             */
+    dvs_expr_t    exports_head;      /* head of ExportSpec linked list   */
+    uint32_t   n_imports;         /* number of ImportSpecs             */
+    dvs_expr_t    imports_head;      /* head of ImportSpec linked list   */
+    uint32_t   _p32;              /* keeps `pool` 8-aligned            */
     dvs_pool_t pool;              /* MUST be last field                */
     /* pool data region follows immediately in the same buffer         */
 };
@@ -386,6 +529,43 @@ static inline int dvs_binop_typed_signed(int op) {
     return (op >= DVS_BIN_SLT && op <= DVS_BIN_SGE)
         || (op >= DVS_BIN_SDIV && op <= DVS_BIN_SMOD);
 }
+
+/** dvs_problem_t.magic: the bytes "DVSP". The image is little-endian, so
+ *  the word reads as this value only on a little-endian host: a big-endian
+ *  runtime refuses every image. */
+#define DVS_PROBLEM_MAGIC  0x50535644u
+
+/** The alignment of every node in an image's pool, whatever the host. */
+#define DVS_IMAGE_ALIGN  8u
+
+/**
+ * Check that `size` bytes at `img` (8-aligned) are a problem image this
+ * runtime can read: magic, format version and byte order, the pool header
+ * against `size`, and every offset reachable from the header -- the spec
+ * lists and the expression trees under them -- in range and aligned, so a
+ * walk of the image reads only inside it; node kinds, operators and variable
+ * kinds are known values, and variable ids are below n_vars. Expression
+ * children sit at lower offsets than their parent, as every builder
+ * allocates them.
+ *
+ * @return 0 if it is, else -1 with the reason in `why` (if not NULL).
+ */
+int dvs_problem_check_image(const void *img, size_t size, char *why, size_t whylen);
+
+/** What an expression node is made of: its size in bytes and the nodes it
+ *  refers to, `n_kids` in kids[] and then `n_more` at `more` (the elements
+ *  of an in-set, the bounds of an in-ranges, the terms of a sum). */
+typedef struct {
+    uint64_t          size;
+    uint32_t          n_kids;
+    dvs_expr_t        kids[3];
+    const dvs_expr_t *more;
+    uint64_t          n_more;
+} image_node_t;
+
+/** Describe the node at `node`, which has `avail` bytes of image after it
+ *  (dvs_image.c). -1 if its kind or operator is unknown or it does not fit. */
+int dvs_image_node(const void *node, uint64_t avail, image_node_t *out);
 
 /** Convert a pool offset (dvs_expr_t) to a real pointer. */
 #define POOL_PTR(sp, ref)  dvs_pool_ptr(&(sp)->pool, (ref))

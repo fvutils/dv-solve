@@ -57,9 +57,21 @@ struct dvs_builder_s {
     dvs_expr_t       softs_head;
     uint32_t      n_dists;
     dvs_expr_t       dists_head;
+    uint32_t      flags;            /* DVS_PROBLEM_F_* to finalize with */
+    uint32_t      n_arrays;
+    dvs_expr_t       arrays_head;
+    uint32_t      n_foreachs;
+    dvs_expr_t       foreachs_head;
+    uint32_t      n_slots;
+    uint32_t      n_exports;
+    dvs_expr_t       exports_head;
+    uint32_t      n_imports;
+    dvs_expr_t       imports_head;
+    dvs_expr_t       foreach_open;     /* innermost open ForeachSpec, or EXPR_NULL */
+    uint32_t      levels_bound;     /* bit per level of the open foreachs */
 };
 
-/* The documented builder functions are declared in dv_solve.h; this
+/* The documented builder functions are declared in dvs_writer.h; this
  * header adds the internal ones. */
 
 /* ------------------------------------------------------------------ */
@@ -176,18 +188,6 @@ void *dvs_builder_ref_ptr(const dvs_builder_t *b, dvs_expr_t ref);
 /* ------------------------------------------------------------------ */
 /* Expression builders (mirror dvs_problem.h API)                      */
 /* ------------------------------------------------------------------ */
-
-/** A sized constant of `width` bits (see ExprConst in dvs_problem.h).
- *  width 0 is the same as dvs_builder_expr_const (an unsized literal). */
-dvs_expr_t dvs_builder_expr_const_sized(dvs_builder_t *b, int64_t value,
-                                 uint8_t is_signed, uint32_t width);
-/** INTERNAL (not part of the documented surface): an explicit
- *  width/signedness conversion node, EXPR_SV_CAST (see dvs_problem.h). Used
- *  by front ends that build explicit problems, e.g. the SMT-LIB2 front end
- *  reading an unsigned bit pattern as signed for `bvashr`. */
-dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
-                             uint32_t from_bits, uint32_t to_bits,
-                             uint8_t sign_extend, uint8_t dst_signed);
 
 /** Build an array-select expression: result = base[index]. */
 dvs_expr_t dvs_builder_expr_array_select(dvs_builder_t *b, uint32_t base_var_id,

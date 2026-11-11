@@ -1086,7 +1086,8 @@ static uint64_t _slice_max_le(uint64_t alo, uint64_t ahi,
 }
 
 /* Tighten operand `aid` from a singleton result `v` for slice [lo,hi]. Applies
- * only for a non-negative (unsigned-interpretable) operand interval.
+ * only for a non-negative (unsigned-interpretable) operand interval, or to a
+ * slice of the whole of a signed operand, which fixes it.
  *
  * The `DV_NO_BITSLICE_BACKWARD` env var (read once) disables this backward
  * pruning, leaving the propagator forward-only. That is a *test knob*: with
@@ -1112,6 +1113,15 @@ static PropResult _bit_slice_backward(dvs_ctx_t *ctx, uint32_t aid,
      * 64-bit unsigned v used to bail here (ahi = -1) → v never forced to bit 63
      * → wrong `unsat`. */
     const Variable *av = &ctx->vars[aid];
+    PropResult r;
+    if ((av->flags & VAR_SIGNED) && lo == 0 && hi + 1 == av->width) {
+        /* The whole of a signed operand, read unsigned: v is its two's
+         * complement, so the operand is fixed, negative or not. */
+        int64_t x = hi < 63 && ((v >> hi) & 1) ? (int64_t)(v - ((uint64_t)1 << (hi + 1)))
+                                               : (int64_t)v;
+        if ((r = ctx_tighten_lb64(ctx, aid, x)) != PROP_OK) return r;
+        return ctx_tighten_ub64(ctx, aid, x);
+    }
     int wide_unsigned = !(av->flags & VAR_SIGNED) && av->width >= 64;
     if (wide_unsigned) {
         if ((uint64_t)alo > (uint64_t)ahi) return PROP_OK;
@@ -1122,7 +1132,6 @@ static PropResult _bit_slice_backward(dvs_ctx_t *ctx, uint32_t aid,
     uint64_t nlo = _slice_min_ge((uint64_t)alo, (uint64_t)ahi, lo, hi, v, &ok1);
     uint64_t nhi = _slice_max_le((uint64_t)alo, (uint64_t)ahi, lo, hi, v, &ok2);
     if (!ok1 || !ok2) return PROP_CONFLICT;
-    PropResult r;
     if ((r = ctx_tighten_lb64(ctx, aid, (int64_t)nlo)) != PROP_OK) return r;
     if ((r = ctx_tighten_ub64(ctx, aid, (int64_t)nhi)) != PROP_OK) return r;
     return PROP_OK;
@@ -3357,13 +3366,18 @@ static PropResult _fire_bit_slice_64(Propagator *self, dvs_ctx_t *ctx) {
      * by shifting. Without it a's bounds reached the decided field a[63:1]
      * only once a was fixed, so whatever narrowed a (a stride from a shift)
      * never steered the search (docs/structural_reasoning_design.md, "Why
-     * CDCL stalls", part 3). The explainer cites the other side's bounds. */
+     * CDCL stalls", part 3). A signed a qualifies while it is non-negative
+     * (below 64 bits, so a's bound from r stays a non-negative int64): its
+     * pattern is then its value. lo = 0 is the unsigned view of a, as
+     * `size() == n` compiles: without it a 32-bit size was drawn over
+     * [0, 2^31) and each conflict excluded one value. The explainer cites
+     * the other side's bounds (and a >= 0 for a signed a). */
     {
         const Variable *av = &ctx->vars[aid];
-        if (!(av->flags & VAR_SIGNED) && av->width == (uint32_t)bself->hi_bit + 1
-                && bself->lo_bit >= 1 && av->width <= 64
-                && !(ctx->vars[rid].flags & VAR_SIGNED)
-                && (uint64_t)alo <= (uint64_t)ahi && rid != aid) {
+        const int a_ok = (av->flags & VAR_SIGNED) ? alo >= 0 && av->width < 64
+                                                  : (uint64_t)alo <= (uint64_t)ahi;
+        if (a_ok && av->width == (uint32_t)bself->hi_bit + 1 && av->width <= 64
+                && !(ctx->vars[rid].flags & VAR_SIGNED) && rid != aid) {
             uint32_t lo = bself->lo_bit;
             if ((r = ctx_tighten_lb64(ctx, rid, (int64_t)((uint64_t)alo >> lo))) != PROP_OK) return r;
             if ((r = ctx_tighten_ub64(ctx, rid, (int64_t)((uint64_t)ahi >> lo))) != PROP_OK) return r;
@@ -4803,11 +4817,13 @@ static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
      * like the singleton [0,0]: the pigeonhole check then saw a union of size 1
      * and fabricated PROP_CONFLICT -> spurious UNSAT for the default PSS int.
      * var_lo64/var_hi64 resolve the real bounds for every tier; L[]/H[] cache
-     * them (n <= 16) and are refreshed after each tighten. Overflow guards on
-     * the span/Hall-width arithmetic ensure a very wide (width-64 unsigned)
+     * them (scratch after watcher_nexts) and are refreshed after each tighten.
+     * Overflow guards on the span/Hall-width arithmetic ensure a very wide (width-64 unsigned)
      * domain can never wrap negative and manufacture a false conflict; that
      * edge stays sound (it may under-propagate, never mis-report). */
-    int64_t L[MAX_ALLDIFF_VARS], H[MAX_ALLDIFF_VARS];
+    int64_t *L = (int64_t *)(ad->var_ids + 2u * ad->_capacity);
+    int64_t *H = L + n;
+    uint32_t *sorted = (uint32_t *)(H + n);
     for (uint32_t i = 0; i < n; i++) {
         Variable *vi = &ctx->vars[ad->var_ids[i]];
         L[i] = var_lo64(ctx, vi);
@@ -4843,13 +4859,12 @@ static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
     }
     /* Domain union cardinality upper bound (#values - 1 = ghi - glo). The
      * `span >= 0` guard skips the test when the difference wrapped (a domain
-     * too wide to ever pigeonhole n <= 16 vars anyway). */
+     * too wide to ever pigeonhole n vars anyway). */
     int64_t span = ghi - glo;
     if (span >= 0 && span + 1 < (int64_t)n) return PROP_CONFLICT;
 
     /* --- Hall interval detection via sweep --- */
-    /* Sort variables by lo bound (insertion sort, n <= 16) */
-    uint32_t sorted[MAX_ALLDIFF_VARS];
+    /* Sort variables by lo bound (insertion sort) */
     for (uint32_t i = 0; i < n; i++) sorted[i] = i;
     for (uint32_t i = 1; i < n; i++) {
         uint32_t key = sorted[i];
@@ -4921,7 +4936,11 @@ static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
 
 uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
                                  const uint32_t *var_ids, uint8_t priority) {
-    if (n_vars < 2 || n_vars > MAX_ALLDIFF_VARS) return EXPR_NULL;
+    /* var_ids[n], watcher_nexts[n], then scratch lo[n], hi[n], order[n]:
+     * 28 bytes a variable. The bound keeps the size within a uint32. */
+    if (n_vars < 2 || n_vars > (UINT32_MAX - (uint32_t)sizeof(AllDifferent_t)) / 28u)
+        return EXPR_NULL;
+    uint32_t sz = (uint32_t)sizeof(AllDifferent_t) + 28u * n_vars;
 
     /* Reject variables wider than 32 bits */
     for (uint32_t i = 0; i < n_vars; i++) {
@@ -4929,11 +4948,12 @@ uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
     }
 
     if (dvs_ctx_room_prop(ctx) != 0) return EXPR_NULL;  /* prop_refs slot */
-    uint32_t ref = dvs_spool_alloc(&ctx->pool, (uint32_t)sizeof(AllDifferent_t), 8u);
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, sz, 8u);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
     AllDifferent_t *ad = (AllDifferent_t *)dvs_spool_ptr(&ctx->pool, ref);
-    memset(ad, 0, sizeof(AllDifferent_t));
+    memset(ad, 0, sz);
+    uint32_t *watcher_nexts = ad->var_ids + n_vars;
 
     ad->hdr.fire       = _fire_all_different_32;
     ad->hdr.queue_next = EXPR_NULL;
@@ -4941,7 +4961,7 @@ uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
     ad->hdr.priority   = priority;
     ad->hdr.flags      = PROP_FLAG_WIDE_WATCH;
     ad->n_vars         = n_vars;
-    ad->_capacity      = MAX_ALLDIFF_VARS;
+    ad->_capacity      = n_vars;
 
     for (uint32_t i = 0; i < n_vars; i++) {
         ad->var_ids[i] = var_ids[i];
@@ -4951,7 +4971,7 @@ uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
        watcher chain.  Store the previous head as watcher_nexts[i]. */
     for (uint32_t i = 0; i < n_vars; i++) {
         uint32_t vid = var_ids[i];
-        ad->watcher_nexts[i]    = ctx->watcher_heads[vid];
+        watcher_nexts[i]        = ctx->watcher_heads[vid];
         ctx->watcher_heads[vid] = ref;
     }
 
@@ -5434,4 +5454,32 @@ int prop_difference_relations(const Propagator *p, const dvs_ctx_t *ctx,
         return 1;
     }
     return 0;
+}
+
+dvs_pick_kind_t prop_pick_kind(const Propagator *p, uint32_t *hi_bit, uint32_t *lo_bit) {
+    PropResult (*f)(Propagator *, dvs_ctx_t *) = p->fire;
+    if (f == _fire_bounds_eq_64 || f == _fire_bounds_eq_32) return PPK_EQ;
+    if (f == _fire_bounds_band_64) return PPK_BAND;
+    if (f == _fire_bounds_shl_64 || f == _fire_bvshl_64) return PPK_SHL;
+    if (f == _fire_bounds_mod_64 || f == _fire_bounds_mod_32) return PPK_MOD;
+    if (f == _fire_reification_64 || f == _fire_reification_32) return PPK_REIF_LE;
+    if (f == _fire_reification_eq_64 || f == _fire_reification_eq_32) return PPK_REIF_EQ;
+    if (f == _fire_ite_value_64) return PPK_ITE;
+    if (f == _fire_bounds_add_64 || f == _fire_bounds_add_32) return PPK_ADD;
+    if (f == _fire_disj_clause) return PPK_DISJ;
+    if (f == _fire_bit_slice_64) {
+        *hi_bit = ((const BitSlice_64_t *)p)->hi_bit;
+        *lo_bit = ((const BitSlice_64_t *)p)->lo_bit;
+        return PPK_SLICE;
+    }
+    if (f == _fire_bounds_concat_64) {
+        *lo_bit = ((const BoundsConcat_64_t *)p)->lo_width;
+        return PPK_CONCAT;
+    }
+    if (f == _fire_bit_slice_32) {
+        *hi_bit = ((const BitSlice_32_t *)p)->hi_bit;
+        *lo_bit = ((const BitSlice_32_t *)p)->lo_bit;
+        return PPK_SLICE;
+    }
+    return PPK_OTHER;
 }

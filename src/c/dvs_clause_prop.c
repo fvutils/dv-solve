@@ -32,6 +32,7 @@ static PropResult _check_clause(ClauseDB *db, dvs_ctx_t *ctx,
 
     if (n_false == n) {
         db->n_conflicts++;
+        cl->last_used = db->epoch;
         ctx->conflict_clause_idx = ci;
         return PROP_CONFLICT;
     }
@@ -65,6 +66,7 @@ static PropResult _check_clause(ClauseDB *db, dvs_ctx_t *ctx,
             pr = ctx_tighten_ub64(ctx, unit.var_id, (int64_t)unit.bound);
         ctx->current_prop_ref    = saved_pr;
         ctx->current_trail_flags = saved_flag;
+        cl->last_used = db->epoch;
         if (pr == PROP_CONFLICT) return PROP_CONFLICT;
         db->n_propagations++;
     }
@@ -204,6 +206,7 @@ PropResult clause_propagate(ClauseDB *db, dvs_ctx_t *ctx) {
 
             if (n_false == n) {
                 db->n_conflicts++;
+                cl->last_used = db->epoch;
                 ctx->conflict_clause_idx = ci;
                 return PROP_CONFLICT;
             }
@@ -238,6 +241,7 @@ PropResult clause_propagate(ClauseDB *db, dvs_ctx_t *ctx) {
                 }
                 ctx->current_prop_ref    = saved_pr;
                 ctx->current_trail_flags = saved_flag;
+                cl->last_used = db->epoch;
                 if (pr == PROP_CONFLICT) return PROP_CONFLICT;
                 changed = 1;
                 db->n_propagations++;

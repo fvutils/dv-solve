@@ -41,6 +41,48 @@ static ExprKind _kind(dvs_problem_t *p, dvs_expr_t r) {
     return *(const ExprKind *)POOL_PTR(p, r);
 }
 
+static int _is_const(dvs_problem_t *p, dvs_expr_t r) {
+    ExprKind k = _kind(p, r);
+    return k == EXPR_CONST || k == EXPR_CONST_WIDE;
+}
+
+/* e through any extensions and casts. */
+static dvs_expr_t _strip(dvs_problem_t *p, dvs_expr_t e) {
+    for (int i = 0; i < 8; i++) {
+        ExprKind k = _kind(p, e);
+        if (k == EXPR_EXTEND || k == EXPR_SV_CAST) e = ((const ExprExtend *)POOL_PTR(p, e))->operand;
+        else if (k == EXPR_CAST) e = ((const ExprCast *)POOL_PTR(p, e))->operand;
+        else break;
+    }
+    return e;
+}
+
+/* e is a constant, through extensions, casts and bit selects. */
+static int _constish(dvs_problem_t *p, dvs_expr_t e) {
+    for (int i = 0; i < 8; i++) {
+        e = _strip(p, e);
+        if (_kind(p, e) != EXPR_EXTRACT) break;
+        e = ((const ExprExtract *)POOL_PTR(p, e))->operand;
+    }
+    return _is_const(p, e);
+}
+
+/* `c << k` with c a constant: a power of two (times c). */
+static int _shl_of_const(dvs_problem_t *p, dvs_expr_t e) {
+    e = _strip(p, e);
+    if (_kind(p, e) != EXPR_BINARY) return 0;
+    const ExprBinary *b = (const ExprBinary *)POOL_PTR(p, e);
+    return b->op == DVS_BIN_LSHIFT && _constish(p, b->lhs);
+}
+
+/* `(c << k) - d`, constants c and d: a mask of the low k bits for c == d == 1. */
+static int _shl_mask(dvs_problem_t *p, dvs_expr_t e) {
+    e = _strip(p, e);
+    if (_kind(p, e) != EXPR_BINARY) return 0;
+    const ExprBinary *b = (const ExprBinary *)POOL_PTR(p, e);
+    return b->op == DVS_BIN_SUB && _constish(p, b->rhs) && _shl_of_const(p, b->lhs);
+}
+
 /* Visit one node: classify it and push its operands. */
 static int _visit(Walk *w, dvs_expr_t r) {
     dvs_problem_t *p = w->p;
@@ -75,6 +117,27 @@ static int _visit(Walk *w, dvs_expr_t r) {
         default:                                              o->n_other++; break;
         }
         if (dvs_binop_is_typed(b->op)) o->n_typed++;
+        int lconst = _is_const(p, b->lhs), rconst = _is_const(p, b->rhs);
+        /* Not a bit network: `c << k`, a power of two that CDCL links
+         * (_pow2_facts, _mul_as_shift), and `x & ((1 << k) - 1)`, an
+         * alignment whose known bits CDCL's value picker draws in once k is
+         * decided (dvs_search.c, the pick domain): dma_desc, ahb_burst. */
+        switch (b->op) {
+        case DVS_BIN_BAND:
+            o->n_bitvar += !lconst && !rconst && !_shl_mask(p, b->lhs) && !_shl_mask(p, b->rhs);
+            break;
+        case DVS_BIN_BOR: case DVS_BIN_BXOR:
+            o->n_bitvar += !lconst && !rconst;
+            break;
+        case DVS_BIN_LSHIFT:
+            o->n_bitvar += !rconst && !_constish(p, b->lhs);
+            break;
+        case DVS_BIN_RSHIFT: case DVS_BIN_ASHR: case DVS_BIN_LSHR:
+            o->n_bitvar += !rconst;
+            break;
+        default:
+            break;
+        }
         if (_push(w, b->lhs) < 0 || _push(w, b->rhs) < 0) rc = -1;
         break;
     }
@@ -180,6 +243,20 @@ static int _top(Walk *w, dvs_expr_t root) {
     return rc;
 }
 
+/* Every variable of `ad` has at least 4 values per variable of `ad`. */
+static int _alldiff_loose(dvs_problem_t *p, const AllDiffSpec *ad) {
+    const uint32_t *ids = (const uint32_t *)(ad + 1);
+    for (dvs_expr_t r = p->vars_head; r != EXPR_NULL;) {
+        const VarSpec *vs = (const VarSpec *)POOL_PTR(p, r);
+        uint64_t span = (uint64_t)vs->hi - (uint64_t)vs->lo + 1;   /* 0: all 2^64 */
+        if (span && span / 4 < ad->n_vars)
+            for (uint32_t i = 0; i < ad->n_vars; i++)
+                if (ids[i] == vs->var_id) return 0;
+        r = vs->next;
+    }
+    return 1;
+}
+
 int dvs_shape_compute(dvs_problem_t *p, dvs_shape_t *out) {
     memset(out, 0, sizeof *out);
     Walk w;
@@ -217,6 +294,17 @@ int dvs_shape_compute(dvs_problem_t *p, dvs_shape_t *out) {
         c = ss->next;
     }
     out->n_typed += soft.n_typed;
+    for (dvs_expr_t r = p->vars_head; r != EXPR_NULL;) {
+        const VarSpec *vs = (const VarSpec *)POOL_PTR(p, r);
+        if (vs->width > out->max_width) out->max_width = vs->width;
+        r = vs->next;
+    }
+    for (dvs_expr_t r = p->allDiff_head; r != EXPR_NULL;) {
+        const AllDiffSpec *ad = (const AllDiffSpec *)POOL_PTR(p, r);
+        if (ad->n_vars > out->n_alldiff_loose && _alldiff_loose(p, ad))
+            out->n_alldiff_loose = ad->n_vars;
+        r = ad->next;
+    }
     free(w.stack);
     free(w.seen);
     return rc;
@@ -231,5 +319,21 @@ const char *dvs_shape_route(const dvs_shape_t *sh) {
      * equality, so equalities say nothing about the shape; orderings do.
      * Randomization is mostly orderings, circuits mostly bit operations. */
     if ((uint64_t)sh->n_bit + sh->n_arith >= 3ull * sh->n_cmp) return "bit-level";
+    return NULL;
+}
+
+const char *dvs_shape_route_rand(const dvs_shape_t *sh) {
+    /* Thresholds from the benches each side of them: three bit operators
+     * between variables (verilator_operators, ahb_burst, dma_desc vs pow2,
+     * shift_align), four sums over variables of 8 bits or less (sum_with,
+     * nqueens vs eq_chain, signed_mix; over wider ones bit-blast samples
+     * unevenly: test_count_weighted's linear_sys),
+     * 8 to 64 all-different variables (unique_16, unique_64 vs
+     * three_unique; past 64 the pairwise encoding grows, and a tight
+     * domain is a pigeonhole, hard for SAT). */
+    if (sh->n_bitvar >= 3)                                   return "bit-network";
+    if (sh->n_arith >= 4 && sh->n_arith > 2ull * sh->n_cmp && sh->max_width <= 8)
+        return "sum";
+    if (sh->n_alldiff_loose >= 8 && sh->n_alldiff_loose <= 64) return "all-different";
     return NULL;
 }

@@ -83,6 +83,10 @@ function(dvs_apply_cadical tgt)
     endif()
 endfunction()
 
+# DVS_API (src/c/dvs_api.h) is dllexport while dv-solve itself is compiled.
+# Only Windows reads it.
+add_compile_definitions(DVS_BUILDING)
+
 # MSVC portability for the dv-solve C sources (applies to every target defined
 # below — libraries, the CLI and the C tests). DVS_WIN_COMPAT is set in
 # kissat.cmake. Force-includes the builtins/stat shim and puts the POSIX shim
@@ -254,8 +258,12 @@ set(DVS_SOURCES
     src/c/dvs_oracle_core.c
     src/c/dvs_smt2_emit.c
     src/c/dvs_oracle.c
+    src/c/dvs_capture.c
     src/c/dvs_handle.c
     src/c/dvs_engine.c
+    src/c/dvs_image.c
+    src/c/dvs_parts.c
+    src/c/dvs_tmpl.c
 )
 
 # The CaDiCaL backend translation unit (pure C over the ccadical.h C API) is
@@ -279,6 +287,7 @@ endif()
 
 target_include_directories(dv_solve PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
+    $<INSTALL_INTERFACE:include>
 )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -290,7 +299,7 @@ endif()
 # Installation                                                         #
 # ------------------------------------------------------------------ #
 
-install(TARGETS dv_solve
+install(TARGETS dv_solve EXPORT dv-solveTargets
     LIBRARY DESTINATION lib        # .so/.dylib (Unix)
     RUNTIME DESTINATION lib        # .dll (Windows)
     ARCHIVE DESTINATION lib        # import .lib (Windows)
@@ -367,6 +376,153 @@ install(TARGETS dv_solve_dpi
 )
 
 # ------------------------------------------------------------------ #
+# Embeddable libraries: the writer and the static runtime             #
+# ------------------------------------------------------------------ #
+# For programs that carry dv-solve inside them, such as Verilator and the
+# models it generates. Both are static and position-independent. Their only
+# global symbols are the DVS_API functions, and those are hidden too
+# (DVS_STATIC): a shared object they are linked into exports no dv-solve
+# symbol, so two copies in one process cannot bind to each other.
+#
+# The global symbols to keep are listed from the DVS_API declarations.
+function(dvs_api_symbols out)
+    set(_syms)
+    foreach(_h IN LISTS ARGN)
+        file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/src/c/${_h} _decls REGEX "^DVS_API ")
+        foreach(_d IN LISTS _decls)
+            string(REGEX MATCH "([a-z0-9_]+)\\(" _m "${_d}")
+            list(APPEND _syms ${CMAKE_MATCH_1})
+        endforeach()
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/c/${_h})
+    endforeach()
+    list(JOIN _syms "\n" _syms)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/${out} "${_syms}\nDW.ref.*\n")
+endfunction()
+
+# The writer builds problem images. It needs only libc: no solver, no threads.
+add_library(dv_solve_writer STATIC src/c/dvs_builder.c src/c/dvs_image.c)
+set_target_properties(dv_solve_writer PROPERTIES
+    C_VISIBILITY_PRESET hidden EXPORT_NAME writer)
+target_compile_definitions(dv_solve_writer PUBLIC DVS_STATIC)
+target_include_directories(dv_solve_writer PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
+    $<INSTALL_INTERFACE:include>)
+
+# The static runtime, libdv_solve.a. Its objects, kissat's and CaDiCaL's
+# included, are merged into one relocatable object (so their references to
+# each other resolve), and every global but DVS_API is then made local, except
+# vague-linkage (COMDAT) definitions, which must stay global so a program that
+# defines the same ones can discard our copies (cmake/dvs_localize.cmake).
+# Never built with ASan, whatever the build type.
+#
+# Needs GNU ld and objcopy: not built on MSVC or macOS yet.
+if(DVS_WITH_CADICAL)
+    if(APPLE)
+        set(DVS_CXX_RUNTIME c++)
+    else()
+        set(DVS_CXX_RUNTIME stdc++)
+    endif()
+endif()
+if(NOT MSVC AND NOT APPLE)
+    dvs_api_symbols(dv_solve_writer.syms dvs_writer.h)
+    set(_dvs_localize ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DOBJCOPY=${CMAKE_OBJCOPY})
+    set(_dvs_localize_script ${CMAKE_CURRENT_SOURCE_DIR}/cmake/dvs_localize.cmake)
+    add_custom_command(TARGET dv_solve_writer POST_BUILD
+        COMMAND ${_dvs_localize} -DIN=$<TARGET_FILE:dv_solve_writer>
+                -DKEEP_FILE=${CMAKE_CURRENT_BINARY_DIR}/dv_solve_writer.syms
+                -P ${_dvs_localize_script}
+        VERBATIM)
+
+    add_library(dv_solve_rt_objs OBJECT ${DVS_SOURCES})
+    set_target_properties(dv_solve_rt_objs PROPERTIES C_VISIBILITY_PRESET hidden)
+    target_compile_definitions(dv_solve_rt_objs PRIVATE DVS_STATIC)
+    target_include_directories(dv_solve_rt_objs PRIVATE ${KISSAT_SRC})
+    if(DVS_WITH_CADICAL)
+        target_compile_definitions(dv_solve_rt_objs PRIVATE DVS_WITH_CADICAL=1)
+        target_include_directories(dv_solve_rt_objs PRIVATE ${CADICAL_SRC})
+        set(_dvs_rt_cadical ${CADICAL_LOCALIZED})
+        set(_dvs_rt_cadical_dep cadical_localize)
+    endif()
+
+    dvs_api_symbols(dv_solve_rt.syms dv_solve.h dvs_writer.h)
+    set(_dvs_rt_merged ${CMAKE_CURRENT_BINARY_DIR}/dv_solve_rt_merged.o)
+    set(_dvs_rt_obj    ${CMAKE_CURRENT_BINARY_DIR}/dv_solve_rt.o)
+    add_custom_command(OUTPUT ${_dvs_rt_obj}
+        COMMAND ${CMAKE_LINKER} -r $<TARGET_OBJECTS:dv_solve_rt_objs>
+                --whole-archive $<TARGET_FILE:kissat> --no-whole-archive
+                ${_dvs_rt_cadical} -o ${_dvs_rt_merged}
+        COMMAND ${_dvs_localize} -DIN=${_dvs_rt_merged} -DOUT=${_dvs_rt_obj}
+                -DKEEP_FILE=${CMAKE_CURRENT_BINARY_DIR}/dv_solve_rt.syms
+                -P ${_dvs_localize_script}
+        DEPENDS dv_solve_rt_objs $<TARGET_OBJECTS:dv_solve_rt_objs> kissat
+                ${_dvs_rt_cadical} ${_dvs_rt_cadical_dep}
+                ${CMAKE_CURRENT_BINARY_DIR}/dv_solve_rt.syms ${_dvs_localize_script}
+        COMMAND_EXPAND_LISTS VERBATIM
+        COMMENT "Merging the dv-solve static runtime (keeps only DVS_API global)")
+    set_source_files_properties(${_dvs_rt_obj} PROPERTIES
+        EXTERNAL_OBJECT TRUE GENERATED TRUE)
+
+    add_library(dv_solve_rt STATIC ${_dvs_rt_obj})
+    set_target_properties(dv_solve_rt PROPERTIES
+        OUTPUT_NAME dv_solve EXPORT_NAME dv_solve_static LINKER_LANGUAGE C)
+    target_compile_definitions(dv_solve_rt INTERFACE DVS_STATIC)
+    target_include_directories(dv_solve_rt INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c>
+        $<INSTALL_INTERFACE:include>)
+    target_link_libraries(dv_solve_rt INTERFACE
+        Threads::Threads ${DVS_CXX_RUNTIME} m ${CMAKE_DL_LIBS})
+    set(_dvs_rt_target dv_solve_rt)
+endif()
+
+install(TARGETS dv_solve_writer ${_dvs_rt_target} EXPORT dv-solveTargets
+    ARCHIVE DESTINATION lib)
+
+# ------------------------------------------------------------------ #
+# pkg-config and CMake package files                                 #
+# ------------------------------------------------------------------ #
+# Relocatable: the .pc files locate the prefix from their own directory, so
+# a moved tree (a wheel, a verilator-bin bundle) stays usable.
+
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/src/c/dvs_writer.h _dvs_fmt
+    REGEX "^#define DVS_PROBLEM_FORMAT_VERSION ")
+string(REGEX REPLACE ".* ([0-9]+)u?$" "\\1" DVS_PROBLEM_FORMAT_VERSION "${_dvs_fmt}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/c/dvs_writer.h)
+set(DVS_PC_LIBS_PRIVATE "-lpthread -lm")
+if(DVS_WITH_CADICAL)
+    string(APPEND DVS_PC_LIBS_PRIVATE " -l${DVS_CXX_RUNTIME}")
+endif()
+if(CMAKE_DL_LIBS)
+    string(APPEND DVS_PC_LIBS_PRIVATE " -l${CMAKE_DL_LIBS}")
+endif()
+foreach(_pc dv-solve dv-solve-writer)
+    configure_file(cmake/${_pc}.pc.in ${CMAKE_CURRENT_BINARY_DIR}/${_pc}.pc @ONLY)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${_pc}.pc DESTINATION lib/pkgconfig)
+endforeach()
+
+include(CMakePackageConfigHelpers)
+configure_file(cmake/dv-solveConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/dv-solveConfig.cmake @ONLY)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/dv-solveConfigVersion.cmake
+    VERSION ${DVS_VERSION} COMPATIBILITY SameMinorVersion)
+install(EXPORT dv-solveTargets NAMESPACE dv_solve::
+    DESTINATION lib/cmake/dv-solve)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dv-solveConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/dv-solveConfigVersion.cmake
+    DESTINATION lib/cmake/dv-solve)
+
+# License notices of everything in libdv_solve.a: whoever ships a program
+# linked with it must ship these too
+install(FILES LICENSE DESTINATION share/doc/dv-solve)
+install(FILES src/c/sat/kissat/LICENSE DESTINATION share/doc/dv-solve RENAME LICENSE.kissat)
+if(DVS_WITH_CADICAL)
+    install(FILES ${CADICAL_SRC_ROOT}/LICENSE DESTINATION share/doc/dv-solve
+        RENAME LICENSE.cadical)
+endif()
+
+# ------------------------------------------------------------------ #
 # SMT-LIB2 lexer test                                                 #
 # ------------------------------------------------------------------ #
 
@@ -435,6 +591,47 @@ add_executable(test_engine tests/c/test_engine.c)
 target_link_libraries(test_engine PRIVATE dv_solve)
 target_include_directories(test_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_engine COMMAND test_engine)
+
+add_executable(test_canonical tests/c/test_canonical.c)
+target_link_libraries(test_canonical PRIVATE dv_solve)
+target_include_directories(test_canonical PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_canonical COMMAND test_canonical)
+
+add_executable(test_evict tests/c/test_evict.c)
+target_link_libraries(test_evict PRIVATE dv_solve)
+target_include_directories(test_evict PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_evict COMMAND test_evict)
+
+add_executable(test_arrays tests/c/test_arrays.c)
+target_link_libraries(test_arrays PRIVATE dv_solve)
+target_include_directories(test_arrays PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_arrays COMMAND test_arrays)
+
+add_executable(test_parts tests/c/test_parts.c)
+target_link_libraries(test_parts PRIVATE dv_solve)
+target_include_directories(test_parts PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_parts COMMAND test_parts)
+
+add_executable(test_image tests/c/test_image.c)
+target_link_libraries(test_image PRIVATE dv_solve)
+target_include_directories(test_image PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_image COMMAND test_image)
+
+# Installs into the build tree and builds tests/pkgconfig against it with only
+# the pkg-config flags, as an embedding program would (static runtime included).
+find_program(DVS_PKG_CONFIG pkg-config)
+if(TARGET dv_solve_rt AND DVS_PKG_CONFIG)
+    set(_pc_prefix ${CMAKE_CURRENT_BINARY_DIR}/test_pkgconfig/prefix)
+    set(_pc_cxx c++)
+    if(CMAKE_CXX_COMPILER)
+        set(_pc_cxx ${CMAKE_CXX_COMPILER})
+    endif()
+    add_test(NAME test_pkgconfig COMMAND sh -c
+        "\"$0\" --install \"$1\" --prefix \"$2\" >/dev/null && CXX=\"$3\" sh \"$4\" \"$2\" \"$5\""
+        ${CMAKE_COMMAND} ${CMAKE_BINARY_DIR} ${_pc_prefix} ${_pc_cxx}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pkgconfig/run.sh
+        ${CMAKE_CURRENT_BINARY_DIR}/test_pkgconfig/work)
+endif()
 
 add_executable(test_dvs_bbsolver_incremental tests/c/test_dvs_bbsolver_incremental.c)
 target_link_libraries(test_dvs_bbsolver_incremental PRIVATE dv_solve kissat)
@@ -515,6 +712,11 @@ add_executable(test_ctx_dirty_buffer tests/c/test_ctx_dirty_buffer.c)
 target_link_libraries(test_ctx_dirty_buffer PRIVATE dv_solve)
 add_test(NAME test_ctx_dirty_buffer COMMAND test_ctx_dirty_buffer)
 
+add_executable(test_reset_memory tests/c/test_reset_memory.c)
+target_link_libraries(test_reset_memory PRIVATE dv_solve)
+target_include_directories(test_reset_memory PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_reset_memory COMMAND test_reset_memory)
+
 add_executable(test_clause_notify tests/c/test_clause_notify.c)
 target_link_libraries(test_clause_notify PRIVATE dv_solve)
 target_include_directories(test_clause_notify PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
@@ -590,6 +792,7 @@ add_executable(bench_vlt_replay
 )
 target_link_libraries(bench_vlt_replay PRIVATE dv_solve m)
 target_include_directories(bench_vlt_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+
 
 # ------------------------------------------------------------------ #
 # SMT-LIB2 frontend unit tests                                        #
@@ -677,6 +880,16 @@ if(MSVC)
         MSVC_RUNTIME_LIBRARY ${_dvs_static_crt})
 endif()
 target_link_libraries(dv-solve-smt2 PRIVATE dv_solve_static Threads::Threads)
+
+# Solves a DVS_CAPTURE file (src/c/dvs_capture.h) again through the handle
+# API: checks the results and times the calls, without the client. Linked
+# statically, as a simulator links the library, so its times are a floor.
+add_executable(dvs_capture_replay tests/c/dvs_capture_replay.c)
+target_link_libraries(dvs_capture_replay PRIVATE dv_solve_static Threads::Threads)
+target_include_directories(dvs_capture_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+if(DVS_WITH_CADICAL)
+    set_target_properties(dvs_capture_replay PROPERTIES LINKER_LANGUAGE CXX)
+endif()
 if(DVS_WITH_CADICAL)
     # CaDiCaL is C++; link with the C++ driver so libstdc++/libc++ is pulled in.
     set_target_properties(dv-solve-smt2 PROPERTIES LINKER_LANGUAGE CXX)
@@ -747,7 +960,7 @@ install(TARGETS dv-solve-smt2 RUNTIME DESTINATION bin)
 endif()  # DVS_BUILD_SMT2
 
 # Every target that compiles dvs_build_info.c needs the generated header first.
-foreach(_dvs_t dv_solve dv_solve_debug dv_solve_dpi dv_solve_static)
+foreach(_dvs_t dv_solve dv_solve_debug dv_solve_dpi dv_solve_static dv_solve_rt_objs)
     if(TARGET ${_dvs_t})
         add_dependencies(${_dvs_t} dvs_git_info)
         target_link_libraries(${_dvs_t} PRIVATE ${CMAKE_DL_LIBS})   # dladdr

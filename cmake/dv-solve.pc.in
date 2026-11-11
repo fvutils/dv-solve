@@ -1,0 +1,14 @@
+# The dv-solve runtime, as the static archive libdv_solve.a. Link it with
+# `pkg-config --static --libs dv-solve`; `staticlib` is the archive's path.
+prefix=${pcfiledir}/../..
+libdir=${prefix}/lib
+includedir=${prefix}/include
+staticlib=${libdir}/libdv_solve.a
+format_version=@DVS_PROBLEM_FORMAT_VERSION@
+
+Name: dv-solve
+Description: dv-solve constraint solver runtime (static)
+Version: @DVS_VERSION@
+Cflags: -I${includedir} -DDVS_STATIC
+Libs: ${staticlib}
+Libs.private: @DVS_PC_LIBS_PRIVATE@
