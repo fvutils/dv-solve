@@ -186,6 +186,8 @@ typedef struct dvs_ctx_s {
      * keeps it, so a randomize() loop that re-solves the problem pays a
      * search that cannot finish once, not on every call; a compile clears it. */
     uint64_t           prop_fires;    /* propagator firings, ever: the work count */
+    uint64_t           prop_call_fires; /* prop_fires when the running
+                                       * dvs_solver_propagate began       */
     uint64_t           ok_fires_max;  /* most firings a solve that answered
                                        * (sat or unsat) needed               */
     uint64_t           thrash_limit;  /* prop_fires past which this solve

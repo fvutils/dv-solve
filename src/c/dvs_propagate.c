@@ -296,6 +296,7 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
     /* A clause conflict recorded by an earlier, unanalysed conflict (e.g. a
      * shaving probe) must not be mistaken for the source of the next one. */
     ctx->conflict_clause_idx = EXPR_NULL;
+    ctx->prop_call_fires = ctx->prop_fires;
     while (ctx->queue.non_empty_mask) {
         /* Lowest set bit = highest priority level with entries */
         uint32_t lvl = (uint32_t)__builtin_ctz(ctx->queue.non_empty_mask);

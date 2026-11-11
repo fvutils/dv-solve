@@ -10,7 +10,8 @@
  * CYCLE, which Bellman-Ford finds in O(V * E).
  *
  * One propagator per compiled problem watches every variable of every
- * difference relation that lies on a cycle of relations. It reads the edge
+ * difference relation that lies on a directed cycle through two relations
+ * or more (one relation's own edges never sum negative). It reads the edge
  * weights from the current bounds -- `r = a + b` gives r <= a + hi(b) and
  * a <= r - lo(b), valid only while the bounds prove the sum cannot wrap --
  * and reports a negative cycle as a conflict, explained by exactly the

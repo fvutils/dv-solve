@@ -29,6 +29,12 @@
 #define DC_MAX_NODES   512u
 #define DC_MAX_RELS    1024u
 #define DC_LIM         ((int64_t)1 << 61)
+/* Firings a propagation spends before the check runs. A negative cycle is
+ * what bounds propagation crawls round, so it shows as a propagation that
+ * keeps firing; one that settles first has none (dvs_diffcycle.h). Most
+ * settle within a few dozen, and the check, which rebuilds its graph on
+ * every firing, cost more than they did (shift_width, page_table_entry). */
+#define DC_FIRES_FIRST 64u
 
 typedef struct {
     uint32_t u, v;     /* local node indices */
@@ -145,6 +151,8 @@ static PropResult _fire_diffcycle(Propagator *self, dvs_ctx_t *ctx) {
     int64_t  *dist       = DC_AT(h, d->dist_off, int64_t);
     uint32_t *pred       = DC_AT(h, d->pred_off, uint32_t);
     DcEdge   *edges      = DC_AT(h, d->edges_off, DcEdge);
+    /* Woken again by the crawl's next tightening. */
+    if (ctx->prop_fires - ctx->prop_call_fires < DC_FIRES_FIRST) return PROP_OK;
 
     /* Local index of each relation variable: relations store local ids. */
     uint32_t ne = 0;
@@ -280,6 +288,64 @@ static uint32_t _uf_find(uint32_t *p, uint32_t x) {
     return x;
 }
 
+/* Strongly connected components of the graph of n nodes and the m edges
+ * u[k] -> v[k] (Kosaraju, iterative): comp[x] for each node. 0, or -1 on
+ * allocation failure. */
+static int _scc(uint32_t n, uint32_t m, const uint32_t *u, const uint32_t *v, uint32_t *comp) {
+    uint32_t *off  = (uint32_t *)calloc(2u * (n + 1u), sizeof(uint32_t));
+    uint32_t *adj  = (uint32_t *)malloc(((size_t)2u * m + 1u) * sizeof(uint32_t));
+    uint32_t *ord  = (uint32_t *)malloc(((size_t)n + 1u) * sizeof(uint32_t));
+    uint32_t *stk  = (uint32_t *)malloc(((size_t)n + 1u) * sizeof(uint32_t));
+    uint32_t *pos  = (uint32_t *)malloc(((size_t)n + 1u) * sizeof(uint32_t));
+    int rc = -1;
+    if (!off || !adj || !ord || !stk || !pos) goto out;
+    /* Forward adjacency in adj[off[x] .. off[x+1]), reverse after it. */
+    uint32_t *roff = off + n + 1u, *radj = adj + m;
+    for (uint32_t k = 0; k < m; k++) { off[u[k] + 1]++; roff[v[k] + 1]++; }
+    for (uint32_t x = 0; x < n; x++) { off[x + 1] += off[x]; roff[x + 1] += roff[x]; }
+    for (uint32_t x = 0; x < n; x++) pos[x] = off[x];
+    for (uint32_t k = 0; k < m; k++) adj[pos[u[k]]++] = v[k];
+    for (uint32_t x = 0; x < n; x++) pos[x] = roff[x];
+    for (uint32_t k = 0; k < m; k++) radj[pos[v[k]]++] = u[k];
+    /* Pass 1: nodes in order of finishing a depth-first walk. */
+    uint32_t no = 0;
+    for (uint32_t x = 0; x < n; x++) comp[x] = UINT32_MAX;   /* unvisited */
+    for (uint32_t s = 0; s < n; s++) {
+        if (comp[s] != UINT32_MAX) continue;
+        uint32_t sp = 0;
+        stk[sp++] = s; comp[s] = 0; pos[s] = off[s];
+        while (sp) {
+            uint32_t x = stk[sp - 1];
+            if (pos[x] < off[x + 1]) {
+                uint32_t y = adj[pos[x]++];
+                if (comp[y] == UINT32_MAX) { comp[y] = 0; pos[y] = off[y]; stk[sp++] = y; }
+            } else {
+                ord[no++] = x;
+                sp--;
+            }
+        }
+    }
+    /* Pass 2: on the reverse graph, in reverse finishing order. */
+    for (uint32_t x = 0; x < n; x++) comp[x] = UINT32_MAX;
+    uint32_t nc = 0;
+    for (uint32_t i = n; i-- > 0;) {
+        uint32_t s = ord[i];
+        if (comp[s] != UINT32_MAX) continue;
+        uint32_t sp = 0;
+        stk[sp++] = s; comp[s] = nc;
+        while (sp) {
+            uint32_t x = stk[--sp];
+            for (uint32_t k = roff[x]; k < roff[x + 1]; k++)
+                if (comp[radj[k]] == UINT32_MAX) { comp[radj[k]] = nc; stk[sp++] = radj[k]; }
+        }
+        nc++;
+    }
+    rc = 0;
+out:
+    free(off); free(adj); free(ord); free(stk); free(pos);
+    return rc;
+}
+
 int diffcycle_build(dvs_ctx_t *ctx) {
     if (!ctx->prop_refs || ctx->n_vars == 0) return 0;
     uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
@@ -288,8 +354,11 @@ int diffcycle_build(dvs_ctx_t *ctx) {
     uint32_t *uf  = (uint32_t *)malloc((size_t)ctx->n_vars * sizeof(uint32_t));
     uint8_t  *cyc = (uint8_t *)calloc(ctx->n_vars, 1);
     uint32_t *loc = (uint32_t *)malloc((size_t)ctx->n_vars * sizeof(uint32_t));
+    uint32_t *comp = (uint32_t *)malloc((size_t)ctx->n_vars * sizeof(uint32_t));
+    uint8_t  *keep = (uint8_t *)calloc(2u * lim + 1u, 1);   /* per relation */
+    uint32_t *eu = NULL, *ev = NULL, *er = NULL;
     int rc = 0;
-    if (!rels || !uf || !cyc || !loc) { rc = -1; goto out; }
+    if (!rels || !uf || !cyc || !loc || !comp || !keep) { rc = -1; goto out; }
 
     uint32_t nr = 0;
     for (uint32_t pi = 0; pi < lim; pi++) {
@@ -335,17 +404,59 @@ int diffcycle_build(dvs_ctx_t *ctx) {
     for (uint32_t i = 0; i < nr; i++)
         if (rels[i]._pad[0]) cyc[_uf_find(uf, rels[i].v[0])] = 1;
 
+    /* Of those, a negative cycle is a directed one through two relations
+     * or more: one relation's own edges never sum negative (r = a + b, or
+     * x and x + c both ways). So keep only the relations with an edge
+     * inside a strongly connected component that holds edges of two
+     * relations. The edge directions (the table above) depend on the
+     * kinds only, not on bounds. Both tests are needed: x == y + c both
+     * ways along a chain is one component with no cycle. */
+    for (uint32_t i = 0; i < ctx->n_vars; i++) loc[i] = UINT32_MAX;
+    uint32_t n0 = 0;
+    for (uint32_t i = 0; i < nr; i++)
+        for (int q = 0; q < 3; q++)
+            if (loc[rels[i].v[q]] == UINT32_MAX) loc[rels[i].v[q]] = n0++;
+    eu = (uint32_t *)malloc((size_t)4u * nr * sizeof(uint32_t));
+    ev = (uint32_t *)malloc((size_t)4u * nr * sizeof(uint32_t));
+    er = (uint32_t *)malloc((size_t)4u * nr * sizeof(uint32_t));
+    if (!eu || !ev || !er) { rc = -1; goto out; }
+    uint32_t ne = 0;
+    for (uint32_t i = 0; i < nr; i++) {
+        uint32_t x = loc[rels[i].v[0]], a = loc[rels[i].v[1]], b = loc[rels[i].v[2]];
+#define DIR(U, V) do { eu[ne] = (U); ev[ne] = (V); er[ne] = i; ne++; } while (0)
+        switch (rels[i].kind) {
+        case DREL_LE:   DIR(a, x); break;
+        case DREL_SUM:  DIR(a, x); DIR(b, x); DIR(x, a); DIR(x, b); break;
+        case DREL_SUB:  DIR(a, x); DIR(x, a); DIR(a, b); DIR(b, a); break;
+        case DREL_ADDC: DIR(a, x); DIR(x, a); break;
+        }
+#undef DIR
+    }
+    if (_scc(n0, ne, eu, ev, comp) != 0) { rc = -1; goto out; }
+    /* loc[c] (reused): 0 no edge inside component c yet, 1 + the relation
+     * of the first, or UINT32_MAX once edges of two relations are inside. */
+    for (uint32_t c = 0; c < n0; c++) loc[c] = 0;
+    for (uint32_t k = 0; k < ne; k++) {
+        uint32_t c = comp[eu[k]];
+        if (c != comp[ev[k]] || loc[c] == UINT32_MAX) continue;
+        if (!loc[c]) loc[c] = 1 + er[k];
+        else if (loc[c] != 1 + er[k]) loc[c] = UINT32_MAX;
+    }
+    for (uint32_t k = 0; k < ne; k++)
+        if (comp[eu[k]] == comp[ev[k]] && loc[comp[eu[k]]] == UINT32_MAX) keep[er[k]] = 1;
+
     /* Keep the relations of cyclic components; number their variables. */
     uint32_t nv = 0, nk = 0;
     for (uint32_t i = 0; i < ctx->n_vars; i++) loc[i] = UINT32_MAX;
     for (uint32_t i = 0; i < nr; i++) {
-        if (!cyc[_uf_find(uf, rels[i].v[0])]) continue;
+        if (!cyc[_uf_find(uf, rels[i].v[0])] || !keep[i]) continue;
         for (int q = 0; q < 3; q++) {
             uint32_t v = rels[i].v[q];
             if (loc[v] == UINT32_MAX) loc[v] = nv++;
         }
         rels[nk++] = rels[i];
     }
+    if (nk == 0) goto out;
     if (nv > DC_MAX_NODES || nk > DC_MAX_RELS) goto out;   /* too big: leave it to propagation */
     for (uint32_t i = 0; i < nk; i++)
         for (int q = 0; q < 3; q++) rels[i].v[q] = loc[rels[i].v[q]];
@@ -394,7 +505,7 @@ int diffcycle_build(dvs_ctx_t *ctx) {
     prop_enqueue(ctx, ref);
 
 out:
-    free(rels); free(uf); free(cyc); free(loc);
+    free(rels); free(uf); free(cyc); free(loc); free(comp); free(keep); free(eu); free(ev); free(er);
     return rc;
 }
 
