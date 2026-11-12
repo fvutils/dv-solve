@@ -1,6 +1,7 @@
 #include <string.h>
 #include "dvs_trail.h"
 #include "dvs_ctx.h"
+#include "dvs_lcg.h"
 
 /* ------------------------------------------------------------------ */
 /* Internal helpers                                                    */
@@ -154,10 +155,16 @@ void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
     LevelMark *mark = &ctx->level_marks[target_level];
     TrailEntry *stop = mark->trail_top;
     TrailEntry *e    = ctx->trail_top;
+    /* Learnt-clause watches on the literals a restored bound frees are
+     * checked again at the next bound change. */
+    ClauseDB *cdb = ctx->lcg ? &((LCGCtx *)ctx->lcg)->clause_db : NULL;
+    if (cdb && !cdb->n_clauses) cdb = NULL;
 
     /* Walk the trail backward and undo each change */
     while (e != stop) {
         Variable *v = &ctx->vars[e->var_id];
+        if (cdb && e->kind != TRAIL_HOLE)
+            clause_db_unbound(cdb, v, e->var_id, e->kind == TRAIL_LB, e->old_value);
 
         switch ((TrailKind)e->kind) {
         case TRAIL_LB:

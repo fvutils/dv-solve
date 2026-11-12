@@ -4795,152 +4795,164 @@ uint32_t prop_disj_eq_set(const Propagator *p, uint32_t *out_var,
 /* ------------------------------------------------------------------ */
 /* AllDifferent_32:  x0, x1, ..., xN are all distinct                 */
 /*                                                                     */
-/* Propagation strategy (in order):                                   */
-/*   1. Pigeonhole check: count distinct reachable values; if fewer   */
-/*      than n_vars, return PROP_CONFLICT.                            */
-/*   2. Singleton exclusion: for each variable that is assigned        */
-/*      (lo == hi), tighten bounds of all other variables to exclude  */
-/*      that value.  This is the most common propagation in practice. */
-/*   3. Hall interval detection: sort by lo, sweep to find intervals  */
-/*      where count of contained domains exceeds interval width.      */
-/*   4. Entailment: all variables assigned and distinct.              */
+/* Bounds consistency in O(n log n) (Lopez-Ortiz, Quimper, Tromp and   */
+/* van Beek, "A fast and simple algorithm for bounds consistency of    */
+/* the alldifferent constraint", IJCAI 2003): every bound that lies in */
+/* a Hall interval (an interval that as many other variables fill as   */
+/* it has values) moves past it, and an overfull interval is a         */
+/* conflict. Singleton exclusion is the width-1 case. Until 6c         */
+/* (2026-11-12) this was singleton exclusion over all pairs plus a     */
+/* Hall sweep over all start/end pairs, O(n^2) a firing: 90% of        */
+/* simbench unique_64 under CDCL.                                      */
+/*                                                                     */
+/* Scratch after watcher_nexts (prop_add_all_different sizes it):      */
+/* int64 L[n], H[n], NL[n], NH[n], bnd[2n+2], d[2n+2]; int32 t[2n+2],  */
+/* h[2n+2]; uint32 minsorted[n], maxsorted[n], minrank[n], maxrank[n]. */
+/* minsorted/maxsorted persist between firings, so their insertion     */
+/* sort starts from the last order.                                    */
 /* ------------------------------------------------------------------ */
+
+/* minsorted[n], maxsorted[n]: after L..NH (4n int64), bnd and d
+ * (2 x (2n+2) int64), t and h (2 x (2n+2) int32). */
+static uint32_t *_ad_orders(AllDifferent_t *ad) {
+    uint32_t n = ad->n_vars;
+    int64_t *d_end = (int64_t *)(ad->var_ids + 2u * ad->_capacity) + 4u * n + 2u * (2u * n + 2u);
+    return (uint32_t *)((int32_t *)d_end + 2u * (2u * n + 2u));
+}
+
+static void _ad_pathset(int32_t *t, int32_t start, int32_t end, int32_t to) {
+    int32_t k, l;
+    for (l = start; (k = l) != end; t[k] = to) l = t[k];
+}
+static int32_t _ad_pathmin(const int32_t *t, int32_t i) { while (t[i] < i) i = t[i]; return i; }
+static int32_t _ad_pathmax(const int32_t *t, int32_t i) { while (t[i] > i) i = t[i]; return i; }
+
+static void _ad_isort(uint32_t *o, uint32_t n, const int64_t *key) {
+    for (uint32_t i = 1; i < n; i++) {
+        uint32_t x = o[i], j = i;
+        while (j > 0 && key[o[j - 1]] > key[x]) { o[j] = o[j - 1]; j--; }
+        o[j] = x;
+    }
+}
 
 static PropResult _fire_all_different_32(Propagator *self, dvs_ctx_t *ctx) {
     AllDifferent_t *ad = (AllDifferent_t *)self;
     uint32_t n = ad->n_vars;
+    uint32_t nbmax = 2u * n + 2u;
 
-    /* Read tier-aware 64-bit bounds up front. A width-32 *unsigned* variable is
-     * tier-1 -- its true bounds live in a pooled WideBounds64 and the raw
-     * Variable.lo/.hi int32 fields are pinned to 0 (see _init_tier1). The old
-     * code read those int32 fields directly, so every unsigned-32 var looked
-     * like the singleton [0,0]: the pigeonhole check then saw a union of size 1
-     * and fabricated PROP_CONFLICT -> spurious UNSAT for the default PSS int.
-     * var_lo64/var_hi64 resolve the real bounds for every tier; L[]/H[] cache
-     * them (scratch after watcher_nexts) and are refreshed after each tighten.
-     * Overflow guards on the span/Hall-width arithmetic ensure a very wide (width-64 unsigned)
-     * domain can never wrap negative and manufacture a false conflict; that
-     * edge stays sound (it may under-propagate, never mis-report). */
+    /* Bounds through var_lo64/var_hi64: a width-32 unsigned variable is
+     * tier-1, its int32 lo/hi fields are not its bounds. */
     int64_t *L = (int64_t *)(ad->var_ids + 2u * ad->_capacity);
-    int64_t *H = L + n;
-    uint32_t *sorted = (uint32_t *)(H + n);
+    int64_t *H = L + n, *NL = H + n, *NH = NL + n;
+    int64_t *bnd = NH + n, *d = bnd + nbmax;
+    int32_t *t = (int32_t *)(d + nbmax), *h = t + nbmax;
+    uint32_t *minsorted = _ad_orders(ad), *maxsorted = minsorted + n;
+    uint32_t *minrank = maxsorted + n, *maxrank = minrank + n;
     for (uint32_t i = 0; i < n; i++) {
         Variable *vi = &ctx->vars[ad->var_ids[i]];
-        L[i] = var_lo64(ctx, vi);
-        H[i] = var_hi64(ctx, vi);
+        NL[i] = L[i] = var_lo64(ctx, vi);
+        NH[i] = H[i] = var_hi64(ctx, vi);
+    }
+    _ad_isort(minsorted, n, L);
+    _ad_isort(maxsorted, n, H);
+
+    /* The distinct values of every L and H + 1, in order, between
+     * sentinels; each variable's ranks index them. */
+    int32_t nb = 0;
+    {
+        int64_t mn = L[minsorted[0]], mx = H[maxsorted[0]] + 1, last = mn - 2;
+        uint32_t i = 0, j = 0;
+        bnd[0] = last;
+        for (;;) {
+            if (i < n && mn <= mx) {
+                if (mn != last) bnd[++nb] = last = mn;
+                minrank[minsorted[i]] = (uint32_t)nb;
+                if (++i < n) mn = L[minsorted[i]];
+            } else {
+                if (mx != last) bnd[++nb] = last = mx;
+                maxrank[maxsorted[j]] = (uint32_t)nb;
+                if (++j == n) break;
+                mx = H[maxsorted[j]] + 1;
+            }
+        }
+        bnd[nb + 1] = bnd[nb] + 2;
     }
 
-    /* --- Singleton exclusion (most common propagation) --- */
+    /* Lower bounds: variables by increasing upper bound. */
+    for (int32_t i = 1; i <= nb + 1; i++) {
+        t[i] = h[i] = i - 1;
+        d[i] = bnd[i] - bnd[i - 1];
+    }
     for (uint32_t i = 0; i < n; i++) {
-        if (L[i] != H[i]) continue;
-        int64_t val = L[i];
-        for (uint32_t j = 0; j < n; j++) {
-            if (j == i) continue;
-            uint32_t vj_id = ad->var_ids[j];
-            if (L[j] == val) {
-                if (ctx_tighten_lb64(ctx, vj_id, val + 1) == PROP_CONFLICT)
-                    return PROP_CONFLICT;
-                L[j] = var_lo64(ctx, &ctx->vars[vj_id]);
-            }
-            if (H[j] == val) {
-                if (ctx_tighten_ub64(ctx, vj_id, val - 1) == PROP_CONFLICT)
-                    return PROP_CONFLICT;
-                H[j] = var_hi64(ctx, &ctx->vars[vj_id]);
-            }
+        uint32_t v = maxsorted[i];
+        int32_t x = (int32_t)minrank[v], y = (int32_t)maxrank[v];
+        int32_t z = _ad_pathmax(t, x + 1), j = t[z];
+        if (--d[z] == 0) {
+            t[z] = z + 1;
+            z = _ad_pathmax(t, t[z]);
+            t[z] = j;
+        }
+        _ad_pathset(t, x + 1, z, z);
+        if (d[z] < bnd[z] - bnd[y]) return PROP_CONFLICT;
+        if (h[x] > x) {
+            int32_t w = _ad_pathmax(h, h[x]);
+            NL[v] = bnd[w];
+            _ad_pathset(h, x, w, w);
+        }
+        if (d[z] == bnd[z] - bnd[y]) {
+            _ad_pathset(h, h[y], j - 1, y);
+            h[y] = j - 1;
         }
     }
 
-    /* --- Pigeonhole check --- */
-    /* Find global lo/hi across all variables */
-    int64_t glo = L[0], ghi = H[0];
-    for (uint32_t i = 1; i < n; i++) {
-        if (L[i] < glo) glo = L[i];
-        if (H[i] > ghi) ghi = H[i];
+    /* Upper bounds: variables by decreasing lower bound. */
+    for (int32_t i = 0; i <= nb; i++) {
+        t[i] = h[i] = i + 1;
+        d[i] = bnd[i + 1] - bnd[i];
     }
-    /* Domain union cardinality upper bound (#values - 1 = ghi - glo). The
-     * `span >= 0` guard skips the test when the difference wrapped (a domain
-     * too wide to ever pigeonhole n vars anyway). */
-    int64_t span = ghi - glo;
-    if (span >= 0 && span + 1 < (int64_t)n) return PROP_CONFLICT;
-
-    /* --- Hall interval detection via sweep --- */
-    /* Sort variables by lo bound (insertion sort) */
-    for (uint32_t i = 0; i < n; i++) sorted[i] = i;
-    for (uint32_t i = 1; i < n; i++) {
-        uint32_t key = sorted[i];
-        int64_t key_lo = L[key];
-        uint32_t j = i;
-        while (j > 0 && L[sorted[j - 1]] > key_lo) {
-            sorted[j] = sorted[j - 1];
-            j--;
+    for (uint32_t i = n; i-- > 0;) {
+        uint32_t v = minsorted[i];
+        int32_t x = (int32_t)maxrank[v], y = (int32_t)minrank[v];
+        int32_t z = _ad_pathmin(t, x - 1), j = t[z];
+        if (--d[z] == 0) {
+            t[z] = z - 1;
+            z = _ad_pathmin(t, t[z]);
+            t[z] = j;
         }
-        sorted[j] = key;
-    }
-
-    /* Sweep: for each starting position, count how many domains are
-       fully contained in [start_lo, end_hi].  If count > width, tighten. */
-    for (uint32_t start = 0; start < n; start++) {
-        int64_t lo_s = L[sorted[start]];
-        int64_t max_hi = lo_s;
-        uint32_t count = 0;
-        for (uint32_t end = start; end < n; end++) {
-            uint32_t si = sorted[end];
-            if (L[si] >= lo_s) {
-                if (H[si] > max_hi) max_hi = H[si];
-                count++;
-            }
-            int64_t width = max_hi - lo_s + 1;
-            if (width < 0) continue;   /* wrapped: too wide to pigeonhole */
-            if ((int64_t)count > width) return PROP_CONFLICT;
-            /* If count == width (Hall interval), variables outside must
-               avoid [lo_s, max_hi] */
-            if ((int64_t)count == width && count >= 2) {
-                for (uint32_t k = 0; k < n; k++) {
-                    uint32_t kid = ad->var_ids[k];
-                    /* Skip variables that are part of this Hall interval */
-                    int in_hall = (L[k] >= lo_s && H[k] <= max_hi);
-                    if (in_hall) continue;
-                    /* If vk overlaps the Hall interval, tighten */
-                    if (L[k] >= lo_s && L[k] <= max_hi) {
-                        if (ctx_tighten_lb64(ctx, kid, max_hi + 1) == PROP_CONFLICT)
-                            return PROP_CONFLICT;
-                        L[k] = var_lo64(ctx, &ctx->vars[kid]);
-                    }
-                    if (H[k] >= lo_s && H[k] <= max_hi) {
-                        if (ctx_tighten_ub64(ctx, kid, lo_s - 1) == PROP_CONFLICT)
-                            return PROP_CONFLICT;
-                        H[k] = var_hi64(ctx, &ctx->vars[kid]);
-                    }
-                }
-            }
+        _ad_pathset(t, x - 1, z, z);
+        if (d[z] < bnd[y] - bnd[z]) return PROP_CONFLICT;
+        if (h[x] < x) {
+            int32_t w = _ad_pathmin(h, h[x]);
+            NH[v] = bnd[w] - 1;
+            _ad_pathset(h, x, w, w);
+        }
+        if (d[z] == bnd[y] - bnd[z]) {
+            _ad_pathset(h, h[y], j + 1, y);
+            h[y] = j + 1;
         }
     }
 
-    /* --- Entailment check --- */
-    int all_assigned = 1;
+    int all_fixed = 1;
     for (uint32_t i = 0; i < n; i++) {
-        if (L[i] != H[i]) { all_assigned = 0; break; }
+        uint32_t vid = ad->var_ids[i];
+        if (NL[i] > L[i] && ctx_tighten_lb64(ctx, vid, NL[i]) == PROP_CONFLICT)
+            return PROP_CONFLICT;
+        if (NH[i] < H[i] && ctx_tighten_ub64(ctx, vid, NH[i]) == PROP_CONFLICT)
+            return PROP_CONFLICT;
+        if (NL[i] != NH[i]) all_fixed = 0;
     }
-    if (all_assigned) {
-        /* Verify all distinct (should be guaranteed by propagation) */
-        for (uint32_t i = 0; i < n; i++) {
-            for (uint32_t j = i + 1; j < n; j++) {
-                if (L[i] == L[j]) return PROP_CONFLICT;
-            }
-        }
-        return PROP_ENTAILED;
-    }
-
-    return PROP_OK;
+    /* All fixed and consistent: two equal would be an overfull interval. */
+    return all_fixed ? PROP_ENTAILED : PROP_OK;
 }
 
 uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
                                  const uint32_t *var_ids, uint8_t priority) {
-    /* var_ids[n], watcher_nexts[n], then scratch lo[n], hi[n], order[n]:
-     * 28 bytes a variable. The bound keeps the size within a uint32. */
-    if (n_vars < 2 || n_vars > (UINT32_MAX - (uint32_t)sizeof(AllDifferent_t)) / 28u)
+    /* var_ids[n], watcher_nexts[n], then the fire's scratch (see
+     * _fire_all_different_32): 104 bytes a variable and 48 more. The bound
+     * keeps the size within a uint32. */
+    if (n_vars < 2 || n_vars > (UINT32_MAX - (uint32_t)sizeof(AllDifferent_t) - 48u) / 104u)
         return EXPR_NULL;
-    uint32_t sz = (uint32_t)sizeof(AllDifferent_t) + 28u * n_vars;
+    uint32_t sz = (uint32_t)sizeof(AllDifferent_t) + 104u * n_vars + 48u;
 
     /* Reject variables wider than 32 bits */
     for (uint32_t i = 0; i < n_vars; i++) {
@@ -4965,6 +4977,10 @@ uint32_t prop_add_all_different(dvs_ctx_t *ctx, uint32_t n_vars,
 
     for (uint32_t i = 0; i < n_vars; i++) {
         ad->var_ids[i] = var_ids[i];
+    }
+    {   /* The fire's sort orders start as the identity. */
+        uint32_t *minsorted = _ad_orders(ad);
+        for (uint32_t i = 0; i < 2u * n_vars; i++) minsorted[i] = i % n_vars;
     }
 
     /* Register watchers: insert this propagator into each variable's

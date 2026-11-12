@@ -85,11 +85,29 @@ typedef struct {
 #define CLAUSE_DB_INIT_CAP  4096u
 #define MAX_CLAUSE_LITS     64u
 
-/* Watch list entry: points to a clause that watches a given variable */
-typedef struct WatchEntry {
-    uint32_t           clause_idx;  /* index into clauses array */
-    struct WatchEntry *next;        /* linked list              */
+/* A clause watching one bound literal. `key` is the literal's bound mapped
+ * so that the literals a bound change makes false sort first (watch_mask). */
+typedef struct {
+    uint64_t key;
+    uint32_t clause_idx;
 } WatchEntry;
+
+/* The watches on one variable's `x >= b` (or `x <= b`) literals, sorted by
+ * key in e[0, n_sorted). Entries past n_sorted were added without a context
+ * and hold the raw bound until the next check sorts them in. Every watch
+ * with key < `done` has been checked since its literal became false; a
+ * backtrack that frees literals lowers `done` (clause_db_unbound). */
+typedef struct {
+    WatchEntry *e;
+    uint32_t    n, cap, n_sorted;
+    uint64_t    done;
+} WatchList;
+
+/* A watch moved during a check, inserted once the check is over. */
+typedef struct {
+    Literal  lit;
+    uint32_t clause_idx;
+} WatchMove;
 
 typedef struct {
     /* Clause storage: array of pointers to variable-length Clause structs */
@@ -97,10 +115,14 @@ typedef struct {
     uint32_t  n_clauses;
     uint32_t  clauses_cap;
 
-    /* Per-variable watch lists (one for LB events, one for UB events) */
-    WatchEntry **watch_lb;   /* watch_lb[var_id] -> linked list */
-    WatchEntry **watch_ub;   /* watch_ub[var_id] -> linked list */
+    /* Per-variable watch lists: watch_lb[v] holds the watched `v >= b`
+     * literals (made false by an upper-bound fall), watch_ub[v] the
+     * `v <= b` ones (made false by a lower-bound rise). */
+    WatchList   *watch_lb;
+    WatchList   *watch_ub;
     uint32_t     n_watch_vars;
+    WatchMove   *mv;         /* scratch for the watches one check moves */
+    uint32_t     mv_cap;
     /* A clause notification is running: a tightening it makes does not start
      * another (clause_notify_lb / _ub) but is queued in `pend` and checked
      * when the running one finishes. Per database, not per process. */
@@ -109,8 +131,9 @@ typedef struct {
     uint32_t    *pend;       /* queued events: var_id*2 + (1 = ub event)   */
     uint32_t     n_pend;
     uint32_t     pend_cap;
-    /* The per-variable arrays above (watch_lb, watch_ub, pend) come from
-     * here, so they grow with the context (lcg_reserve_vars). */
+    /* The per-variable arrays above (watch_lb, watch_ub, pend) and the
+     * watch lists come from here, so they grow with the context
+     * (lcg_reserve_vars). */
     dvs_alloc_t *alloc;
 
     /* Allocation arena for clauses and watch entries. Clauses and watch
@@ -145,6 +168,10 @@ uint32_t clause_db_add(ClauseDB *db, uint32_t n_lits, const Literal *lits,
  *  else the one made false last). */
 uint32_t clause_db_add_watched(ClauseDB *db, const dvs_ctx_t *ctx, uint32_t n_lits,
                                Literal *lits, uint32_t lbd);
+
+/** Watch `lit` for clause `ci`: sorted into its list with a context, else
+ *  appended for the next check to sort in. Returns -1 out of memory. */
+int clause_db_watch(ClauseDB *db, const dvs_ctx_t *ctx, Literal lit, uint32_t ci);
 
 /** Choose every clause's watched literals again under the current bounds:
  *  clauses kept from an earlier solve (lcg_retain_used, a handle restore)
@@ -367,6 +394,24 @@ static inline int literal_is_false(const dvs_ctx_t *ctx, Literal lit) {
         return var_b_lt(v, var_hi64(ctx, v), lit.bound);
     else
         return var_b_gt(v, var_lo64(ctx, v), lit.bound);
+}
+
+/* A watch key is a bound XOR this mask: the key order is the variable's
+ * value order (var_b_lt), reversed for `x >= b` literals. Then `x <= b` is
+ * false exactly when key(b) < key(lo), and `x >= b` when key(b) < key(hi). */
+static inline uint64_t watch_mask(const Variable *v, int is_lb) {
+    uint64_t m = (!(v->flags & VAR_SIGNED) && v->width >= 64) ? 0 : 1ull << 63;
+    return is_lb ? ~m : m;
+}
+
+/* A backtrack restored `var`'s lower bound (`is_lb`) or upper bound to
+ * `old`: the literals that frees are unchecked again. */
+static inline void clause_db_unbound(ClauseDB *db, const Variable *v, uint32_t var,
+                                     int is_lb, int64_t old) {
+    if (var >= db->n_watch_vars) return;
+    WatchList *wl = is_lb ? &db->watch_ub[var] : &db->watch_lb[var];
+    uint64_t k = (uint64_t)old ^ watch_mask(v, !is_lb);
+    if (k < wl->done) wl->done = k;
 }
 
 #endif /* DVS_LCG_H */

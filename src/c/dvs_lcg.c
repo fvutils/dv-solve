@@ -92,8 +92,8 @@ int clause_db_init_alloc(ClauseDB *db, uint32_t n_vars, dvs_alloc_t *alloc) {
     if (!db->clauses) return -1;
 
     db->n_watch_vars = n_vars;
-    db->watch_lb = (WatchEntry **)_zalloc(alloc, n_vars, sizeof(WatchEntry *));
-    db->watch_ub = (WatchEntry **)_zalloc(alloc, n_vars, sizeof(WatchEntry *));
+    db->watch_lb = (WatchList *)_zalloc(alloc, n_vars, sizeof(WatchList));
+    db->watch_ub = (WatchList *)_zalloc(alloc, n_vars, sizeof(WatchList));
     db->pend_cap = 2u * n_vars + 64u;
     db->pend = (uint32_t *)_zalloc(alloc, db->pend_cap, sizeof(uint32_t));
     if (!db->watch_lb || !db->watch_ub || !db->pend) {
@@ -115,40 +115,68 @@ int clause_db_init_alloc(ClauseDB *db, uint32_t n_vars, dvs_alloc_t *alloc) {
 void clause_db_destroy(ClauseDB *db) {
     if (db->alloc) {
         _afree(db->alloc, db->clauses, db->clauses_cap * sizeof(Clause *));
-        _afree(db->alloc, db->watch_lb, db->n_watch_vars * sizeof(WatchEntry *));
-        _afree(db->alloc, db->watch_ub, db->n_watch_vars * sizeof(WatchEntry *));
+        for (uint32_t v = 0; v < db->n_watch_vars; v++) {
+            if (db->watch_lb)
+                _afree(db->alloc, db->watch_lb[v].e, db->watch_lb[v].cap * sizeof(WatchEntry));
+            if (db->watch_ub)
+                _afree(db->alloc, db->watch_ub[v].e, db->watch_ub[v].cap * sizeof(WatchEntry));
+        }
+        _afree(db->alloc, db->watch_lb, db->n_watch_vars * sizeof(WatchList));
+        _afree(db->alloc, db->watch_ub, db->n_watch_vars * sizeof(WatchList));
+        _afree(db->alloc, db->mv, db->mv_cap * sizeof(WatchMove));
         _afree(db->alloc, db->pend, db->pend_cap * sizeof(uint32_t));
     }
     if (db->arena.seg) dvs_spool_destroy(&db->arena);
     memset(db, 0, sizeof(*db));
 }
 
-/* Arena allocator for clauses and watch entries */
+/* Arena allocator for clauses */
 static void *_arena_alloc(ClauseDB *db, uint32_t size, uint32_t align) {
     uint32_t ref = dvs_spool_alloc(&db->arena, size, align);
     return ref == EXPR_NULL ? NULL : dvs_spool_ptr(&db->arena, ref);
 }
 
-/* Add a watch entry for a literal in a clause */
-static void _add_watch(ClauseDB *db, Literal lit, uint32_t clause_idx) {
-    WatchEntry *we = (WatchEntry *)_arena_alloc(db, sizeof(WatchEntry), 8);
-    if (!we) return;
-    we->clause_idx = clause_idx;
-    if (lit.is_lb) {
-        if (lit.var_id < db->n_watch_vars) {
-            we->next = db->watch_lb[lit.var_id];
-            db->watch_lb[lit.var_id] = we;
-        }
-    } else {
-        if (lit.var_id < db->n_watch_vars) {
-            we->next = db->watch_ub[lit.var_id];
-            db->watch_ub[lit.var_id] = we;
-        }
+/* Watch `lit` for clause `ci`. With a context the watch goes into the
+ * sorted part of the list; without one it is appended unsorted, and its
+ * list is sorted (and checked from the start) at its next check. */
+int clause_db_watch(ClauseDB *db, const dvs_ctx_t *ctx, Literal lit, uint32_t ci) {
+    if (lit.var_id >= db->n_watch_vars) return 0;
+    WatchList *wl = lit.is_lb ? &db->watch_lb[lit.var_id] : &db->watch_ub[lit.var_id];
+    if (!wl->n) wl->done = 0;           /* not lowered while it was empty */
+    if (wl->n == wl->cap) {
+        uint32_t cap = wl->cap ? 2u * wl->cap : 4u;
+        if (_agrow(db->alloc, &wl->e, wl->cap, cap, sizeof(WatchEntry))) return -1;
+        wl->cap = cap;
+    }
+    if (!ctx) {
+        wl->e[wl->n++] = (WatchEntry){ (uint64_t)lit.bound, ci };
+        return 0;
+    }
+    uint64_t key = (uint64_t)lit.bound ^ watch_mask(&ctx->vars[lit.var_id], lit.is_lb);
+    uint32_t lo = 0, hi = wl->n_sorted;
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2;
+        if (wl->e[mid].key <= key) lo = mid + 1; else hi = mid;
+    }
+    memmove(&wl->e[lo + 1], &wl->e[lo], (wl->n - lo) * sizeof(WatchEntry));
+    wl->e[lo] = (WatchEntry){ key, ci };
+    wl->n++;
+    wl->n_sorted++;
+    return 0;
+}
+
+/* Empty every watch list. Only a clause adds a watch, so with none there is
+ * nothing to clear (`done` is reset when a list gets its first watch). */
+static void _unwatch_all(ClauseDB *db) {
+    if (!db->n_clauses) return;
+    for (uint32_t v = 0; v < db->n_watch_vars; v++) {
+        db->watch_lb[v].n = db->watch_lb[v].n_sorted = 0;
+        db->watch_ub[v].n = db->watch_ub[v].n_sorted = 0;
     }
 }
 
-uint32_t clause_db_add(ClauseDB *db, uint32_t n_lits, const Literal *lits,
-                        uint32_t lbd) {
+static uint32_t _clause_db_add(ClauseDB *db, const dvs_ctx_t *ctx, uint32_t n_lits,
+                               const Literal *lits, uint32_t lbd) {
     if (n_lits == 0 || n_lits > MAX_CLAUSE_LITS) return UINT32_MAX;
 
     /* Grow clause pointer array if needed */
@@ -177,9 +205,18 @@ uint32_t clause_db_add(ClauseDB *db, uint32_t n_lits, const Literal *lits,
 
     /* Two watched literals, lits[0] and lits[1] (dvs_clause_prop.c). */
     for (uint32_t i = 0; i < n_lits && i < 2; i++)
-        _add_watch(db, lits[i], idx);
+        if (clause_db_watch(db, ctx, lits[i], idx)) {
+            /* Out of memory: drop it (a watch already made goes with it). */
+            db->clauses[idx] = NULL;
+            return UINT32_MAX;
+        }
 
     return idx;
+}
+
+uint32_t clause_db_add(ClauseDB *db, uint32_t n_lits, const Literal *lits,
+                        uint32_t lbd) {
+    return _clause_db_add(db, NULL, n_lits, lits, lbd);
 }
 
 /* Did trail entry `t` make `l` false? For x >= b: an upper-bound change
@@ -218,41 +255,22 @@ static uint32_t _order_watches(const dvs_ctx_t *ctx, uint32_t n, Literal *lits) 
 uint32_t clause_db_add_watched(ClauseDB *db, const dvs_ctx_t *ctx, uint32_t n_lits,
                                Literal *lits, uint32_t lbd) {
     _order_watches(ctx, n_lits, lits);
-    return clause_db_add(db, n_lits, lits, lbd);
+    return _clause_db_add(db, ctx, n_lits, lits, lbd);
 }
 
 int clause_db_rewatch(ClauseDB *db, const dvs_ctx_t *ctx) {
     if (!db->n_clauses) return 0;
-    /* Unlink every watch entry and hand them out again (entries are only a
-     * clause index; the arena cannot free them one by one). */
-    WatchEntry *pool = NULL;
-    for (uint32_t v = 0; v < db->n_watch_vars; v++)
-        for (int d = 0; d < 2; d++) {
-            WatchEntry **head = d ? &db->watch_lb[v] : &db->watch_ub[v];
-            while (*head) {
-                WatchEntry *we = *head;
-                *head = we->next;
-                we->next = pool;
-                pool = we;
-            }
-        }
+    _unwatch_all(db);
     int n_short = 0;
     for (uint32_t ci = 0; ci < db->n_clauses; ci++) {
         Clause *cl = db->clauses[ci];
         if (!cl) continue;
         Literal *lits = (Literal *)(cl + 1);
         if (_order_watches(ctx, cl->n_lits, lits) < 2) n_short++;
-        for (uint32_t i = 0; i < cl->n_lits && i < 2; i++) {
-            if (lits[i].var_id >= db->n_watch_vars) continue;
-            WatchEntry *we = pool;
-            if (we) pool = we->next;
-            else if (!(we = (WatchEntry *)_arena_alloc(db, sizeof(WatchEntry), 8))) continue;
-            we->clause_idx = ci;
-            WatchEntry **dst = lits[i].is_lb ? &db->watch_lb[lits[i].var_id]
-                                             : &db->watch_ub[lits[i].var_id];
-            we->next = *dst;
-            *dst = we;
-        }
+        /* Unsorted: each list is sorted once, at its next check. Out of
+         * memory the clause goes unwatched (it only prunes). */
+        for (uint32_t i = 0; i < cl->n_lits && i < 2; i++)
+            (void)clause_db_watch(db, NULL, lits[i], ci);
     }
     return n_short;
 }
@@ -382,8 +400,8 @@ int lcg_reserve_vars(LCGCtx *lcg, dvs_alloc_t *alloc, uint32_t n) {
         _agrow(a, &lcg->mk_start, o2 + 1u, n2 + 1u, sizeof(uint32_t)) ||
         _agrow(a, &lcg->mk_cur, o2, n2, sizeof(uint32_t)) ||
         _agrow(a, &vs->activity, old, n, sizeof(double)) ||
-        _agrow(a, &db->watch_lb, db->n_watch_vars, n, sizeof(WatchEntry *)) ||
-        _agrow(a, &db->watch_ub, db->n_watch_vars, n, sizeof(WatchEntry *)) ||
+        _agrow(a, &db->watch_lb, db->n_watch_vars, n, sizeof(WatchList)) ||
+        _agrow(a, &db->watch_ub, db->n_watch_vars, n, sizeof(WatchList)) ||
         _agrow(a, &db->pend, db->pend_cap, 2u * (size_t)n + 64u, sizeof(uint32_t)))
         return -1;
     vs->n_vars = n;
@@ -401,10 +419,9 @@ void lcg_reset(LCGCtx *lcg) {
     /* Only slots below n_clauses are ever read (clause_db_add fills each
      * before it counts it): clearing all clauses_cap of them was most of a
      * small solve's reset. */
+    if (db->watch_lb && db->watch_ub) _unwatch_all(db);
     if (db->clauses) memset(db->clauses, 0, db->n_clauses * sizeof(Clause *));
     db->n_clauses = 0;
-    if (db->watch_lb) memset(db->watch_lb, 0, db->n_watch_vars * sizeof(WatchEntry *));
-    if (db->watch_ub) memset(db->watch_ub, 0, db->n_watch_vars * sizeof(WatchEntry *));
     dvs_spool_release(&db->arena, db->arena_empty);
     db->n_pend         = 0;
     db->pend_over      = 0;
@@ -468,10 +485,9 @@ void lcg_retain_used(LCGCtx *lcg) {
         memcpy(keep + at, cl, sz);
         at += sz;
     }
+    _unwatch_all(db);
     memset(db->clauses, 0, db->n_clauses * sizeof(Clause *));
     db->n_clauses = 0;
-    memset(db->watch_lb, 0, db->n_watch_vars * sizeof(WatchEntry *));
-    memset(db->watch_ub, 0, db->n_watch_vars * sizeof(WatchEntry *));
     dvs_spool_release(&db->arena, db->arena_empty);
     for (size_t p = 0; p < at;) {
         const Clause *cl = (const Clause *)(keep + p);
@@ -1080,15 +1096,18 @@ static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *ou
             if (lcg->seen[e_slot]) {
                 Literal lit = lcg->seen_lit[e_slot];
                 Literal neg = literal_negate(lit);
+                /* No room: refuse, as ADD_EXPL_LIT does. Dropping the
+                 * literal made the clause claim more than the conflict
+                 * shows (simbench unique_64, 6c: 32 fixed values, the
+                 * UIP dropped). The next analysis clears `seen`. */
+                if (learnt_idx >= lcg->learnt_cap) { lcg_dbg_bail[12]++; return -1; }
                 if (!uip_set) {
-                    if (learnt_idx < lcg->learnt_cap) {
-                        for (uint32_t j = learnt_idx; j > 0; j--)
-                            lcg->learnt_buf[j] = lcg->learnt_buf[j - 1];
-                        lcg->learnt_buf[0] = neg;
-                        learnt_idx++;
-                    }
+                    for (uint32_t j = learnt_idx; j > 0; j--)
+                        lcg->learnt_buf[j] = lcg->learnt_buf[j - 1];
+                    lcg->learnt_buf[0] = neg;
+                    learnt_idx++;
                     uip_set = 1;
-                } else if (learnt_idx < lcg->learnt_cap) {
+                } else {
                     lcg->learnt_buf[learnt_idx++] = neg;
                 }
                 lcg->seen[e_slot] = 0;

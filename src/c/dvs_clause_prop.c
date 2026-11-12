@@ -1,4 +1,6 @@
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include "dvs_lcg.h"
 #include "dvs_ctx.h"
 #include "dvs_propagator.h"
@@ -98,49 +100,91 @@ static PropResult _check_clause(ClauseDB *db, dvs_ctx_t *ctx,
 PropResult clause_propagate(ClauseDB *db, dvs_ctx_t *ctx);
 
 /* Two watched literals: a clause keeps its watched literals at lits[0] and
- * lits[1], and sits on the watch list of each. `head` is the list of
- * clauses watching a literal on `var` that the bound change just moved
- * against (`is_lb`: an `x >= b` literal). A clause is only looked at when
- * that watched literal is now false: the watch moves to a literal that is
- * not, or else the clause is unit (or false) on its other watch.
- * Backtracking makes no watched literal false, so it needs no work. Until
- * 2026-11-12 every literal was watched and every clause on the list read in
- * full: about 80% of a conflict-heavy solve (simbench sum_partition). */
-static PropResult _check_watch(ClauseDB *db, dvs_ctx_t *ctx, WatchEntry **head,
+ * lits[1], and sits on the watch list of each. `wl` holds the watched
+ * `var >= b` (`is_lb`) or `var <= b` literals, sorted so that the false ones
+ * come first; the check visits only those made false since it last ran
+ * (keys [done, now)). For each, the watch moves to a literal that is not
+ * false, or else the clause is unit (or false) on its other watch.
+ * Backtracking makes no watched literal false, so it needs no work beyond
+ * lowering `done`. Until 2026-11-12 every literal was watched and every
+ * clause on the list read in full: about 80% of a conflict-heavy solve
+ * (simbench sum_partition). Then until 6c (2026-11-12) each list was
+ * unsorted and read in full on every bound change of its variable: 90% of
+ * verilator_operators under CDCL, whose learnt clauses `b != k` all watch b. */
+static int _cmp_watch(const void *a, const void *b) {
+    uint64_t x = ((const WatchEntry *)a)->key, y = ((const WatchEntry *)b)->key;
+    return x < y ? -1 : x > y;
+}
+
+static PropResult _check_watch(ClauseDB *db, dvs_ctx_t *ctx, WatchList *wl,
                                uint32_t var, uint8_t is_lb) {
-    WatchEntry **pp = head;
-    while (*pp) {
-        WatchEntry *we = *pp;
-        Clause *cl = db->clauses[we->clause_idx];
-        if (!cl) { *pp = we->next; continue; }   /* dropped by clause_db_gc */
+    if (!wl->n) return PROP_OK;
+    const Variable *v = &ctx->vars[var];
+    uint64_t m = watch_mask(v, is_lb);
+    if (wl->n_sorted < wl->n) {
+        /* Watches added without a context hold their bound: key them, sort
+         * the whole list and check it from the start. */
+        for (uint32_t i = wl->n_sorted; i < wl->n; i++) wl->e[i].key ^= m;
+        qsort(wl->e, wl->n, sizeof(WatchEntry), _cmp_watch);
+        wl->n_sorted = wl->n;
+        wl->done = 0;
+    }
+    uint64_t now = (uint64_t)(is_lb ? var_hi64(ctx, v) : var_lo64(ctx, v)) ^ m;
+    if (wl->done >= now) return PROP_OK;
+    uint32_t lo = 0, hi = wl->n;
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2;
+        if (wl->e[mid].key < wl->done) lo = mid + 1; else hi = mid;
+    }
+    WatchEntry *e = wl->e;
+    uint32_t r = lo, w = lo, n_mv = 0;
+    PropResult res = PROP_OK;
+    for (; r < wl->n && e[r].key < now; r++) {
+        WatchEntry we = e[r];
+        Clause *cl = db->clauses[we.clause_idx];
+        if (!cl) continue;                       /* dropped by clause_db_gc */
         Literal *lits = (Literal *)(cl + 1);
         uint32_t n = cl->n_lits;
-        /* Which watch this entry is for. Both can be on this list (same
-         * variable and direction): take the false one. */
-        int on0 = lits[0].var_id == var && lits[0].is_lb == is_lb;
-        int on1 = n > 1 && lits[1].var_id == var && lits[1].is_lb == is_lb;
-        uint32_t w = on0 && (!on1 || literal_is_false(ctx, lits[0])) ? 0 : 1;
-        if (!literal_is_false(ctx, lits[w])
-                || (n > 1 && literal_is_true(ctx, lits[1 - w]))) {
-            pp = &we->next;
-            continue;
-        }
+        /* Which watch this entry is for: the one with its bound. */
+        uint32_t x = 0;
+        while (x < 2 && x < n && !(lits[x].var_id == var && lits[x].is_lb == is_lb
+                                   && ((uint64_t)lits[x].bound ^ m) == we.key)) x++;
+        if (x == 2 || x == n) continue;          /* stale: no longer watched */
+        if (n > 1 && literal_is_true(ctx, lits[1 - x])) { e[w++] = we; continue; }
         uint32_t k = 2;
         while (k < n && literal_is_false(ctx, lits[k])) k++;
         if (k < n) {
-            Literal t = lits[w]; lits[w] = lits[k]; lits[k] = t;
-            *pp = we->next;
-            WatchEntry **dst = lits[w].is_lb ? &db->watch_lb[lits[w].var_id]
-                                             : &db->watch_ub[lits[w].var_id];
-            we->next = *dst;
-            *dst = we;
+            Literal t = lits[x]; lits[x] = lits[k]; lits[k] = t;
+            if (n_mv == db->mv_cap) {
+                uint32_t cap = db->mv_cap ? 2u * db->mv_cap : 64u;
+                WatchMove *p = (WatchMove *)DVS_RESIZE(db->alloc, db->mv,
+                    db->mv_cap * sizeof(WatchMove), cap * sizeof(WatchMove));
+                if (!p) { lits[k] = lits[x]; lits[x] = t; e[w++] = we; continue; }
+                db->mv = p;
+                db->mv_cap = cap;
+            }
+            db->mv[n_mv++] = (WatchMove){ lits[x], we.clause_idx };
             continue;
         }
-        pp = &we->next;
-        if (_check_clause(db, ctx, we->clause_idx) == PROP_CONFLICT)
-            return PROP_CONFLICT;
+        e[w++] = we;
+        if (_check_clause(db, ctx, we.clause_idx) == PROP_CONFLICT) {
+            res = PROP_CONFLICT;
+            r++;
+            break;
+        }
     }
-    return PROP_OK;
+    if (w < r) {
+        memmove(&e[w], &e[r], (wl->n - r) * sizeof(WatchEntry));
+        wl->n -= r - w;
+        wl->n_sorted -= r - w;
+    }
+    /* After a conflict the rest is unchecked; the backtrack lowers `done`. */
+    if (res != PROP_CONFLICT) wl->done = now;
+    for (uint32_t i = 0; i < n_mv; i++)
+        if (clause_db_watch(db, ctx, db->mv[i].lit, db->mv[i].clause_idx)) {
+            db->clauses[db->mv[i].clause_idx] = NULL;   /* out of memory */
+        }
+    return res;
 }
 
 static PropResult _drain(ClauseDB *db, dvs_ctx_t *ctx, PropResult res);
