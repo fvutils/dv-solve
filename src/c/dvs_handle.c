@@ -246,12 +246,16 @@ static int solve_once(dvs_handle_t *h, const dvs_ref_t *refs, uint64_t seed) {
             return DVS_RANDOMIZE_UNSAT;
     }
 
-    /* The front end's options (smt2_frontend.c, _cmd_check_sat_body). */
+    /* The front end's options (smt2_frontend.c, _cmd_check_sat_body), but
+     * the search takes max_conflicts as its restart unit: at 10000 a solve
+     * never restarted, and one stuck under a bad early decision ran to the
+     * trail cap (simbench sum_partition on CDCL: 434 ms -> 7.3 ms per call
+     * at 100). The conflict budget, the product, is kept. */
     dvs_solve_opts_t o;
     memset(&o, 0, sizeof o);
     o.seed = seed;
-    o.max_conflicts = 10000;
-    o.max_restarts = 1000;
+    o.max_conflicts = 100;
+    o.max_restarts = 100000;
     o.use_lcg = 1;
     o.use_phase_save = 1;
     o.fair_pick = 1;

@@ -140,6 +140,18 @@ void clause_db_destroy(ClauseDB *db);
 uint32_t clause_db_add(ClauseDB *db, uint32_t n_lits, const Literal *lits,
                         uint32_t lbd);
 
+/** clause_db_add for a clause learnt under the current bounds: first moves
+ *  the literals to watch to lits[0] and lits[1] (two that are not false,
+ *  else the one made false last). */
+uint32_t clause_db_add_watched(ClauseDB *db, const dvs_ctx_t *ctx, uint32_t n_lits,
+                               Literal *lits, uint32_t lbd);
+
+/** Choose every clause's watched literals again under the current bounds:
+ *  clauses kept from an earlier solve (lcg_retain_used, a handle restore)
+ *  were watched under other bounds. Returns how many clauses have fewer
+ *  than two non-false literals (unit or false now: clause_propagate them). */
+int clause_db_rewatch(ClauseDB *db, const dvs_ctx_t *ctx);
+
 /** Remove clauses with LBD > threshold (garbage collection). */
 void clause_db_gc(ClauseDB *db, uint32_t lbd_threshold);
 
@@ -320,6 +332,13 @@ PropResult clause_notify_release(ClauseDB *db, dvs_ctx_t *ctx, int check);
  * @return PROP_OK or PROP_CONFLICT.
  */
 PropResult clause_propagate(ClauseDB *db, dvs_ctx_t *ctx);
+
+/**
+ * Check one clause (one just added) and propagate it if unit, with the
+ * clause checks that propagation queues.
+ * @return PROP_OK or PROP_CONFLICT.
+ */
+PropResult clause_propagate_one(ClauseDB *db, dvs_ctx_t *ctx, uint32_t ci);
 
 #ifdef __cplusplus
 }

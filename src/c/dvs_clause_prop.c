@@ -90,17 +90,65 @@ static PropResult _check_clause(ClauseDB *db, dvs_ctx_t *ctx,
  * qc_satadd_w4: 271,664 + 66,478 of 413k conflicts).
  *
  * The queue holds var_id*2 + (1 for an upper-bound event). If it fills,
- * pend_over makes the drain rescan every clause instead. The flag and the
+ * pend_over makes the drain choose every clause's watches again and rescan
+ * every clause instead. The flag and the
  * queue are per database (B115: a process-wide static once stayed set and
  * turned learnt-clause propagation off for every solver). */
 
 PropResult clause_propagate(ClauseDB *db, dvs_ctx_t *ctx);
 
-static PropResult _check_watch(ClauseDB *db, dvs_ctx_t *ctx, WatchEntry *we) {
-    for (; we; we = we->next)
+/* Two watched literals: a clause keeps its watched literals at lits[0] and
+ * lits[1], and sits on the watch list of each. `head` is the list of
+ * clauses watching a literal on `var` that the bound change just moved
+ * against (`is_lb`: an `x >= b` literal). A clause is only looked at when
+ * that watched literal is now false: the watch moves to a literal that is
+ * not, or else the clause is unit (or false) on its other watch.
+ * Backtracking makes no watched literal false, so it needs no work. Until
+ * 2026-11-12 every literal was watched and every clause on the list read in
+ * full: about 80% of a conflict-heavy solve (simbench sum_partition). */
+static PropResult _check_watch(ClauseDB *db, dvs_ctx_t *ctx, WatchEntry **head,
+                               uint32_t var, uint8_t is_lb) {
+    WatchEntry **pp = head;
+    while (*pp) {
+        WatchEntry *we = *pp;
+        Clause *cl = db->clauses[we->clause_idx];
+        if (!cl) { *pp = we->next; continue; }   /* dropped by clause_db_gc */
+        Literal *lits = (Literal *)(cl + 1);
+        uint32_t n = cl->n_lits;
+        /* Which watch this entry is for. Both can be on this list (same
+         * variable and direction): take the false one. */
+        int on0 = lits[0].var_id == var && lits[0].is_lb == is_lb;
+        int on1 = n > 1 && lits[1].var_id == var && lits[1].is_lb == is_lb;
+        uint32_t w = on0 && (!on1 || literal_is_false(ctx, lits[0])) ? 0 : 1;
+        if (!literal_is_false(ctx, lits[w])
+                || (n > 1 && literal_is_true(ctx, lits[1 - w]))) {
+            pp = &we->next;
+            continue;
+        }
+        uint32_t k = 2;
+        while (k < n && literal_is_false(ctx, lits[k])) k++;
+        if (k < n) {
+            Literal t = lits[w]; lits[w] = lits[k]; lits[k] = t;
+            *pp = we->next;
+            WatchEntry **dst = lits[w].is_lb ? &db->watch_lb[lits[w].var_id]
+                                             : &db->watch_ub[lits[w].var_id];
+            we->next = *dst;
+            *dst = we;
+            continue;
+        }
+        pp = &we->next;
         if (_check_clause(db, ctx, we->clause_idx) == PROP_CONFLICT)
             return PROP_CONFLICT;
+    }
     return PROP_OK;
+}
+
+static PropResult _drain(ClauseDB *db, dvs_ctx_t *ctx, PropResult res);
+
+PropResult clause_propagate_one(ClauseDB *db, dvs_ctx_t *ctx, uint32_t ci) {
+    if (db->in_notify) return _check_clause(db, ctx, ci);
+    db->in_notify = 1;
+    return _drain(db, ctx, _check_clause(db, ctx, ci));
 }
 
 /* Check the queued events until none is left or one conflicts, then
@@ -110,9 +158,12 @@ static PropResult _drain(ClauseDB *db, dvs_ctx_t *ctx, PropResult res) {
         if (db->n_pend) {
             uint32_t e = db->pend[--db->n_pend];
             uint32_t v = e >> 1;
-            res = _check_watch(db, ctx, (e & 1u) ? db->watch_lb[v] : db->watch_ub[v]);
+            res = (e & 1u) ? _check_watch(db, ctx, &db->watch_lb[v], v, 1)
+                           : _check_watch(db, ctx, &db->watch_ub[v], v, 0);
         } else {
+            /* Events were lost, so watches may be false: choose them again. */
             db->pend_over = 0;
+            clause_db_rewatch(db, ctx);
             res = clause_propagate(db, ctx);
         }
     }
@@ -134,8 +185,8 @@ static PropResult _notify(ClauseDB *db, dvs_ctx_t *ctx, uint32_t var_id, int ub_
     db->in_notify = 1;
     /* An LB rise falsifies `var <= v` literals (the UB watch list); a UB
      * fall falsifies `var >= v` literals (the LB watch list). */
-    return _drain(db, ctx, _check_watch(db, ctx, ub_event ? db->watch_lb[var_id]
-                                                          : db->watch_ub[var_id]));
+    return _drain(db, ctx, ub_event ? _check_watch(db, ctx, &db->watch_lb[var_id], var_id, 1)
+                                    : _check_watch(db, ctx, &db->watch_ub[var_id], var_id, 0));
 }
 
 int clause_notify_hold(ClauseDB *db) {

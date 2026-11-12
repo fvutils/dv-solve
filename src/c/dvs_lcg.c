@@ -175,12 +175,86 @@ uint32_t clause_db_add(ClauseDB *db, uint32_t n_lits, const Literal *lits,
     uint32_t idx = db->n_clauses++;
     db->clauses[idx] = cl;
 
-    /* Watch all literals so event-driven propagation can find this clause
-     * when any of its variables' bounds change. */
-    for (uint32_t i = 0; i < n_lits; i++)
+    /* Two watched literals, lits[0] and lits[1] (dvs_clause_prop.c). */
+    for (uint32_t i = 0; i < n_lits && i < 2; i++)
         _add_watch(db, lits[i], idx);
 
     return idx;
+}
+
+/* Did trail entry `t` make `l` false? For x >= b: an upper-bound change
+ * from at least b. */
+static int _falsifies(const dvs_ctx_t *ctx, const TrailEntry *t, Literal l) {
+    if (t->var_id != l.var_id) return 0;
+    const Variable *v = &ctx->vars[l.var_id];
+    if (l.is_lb) return t->kind == TRAIL_UB && !var_b_lt(v, t->old_value, l.bound);
+    return t->kind == TRAIL_LB && !var_b_gt(v, t->old_value, l.bound);
+}
+
+/* Move the literals to watch to lits[0] and lits[1]: two that are not false
+ * under the current bounds; failing that, after the non-false one (if any),
+ * the one made false last, which the first backtrack that frees any literal
+ * frees too. Returns how many are not false. */
+static uint32_t _order_watches(const dvs_ctx_t *ctx, uint32_t n, Literal *lits) {
+    uint32_t w = 0;
+    for (uint32_t i = 0; i < n && w < 2; i++)
+        if (!literal_is_false(ctx, lits[i])) {
+            Literal t = lits[w]; lits[w] = lits[i]; lits[i] = t;
+            w++;
+        }
+    if (w < 2 && n > w + 1) {
+        for (const TrailEntry *t = ctx->trail_top; t; t = t->prev) {
+            uint32_t k = w;
+            while (k < n && !_falsifies(ctx, t, lits[k])) k++;
+            if (k < n) {
+                Literal x = lits[w]; lits[w] = lits[k]; lits[k] = x;
+                break;
+            }
+        }
+    }
+    return w;
+}
+
+uint32_t clause_db_add_watched(ClauseDB *db, const dvs_ctx_t *ctx, uint32_t n_lits,
+                               Literal *lits, uint32_t lbd) {
+    _order_watches(ctx, n_lits, lits);
+    return clause_db_add(db, n_lits, lits, lbd);
+}
+
+int clause_db_rewatch(ClauseDB *db, const dvs_ctx_t *ctx) {
+    if (!db->n_clauses) return 0;
+    /* Unlink every watch entry and hand them out again (entries are only a
+     * clause index; the arena cannot free them one by one). */
+    WatchEntry *pool = NULL;
+    for (uint32_t v = 0; v < db->n_watch_vars; v++)
+        for (int d = 0; d < 2; d++) {
+            WatchEntry **head = d ? &db->watch_lb[v] : &db->watch_ub[v];
+            while (*head) {
+                WatchEntry *we = *head;
+                *head = we->next;
+                we->next = pool;
+                pool = we;
+            }
+        }
+    int n_short = 0;
+    for (uint32_t ci = 0; ci < db->n_clauses; ci++) {
+        Clause *cl = db->clauses[ci];
+        if (!cl) continue;
+        Literal *lits = (Literal *)(cl + 1);
+        if (_order_watches(ctx, cl->n_lits, lits) < 2) n_short++;
+        for (uint32_t i = 0; i < cl->n_lits && i < 2; i++) {
+            if (lits[i].var_id >= db->n_watch_vars) continue;
+            WatchEntry *we = pool;
+            if (we) pool = we->next;
+            else if (!(we = (WatchEntry *)_arena_alloc(db, sizeof(WatchEntry), 8))) continue;
+            we->clause_idx = ci;
+            WatchEntry **dst = lits[i].is_lb ? &db->watch_lb[lits[i].var_id]
+                                             : &db->watch_ub[lits[i].var_id];
+            we->next = *dst;
+            *dst = we;
+        }
+    }
+    return n_short;
 }
 
 void clause_db_gc(ClauseDB *db, uint32_t lbd_threshold) {

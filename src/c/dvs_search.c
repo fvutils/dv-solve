@@ -3457,6 +3457,13 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                               ? _luby(luby_idx) * max_conflicts
                               : UINT32_MAX;
 
+    /* Clauses kept from an earlier solve were watched under its bounds. */
+    if (ctx->lcg) {
+        ClauseDB *cdb = &((LCGCtx *)ctx->lcg)->clause_db;
+        if (clause_db_rewatch(cdb, ctx) > 0 && clause_propagate(cdb, ctx) == PROP_CONFLICT)
+            return ABORTED() ? DVS_SOLVE_TIMEOUT : DVS_SOLVE_UNSAT;
+    }
+
     /* Level-0 BCP */
     if (dvs_solver_propagate(ctx) == PROP_CONFLICT)
         return ABORTED() ? DVS_SOLVE_TIMEOUT : DVS_SOLVE_UNSAT;
@@ -3759,13 +3766,14 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
                          * of distinct decision levels). Clause GC at
                          * restart uses this to discard low-utility
                          * clauses. */
-                        clause_db_add(&lcg->clause_db, n_lits,
-                                       learnt_buf, lbd ? lbd : n_lits);
+                        uint32_t ci = clause_db_add_watched(&lcg->clause_db, ctx, n_lits,
+                                                            learnt_buf, lbd ? lbd : n_lits);
                         lcg->n_learnt++;
 
-                        /* Force unit propagation from the new clause,
-                         * then resume the propagator queue. */
-                        pr = clause_propagate(&lcg->clause_db, ctx);
+                        /* Unit propagation from the new clause (the others
+                         * are watched), then resume the propagator queue. */
+                        pr = ci == UINT32_MAX ? PROP_OK
+                                              : clause_propagate_one(&lcg->clause_db, ctx, ci);
                         if (pr != PROP_CONFLICT) pr = dvs_solver_propagate(ctx);
                         continue;  /* re-enter while(pr==CONFLICT) */
                     }
