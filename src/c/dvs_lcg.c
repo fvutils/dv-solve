@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "dvs_kb.h"
 #include "dvs_lcg.h"
 #include "dvs_ctx.h"
 #include "dvs_explain.h"
@@ -666,9 +667,10 @@ void dvs_step_check_explanation(dvs_ctx_t *ctx, const char *who,
                                 const Literal *ante, uint32_t n, Literal lit);
 #endif
 
-/* Set a bound directly, as trail_backtrack does. */
+/* Set a bound (or a known-bits record) directly, as trail_backtrack does. */
 static void _set_bound(dvs_ctx_t *ctx, uint32_t var_id, uint8_t kind, int64_t val) {
     Variable *v = &ctx->vars[var_id];
+    if (kind == TRAIL_BITS) { ctx->kb[var_id] = (KbRec *)(intptr_t)val; return; }
     if (VAR_IS_TIER0(v->flags)) {
         if (kind == TRAIL_LB) v->lo = (int32_t)val; else v->hi = (int32_t)val;
     } else if (VAR_IS_TIER1(v->flags)) {
@@ -689,7 +691,7 @@ static int _rewind_before(LCGCtx *lcg, dvs_ctx_t *ctx, TrailEntry **applied,
                           TrailEntry *e) {
     while (*applied && *applied != e->prev) {
         TrailEntry *t = *applied;
-        if (t->kind == TRAIL_LB || t->kind == TRAIL_UB) {
+        if (t->kind == TRAIL_LB || t->kind == TRAIL_UB || t->kind == TRAIL_BITS) {
             if (lcg->n_undo == lcg->undo_cap) {
                 uint32_t old = lcg->undo_cap, cap = old ? 2u * old : 256u;
                 dvs_alloc_t *a = lcg->vsids.alloc;
@@ -709,7 +711,8 @@ static int _rewind_before(LCGCtx *lcg, dvs_ctx_t *ctx, TrailEntry **applied,
             const Variable *v = &ctx->vars[t->var_id];
             lcg->undo_var[lcg->n_undo]  = t->var_id;
             lcg->undo_kind[lcg->n_undo] = t->kind;
-            lcg->undo_val[lcg->n_undo]  = t->kind == TRAIL_LB ? var_lo64(ctx, v) : var_hi64(ctx, v);
+            lcg->undo_val[lcg->n_undo]  = t->kind == TRAIL_BITS ? (int64_t)(intptr_t)ctx->kb[t->var_id]
+                                        : t->kind == TRAIL_LB ? var_lo64(ctx, v) : var_hi64(ctx, v);
             lcg->n_undo++;
             _set_bound(ctx, t->var_id, t->kind, t->old_value);
         }
@@ -932,6 +935,10 @@ static int _analyze(LCGCtx *lcg, dvs_ctx_t *ctx, Literal *out_lits, uint32_t *ou
             }
             ADD_EXPL_LIT(_mk_lit(vid, 1, var_lo64(ctx, &ctx->vars[vid])));
             ADD_EXPL_LIT(_mk_lit(vid, 0, var_hi64(ctx, &ctx->vars[vid])));
+            /* A known-bits clash: the bits rest on their record's literals. */
+            const Literal *kl; uint32_t kn;
+            if (kb_lits(ctx, vid, &kl, &kn) != 0) { lcg_dbg_bail[6]++; return -1; }
+            for (uint32_t k = 0; k < kn; k++) ADD_EXPL_LIT(kl[k]);
         }
         {   /* A guard-gated propagator can only fail while its guard is 1. */
             uint32_t gid = _prop_guard(ctx, cp);

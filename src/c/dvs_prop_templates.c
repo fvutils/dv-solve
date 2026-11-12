@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include "dvs_kb.h"
 #include "dvs_numth.h"
 #include "dvs_propagator.h"
 #include "dvs_ctx.h"
@@ -3575,7 +3576,7 @@ static PropResult _bitwise_u64(dvs_ctx_t *ctx, dvs_binop_t op,
 /* BoundsBAND_64:  r = a & b                                          */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_band_64(Propagator *self, dvs_ctx_t *ctx) {
+static PropResult _band_64_bounds(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -3623,6 +3624,14 @@ static PropResult _fire_bounds_band_64(Propagator *self, dvs_ctx_t *ctx) {
     return PROP_OK;
 }
 
+/* The bounds rules, then known bits (dvs_kb.h). */
+static PropResult _fire_bounds_band_64(Propagator *self, dvs_ctx_t *ctx) {
+    PropResult res = _band_64_bounds(self, ctx);
+    if (res != PROP_OK) return res;
+    PropWatchSect *ws = PROP_WS(self);
+    return kb_bitwise(ctx, KB_AND, ws->var_ids[0], ws->var_ids[1], ws->var_ids[2]);
+}
+
 uint32_t prop_add_bounds_band_64(dvs_ctx_t *ctx, uint32_t r_id,
                                   uint32_t a_id, uint32_t b_id,
                                   uint8_t priority) {
@@ -3635,7 +3644,7 @@ uint32_t prop_add_bounds_band_64(dvs_ctx_t *ctx, uint32_t r_id,
 /* BoundsBOR_64:  r = a | b                                           */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_bor_64(Propagator *self, dvs_ctx_t *ctx) {
+static PropResult _bor_64_bounds(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -3716,6 +3725,14 @@ static PropResult _fire_bounds_bor_64(Propagator *self, dvs_ctx_t *ctx) {
     return PROP_OK;
 }
 
+/* The bounds rules, then known bits (dvs_kb.h). */
+static PropResult _fire_bounds_bor_64(Propagator *self, dvs_ctx_t *ctx) {
+    PropResult res = _bor_64_bounds(self, ctx);
+    if (res != PROP_OK) return res;
+    PropWatchSect *ws = PROP_WS(self);
+    return kb_bitwise(ctx, KB_OR, ws->var_ids[0], ws->var_ids[1], ws->var_ids[2]);
+}
+
 uint32_t prop_add_bounds_bor_64(dvs_ctx_t *ctx, uint32_t r_id,
                                  uint32_t a_id, uint32_t b_id,
                                  uint8_t priority) {
@@ -3728,7 +3745,7 @@ uint32_t prop_add_bounds_bor_64(dvs_ctx_t *ctx, uint32_t r_id,
 /* BoundsBXOR_64:  r = a ^ b                                         */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_bxor_64(Propagator *self, dvs_ctx_t *ctx) {
+static PropResult _bxor_64_bounds(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -3823,6 +3840,14 @@ static PropResult _fire_bounds_bxor_64(Propagator *self, dvs_ctx_t *ctx) {
     return PROP_OK;
 }
 
+/* The bounds rules, then known bits (dvs_kb.h). */
+static PropResult _fire_bounds_bxor_64(Propagator *self, dvs_ctx_t *ctx) {
+    PropResult res = _bxor_64_bounds(self, ctx);
+    if (res != PROP_OK) return res;
+    PropWatchSect *ws = PROP_WS(self);
+    return kb_bitwise(ctx, KB_XOR, ws->var_ids[0], ws->var_ids[1], ws->var_ids[2]);
+}
+
 uint32_t prop_add_bounds_bxor_64(dvs_ctx_t *ctx, uint32_t r_id,
                                   uint32_t a_id, uint32_t b_id,
                                   uint8_t priority) {
@@ -3835,7 +3860,7 @@ uint32_t prop_add_bounds_bxor_64(dvs_ctx_t *ctx, uint32_t r_id,
 /* BoundsBNOT_64:  r = ~a                                            */
 /* ------------------------------------------------------------------ */
 
-static PropResult _fire_bounds_bnot_64(Propagator *self, dvs_ctx_t *ctx) {
+static PropResult _bnot_64_bounds(Propagator *self, dvs_ctx_t *ctx) {
     PropWatchSect *ws  = PROP_WS(self);
     uint32_t       rid = ws->var_ids[0];
     uint32_t       aid = ws->var_ids[1];
@@ -3889,6 +3914,14 @@ static PropResult _fire_bounds_bnot_64(Propagator *self, dvs_ctx_t *ctx) {
     if ((res = ctx_tighten_ub64(ctx, aid, new_ahi)) != PROP_OK) return res;
 
     return PROP_OK;
+}
+
+/* The bounds rules, then known bits (dvs_kb.h). */
+static PropResult _fire_bounds_bnot_64(Propagator *self, dvs_ctx_t *ctx) {
+    PropResult res = _bnot_64_bounds(self, ctx);
+    if (res != PROP_OK) return res;
+    PropWatchSect *ws = PROP_WS(self);
+    return kb_bitwise(ctx, KB_NOT, ws->var_ids[0], ws->var_ids[1], EXPR_NULL);
 }
 
 uint32_t prop_add_bounds_bnot_64(dvs_ctx_t *ctx, uint32_t r_id,

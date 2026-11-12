@@ -215,6 +215,8 @@ PropResult ctx_tighten_ub32(dvs_ctx_t *ctx, uint32_t var_id, int32_t new_ub) {
     return _lcg_notify_ub(ctx, var_id, (int64_t)new_ub);
 }
 
+void ctx_wake_var(dvs_ctx_t *ctx, uint32_t var_id) { _wake_var(ctx, var_id); }
+
 PropResult ctx_tighten_lb64(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_lb) {
     Variable *v = &ctx->vars[var_id];
     int64_t curr = var_lo64(ctx, v);

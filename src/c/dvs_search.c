@@ -7,6 +7,7 @@
 #include "dvs_search.h"
 #include "dvs_thread.h"
 #include "dvs_ctx.h"
+#include "dvs_kb.h"
 #include "dvs_engine.h"
 #include "dvs_oracle_hooks.h"
 #include "dvs_propagator.h"
@@ -1323,8 +1324,24 @@ static int _pd_class(dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t x, PdFacts *F
 static int _pd_facts(dvs_ctx_t *ctx, uint32_t x, PdFacts *F) {
     if (!ctx->prop_refs || ctx->n_props == 0 || !_pd_enabled()) return 0;
     DvsPickIx *ix = _pd_index(ctx);
-    if (!ix || !ix->any || x >= ix->n_vars || ix->rep[x] == PD_NONE) return 0;
-    return _pd_class(ctx, ix, x, F, 0);
+    int rc = 0;
+    if (ix && ix->any && x < ix->n_vars && ix->rep[x] != PD_NONE)
+        rc = _pd_class(ctx, ix, x, F, 0);
+    /* The search's known bits on x (dvs_kb.h), in the pick domain's
+     * unsigned value space. */
+    const KbRec *kr = (ctx->kb && x < ctx->kb_cap) ? ctx->kb[x] : NULL;
+    const Variable *xv = &ctx->vars[x];
+    if (kr && rc >= 0 && !(xv->flags & VAR_SIGNED) && xv->width > 1 && xv->width <= 64) {
+        if (rc == 0) {
+            F->maxv = _pd_maxv(xv->width);
+            F->km = F->kv = 0;
+            F->cm = 1; F->cr = 0;
+            F->set.univ = 1; F->set.n = 0;
+        }
+        if (!_pd_bits(F, kr->mask, kr->val)) return -1;
+        rc = 1;
+    }
+    return rc;
 }
 
 /* The facts on x's class. depth > 0: a concatenation's result, for its
@@ -4346,6 +4363,7 @@ static void _solver_reset(dvs_ctx_t *ctx) {
     ctx->trail_top      = NULL;
     ctx->trail_count    = 0;
     ctx->entail_top     = NULL;
+    kb_clear(ctx);                     /* its records are on that stack */
     if (ctx->dynamic) dvs_stack_pop(ctx->dynamic, (dvs_stack_mark_t){0});
     ctx->conflict_count = 0;
 

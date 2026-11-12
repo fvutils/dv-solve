@@ -229,6 +229,7 @@ set(DVS_SOURCES
     src/c/dvs_stack.c
     src/c/dvs_checkpoint.c
     src/c/dvs_trail.c
+    src/c/dvs_kb.c
     src/c/dvs_validate.c
     src/c/dvs_sv.c
     src/c/dvs_placement.c

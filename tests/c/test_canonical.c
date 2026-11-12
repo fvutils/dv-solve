@@ -69,7 +69,9 @@ static Prob aligned(dvs_builder_t *b) {
  * base lies in one of two intervals, which a default-mode handle learns
  * once and keeps (its clause policy), so the preload carries it. The
  * alignment is written `((base * 3) & 255) == 0` (the same values), which
- * the value picker's known bits do not read: it needs draws that miss. */
+ * the value picker's known bits do not read: it needs draws that miss.
+ * The search's own known bits (dvs_kb.h) do read it and learn nothing, so
+ * this problem runs with them off (DVS_KB=0, read when a context is made). */
 static Prob wrapped(dvs_builder_t *b) {
     dvs_builder_add_var(b, 0, 32, 0, 0, 0xFFFFFFFFll);
     dvs_builder_add_var(b, 1, 32, 0, 256, 16384);
@@ -184,7 +186,9 @@ int main(void) {
     for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
         dvs_builder_t *b = dvs_builder_create(0, NULL);
         Prob pr = t[i].make(b);
+        if (!strcmp(t[i].name, "wrapped")) setenv("DVS_KB", "0", 1);
         check(t[i].name, pr);
+        unsetenv("DVS_KB");
         dvs_builder_free_problem(b, pr.p, pr.sz);
         dvs_builder_destroy(b);
     }

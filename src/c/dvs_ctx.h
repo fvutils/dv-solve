@@ -306,6 +306,12 @@ typedef struct dvs_ctx_s {
     uint64_t          *sk_mask;
     uint64_t          *sk_val;
     uint32_t           sk_n;
+    /* Known bits in the search [kb_cap] (dvs_kb.h): each variable's current
+     * record, NULL for the static bits only. kb_state: 0 unread, 1 on,
+     * -1 off (DVS_KB=0). */
+    struct KbRec     **kb;
+    uint32_t           kb_cap;
+    int8_t             kb_state;
     /* Power-of-two links [n_p2 pairs]: p2_link[2i] == 1 << p2_link[2i+1] in
      * every solution (an aux var defined by a shift of 1, or a fact of the
      * initial compile: _pow2_facts). A product with such a factor is

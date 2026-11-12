@@ -2,6 +2,7 @@
 #include "dvs_trail.h"
 #include "dvs_ctx.h"
 #include "dvs_lcg.h"
+#include "dvs_kb.h"
 
 /* ------------------------------------------------------------------ */
 /* Internal helpers                                                    */
@@ -113,6 +114,25 @@ int trail_record_ub(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Record known bits                                                   */
+/* ------------------------------------------------------------------ */
+
+int trail_record_bits(dvs_ctx_t *ctx, uint32_t var_id, KbRec *rec) {
+    TrailEntry *e = _alloc_entry(ctx);
+    if (!e) return -1;
+    e->var_id         = var_id;
+    e->kind           = TRAIL_BITS;
+    e->value_size     = TRAIL_VALUE_64;
+    e->decision_level = (uint16_t)ctx->decision_level;
+    e->old_value      = (int64_t)(intptr_t)rec->prev;
+    e->prop_ref       = ctx->current_prop_ref;
+    e->flags          = ctx->current_trail_flags;
+    ctx->kb[var_id]   = rec;
+    _push_entry(ctx, e);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Record hole                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -163,7 +183,7 @@ void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
     /* Walk the trail backward and undo each change */
     while (e != stop) {
         Variable *v = &ctx->vars[e->var_id];
-        if (cdb && e->kind != TRAIL_HOLE)
+        if (cdb && (e->kind == TRAIL_LB || e->kind == TRAIL_UB))
             clause_db_unbound(cdb, v, e->var_id, e->kind == TRAIL_LB, e->old_value);
 
         switch ((TrailKind)e->kind) {
@@ -189,6 +209,10 @@ void trail_backtrack(dvs_ctx_t *ctx, uint32_t target_level) {
 
         case TRAIL_HOLE:
             /* Phase 6: restore removed value to the hole list */
+            break;
+
+        case TRAIL_BITS:
+            ctx->kb[e->var_id] = (KbRec *)(intptr_t)e->old_value;
             break;
         }
 

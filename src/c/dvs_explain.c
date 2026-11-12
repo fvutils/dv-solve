@@ -24,6 +24,7 @@
  */
 
 #include <stdint.h>
+#include "dvs_kb.h"
 #include "dvs_propagator.h"
 #include "dvs_lcg.h"
 #include "dvs_ctx.h"
@@ -629,6 +630,8 @@ static int _bitwise_u64(const dvs_ctx_t *ctx, uint32_t r, uint32_t a, uint32_t b
 int explain_bounds_band(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
+    if (kb_enabled(ctx))   /* the firing may have used known bits */
+        return kb_explain(ctx, PROP_WS(self)->var_ids, 3, out);
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
     if (_bitwise_u64(ctx, rid, aid, bid))
@@ -696,6 +699,8 @@ int explain_bounds_band(Propagator *self, dvs_ctx_t *ctx,
 int explain_bounds_bor(Propagator *self, dvs_ctx_t *ctx,
                         uint32_t var_id, uint8_t is_lb,
                         int64_t new_bound, Explanation *out) {
+    if (kb_enabled(ctx))   /* the firing may have used known bits */
+        return kb_explain(ctx, PROP_WS(self)->var_ids, 3, out);
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
     if (_bitwise_u64(ctx, rid, aid, bid))
@@ -734,6 +739,8 @@ int explain_bounds_bor(Propagator *self, dvs_ctx_t *ctx,
 int explain_bounds_bxor(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
+    if (kb_enabled(ctx))   /* the firing may have used known bits */
+        return kb_explain(ctx, PROP_WS(self)->var_ids, 3, out);
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1], bid = ws->var_ids[2];
     if (_bitwise_u64(ctx, rid, aid, bid))
@@ -771,6 +778,8 @@ int explain_bounds_bxor(Propagator *self, dvs_ctx_t *ctx,
 int explain_bounds_bnot(Propagator *self, dvs_ctx_t *ctx,
                          uint32_t var_id, uint8_t is_lb,
                          int64_t new_bound, Explanation *out) {
+    if (kb_enabled(ctx))   /* the firing may have used known bits */
+        return kb_explain(ctx, PROP_WS(self)->var_ids, 2, out);
     PropWatchSect *ws = PROP_WS(self);
     uint32_t rid = ws->var_ids[0], aid = ws->var_ids[1];
     out->n_lits = 0;

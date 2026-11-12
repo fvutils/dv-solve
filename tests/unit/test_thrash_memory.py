@@ -13,19 +13,20 @@ from __future__ import annotations
 import time
 
 from dv_solve.builder import SolveProblemBuilder
-from dv_solve.problem import BIN_ADD, BIN_BXOR, BIN_EQ, BIN_MUL
+from dv_solve.problem import BIN_BXOR, BIN_EQ, BIN_MUL, BIN_SUB
 from dv_solve.ctx import SolveCtx, SOLVE_TIMEOUT
 
 LIMIT_S = 0.3     # the default budget, shortened for the test
 
 
 def _mix():
-    """(a * b) ^ (a + b) == 1234567890 over 16-bit fields: the search thrashes.
-    (Nothing inverts a product through an xor with a sum. Earlier examples
-    here now solve: `a * b == c * c + 12345` by the square and divisor rules,
-    and `a * (a ^ b) == K` and `a * (a | b) == K` since the xor and the or
-    bound their results; see _fire_bvbin_64, _fire_bounds_bxor_64 and
-    _fire_bounds_bor_64.)"""
+    """(a * b) ^ (a - b) == 1234567890 over 16-bit fields (no solution): the
+    search thrashes. (Nothing inverts a product through an xor with a
+    difference. Earlier examples here now solve: `a * b == c * c + 12345` by
+    the square and divisor rules; `a * (a ^ b) == K` and `a * (a | b) == K`
+    since the xor and the or bound their results (_fire_bvbin_64,
+    _fire_bounds_bxor_64, _fire_bounds_bor_64); `(a * b) ^ (a + b) == K`
+    by the search's known bits (dvs_kb.c), which refute it at once.)"""
     b = SolveProblemBuilder()
     try:
         for i in range(2):
@@ -35,7 +36,7 @@ def _mix():
         b.add_constraint(b.expr_binary(
             BIN_EQ,
             b.expr_binary(BIN_BXOR, b.expr_binary(BIN_MUL, e(v(0)), e(v(1))),
-                          b.expr_binary(BIN_ADD, e(v(0)), e(v(1)))),
+                          b.expr_binary(BIN_SUB, e(v(0)), e(v(1)))),
             b.expr_const(1234567890, width=32)))
         buf, _sz = b.finalize()
     finally:

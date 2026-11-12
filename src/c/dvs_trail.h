@@ -19,6 +19,8 @@ typedef enum {
     TRAIL_LB   = 0,  /* lower bound tightened  */
     TRAIL_UB   = 1,  /* upper bound tightened  */
     TRAIL_HOLE = 2,  /* value removed from interior (hole) */
+    TRAIL_BITS = 3,  /* known bits changed: old_value is the previous
+                      * KbRec pointer (dvs_kb.h) */
 } TrailKind;
 
 /* ------------------------------------------------------------------ */
@@ -98,6 +100,13 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Record a known-bits change on `var_id` (ctx->kb[var_id] := rec, whose
+ * prev is the old record). -1 if the dynamic stack is full.
+ */
+struct KbRec;
+int trail_record_bits(dvs_ctx_t *ctx, uint32_t var_id, struct KbRec *rec);
 
 /**
  * Record a decision-level push.

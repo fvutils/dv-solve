@@ -193,6 +193,9 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->sk_mask         = NULL;
     ctx->sk_val          = NULL;
     ctx->sk_n            = 0;
+    ctx->kb              = NULL;
+    ctx->kb_cap          = 0;
+    ctx->kb_state        = 0;
     ctx->p2_link         = NULL;
     ctx->n_p2 = ctx->p2_cap = 0;
     ctx->p2_on           = 0;
@@ -505,6 +508,8 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     dvs_ctx_free(ctx, ctx->sk_mask, (size_t)ctx->sk_n * sizeof(uint64_t));
     dvs_ctx_free(ctx, ctx->sk_val, (size_t)ctx->sk_n * sizeof(uint64_t));
     ctx->sk_mask = ctx->sk_val = NULL; ctx->sk_n = 0;
+    dvs_ctx_free(ctx, ctx->kb, (size_t)ctx->kb_cap * sizeof(struct KbRec *));
+    ctx->kb = NULL; ctx->kb_cap = 0;
     dvs_ctx_free(ctx, ctx->p2_link, (size_t)ctx->p2_cap * 2 * sizeof(uint32_t));
     ctx->p2_link = NULL; ctx->n_p2 = ctx->p2_cap = 0; ctx->p2_on = 0;
     if (ctx->phase_save)
