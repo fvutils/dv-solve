@@ -120,7 +120,7 @@ typedef struct {
     int64_t  value;
 } DvsRootPin;
 
-/* The bucket weights _pick_value_weighted found for a variable in one search
+/* The bucket probes _pick_value_weighted made for a variable in one search
  * state, keyed by a hash of that state (dvs_search.c, _wmemo_find): the
  * first DVS_WMEMO_KEPT slots are kept across solves, the rest serve one. */
 #define DVS_WPICK_BUCKETS 16u
@@ -128,13 +128,16 @@ typedef struct {
 #define DVS_WMEMO_SLOTS   64u
 typedef struct DvsWMemo {
     uint64_t k1, k2;          /* state hash; k1 == 0: empty slot          */
-    uint64_t fires;           /* propagator firings the probes took        */
     uint32_t solve;           /* wmemo_solve of the solve that made it     */
+    uint16_t known;           /* buckets probed with no learnt clause      */
+    uint16_t seen;            /* buckets probed in this solve              */
     uint8_t  nb;              /* buckets                                   */
-    uint8_t  exact;           /* made with no learnt clause                */
     uint8_t  hits;            /* reuses, less the newcomers it turned away */
+    uint8_t  has_ub;          /* ub[] and emax are set                     */
     uint8_t  _pad;
     int32_t  emax;            /* wt[k] is the box / 2^(DVS_WPICK_SCALE*emax) */
+    double   ub[DVS_WPICK_BUCKETS];   /* bound on wt[k] from the state alone */
+    uint32_t fires[DVS_WPICK_BUCKETS];  /* propagator firings of each probe */
     int64_t  blo[DVS_WPICK_BUCKETS], bhi[DVS_WPICK_BUCKETS];
     double   wt[DVS_WPICK_BUCKETS];   /* 0: bucket refuted                 */
 } DvsWMemo;

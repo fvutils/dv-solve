@@ -1613,9 +1613,9 @@ enum { KEEP_NONE = 0, KEEP_SET = 1, KEEP_DEAD = 2 };
  * The probes are most of a small solve's time (usb_pkt: 280 a call, 90%
  * of it), and the same weights are asked for again and again: a decision
  * the search retakes after a conflict, and a site's first decisions on
- * every call. So the weights are kept by search state (ctx->wmemo, see
- * _wmemo_find) and reused, with the probes' firings still counted as work
- * so the work budget falls where it did. */
+ * every call. So the probes are kept by search state (ctx->wmemo, see
+ * _wmemo_find) and reused, with their firings still counted as work so
+ * the work budget falls where it did. */
 #define DVS_WPICK_PROBES  1024u
 
 static int _wpick_enabled(void) {
@@ -1634,29 +1634,48 @@ static int _wpick_enabled(void) {
 #define DVS_WPICK_SCALE 512
 typedef struct { double m; int e; } WBox;
 
-static WBox _wpick_box(dvs_ctx_t *ctx) {
+static const DvsPickIx *_wpick_ix(dvs_ctx_t *ctx) {
+    const DvsPickIx *ix = ctx->prop_refs && ctx->n_props && _pd_enabled() ? _pd_index(ctx) : NULL;
+    return ix && ix->any ? ix : NULL;
+}
+
+/* Variable i's facts (aligned, in its value set), which make a selector's
+ * buckets weigh what they leave: 1 and *F, else 0. */
+static int _wpick_facts(dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t i, PdFacts *F) {
+    return ix && ix->rep[i] != PD_NONE && _pd_has(ix, ix->rep[i])
+           && _pd_class(ctx, ix, i, F, 0) == 1;
+}
+
+/* The values counted for variable i in [lo, hi]: its domain's, or fewer
+ * when its facts F (NULL: none) allow fewer. */
+static double _wpick_dim(const dvs_ctx_t *ctx, const PdFacts *F, uint32_t i,
+                         int64_t lo, int64_t hi) {
+    double d = (double)_dom_size(ctx, i, lo, hi) + 1.0;
+    if (F) {
+        double c = _pd_count(F, (uint64_t)lo, (uint64_t)hi);
+        if (c < d) d = c;
+    }
+    return d;
+}
+
+/* The box; with omit a variable, the box of the others with no
+ * equality-group correction, which bounds what any narrowing of the
+ * domains leaves (see _pick_value_weighted). */
+static WBox _wpick_box(dvs_ctx_t *ctx, uint32_t omit) {
     uint32_t n = ctx->n_decl_vars < ctx->n_vars ? ctx->n_decl_vars : ctx->n_vars;
     WBox b = { 1.0, 0 };
-    const DvsPickIx *ix = ctx->prop_refs && ctx->n_props && _pd_enabled() ? _pd_index(ctx) : NULL;
-    if (ix && !ix->any) ix = NULL;
+    const DvsPickIx *ix = _wpick_ix(ctx);
     for (uint32_t i = 0; i < n; i++) {
         const Variable *v = &ctx->vars[i];
-        if ((v->flags & VAR_AUX) || (ctx->var_alias && ctx->var_alias[i] != i)
+        if (i == omit || (v->flags & VAR_AUX) || (ctx->var_alias && ctx->var_alias[i] != i)
                 || _is_defined(ctx, i)) continue;
         int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
         if (lo == hi) continue;
-        /* The values its facts allow (aligned, in its value set), when it
-         * has any: what makes a selector's buckets weigh what they leave. */
         PdFacts F;
-        double d = (double)_dom_size(ctx, i, lo, hi) + 1.0;
-        if (ix && ix->rep[i] != PD_NONE && _pd_has(ix, ix->rep[i])
-                && _pd_class(ctx, ix, i, &F, 0) == 1) {
-            double c = _pd_count(&F, (uint64_t)lo, (uint64_t)hi);
-            if (c < d) d = c;
-        }
-        b.m *= d;
+        b.m *= _wpick_dim(ctx, _wpick_facts(ctx, ix, i, &F) ? &F : NULL, i, lo, hi);
         if (b.m > 0x1p512) { b.m *= 0x1p-512; b.e++; }
     }
+    if (omit != UINT32_MAX) return b;
     /* A linear equality with two or more variables open fixes one of them
      * given the rest, so its variables are one dimension fewer than their
      * domains say: `a + b + c == 200` with a decided leaves b and c each
@@ -1711,33 +1730,34 @@ static int _no_learnt(const dvs_ctx_t *ctx) {
     return !L || L->clause_db.n_clauses == 0;
 }
 
-/* The weights for deciding x (nb buckets) in the current search state, if
- * kept: the entry, else NULL. *put is then the slot for the probes' result
- * (NULL: no memo), and the state's key is in *k1, *k2.
+/* This solve's entry for deciding x (nb buckets) in the current search state
+ * (NULL: no memo). The buckets' bounds, which depend on the state alone, are
+ * kept in it, and each bucket's probe, reused:
  *
- * The key hashes every variable's bounds, which with the compiled problem
- * (wmemo_epoch: compile, add_constraint and value exclusion bump it;
- * restore_gen) and the active soft constraints settle what the probes find
- * -- but for the learnt clauses, which can only prune more. Two tables:
+ *  - as its weight, when probed with no learnt clause and none now (known):
+ *    the key hashes every variable's bounds, which with the compiled problem
+ *    (wmemo_epoch: compile, add_constraint and value exclusion bump it;
+ *    restore_gen) and the active soft constraints settle what a probe finds
+ *    -- but for the learnt clauses, which can only prune more.
+ *  - as a bound on its weight, when probed earlier in this solve (seen): the
+ *    clauses learnt since can only have pruned.
  *
- *  - this solve's (slots DVS_WMEMO_KEPT on, direct-mapped; an entry of
- *    another solve is an empty slot). Reused with the clauses learnt since
- *    by rejection (_pick_value_weighted).
- *  - across solves (the first DVS_WMEMO_KEPT slots, two ways a set): only
- *    entries made with no learnt clause, used with none, which are exactly
- *    what the probes would find. A hit is also copied into this solve's
- *    table, as the probes' result would have been.
+ * Two tables: this solve's (slots DVS_WMEMO_KEPT on, direct-mapped; an entry
+ * of another solve is an empty slot), and across solves (the first
+ * DVS_WMEMO_KEPT slots, two ways a set) for the known probes. A miss in this
+ * solve's table takes the kept entry's known probes, as if made in this solve
+ * but not seen.
  *
- * So what a solve draws depends on the problem, the state and the seed, not
- * on what the tables kept from earlier calls: a reused handle draws what a
- * fresh one would (test_evict). In the kept table a new entry replaces the
- * way reused less (each reuse counts, to 3; on a tie the older), and the
- * way kept loses a count: a site's first decisions, asked on every call,
- * outlast the deeper states that mostly come once. Wider than 64 bits the
- * bounds are not all in vars[]: no memo. */
-static DvsWMemo *_wmemo_find(dvs_ctx_t *ctx, uint32_t x, uint32_t nb,
-                             DvsWMemo **put, uint64_t *k1, uint64_t *k2) {
-    *put = NULL;
+ * A known probe stands in for the probe itself, firings and all, and the
+ * draws do not depend on which probes were known: so what a solve draws
+ * depends on the problem, the state and the seed, not on what the tables kept
+ * from earlier calls, and a reused handle draws what a fresh one would
+ * (test_evict). In the kept table a new entry replaces the way reused less
+ * (each reuse counts, to 3; on a tie the older), and the way kept loses a
+ * count: a site's first decisions, asked on every call, outlast the deeper
+ * states that mostly come once. Wider than 64 bits the bounds are not all in
+ * vars[]: no memo. */
+static DvsWMemo *_wmemo_find(dvs_ctx_t *ctx, uint32_t x, uint32_t nb) {
     if (!ctx->wmemo) {
         ctx->wmemo = (DvsWMemo *)DVS_ALLOC(ctx->alloc, DVS_WMEMO_SLOTS * sizeof(DvsWMemo));
         if (!ctx->wmemo) return NULL;
@@ -1755,33 +1775,41 @@ static DvsWMemo *_wmemo_find(dvs_ctx_t *ctx, uint32_t x, uint32_t nb,
         WMIX(var_lo64(ctx, v)); WMIX(var_hi64(ctx, v));
     }
 #undef WMIX
-    *k1 = a | 1u;
-    *k2 = b;
+    const uint64_t k1 = a | 1u, k2 = b;
     const uint32_t h = (uint32_t)(b >> 32);
     DvsWMemo *s = &ctx->wmemo[DVS_WMEMO_KEPT + h % (DVS_WMEMO_SLOTS - DVS_WMEMO_KEPT)];
-    if (s->solve == ctx->wmemo_solve && s->k1 == *k1 && s->k2 == *k2 && s->nb == nb)
+    if (s->solve == ctx->wmemo_solve && s->k1 == k1 && s->k2 == k2 && s->nb == nb)
         return s;
-    *put = s;
-    if (!_no_learnt(ctx)) return NULL;
     DvsWMemo *w = &ctx->wmemo[(h % (DVS_WMEMO_KEPT / 2u)) * 2u];
-    for (int i = 0; i < 2; i++)
-        if (w[i].k1 == *k1 && w[i].k2 == *k2 && w[i].nb == nb) {
-            if (w[i].hits < 3) w[i].hits++;
-            *s = w[i];
-            s->solve = ctx->wmemo_solve;
-            return s;
-        }
-    return NULL;
+    int i = 0;
+    while (i < 2 && !(_no_learnt(ctx) && w[i].k1 == k1 && w[i].k2 == k2 && w[i].nb == nb))
+        i++;
+    if (i < 2) {
+        if (w[i].hits < 3) w[i].hits++;
+        *s = w[i];
+    } else {
+        memset(s, 0, sizeof *s);
+        s->k1 = k1; s->k2 = k2; s->nb = (uint8_t)nb;
+    }
+    s->solve = ctx->wmemo_solve;
+    s->seen = 0;
+    return s;
 }
 
-/* Keep the probes' result `m` (exact: made with no learnt clause) across
- * solves too. */
+/* Keep this solve's entry m's known probes across solves too. */
 static void _wmemo_keep(dvs_ctx_t *ctx, const DvsWMemo *m) {
     DvsWMemo *w = &ctx->wmemo[((uint32_t)(m->k2 >> 32) % (DVS_WMEMO_KEPT / 2u)) * 2u];
-    int v = w[1].hits < w[0].hits || (w[1].hits == w[0].hits && w[1].solve < w[0].solve);
-    if (w[!v].hits) w[!v].hits--;
+    int v;
+    if (w[0].k1 == m->k1 && w[0].k2 == m->k2 && w[0].nb == m->nb) v = 0;
+    else if (w[1].k1 == m->k1 && w[1].k2 == m->k2 && w[1].nb == m->nb) v = 1;
+    else {
+        v = w[1].hits < w[0].hits || (w[1].hits == w[0].hits && w[1].solve < w[0].solve);
+        if (w[!v].hits) w[!v].hits--;
+        w[v].hits = 0;
+    }
+    uint8_t hits = w[v].hits;
     w[v] = *m;
-    w[v].hits = 0;
+    w[v].hits = hits;
 }
 
 /* One bucket probe: x in [blo, bhi] at a level of its own, propagated. 1 when
@@ -1804,7 +1832,7 @@ static int _wpick_probe(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi,
          * its feasible part, so its value must come from that part. */
         *plo = var_lo64(ctx, &ctx->vars[x]);
         *phi = var_hi64(ctx, &ctx->vars[x]);
-        *w = _wpick_box(ctx);
+        *w = _wpick_box(ctx, UINT32_MAX);
     }
     trail_backtrack(ctx, level);
     ctx->conflict_prop_ref   = EXPR_NULL;
@@ -1812,7 +1840,55 @@ static int _wpick_probe(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi,
     return ok;
 }
 
-/* 1: a value for x is in *out. 0: draw uniformly instead. */
+/* Bucket k's weight, by its probe or the memo's (see _wmemo_find), as a
+ * multiple of 2^(DVS_WPICK_SCALE*e); what propagation left of the bucket in
+ * *plo, *phi. -1: propagation gave up. */
+static double _wpick_weigh(dvs_ctx_t *ctx, uint32_t x, DvsWMemo *m, uint32_t k,
+                           int64_t b0, int64_t b1, int32_t e, int64_t *plo, int64_t *phi) {
+    const uint16_t bit = (uint16_t)(1u << k);
+    const int exact = _no_learnt(ctx);
+    ctx->wpick_left--;
+    if (m && exact && (m->known & bit)) {
+        ctx->prop_fires += m->fires[k];
+        m->seen |= bit;
+        *plo = m->blo[k];
+        *phi = m->bhi[k];
+        return m->wt[k];
+    }
+    const uint64_t f0 = ctx->prop_fires;
+    WBox b;
+    int ok = _wpick_probe(ctx, x, b0, b1, ctx->decision_level, plo, phi, &b);
+    if (ctx->prop_aborted) return -1.0;
+    double w = 0.0;
+    if (ok) {
+        w = b.m;
+        for (int d = b.e; d < e && w > 0.0; d++) w *= 0x1p-512;
+        for (int d = e; d < b.e; d++) w *= 0x1p512;
+    }
+    if (m) {
+        m->wt[k] = w;
+        m->blo[k] = *plo;
+        m->bhi[k] = *phi;
+        m->fires[k] = (uint32_t)(ctx->prop_fires - f0);
+        m->seen |= bit;
+        m->known = exact ? (uint16_t)(m->known | bit) : (uint16_t)(m->known & ~bit);
+    }
+    return w;
+}
+
+/* 1: a value for x is in *out. 0: draw uniformly instead.
+ *
+ * Bucket k is drawn with probability w_k / sum(w) by rejection, not by
+ * probing every bucket. Propagation only narrows domains, so the box a
+ * probe leaves is at most u_k = (bucket k's values) * (the other counted
+ * domains now), the box with no equality-group correction, which only
+ * divides. Draw a bucket by u, weigh it (a probe), keep it with probability
+ * w_k / u_k, else set u_k = w_k, now exact and kept if drawn again, and
+ * draw again: at most nb probes, and one when x's bucket narrows no other
+ * counted domain (u = w). A probe
+ * made earlier in this solve bounds w_k tighter. The equality-group
+ * correction is not monotone, so a weight can exceed its bound from an
+ * earlier probe: then every bucket is weighed and drawn from directly. */
 static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t hi,
                                 int64_t *out) {
     /* Buckets k = 0..nb-1 over the span+1 values, as offsets from lo in
@@ -1853,115 +1929,83 @@ static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t 
         }
         if (i == nd) return 0;
     }
-    ctx->wpick_left -= nb;
-    int64_t blo[DVS_WPICK_BUCKETS], bhi[DVS_WPICK_BUCKETS];
-    double wt[DVS_WPICK_BUCKETS], tot = 0.0;
-    const uint32_t level = ctx->decision_level;
-    uint64_t k1 = 0, k2 = 0;
-    DvsWMemo *put, *m = _wmemo_find(ctx, x, nb, &put, &k1, &k2);
-    if (m && m->exact && _no_learnt(ctx)) {
-        /* Exactly what the probes would find: draw as they would have. */
-        memcpy(blo, m->blo, nb * sizeof *blo);
-        memcpy(bhi, m->bhi, nb * sizeof *bhi);
-        memcpy(wt, m->wt, nb * sizeof *wt);
-        for (uint32_t k = 0; k < nb; k++) tot += wt[k];
-        ctx->prop_fires += m->fires;
-        ctx->conflict_prop_ref   = EXPR_NULL;
-        ctx->conflict_clause_idx = EXPR_NULL;
-        goto draw;
-    }
-    if (m) {
-        /* Made earlier in this solve: the clauses learnt since can only have
-         * pruned, so each weight is an upper bound of the bucket's weight
-         * now. Rejection sampling draws by the weights now with one probe a
-         * try: draw a bucket by the kept weights, probe it, keep it with
-         * probability now/kept, else store what the probe found and draw
-         * again. A rejected bucket's weight is then current, and it is kept
-         * if drawn again, so this ends within nb + 1 tries. A weight that
-         * grew (the equality-group correction is not monotone) means a full
-         * probe. */
-        m->exact = 0;
-        for (;;) {
-            tot = 0.0;
-            for (uint32_t k = 0; k < nb; k++) tot += m->wt[k];
-            if (tot == 0.0) return 0;
-            double u = (double)(_rand64(ctx) >> 11) * 0x1p-53 * tot;
-            uint32_t k = 0;
-            while (k + 1 < nb && u >= m->wt[k]) { u -= m->wt[k]; k++; }
-            while (m->wt[k] == 0.0) k--;
-            int64_t plo, phi;
-            WBox b;
-            int ok = _wpick_probe(ctx, x, m->blo[k], m->bhi[k], level, &plo, &phi, &b);
-            if (ctx->prop_aborted) return 0;
-            double now = 0.0;
-            if (ok) {
-                if (b.e > m->emax) goto probe_all;
-                now = b.m;
-                for (int d = b.e; d < m->emax && now > 0.0; d++) now *= 0x1p-512;
-                if (now > m->wt[k]) goto probe_all;
-                m->blo[k] = plo;
-                m->bhi[k] = phi;
-            }
-            int keep = ok && (double)(_rand64(ctx) >> 11) * 0x1p-53 * m->wt[k] < now;
-            m->wt[k] = now;
-            if (keep) {
-                *out = _pick_in(ctx, x, plo, phi);
-                return 1;
-            }
-        }
-    }
-probe_all:;
-    if (m) put = m;
-    const uint64_t fires0 = ctx->prop_fires;
+    DvsWMemo *m = _wmemo_find(ctx, x, nb);
+    const uint16_t known0 = m ? m->known : 0;
     const uint64_t q = span / nb, r1 = span % nb + 1u;
-    WBox w[DVS_WPICK_BUCKETS];
-    int ok[DVS_WPICK_BUCKETS], emax = 0, any = 0;
-    for (uint32_t k = 0; k < nb; k++) {
+    int64_t b0[DVS_WPICK_BUCKETS], b1[DVS_WPICK_BUCKETS];
+    int64_t dlo[DVS_WPICK_BUCKETS], dhi[DVS_WPICK_BUCKETS];
+    double u[DVS_WPICK_BUCKETS];
+    uint32_t cur = 0, k;
+    for (k = 0; k < nb; k++) {
         uint64_t o0 = k * q + (k * r1) / nb;
         uint64_t o1 = k + 1 == nb ? span : (k + 1) * q + ((k + 1) * r1) / nb - 1u;
-        int64_t b0 = (int64_t)((uint64_t)lo + o0), b1 = (int64_t)((uint64_t)lo + o1);
+        b0[k] = (int64_t)((uint64_t)lo + o0);
+        b1[k] = (int64_t)((uint64_t)lo + o1);
         if (pdn) {
             /* Values of rank pdn*k/nb .. pdn*(k+1)/nb - 1 among those allowed. */
             uint64_t r0 = (uint64_t)(((unsigned __int128)pdn * k) / nb);
             uint64_t r1_ = (uint64_t)(((unsigned __int128)pdn * (k + 1)) / nb) - 1u;
-            b0 = (int64_t)_pd_nth(&F, (uint64_t)lo, (uint64_t)hi, r0);
-            b1 = (int64_t)_pd_nth(&F, (uint64_t)lo, (uint64_t)hi, r1_);
+            b0[k] = (int64_t)_pd_nth(&F, (uint64_t)lo, (uint64_t)hi, r0);
+            b1[k] = (int64_t)_pd_nth(&F, (uint64_t)lo, (uint64_t)hi, r1_);
         }
-        ok[k] = _wpick_probe(ctx, x, b0, b1, level, &blo[k], &bhi[k], &w[k]);
-        if (ok[k]) {
-            if (!any || w[k].e > emax) emax = w[k].e;
-            any = 1;
+    }
+    int32_t e;
+    if (m && m->has_ub) {
+        e = m->emax;
+        memcpy(u, m->ub, nb * sizeof *u);
+    } else {
+        const WBox rest = _wpick_box(ctx, x);
+        PdFacts XF;
+        const PdFacts *xf = _wpick_facts(ctx, _wpick_ix(ctx), x, &XF) ? &XF : NULL;
+        e = rest.e;
+        for (k = 0; k < nb; k++) u[k] = _wpick_dim(ctx, xf, x, b0[k], b1[k]) * rest.m;
+        if (m) {
+            m->emax = e;
+            memcpy(m->ub, u, nb * sizeof *u);
+            m->has_ub = 1;
         }
-        if (ctx->prop_aborted) break;
     }
-    if (ctx->prop_aborted || !any) return 0;
-    for (uint32_t k = 0; k < nb; k++) {
-        wt[k] = 0.0;
-        if (!ok[k]) continue;
-        wt[k] = w[k].m;
-        for (int d = w[k].e; d < emax && wt[k] > 0.0; d++) wt[k] *= 0x1p-512;
-        tot += wt[k];
+    for (k = 0; k < nb; k++)
+        if (m && (m->seen >> k & 1u) && m->wt[k] < u[k]) u[k] = m->wt[k];
+    int res = 0;
+    for (;;) {
+        double tot = 0.0;
+        for (k = 0; k < nb; k++) tot += u[k];
+        if (tot == 0.0) break;           /* no bucket has a value its facts allow */
+        double r = (double)(_rand64(ctx) >> 11) * 0x1p-53 * tot;
+        k = 0;
+        while (k + 1 < nb && r >= u[k]) { r -= u[k]; k++; }
+        while (u[k] == 0.0) k--;         /* rounding ran past the last weight */
+        if (cur >> k & 1u) {
+            *out = _pick_in(ctx, x, dlo[k], dhi[k]);
+            res = 1;
+            break;
+        }
+        double w = _wpick_weigh(ctx, x, m, k, b0[k], b1[k], e, &dlo[k], &dhi[k]);
+        if (w < 0.0) break;
+        cur |= 1u << k;
+        if (w > u[k] * (1.0 + 0x1p-30)) {
+            uint32_t j;
+            u[k] = w;
+            for (j = 0; j < nb; j++) {
+                if (cur >> j & 1u) continue;
+                u[j] = _wpick_weigh(ctx, x, m, j, b0[j], b1[j], e, &dlo[j], &dhi[j]);
+                if (u[j] < 0.0) break;
+                cur |= 1u << j;
+            }
+            if (j < nb) break;
+            continue;
+        }
+        int keep = w > 0.0 && (double)(_rand64(ctx) >> 11) * 0x1p-53 * u[k] < w;
+        u[k] = w;
+        if (keep) {
+            *out = _pick_in(ctx, x, dlo[k], dhi[k]);
+            res = 1;
+            break;
+        }
     }
-    if (put) {
-        m = put;
-        m->k1 = k1; m->k2 = k2; m->nb = (uint8_t)nb; m->hits = 0;
-        m->solve = ctx->wmemo_solve;
-        m->exact = (uint8_t)_no_learnt(ctx);
-        m->emax = emax;
-        m->fires = ctx->prop_fires - fires0;
-        memcpy(m->blo, blo, nb * sizeof *blo);
-        memcpy(m->bhi, bhi, nb * sizeof *bhi);
-        memcpy(m->wt, wt, nb * sizeof *wt);
-        if (m->exact) _wmemo_keep(ctx, m);
-    }
-draw:;
-    if (tot == 0.0) return 0;          /* no bucket has a value its facts allow */
-    double u = (double)(_rand64(ctx) >> 11) * 0x1p-53 * tot;
-    uint32_t k = 0;
-    while (k + 1 < nb && u >= wt[k]) { u -= wt[k]; k++; }
-    while (wt[k] == 0.0) k--;          /* rounding ran past the last weight */
-    *out = _pick_in(ctx, x, blo[k], bhi[k]);
-    return 1;
+    if (m && _no_learnt(ctx) && m->known != known0) _wmemo_keep(ctx, m);
+    return res;
 }
 
 /* A seed-0 solve's saved phases start at each var's lower bound. With
