@@ -537,8 +537,19 @@ static int _classify_or_leaf(dvs_problem_t *sp, dvs_expr_t ref,
         return 0;
     }
 
+    /* const-const: a foreach guard on a known index (`i > 0`, `i % 2 == 0`),
+     * lowered per element. Non-negative values compare alike signed or
+     * unsigned, at any width. */
+    uint32_t vid, vid2; int64_t cv, cv2;
+    if (_is_const(sp, e->lhs, &cv) && _is_const(sp, e->rhs, &cv2) && cv >= 0 && cv2 >= 0) {
+        *truth_known = 1;
+        *truth = e->op == DVS_BIN_EQ ? cv == cv2 : e->op == DVS_BIN_NEQ ? cv != cv2
+               : e->op == DVS_BIN_LT ? cv < cv2  : e->op == DVS_BIN_LTE ? cv <= cv2
+               : e->op == DVS_BIN_GT ? cv > cv2  : cv >= cv2;
+        return 0;
+    }
+
     /* var-const / extend(var)-const */
-    uint32_t vid, vid2; int64_t cv;
     uint32_t inner_w; int sign_ext;
     if (_is_var_maybe_extend(sp, e->lhs, &vid, &inner_w, &sign_ext)
         && _is_const(sp, e->rhs, &cv)) {
