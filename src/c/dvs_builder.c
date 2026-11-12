@@ -807,6 +807,14 @@ dvs_expr_t dvs_builder_expr_sv_cast(dvs_builder_t *b, dvs_expr_t operand,
 
 dvs_expr_t dvs_builder_expr_extract(dvs_builder_t *b, dvs_expr_t operand,
                              uint32_t hi_bit, uint32_t lo_bit) {
+    /* A slice of a sized constant is a constant: Verilator reads a signed
+     * literal as unsigned with a full-width extract, and the compile and the
+     * samplers match only bare constants. */
+    const ExprConst *c = (const ExprConst *)dvs_builder_ref_ptr(b, operand);
+    if (c && c->kind == EXPR_CONST && lo_bit <= hi_bit && hi_bit < c->width)
+        return dvs_builder_expr_const_sized(b, (int64_t)((uint64_t)c->value >> lo_bit), 0,
+                                            hi_bit - lo_bit + 1);
+
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ExprExtract),
                                 DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
