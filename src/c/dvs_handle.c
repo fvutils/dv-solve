@@ -30,6 +30,7 @@
 #include "dv_solve.h"
 #include "dvs_capture.h"
 #include "dvs_problem.h"
+#include "dvs_presolve.h"
 #include "dvs_ctx.h"
 #include "dvs_lcg.h"
 #include "dvs_search.h"
@@ -86,6 +87,8 @@ static dvs_handle_t *handle_new(const void *buf, size_t size, int top) {
         dvs_handle_free(h);
         return NULL;
     }
+    size_t psize = size;
+    dvs_presolve_linear(&h->p, &psize);
     for (dvs_expr_t r = h->p->vars_head; r != EXPR_NULL;) {
         VarSpec *vs = POOL_PTR(h->p, r);
         if (vs->var_id >= h->n_vars) h->n_vars = vs->var_id + 1;

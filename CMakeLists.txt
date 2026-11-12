@@ -246,6 +246,7 @@ set(DVS_SOURCES
     src/c/dvs_bbsolver.c
     src/c/dvs_components.c
     src/c/dvs_cube.c
+    src/c/dvs_presolve.c
     src/c/dvs_shape.c
     src/c/dvs_aigsim.c
     src/c/dvs_affine.c
@@ -586,6 +587,11 @@ add_executable(test_handle tests/c/test_handle.c)
 target_link_libraries(test_handle PRIVATE dv_solve)
 target_include_directories(test_handle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_handle COMMAND test_handle)
+
+add_executable(test_presolve tests/c/test_presolve.c)
+target_link_libraries(test_presolve PRIVATE dv_solve)
+target_include_directories(test_presolve PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_presolve COMMAND test_presolve)
 
 add_executable(test_engine tests/c/test_engine.c)
 target_link_libraries(test_engine PRIVATE dv_solve)
