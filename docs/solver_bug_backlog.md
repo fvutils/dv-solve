@@ -368,6 +368,14 @@ A 2026-07-10 generative fuzz sweep (`tests/formal/test_fuzz_cross_check.py`,
   slice form; the split handles that. All three: 10–11 µs, JSD 0.017. Gate:
   tests/formal/test_align_rewrite.py (exhaustive); 3 of 5 mutants caught, 2
   equivalent.
+  **2026-11-12: rewrite removed.** On the current CDCL engine (restarts,
+  two watched literals, rejection weighted pick, known bits) the split was
+  the slow path: once the address is split into 1-bit fields, CDCL decides
+  them first and the weighted pick's memo misses on every later decision.
+  Simbench ahb_burst 3x and dma_desc 2x fewer instructions without it;
+  AXI-style mask, modulo and field-split cases re-measured with no skew
+  (size JSD <= 0.0004) and no slowdown. The equivalence test stays, now on
+  the forms as written.
 - **B100: set or ordering on a >32-bit slice of a ≥40-bit word timed out (perf, sound). ✅ FIXED 2026-10-09 (uncommitted) for words up to 64 bits.**
   `x[35:0] inside {0, 5}` or `x[35:0] < 5` on a 40-, 48-, 62-, 63- or 64-bit
   x: SOLVE_TIMEOUT every seed; `x[15:0]` and equalities were fine. Found by

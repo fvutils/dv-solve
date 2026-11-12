@@ -1414,80 +1414,6 @@ static dvs_expr_t _mrw_order(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t c,
     return _mk_bin(E, op, _mrw_field(E, &s, hi[0], l), _mk_const(E, (int64_t)b, 0, n_w));
 }
 
-/* `s` read as a whole unsigned variable, zero-extended at most: that
- * variable, or EXPR_NULL. */
-static dvs_expr_t _mrw_shift_var(SvE *E, dvs_expr_t s, uint32_t *vw) {
-    SvTy t = _type(E, s);
-    MrwSrc o;
-    if (E->err || t.s || !_mrw_src(E, s, t.w, &o, 0)) return EXPR_NULL;
-    if (o.off != 0 || o.avail != o.vw || _type(E, o.var).s || E->err) return EXPR_NULL;
-    *vw = o.vw;
-    return o.var;
-}
-
-/* `1 << s`, s a whole unsigned variable: s, or EXPR_NULL. */
-static dvs_expr_t _mrw_pow2(SvE *E, dvs_expr_t a, uint32_t *vw) {
-    if (a == EXPR_NULL || _kind(E, a) != EXPR_BINARY) return EXPR_NULL;
-    ExprBinary b = *(ExprBinary *)_P(E, a);
-    uint64_t one;
-    SvTy t = _type(E, a);
-    if (E->err || b.op != DVS_BIN_LSHIFT || t.s || t.w > 64
-            || !_mrw_const(E, b.lhs, t.w, &one) || one != 1) return EXPR_NULL;
-    dvs_expr_t v = _mrw_shift_var(E, b.rhs, vw);
-    /* Every shift must stay inside the word: 1 << k is 2^k. */
-    if (v == EXPR_NULL || *vw > 6 || ((1u << *vw) - 1) >= t.w) return EXPR_NULL;
-    return v;
-}
-
-#define MRW_MAX_SHIFT_VW 4
-
-/* (x & ((1 << s) - 1)) == 0 or x % (1 << s) == 0 -- alignment to a random
- * size, as AXI testbenches write it -- or their !=, s a narrow unsigned
- * variable: the slice form `s == k -> x[k-1:0] == 0` for every k, which
- * propagates like any field constraint. */
-static dvs_expr_t _mrw_align(SvE *E, dvs_binop_t op, dvs_expr_t a, dvs_expr_t c,
-                             uint32_t W) {
-    uint64_t z;
-    if (!_mrw_const(E, c, W, &z) || z != 0 || _kind(E, a) != EXPR_BINARY) return EXPR_NULL;
-    ExprBinary b = *(ExprBinary *)_P(E, a);
-    if (_type(E, a).s || E->err) return EXPR_NULL;
-    dvs_expr_t x = EXPR_NULL, sv = EXPR_NULL;
-    uint32_t vw = 0;
-    if (b.op == DVS_BIN_MOD) {
-        x = b.lhs;
-        sv = _mrw_pow2(E, b.rhs, &vw);
-    } else if (b.op == DVS_BIN_BAND) {
-        for (int side = 0; side < 2 && sv == EXPR_NULL; side++) {
-            dvs_expr_t m = side ? b.lhs : b.rhs;
-            if (_kind(E, m) != EXPR_BINARY) continue;
-            ExprBinary mb = *(ExprBinary *)_P(E, m);
-            uint64_t one;
-            if (mb.op != DVS_BIN_SUB || !_mrw_const(E, mb.rhs, _type(E, m).w, &one) || one != 1)
-                continue;
-            sv = _mrw_pow2(E, mb.lhs, &vw);
-            x = side ? b.rhs : b.lhs;
-        }
-    }
-    if (sv == EXPR_NULL || vw > MRW_MAX_SHIFT_VW || _type(E, x).s || E->err) return EXPR_NULL;
-    MrwSrc src;
-    if (!_mrw_src(E, x, W, &src, 0)) return EXPR_NULL;
-    dvs_expr_t acc = EXPR_NULL;
-    for (uint32_t k = 1; k < (1u << vw); k++) {
-        uint32_t h = (uint32_t)(k <= src.avail ? k - 1 : src.avail - 1);
-        dvs_expr_t is_k = _mk_bin(E, op == DVS_BIN_EQ ? DVS_BIN_NEQ : DVS_BIN_EQ,
-                                  sv, _mk_const(E, (int64_t)k, 0, vw));
-        dvs_expr_t f = _mk_bin(E, op, _mrw_field(E, &src, h, 0),
-                               _mk_const(E, 0, 0, (uint32_t)(h + 1)));
-        /* ==: s != k || x[k-1:0] == 0, all k.  !=: s == k && x[k-1:0] != 0,
-         * some k. */
-        dvs_expr_t t = _mk_bin(E, op == DVS_BIN_EQ ? DVS_BIN_OR : DVS_BIN_AND, is_k, f);
-        acc = acc == EXPR_NULL ? t
-            : _mk_bin(E, op == DVS_BIN_EQ ? DVS_BIN_AND : DVS_BIN_OR, acc, t);
-        if (E->err) return EXPR_NULL;
-    }
-    return acc;
-}
-
 static dvs_binop_t _mrw_flip(dvs_binop_t op) {
     switch (op) {
     case DVS_BIN_LT:  return DVS_BIN_GT;
@@ -1645,8 +1571,6 @@ static dvs_expr_t _mrw_cmp(SvE *E, dvs_expr_t ref) {
     if (b.op == DVS_BIN_EQ || b.op == DVS_BIN_NEQ) {
         if ((r = _mrw_eq_const(E, b.op, b.lhs, b.rhs, W)) != EXPR_NULL) return r;
         if ((r = _mrw_eq_const(E, b.op, b.rhs, b.lhs, W)) != EXPR_NULL) return r;
-        if ((r = _mrw_align(E, b.op, b.lhs, b.rhs, W)) != EXPR_NULL) return r;
-        if ((r = _mrw_align(E, b.op, b.rhs, b.lhs, W)) != EXPR_NULL) return r;
         if ((r = _mrw_eq_masked(E, b.op, b.lhs, b.rhs, W)) != EXPR_NULL) return r;
     } else {
         if ((r = _mrw_order(E, b.op, b.lhs, b.rhs, W)) != EXPR_NULL) return r;

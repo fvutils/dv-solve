@@ -381,7 +381,8 @@ For those, either:
 - assert the root-level constraints and read the SAT level-0 units, which is still
   static and unexplained (Principle 1 holds, because they are implied by the base
   constraints) [I]; or
-- keep the syntactic producers from `_mrw_align`.
+- recognise the alignment forms syntactically (as `_mrw_align` did before its
+  removal on 2026-11-12, B101).
 
 **2. Bit-aware bound rounding** (kernel, z3 SLS, Chihani). Part 1 rounds to a stride
 2^s. `tnum_step` rounds to the next value matching *any* fixed-bit pattern in O(1),

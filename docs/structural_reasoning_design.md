@@ -101,8 +101,9 @@ Existing code to build on:
 - `dvs_bvbounds` (`src/c/dvs_bvbounds.h`): range / bounds, also from bitwuzla.
 - `bb_pow2_or_zero` (`src/c/dvs_bbsolver.c`): recognises a constant or `1 << s` divisor
   and lowers `urem` to `&`. Bit-blast only, `urem` only.
-- `_mrw_pow2` / `_mrw_align` (`src/c/dvs_sv.c`): SV elaboration rewrites
-  `x % (1 << s) == 0` and `(x & ((1 << s) - 1)) == 0` into per-size field constraints.
+- `_mrw_pow2` / `_mrw_align` (`src/c/dvs_sv.c`): removed 2026-11-12. They rewrote
+  `x % (1 << s) == 0` and `(x & ((1 << s) - 1)) == 0` into per-size field constraints;
+  the CDCL engine now solves the mask and modulo forms faster than the split (B101).
 - `DvsModLink`, `DvsMulLink`, hole lists, divisor tables: CDCL's per-shape side
   channels. They would become consumers of the shared facts, or be retired by the
   change of variable.

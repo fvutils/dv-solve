@@ -1,16 +1,14 @@
-"""Alignment to a random size compiles to slice implications.
+"""Alignment to a random size compiles, and solves exactly.
 
 AXI testbenches align an address to a random transfer size three ways:
 `(addr & ((1 << size) - 1)) == 0`, `addr % (1 << size) == 0` and
-`size == k -> addr[k-1:0] == 0`. The first two left the engine a mask it
-could not propagate (or, once the address was split into fields, a check it
-could only make after drawing them: ~120 us a solve against ~11 us for the
-slice form). With size a narrow unsigned variable, compile rewrites both to
-the third (dvs_sv_rewrite_masks, every front end).
+`size == k -> addr[k-1:0] == 0`. Compile once rewrote the first two to the
+third (B101); the rewrite was removed on 2026-11-12, when the CDCL engine
+became faster on the forms as written. None of them may decline.
 
-The rewrite must be an equivalence: checked exhaustively over an 8-bit x, a
-shift variable s and a 4-bit y it may share constraints with, by pinning
-every assignment and comparing sat/unsat with the IR's evaluator.
+Checked exhaustively over an 8-bit x, a shift variable s and a 4-bit y it
+may share constraints with, by pinning every assignment and comparing
+sat/unsat with the IR's evaluator.
 """
 from __future__ import annotations
 
@@ -77,7 +75,7 @@ FORMS = {"mask": lambda sw, w: _mask(sw, w), "mask-swapped": lambda sw, w: _mask
 
 
 @pytest.mark.parametrize("form", sorted(FORMS))
-@pytest.mark.parametrize("sw", [1, 2, 3, 4])     # 4: 1 << 15 leaves 8 bits, not rewritten
+@pytest.mark.parametrize("sw", [1, 2, 3, 4])     # 4: 1 << 15 leaves 8 bits
 @pytest.mark.parametrize("cmp", ["=", "distinct"])
 @pytest.mark.parametrize("zero_lhs", [False, True])
 def test_alone(form, sw, cmp, zero_lhs):
