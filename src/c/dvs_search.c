@@ -2733,10 +2733,12 @@ static int _enum_build(dvs_ctx_t *ctx, uint32_t base) {
      * lower bound is raised past each value tried, so propagation skips the
      * values that cannot hold (`a * b == K` steps from divisor to divisor);
      * and the value last tried. */
-    size_t wsz = (size_t)nv * (sizeof(uint32_t) + sizeof(int64_t));
-    uint32_t *lvl = (uint32_t *)DVS_ALLOC(ctx->alloc, wsz);
-    if (!lvl) return 0;
-    int64_t *cur = (int64_t *)(lvl + nv);
+    size_t wsz = (size_t)nv * (2 * sizeof(int64_t) + sizeof(double) + sizeof(uint32_t));
+    int64_t *cur = (int64_t *)DVS_ALLOC(ctx->alloc, wsz);
+    if (!cur) return 0;
+    int64_t *lo = cur + nv;
+    double *span = (double *)(lo + nv);
+    uint32_t *lvl = (uint32_t *)(span + nv);
     int ok = 1;
     uint32_t nodes = 0;
     const uint64_t fires0 = ctx->prop_fires;
@@ -2744,13 +2746,15 @@ static int _enum_build(dvs_ctx_t *ctx, uint32_t base) {
     int advance = 0;     /* back at depth d's scan level after a try */
     trail_push_level(ctx);
     lvl[0] = ctx->decision_level;
-    /* The first variable's range, to project the walk's totals from how far
-     * into it the walk is: a walk headed far past a budget stops early, not
-     * at the budget (a failed walk is what a problem the tier does not suit
-     * pays, once per process). */
-    const int64_t lo0 = var_lo64(ctx, &ctx->vars[ctx->enum_vars[0]]);
-    const double span0 = (double)((uint64_t)var_hi64(ctx, &ctx->vars[ctx->enum_vars[0]])
-                                  - (uint64_t)lo0) + 1.0;
+    /* Each variable's root range, to project the walk's totals from how far
+     * into the box (mixed radix over the open depths) the walk is: a walk
+     * headed far past a budget stops early, not at the budget (a failed walk
+     * is what a problem the tier does not suit pays, once per process). */
+    for (uint32_t j = 0; j < nv; j++) {
+        const Variable *u = &ctx->vars[ctx->enum_vars[j]];
+        lo[j] = var_lo64(ctx, u);
+        span[j] = (double)((uint64_t)var_hi64(ctx, u) - (uint64_t)lo[j]) + 1.0;
+    }
     for (;;) {
         if (ctx->prop_fires - fires0 > DVS_ENUM_FIRES) { ok = 0; break; }
         uint32_t id = ctx->enum_vars[d];
@@ -2787,7 +2791,11 @@ static int _enum_build(dvs_ctx_t *ctx, uint32_t base) {
          * range when it has listed most solutions. */
         if ((nodes & 63) == 0
                 && (nodes >= 1024 || ctx->prop_fires - fires0 >= (1u << 14))) {
-            double done_frac = ((double)((uint64_t)cur[0] - (uint64_t)lo0) + 1.0) / span0;
+            double done_frac = 0, scale = 1;
+            for (uint32_t j = 0; j <= d; j++) {
+                scale /= span[j];
+                done_frac += ((double)((uint64_t)cur[j] - (uint64_t)lo[j]) + (j == d)) * scale;
+            }
             if ((double)ctx->enum_nsol * nv / done_frac > 4.0 * DVS_ENUM_MAX
                     || (double)(ctx->prop_fires - fires0) / done_frac > 4.0 * DVS_ENUM_FIRES)
                 { ok = 0; break; }
@@ -2832,7 +2840,7 @@ static int _enum_build(dvs_ctx_t *ctx, uint32_t base) {
         fprintf(stderr, "[enum] ok=%d nv=%u nsol=%u nodes=%u fires=%llu probe=%u/%u\n", ok, nv,
                 ctx->enum_nsol, nodes, (unsigned long long)(ctx->prop_fires - fires0),
                 ctx->box_probe_acc, ctx->box_probe_n);
-    DVS_RELEASE(ctx->alloc, lvl, wsz);
+    DVS_RELEASE(ctx->alloc, cur, wsz);
     if (!ok) ctx->enum_nsol = 0;
     return ok;
 }
