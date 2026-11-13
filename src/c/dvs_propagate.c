@@ -95,7 +95,10 @@ static void _wake_var(dvs_ctx_t *ctx, uint32_t var_id) {
             }
         }
 
-        prop_enqueue(ctx, prop_ref);
+        /* About half of all firings were a propagator woken by its own
+         * tightenings, finding nothing (memmap_tight_32). */
+        if (prop_ref != ctx->current_prop_ref || !(p->flags & PROP_FLAG_IDEMPOTENT))
+            prop_enqueue(ctx, prop_ref);
         prop_ref = next;
     }
 

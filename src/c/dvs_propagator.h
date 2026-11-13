@@ -27,6 +27,8 @@ typedef enum {
 #define PROP_FLAG_ENTAILED  0x01u
 #define PROP_FLAG_IN_QUEUE  0x02u
 #define PROP_FLAG_WIDE_WATCH 0x04u  /* watcher layout differs from PropWatchSect */
+#define PROP_FLAG_IDEMPOTENT 0x08u  /* a firing leaves it at its own fixpoint, so
+                                     * its own tightenings do not wake it */
 
 /* ------------------------------------------------------------------ */
 /* Event types (for watcher registration — Phase 7+)                  */

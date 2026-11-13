@@ -1238,6 +1238,7 @@ uint32_t prop_add_bounds_le_64(dvs_ctx_t *ctx, uint32_t x_id, uint32_t y_id, uin
     if (ref != EXPR_NULL) {
         Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
         p->explain = _explain_bounds_le_64;
+        p->flags |= PROP_FLAG_IDEMPOTENT;   /* neither tightening reads the other's */
     }
     return ref;
 }
@@ -2399,8 +2400,32 @@ static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
     return PROP_OK;
 }
 
-static PropResult _fire_bvadd_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64(self, ctx, DVS_BIN_ADD); }
-static PropResult _fire_bvsub_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64(self, ctx, DVS_BIN_SUB); }
+/* Rounds of an add or subtract before it leaves the rest to the queue. One
+ * relation settles in one or two; the cap only stops a crawl. */
+#define BVBIN_FIX_ROUNDS 8
+
+/* Fire `op` to its own fixpoint, so it is PROP_FLAG_IDEMPOTENT. A round
+ * reads a and b, writes r, then reads r to narrow a and b: if it left a and
+ * b as they were, another would read what this one read and narrow nothing.
+ * Most firings narrow r alone (a chain's sums, forward), and stop at one. */
+static PropResult _fire_bvbin_64_fix(Propagator *self, dvs_ctx_t *ctx, int op) {
+    const uint32_t *ids = PROP_WS(self)->var_ids;
+    const Variable *a = &ctx->vars[ids[1]], *b = &ctx->vars[ids[2]];
+    for (int round = 0; round < BVBIN_FIX_ROUNDS; round++) {
+        const int64_t al = var_lo64(ctx, a), ah = var_hi64(ctx, a);
+        const int64_t bl = var_lo64(ctx, b), bh = var_hi64(ctx, b);
+        PropResult r = _fire_bvbin_64(self, ctx, op);
+        if (r != PROP_OK) return r;
+        if (al == var_lo64(ctx, a) && ah == var_hi64(ctx, a)
+                && bl == var_lo64(ctx, b) && bh == var_hi64(ctx, b))
+            return PROP_OK;
+    }
+    prop_enqueue(ctx, ctx->current_prop_ref);
+    return PROP_OK;
+}
+
+static PropResult _fire_bvadd_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64_fix(self, ctx, DVS_BIN_ADD); }
+static PropResult _fire_bvsub_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64_fix(self, ctx, DVS_BIN_SUB); }
 static PropResult _fire_bvmul_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64(self, ctx, DVS_BIN_MUL); }
 static PropResult _fire_bvshl_64(Propagator *self, dvs_ctx_t *ctx) { return _fire_bvbin_64(self, ctx, DVS_BIN_LSHIFT); }
 
@@ -2552,6 +2577,7 @@ static uint32_t _prop_add_bvbin_64(dvs_ctx_t *ctx, uint32_t r_id, uint32_t a_id,
     bp->width = width;
     Propagator *p = (Propagator *)dvs_spool_ptr(&ctx->pool, ref);
     p->explain = _explain_bvbin_64;
+    if (fire == _fire_bvadd_64 || fire == _fire_bvsub_64) p->flags |= PROP_FLAG_IDEMPOTENT;
     return ref;
 }
 
