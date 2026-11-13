@@ -28,6 +28,7 @@
 #include "dvs_tmpl.h"
 #include "dvs_builder.h"
 #include "dvs_sv.h"           /* dvs_sv_const_type */
+#include "dvs_stackinfo.h"
 
 /** Most elements one expanded problem may have (all its arrays together). */
 #define TMPL_MAX_ELEMS   65536u
@@ -85,7 +86,12 @@ struct dvs_tmpl_s {
     uint32_t     cap_refs;
     int          any_size_random;
     dvs_handle_t *size_h;  /* the problem of the random sizes */
+    dvs_stack_guard_t sg;  /* the recursive walks' guard, written through a
+                            * const template too (dvs_stackinfo.h) */
 };
+
+/* Too little stack left for a walk to go a level deeper. */
+static int deep(const dvs_tmpl_t *t) { return dvs_stack_low((dvs_stack_guard_t *)&t->sg); }
 
 /* ------------------------------------------------------------------ */
 /* Types and constant folding                                          */
@@ -110,59 +116,73 @@ static int64_t sext(uint64_t v, uint32_t w) {
 #define KIND(t, r)  (*(const uint32_t *)NODE(t, r))
 
 static ty_t type_of(const dvs_tmpl_t *t, dvs_expr_t r) {
-    const void *n = NODE(t, r);
-    ty_t ty = {1, 0};
-    switch (KIND(t, r)) {
-    case EXPR_CONST: dvs_sv_const_type(n, &ty.w, &ty.sg); break;
-    case EXPR_CONST_WIDE:
-        ty.w = ((const ExprConstWide *)n)->width;
-        ty.sg = ((const ExprConstWide *)n)->is_signed;
-        break;
-    case EXPR_VAR: {
-        uint32_t v = ((const ExprVar *)n)->var_id;
-        if (v < t->n_vars) { ty.w = t->vwidth[v]; ty.sg = t->vsigned[v]; }
-        break;
+    /* Each node's type is a leaf's or one operand's, so a loop down that
+     * operand: an extend above fixes the width, a concat above adds its low
+     * part and makes it unsigned. */
+    uint32_t add = 0, wfix = 0;
+    int fixed = 0, unsg = 0;
+    for (;;) {
+        const void *n = NODE(t, r);
+        ty_t ty = {1, 0};
+        dvs_expr_t next = EXPR_NULL;
+        switch (KIND(t, r)) {
+        case EXPR_CONST: dvs_sv_const_type(n, &ty.w, &ty.sg); break;
+        case EXPR_CONST_WIDE:
+            ty.w = ((const ExprConstWide *)n)->width;
+            ty.sg = ((const ExprConstWide *)n)->is_signed;
+            break;
+        case EXPR_VAR: {
+            uint32_t v = ((const ExprVar *)n)->var_id;
+            if (v < t->n_vars) { ty.w = t->vwidth[v]; ty.sg = t->vsigned[v]; }
+            break;
+        }
+        case EXPR_BINARY: {
+            uint32_t op = ((const ExprBinary *)n)->op;
+            if (op < DVS_BIN_EQ || op == DVS_BIN_ASHR) next = ((const ExprBinary *)n)->lhs;
+            break;
+        }
+        case EXPR_UNARY:
+            if (((const ExprUnary *)n)->op != DVS_UN_NOT) next = ((const ExprUnary *)n)->operand;
+            break;
+        case EXPR_ITE: next = ((const ExprITE *)n)->then_e; break;
+        case EXPR_EXTEND:
+            if (!fixed) { wfix = ((const ExprExtend *)n)->to_bits + add; fixed = 1; }
+            next = ((const ExprExtend *)n)->operand;
+            break;
+        case EXPR_SV_CAST:
+            ty.w = ((const ExprSvCast *)n)->to_bits;
+            ty.sg = ((const ExprSvCast *)n)->dst_signed;
+            break;
+        case EXPR_CAST:
+            ty.w = ((const ExprCast *)n)->to_bits;
+            ty.sg = ((const ExprCast *)n)->to_signed;
+            break;
+        case EXPR_EXTRACT:
+            ty.w = ((const ExprExtract *)n)->hi_bit - ((const ExprExtract *)n)->lo_bit + 1;
+            break;
+        case EXPR_CONCAT:
+            if (!fixed) add += ((const ExprConcat *)n)->lo_width;
+            unsg = 1;
+            next = ((const ExprConcat *)n)->hi;
+            break;
+        case EXPR_ARRAY_SIZE:
+        case EXPR_LOOP_INDEX: ty.w = 32; ty.sg = 1; break;
+        case EXPR_ELEM: {
+            const array_t *a = &t->arr[((const ExprElem *)n)->array_id];
+            ty.w = a->width;
+            ty.sg = a->is_signed;
+            break;
+        }
+        case EXPR_REDUCE: next = ((const ExprReduce *)n)->body; break;
+        default: break;   /* in-range/in-set/in-ranges and the relations: Boolean */
+        }
+        if (next == EXPR_NULL) {
+            ty.w = fixed ? wfix : ty.w + add;
+            if (unsg) ty.sg = 0;
+            return ty;
+        }
+        r = next;
     }
-    case EXPR_BINARY: {
-        uint32_t op = ((const ExprBinary *)n)->op;
-        if (op < DVS_BIN_EQ || op == DVS_BIN_ASHR) ty = type_of(t, ((const ExprBinary *)n)->lhs);
-        break;
-    }
-    case EXPR_UNARY:
-        if (((const ExprUnary *)n)->op != DVS_UN_NOT)
-            ty = type_of(t, ((const ExprUnary *)n)->operand);
-        break;
-    case EXPR_ITE: ty = type_of(t, ((const ExprITE *)n)->then_e); break;
-    case EXPR_EXTEND:
-        ty = type_of(t, ((const ExprExtend *)n)->operand);
-        ty.w = ((const ExprExtend *)n)->to_bits;
-        break;
-    case EXPR_SV_CAST:
-        ty.w = ((const ExprSvCast *)n)->to_bits;
-        ty.sg = ((const ExprSvCast *)n)->dst_signed;
-        break;
-    case EXPR_CAST:
-        ty.w = ((const ExprCast *)n)->to_bits;
-        ty.sg = ((const ExprCast *)n)->to_signed;
-        break;
-    case EXPR_EXTRACT:
-        ty.w = ((const ExprExtract *)n)->hi_bit - ((const ExprExtract *)n)->lo_bit + 1;
-        break;
-    case EXPR_CONCAT:
-        ty.w = type_of(t, ((const ExprConcat *)n)->hi).w + ((const ExprConcat *)n)->lo_width;
-        break;
-    case EXPR_ARRAY_SIZE:
-    case EXPR_LOOP_INDEX: ty.w = 32; ty.sg = 1; break;
-    case EXPR_ELEM: {
-        const array_t *a = &t->arr[((const ExprElem *)n)->array_id];
-        ty.w = a->width;
-        ty.sg = a->is_signed;
-        break;
-    }
-    case EXPR_REDUCE: ty = type_of(t, ((const ExprReduce *)n)->body); break;
-    default: break;   /* in-range/in-set/in-ranges and the relations: Boolean */
-    }
-    return ty;
 }
 
 /* The binding of loop levels during an expansion. */
@@ -183,6 +203,7 @@ static void env_bind(env_t *e, uint32_t level, int32_t v) {
  * 0 and *v (masked to its width), or -1 if it is not constant. */
 static int fold(const dvs_tmpl_t *t, const env_t *e, const uint32_t *sizes, dvs_expr_t r,
                 uint64_t *v, ty_t *ty) {
+    if (deep(t)) return -1;
     const void *n = NODE(t, r);
     uint64_t a, b;
     ty_t ta, tb;
@@ -360,6 +381,7 @@ static int walk(const dvs_tmpl_t *t, dvs_expr_t r, uint32_t *seen, uint32_t mark
                 visit_fn fn, void *arg) {
     uint32_t s = slot_of(r);
     if (seen[s] == mark) return 0;
+    if (deep(t)) return -1;
     seen[s] = mark;
     if (fn(t, r, arg)) return -1;
     dvs_expr_t k[4], *all = k;
@@ -556,6 +578,7 @@ typedef struct {
 static uint8_t dep_of(xp_t *x, dvs_expr_t r) {
     uint32_t s = slot_of(r);
     if (x->dep_done[s]) return x->dep[s];
+    if (deep(x->t)) { x->err = DVS_RANDOMIZE_ERROR; return 0xFF; }
     uint8_t d = 0;
     if (KIND(x->t, r) == EXPR_LOOP_INDEX)
         d = (uint8_t)(1u << ((const ExprLoopIndex *)NODE(x->t, r))->level);
@@ -836,6 +859,7 @@ static dvs_expr_t xp_node(xp_t *x, dvs_expr_t r) {
 
 static dvs_expr_t xp(xp_t *x, dvs_expr_t r) {
     if (x->err) return EXPR_NULL;
+    if (deep(x->t)) { x->err = DVS_RANDOMIZE_ERROR; return EXPR_NULL; }
     uint32_t s = slot_of(r);
     uint8_t d = dep_of(x, r);
     if (x->memo[s] != EXPR_NULL) {

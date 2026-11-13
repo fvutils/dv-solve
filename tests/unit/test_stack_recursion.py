@@ -80,6 +80,16 @@ BOUNDED = {
     ("dvs_sv", "_fd_walk"): "dvs_stack_deep",
     ("dvs_sv", "_fd_root"): "dvs_stack_deep",
     # CDCL compile
+    # Linear presolve
+    ("dvs_presolve", "_form_node"): "depth cap PS_MAX_DEPTH (256)",
+    ("dvs_presolve", "_walk"): "depth cap PS_MAX_DEPTH (256)",
+    # Array templates
+    ("dvs_tmpl", "fold"): "dvs_stack_low (not constant)",
+    ("dvs_tmpl", "walk"): "dvs_stack_low",
+    ("dvs_tmpl", "dep_of"): "dvs_stack_low",
+    ("dvs_tmpl", "xp"): "dvs_stack_low",
+    ("dvs_tmpl", "expand_foreach"): "depth cap DVS_MAX_LOOP_LEVELS: a nested foreach binds a level of its own",
+    ("dvs_tmpl", "assemble_foreach"): "depth cap DVS_MAX_LOOP_LEVELS: a nested foreach binds a level of its own",
     ("dvs_compile", "_compile_constraint"): "dvs_stack_low",
     ("dvs_compile", "_value_to_var"): "dvs_stack_low",
     ("dvs_compile", "_collect_eq_aliases"): "dvs_stack_low",
