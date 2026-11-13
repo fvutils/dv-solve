@@ -141,6 +141,7 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->level_marks     = NULL;
     ctx->max_depth       = 0;
     ctx->n_props         = 0;
+    ctx->diffcycle_ref   = EXPR_NULL;
     ctx->watcher_heads   = NULL;
     ctx->n_checkpoints   = 0;
     ctx->prop_refs       = NULL;

@@ -29,12 +29,6 @@
 #define DC_MAX_NODES   512u
 #define DC_MAX_RELS    1024u
 #define DC_LIM         ((int64_t)1 << 61)
-/* Firings a propagation spends before the check runs. A negative cycle is
- * what bounds propagation crawls round, so it shows as a propagation that
- * keeps firing; one that settles first has none (dvs_diffcycle.h). Most
- * settle within a few dozen, and the check, which rebuilds its graph on
- * every firing, cost more than they did (shift_width, page_table_entry). */
-#define DC_FIRES_FIRST 64u
 
 typedef struct {
     uint32_t u, v;     /* local node indices */
@@ -151,8 +145,11 @@ static PropResult _fire_diffcycle(Propagator *self, dvs_ctx_t *ctx) {
     int64_t  *dist       = DC_AT(h, d->dist_off, int64_t);
     uint32_t *pred       = DC_AT(h, d->pred_off, uint32_t);
     DcEdge   *edges      = DC_AT(h, d->edges_off, DcEdge);
-    /* Woken again by the crawl's next tightening. */
-    if (ctx->prop_fires - ctx->prop_call_fires < DC_FIRES_FIRST) return PROP_OK;
+    /* Queued by the propagation loop once a propagation has fired a sweep's
+     * worth and at each doubling (dvs_solver_propagate). Queued otherwise
+     * (left queued by a conflict), early in a propagation, it finds no
+     * crawl. */
+    if (ctx->prop_fires - ctx->prop_call_fires < DIFFCYCLE_FIRES_FIRST) return PROP_OK;
 
     /* Local index of each relation variable: relations store local ids. */
     uint32_t ne = 0;
@@ -494,15 +491,14 @@ int diffcycle_build(dvs_ctx_t *ctx) {
     d->edges_off = edges_off;
     memcpy(DC_AT(h, rels_off, DiffRel), rels, nk * sizeof(DiffRel));
 
+    /* The variables are listed (prop_watched_vars) but not watched: the
+     * propagation loop queues the check (diffcycle_ref). */
     uint32_t *ids = _ids(h), *wn = ids + nv;
     for (uint32_t i = 0; i < ctx->n_vars; i++)
         if (loc[i] != UINT32_MAX) ids[loc[i]] = i;
-    for (uint32_t i = 0; i < nv; i++) {
-        wn[i] = ctx->watcher_heads[ids[i]];
-        ctx->watcher_heads[ids[i]] = ref;
-    }
+    for (uint32_t i = 0; i < nv; i++) wn[i] = EXPR_NULL;
     ctx->prop_refs[h->hdr.prop_id] = ref;
-    prop_enqueue(ctx, ref);
+    ctx->diffcycle_ref = ref;
 
 out:
     free(rels); free(uf); free(cyc); free(loc); free(comp); free(keep); free(eu); free(ev); free(er);

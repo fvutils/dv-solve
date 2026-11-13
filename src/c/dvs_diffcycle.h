@@ -9,9 +9,14 @@
  * (an edge u -> v of weight w for `v <= u + w`), that state is a NEGATIVE
  * CYCLE, which Bellman-Ford finds in O(V * E).
  *
- * One propagator per compiled problem watches every variable of every
+ * One propagator per compiled problem covers every variable of every
  * difference relation that lies on a directed cycle through two relations
- * or more (one relation's own edges never sum negative). It reads the edge
+ * or more (one relation's own edges never sum negative). A negative cycle
+ * is what bounds propagation crawls round, so it shows as a propagation
+ * that keeps firing, and one that settles first has none: the propagation
+ * loop queues the check after DIFFCYCLE_FIRES_FIRST firings and at each
+ * doubling, rather than on every bound it covers (one wake per tightening
+ * cost more than the propagation, memmap_tight_32). It reads the edge
  * weights from the current bounds -- `r = a + b` gives r <= a + hi(b) and
  * a <= r - lo(b), valid only while the bounds prove the sum cannot wrap --
  * and reports a negative cycle as a conflict, explained by exactly the
@@ -27,6 +32,12 @@
 
 struct Propagator;
 struct dvs_ctx_s;
+
+/* Firings a propagation spends before the check first runs, at least (twice
+ * the propagators, when more). Most settle within a few dozen, and the
+ * check, which rebuilds its graph, cost more than they did (shift_width,
+ * page_table_entry). */
+#define DIFFCYCLE_FIRES_FIRST 64u
 
 typedef enum {
     DREL_LE   = 1,   /* v[0] <= v[1] + c                            */

@@ -6,6 +6,7 @@
 #include "dvs_trail.h"
 #include "dvs_lcg.h"
 #include "dvs_search.h"
+#include "dvs_diffcycle.h"
 
 /* ------------------------------------------------------------------ */
 /* Internal: the guard index (guard_ix in dvs_ctx.h)                   */
@@ -299,6 +300,10 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
      * shaving probe) must not be mistaken for the source of the next one. */
     ctx->conflict_clause_idx = EXPR_NULL;
     ctx->prop_call_fires = ctx->prop_fires;
+    /* A propagation that settles fires each propagator a time or two; one
+     * that fires more is crawling. */
+    ctx->diffcycle_at = 2u * ctx->n_props > DIFFCYCLE_FIRES_FIRST ? 2u * ctx->n_props
+                                                                  : DIFFCYCLE_FIRES_FIRST;
     while (ctx->queue.non_empty_mask) {
         /* Lowest set bit = highest priority level with entries */
         uint32_t lvl = (uint32_t)__builtin_ctz(ctx->queue.non_empty_mask);
@@ -317,7 +322,12 @@ PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
 
         if (p->flags & PROP_FLAG_ENTAILED) continue;
 
-        ctx->prop_fires++;
+        /* Still firing: a crawl round a negative cycle (dvs_diffcycle.h). */
+        if (++ctx->prop_fires - ctx->prop_call_fires == ctx->diffcycle_at
+                && ctx->diffcycle_ref != EXPR_NULL) {
+            prop_enqueue(ctx, ctx->diffcycle_ref);
+            ctx->diffcycle_at *= 2;
+        }
         if ((++ctx->prop_ticks & 0x3FFu) == 0 && _prop_over_budget(ctx)) {
             /* Put back the propagator just taken: an abandoned propagation
              * must leave the queue whole, or whoever carries on from here

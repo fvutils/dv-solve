@@ -191,6 +191,10 @@ typedef struct dvs_ctx_s {
     uint64_t           prop_fires;    /* propagator firings, ever: the work count */
     uint64_t           prop_call_fires; /* prop_fires when the running
                                        * dvs_solver_propagate began       */
+    uint64_t           diffcycle_at;  /* its firings at which it next queues
+                                       * the cycle check                   */
+    uint32_t           diffcycle_ref; /* the cycle check (dvs_diffcycle.h),
+                                       * EXPR_NULL: none                   */
     uint64_t           ok_fires_max;  /* most firings a solve that answered
                                        * (sat or unsat) needed               */
     uint64_t           thrash_limit;  /* prop_fires past which this solve
