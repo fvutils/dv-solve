@@ -2153,6 +2153,57 @@ static PropResult _bvsum_exact_back(dvs_ctx_t *ctx, uint32_t X, uint32_t Y, uint
     return PROP_OK;
 }
 
+/* One round of the add r = a + b where _bvsum_exact holds (no carry) and r
+ * is neither operand: the modular steps of _fire_bvbin_64 and then
+ * _bvsum_exact_back, written out over plain bounds. The same tightenings in
+ * the same order, so the trail and every result are the same; it skips the
+ * modular-interval arithmetic, which cannot wrap here except where it is
+ * skipped. hi(a) + hi(b) < 2^w - 1 keeps every sum below the modulus, and
+ * each operand's own hi below its width's maximum. */
+static PropResult _fire_bvadd_exact(dvs_ctx_t *ctx, uint32_t rid, uint32_t aid,
+                                    uint32_t bid, uint8_t w) {
+    const uint64_t mask = _bv_mask(w);
+    const Variable *r = &ctx->vars[rid], *a = &ctx->vars[aid], *b = &ctx->vars[bid];
+#define LO(v) ((uint64_t)var_lo64(ctx, v))
+#define HI(v) ((uint64_t)var_hi64(ctx, v))
+    PropResult res;
+    /* Forward: r within [lo(a) + lo(b), hi(a) + hi(b)]. */
+    const uint64_t al = LO(a), ah = HI(a), bl = LO(b), bh = HI(b);
+    if ((res = ctx_tighten_lb64(ctx, rid, (int64_t)(al + bl))) != PROP_OK) return res;
+    if ((res = ctx_tighten_ub64(ctx, rid, (int64_t)(ah + bh))) != PROP_OK) return res;
+    /* Backward, modular: a = r - b from b as read on entry, then b = r - a
+     * from the new a. A difference interval that wraps (lo(r) < hi(b)), or
+     * spans every residue, teaches nothing. */
+    const uint64_t rl = LO(r), rh = HI(r);
+    if (rh - rl + (bh - bl) < mask && rl >= bh) {
+        if (rl - bh > _bv_mask((uint8_t)a->width)) return PROP_CONFLICT;
+        if ((res = ctx_tighten_lb64(ctx, aid, (int64_t)(rl - bh))) != PROP_OK) return res;
+        if ((res = ctx_tighten_ub64(ctx, aid, (int64_t)(rh - bl))) != PROP_OK) return res;
+    }
+    const uint64_t al2 = LO(a), ah2 = HI(a);
+    if (rh - rl + (ah2 - al2) < mask && rl >= ah2) {
+        if (rl - ah2 > _bv_mask((uint8_t)b->width)) return PROP_CONFLICT;
+        if ((res = ctx_tighten_lb64(ctx, bid, (int64_t)(rl - ah2))) != PROP_OK) return res;
+        if ((res = ctx_tighten_ub64(ctx, bid, (int64_t)(rh - al2))) != PROP_OK) return res;
+    }
+    /* Backward, exact (_bvsum_exact_back): a, then b, from fresh bounds. */
+    for (int side = 0; side < 2; side++) {
+        const uint32_t y = side ? bid : aid;
+        const Variable *yv = side ? b : a, *ov = side ? a : b;
+        const uint64_t xl = LO(r), xh = HI(r), ol = LO(ov), oh = HI(ov);
+        const uint64_t yl = LO(yv), yh = HI(yv);
+        if (xh >= ol && xh - ol < yh
+                && (res = ctx_tighten_ub64(ctx, y, (int64_t)(xh - ol))) != PROP_OK)
+            return res;
+        if (xl > oh && xl - oh > yl
+                && (res = ctx_tighten_lb64(ctx, y, (int64_t)(xl - oh))) != PROP_OK)
+            return res;
+    }
+#undef LO
+#undef HI
+    return PROP_OK;
+}
+
 /* r's low t bits are zero (a shift by at least t, a product with t trailing
  * zeros between its fixed operands): round an unsigned r's bounds to
  * multiples of 2^t. An interval cannot say this, so without it a decision on
@@ -2232,6 +2283,8 @@ static PropResult _fire_bvbin_64(Propagator *self, dvs_ctx_t *ctx, int op) {
     uint8_t        w   = bp->width;
     if (w == 0 || w > 64) return PROP_OK;
     uint64_t mask = _bv_mask(w);
+    if (op == DVS_BIN_ADD && rid != aid && rid != bid && _bvsum_exact(ctx, rid, aid, bid, w))
+        return _fire_bvadd_exact(ctx, rid, aid, bid, w);
 
     ModIv A = _var_modiv(ctx, aid, w);
     ModIv B = _var_modiv(ctx, bid, w);
