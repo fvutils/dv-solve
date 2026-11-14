@@ -295,6 +295,8 @@ static int _prop_over_budget(dvs_ctx_t *ctx) {
     return 0;
 }
 
+int dvs_prop_over_budget(dvs_ctx_t *ctx) { return _prop_over_budget(ctx); }
+
 PropResult dvs_solver_propagate(dvs_ctx_t *ctx) {
     if (ctx->prop_aborted) return PROP_CONFLICT;
     /* Only a propagator that fails in THIS call is the conflict's culprit. */

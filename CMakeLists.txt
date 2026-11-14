@@ -238,6 +238,7 @@ set(DVS_SOURCES
     src/c/dvs_lcg.c
     src/c/dvs_explain.c
     src/c/dvs_diffcycle.c
+    src/c/dvs_linprobe.c
     src/c/dvs_clause_prop.c
     src/c/dvs_sat.c
     src/c/dvs_sat_kissat.c
@@ -588,6 +589,11 @@ add_executable(test_handle tests/c/test_handle.c)
 target_link_libraries(test_handle PRIVATE dv_solve)
 target_include_directories(test_handle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_handle COMMAND test_handle)
+
+add_executable(test_linprobe tests/c/test_linprobe.c)
+target_link_libraries(test_linprobe PRIVATE dv_solve)
+target_include_directories(test_linprobe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_linprobe COMMAND test_linprobe)
 
 add_executable(test_presolve tests/c/test_presolve.c)
 target_link_libraries(test_presolve PRIVATE dv_solve)

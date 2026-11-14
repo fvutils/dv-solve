@@ -281,6 +281,9 @@ void prop_set_guard(dvs_ctx_t *ctx, uint32_t prop_ref, uint32_t guard_var_id);
 PropResult ctx_tighten_lb32(dvs_ctx_t *ctx, uint32_t var_id, int32_t new_lb);
 PropResult ctx_tighten_ub32(dvs_ctx_t *ctx, uint32_t var_id, int32_t new_ub);
 PropResult ctx_tighten_lb64(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_lb);
+/* Past the trail cap, the thrash or work limit, or the deadline: what the
+ * propagation loop checks every 1024 firings (sets thrash_hit / work_hit). */
+int dvs_prop_over_budget(dvs_ctx_t *ctx);
 PropResult ctx_tighten_ub64(dvs_ctx_t *ctx, uint32_t var_id, int64_t new_ub);
 
 /* ------------------------------------------------------------------ */

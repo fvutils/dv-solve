@@ -17,6 +17,7 @@
 #include "dvs_rng.h"
 #include "dvs_explain.h"
 #include "dvs_diffcycle.h"
+#include "dvs_linprobe.h"
 
 #ifdef DVS_STEP_CHECK
 #include <stdio.h>
@@ -1832,8 +1833,8 @@ static void _wmemo_keep(dvs_ctx_t *ctx, const DvsWMemo *m) {
 /* One bucket probe: x in [blo, bhi] at a level of its own, propagated. 1 when
  * it holds, with what propagation left of the bucket in *plo, *phi and the
  * box in *w; 0 when it conflicts or propagation gave up (prop_aborted). */
-static int _wpick_probe(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi,
-                        uint32_t level, int64_t *plo, int64_t *phi, WBox *w) {
+static int _wpick_probe_prop(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi,
+                             uint32_t level, int64_t *plo, int64_t *phi, WBox *w) {
     trail_push_level(ctx);
     ctx->conflict_prop_ref   = EXPR_NULL;
     ctx->conflict_clause_idx = EXPR_NULL;
@@ -1855,6 +1856,79 @@ static int _wpick_probe(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi,
     ctx->conflict_prop_ref   = EXPR_NULL;
     ctx->conflict_clause_idx = EXPR_NULL;
     return ok;
+}
+
+/* The probe on plain bounds (dvs_linprobe.h) when x's component is linear
+ * and nothing else could take part: no clause, nothing queued, no abandoned
+ * propagation. As _wpick_probe; -1 when it does not apply. Its row
+ * evaluations are charged as firings, and to the ticks that pace the budget
+ * checks of the propagation loop. */
+static int _wpick_probe_linear(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi,
+                               int64_t *plo, int64_t *phi, WBox *w) {
+    if (!_no_learnt(ctx) || ctx->queue.non_empty_mask || ctx->prop_aborted) return -1;
+    uint32_t fires;
+    const int r = dvs_linprobe_run(ctx, x, blo, bhi, &fires);
+    if (r < 0) return -1;
+    *plo = blo;
+    *phi = bhi;
+    if (r) {
+        *plo = var_lo64(ctx, &ctx->vars[x]);
+        *phi = var_hi64(ctx, &ctx->vars[x]);
+        *w = _wpick_box(ctx, UINT32_MAX);
+        dvs_linprobe_undo(ctx);
+    }
+    ctx->prop_fires += fires;
+    const uint32_t t0 = ctx->prop_ticks;
+    ctx->prop_ticks += fires;
+    if ((ctx->prop_ticks >> 10) != (t0 >> 10) && dvs_prop_over_budget(ctx)) {
+        ctx->prop_aborted = 1;
+        return 0;
+    }
+    return r;
+}
+
+/* DVS_LINPROBE=0: every probe propagates. DVS_LINPROBE=2: both run, and a
+ * difference aborts (the evaluator's differential check). */
+static int _linprobe_mode(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("DVS_LINPROBE");
+        mode = e && e[0] == '0' ? 0 : e && e[0] == '2' ? 2 : 1;
+    }
+    return mode;
+}
+
+static int _wpick_probe(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi,
+                        uint32_t level, int64_t *plo, int64_t *phi, WBox *w) {
+    const int mode = _linprobe_mode();
+    if (mode == 1) {
+        const int r = _wpick_probe_linear(ctx, x, blo, bhi, plo, phi, w);
+        if (r >= 0) return r;
+    } else if (mode == 2 && _no_learnt(ctx) && !ctx->queue.non_empty_mask && !ctx->prop_aborted) {
+        uint32_t fires;
+        int64_t llo = blo, lhi = bhi;
+        WBox lw = { 0.0, 0 };
+        const int r = dvs_linprobe_run(ctx, x, blo, bhi, &fires);
+        if (r > 0) {
+            llo = var_lo64(ctx, &ctx->vars[x]);
+            lhi = var_hi64(ctx, &ctx->vars[x]);
+            lw = _wpick_box(ctx, UINT32_MAX);
+            dvs_linprobe_undo(ctx);
+        }
+        const int ok = _wpick_probe_prop(ctx, x, blo, bhi, level, plo, phi, w);
+        if (r >= 0 && !ctx->prop_aborted
+                && (r != ok || (ok && (llo != *plo || lhi != *phi || lw.m != w->m || lw.e != w->e)))) {
+            fprintf(stderr, "dvs_linprobe: var %u [%lld, %lld]: evaluator %d [%lld, %lld] %g*2^%d,"
+                    " propagation %d [%lld, %lld] %g*2^%d\n", x, (long long)blo, (long long)bhi,
+                    r, (long long)llo, (long long)lhi, lw.m, lw.e * DVS_WPICK_SCALE,
+                    ok, (long long)*plo, (long long)*phi, ok ? w->m : 0.0,
+                    ok ? w->e * DVS_WPICK_SCALE : 0);
+            abort();
+        }
+        if (r >= 0 && !ctx->prop_aborted) dvs_linprobe_note_check();
+        return ok;
+    }
+    return _wpick_probe_prop(ctx, x, blo, bhi, level, plo, phi, w);
 }
 
 /* Bucket k's weight, by its probe or the memo's (see _wmemo_find), as a

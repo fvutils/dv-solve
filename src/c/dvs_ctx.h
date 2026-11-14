@@ -452,6 +452,8 @@ typedef struct dvs_ctx_s {
     void              *pick_ix;       /* the value picker's propagator index
                                        * (dvs_search.c DvsPickIx), made on use    */
     size_t             pick_ix_bytes;
+    void              *linprobe;      /* the probe evaluator's linear components
+                                       * (dvs_linprobe.c), made on use            */
 } dvs_ctx_t;
 
 /* Search work so far, in units of one propagator firing: firings plus

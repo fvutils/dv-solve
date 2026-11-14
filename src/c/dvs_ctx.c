@@ -5,6 +5,7 @@
 #include "dvs_oracle_hooks.h"
 #include "dvs_lcg.h"
 #include "dvs_costguided.h"
+#include "dvs_linprobe.h"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -476,6 +477,7 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     ctx->wmemo = NULL;
     dvs_ctx_free(ctx, ctx->pick_ix, ctx->pick_ix_bytes);
     ctx->pick_ix = NULL; ctx->pick_ix_bytes = 0;
+    dvs_linprobe_free(ctx);
     dvs_ctx_free(ctx, ctx->box_val, (size_t)ctx->box_cap * sizeof(int64_t));
     ctx->box_val = NULL; ctx->box_cap = 0;
     dvs_ctx_free(ctx, ctx->box_skip, ctx->box_skip_n);

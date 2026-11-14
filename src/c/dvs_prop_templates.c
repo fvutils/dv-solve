@@ -8,6 +8,7 @@
 #include "dvs_lcg.h"
 #include "dvs_explain.h"
 #include "dvs_i128.h"
+#include "dvs_linprobe.h"
 #include "dvs_diffcycle.h"
 
 /* ------------------------------------------------------------------ */
@@ -5610,4 +5611,38 @@ dvs_pick_kind_t prop_pick_kind(const Propagator *p, uint32_t *hi_bit, uint32_t *
         return PPK_SLICE;
     }
     return PPK_OTHER;
+}
+
+/* ------------------------------------------------------------------ */
+/* Linear rows for the probe evaluator (dvs_linprobe.h)                */
+/* ------------------------------------------------------------------ */
+
+uint8_t prop_linear_row(const Propagator *p, const dvs_ctx_t *ctx, uint32_t v[3], uint8_t *w) {
+    PropResult (*f)(Propagator *, dvs_ctx_t *) = p->fire;
+    if (p->flags & PROP_FLAG_WIDE_WATCH) return LINROW_NONE;
+    const uint32_t *ids = ((const PropWatchSect *)((const char *)p + sizeof(Propagator)))->var_ids;
+    if (f == _fire_bvadd_64 || f == _fire_bvsub_64) {
+        /* X = Y + Z, as _bvsum_exact reads it: r = a + b, or a = r + b */
+        const uint8_t bw = ((const BvBin_64_t *)p)->width;
+        const uint32_t X = f == _fire_bvadd_64 ? ids[0] : ids[1];
+        const uint32_t Y = f == _fire_bvadd_64 ? ids[1] : ids[0];
+        const uint32_t Z = ids[2];
+        if (X == Y || X == Z || Y == Z || ctx->vars[X].width != bw
+                || ctx->vars[Y].width > bw || ctx->vars[Z].width > bw)
+            return LINROW_NONE;
+        v[0] = X; v[1] = Y; v[2] = Z;
+        *w = bw;
+        return LINROW_ADD;
+    }
+    uint8_t k = f == _fire_bounds_le_64 || f == _fire_bounds_le_32 ? LINROW_LE
+              : f == _fire_bounds_lt_64 || f == _fire_bounds_lt_32 ? LINROW_LT
+              : f == _fire_bounds_eq_64 || f == _fire_bounds_eq_32 ? LINROW_EQ : LINROW_NONE;
+    if (k == LINROW_NONE || ids[0] == ids[1]) return LINROW_NONE;
+    /* The 32-bit forms compare int32 bounds: the unsigned order up to 31 bits. */
+    if ((f == _fire_bounds_le_32 || f == _fire_bounds_lt_32 || f == _fire_bounds_eq_32)
+            && (ctx->vars[ids[0]].width > 31 || ctx->vars[ids[1]].width > 31))
+        return LINROW_NONE;
+    v[0] = ids[0]; v[1] = ids[1]; v[2] = ids[1];
+    *w = 0;
+    return k;
 }
