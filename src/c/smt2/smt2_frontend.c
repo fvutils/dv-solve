@@ -3205,6 +3205,11 @@ static SMT2_NOINLINE TaggedExpr _translate_list_tagged(Smt2Frontend *fe, const S
 #define OP_IS(name) (oplen == sizeof(name) - 1 && memcmp(op, name, oplen) == 0)
     if (OP_IS("select")) return _tr_select(fe, s);
     if (OP_IS("store"))  return _tr_store(fe, s);
+    /* (op x) of a left-assoc operator is x, as z3 reads it. SMT-LIB 2.6 wants
+     * two operands, but Verilator wrote one for an array of one element. */
+    if ((OP_IS("bvand") || OP_IS("bvor") || OP_IS("bvxor") || OP_IS("bvadd")
+         || OP_IS("bvmul")) && s->list.count == 2)
+        return _translate_tagged(fe, s->list.items[1]);
     if ((OP_IS("bvand") || OP_IS("bvor")) && s->list.count >= 3)
         return _tr_band_bor(fe, s, OP_IS("bvand"));
     if (OP_IS("bvudiv")) return _tr_udivrem(fe, s, 0);

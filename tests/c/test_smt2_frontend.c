@@ -616,6 +616,29 @@ static void test_bvadd_const_wrap_to_zero_sat(void) {
     smt2_frontend_destroy(&fe);
 }
 
+static void test_unary_bv_nary_is_operand(void) {
+    Smt2Frontend fe;
+    char out[512];
+    smt2_frontend_init(&fe, stderr, stderr);
+    /* A left-assoc BV operator of one operand is that operand, as z3 reads
+     * it (Verilator writes (bvor x) for `inside` an array of one element);
+     * it used to taint the assert -> `unknown`. */
+    _run_capture(&fe,
+        "(set-logic QF_BV)"
+        "(declare-const x (_ BitVec 1))"
+        "(declare-const a (_ BitVec 8))"
+        "(assert (= #b1 (bvor x)))"
+        "(assert (= (bvadd a) (bvmul #x05)))"
+        "(assert (= (bvand a) (bvxor a)))"
+        "(check-sat)"
+        "(get-value (x a))",
+        out, sizeof(out));
+    ASSERT_TRUE(strstr(out, "unknown") == NULL);
+    ASSERT_TRUE(strstr(out, "(x #b1)") != NULL);
+    ASSERT_TRUE(strstr(out, "(a #b00000101)") != NULL);
+    smt2_frontend_destroy(&fe);
+}
+
 /* ------------------------------------------------------------------ */
 /* Translator stack guard on a small thread                           */
 /* ------------------------------------------------------------------ */
@@ -728,6 +751,7 @@ int main(void) {
     /* Phase 6 follow-up #1: modular bvadd-with-constant */
     RUN(test_bvadd_const_no_wrap_chain_unsat);
     RUN(test_bvadd_const_wrap_to_zero_sat);
+    RUN(test_unary_bv_nary_is_operand);
     RUN(test_deep_nesting_small_thread);
     RUN(test_deep_nesting_small_thread_engines);
 

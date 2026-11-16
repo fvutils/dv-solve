@@ -1812,3 +1812,14 @@ sessions after a check-sat). `_bump_n_vars` grows + blanks the skipped slots;
 `_find_var`/get-model bound by vars_cap. Also: transient dense array values
 (`_make_array_value`) left `is_abstract` uninitialized — latent until arrays could
 be abstract outside DV_ARRAY; now zeroed.
+
+### B75 — unary `(bvor x)` / `(bvadd x)` ... tainted the assert -> `unknown` (FIXED 2026-11-15)
+Verilator's SMT back-end wrote a one-operand left-assoc BV operator for a constraint
+over an array of one element (`x inside {q}` with one element -> `(bvor (= ...))`;
+`q.sum()` -> `(bvadd ...)`). `_tr_binop` and `_tr_band_bor` need two operands, so the
+assert was untranslatable and check-sat answered `unknown`; z3 reads `(op x)` as `x`.
+riscv-dv's `riscv_csr_instr` hits it on most tests (~1800 failed randomize() per
+illegal_instr run). Fix: `_translate_list_tagged` maps a unary bvand/bvor/bvxor/
+bvadd/bvmul to its operand (as B16 did for `and`/`or`/`xor`). Test:
+`test_smt2_frontend` `test_unary_bv_nary_is_operand`. Verilator now also writes the
+identity first (`(bvor #b0 x)`), see its `docs/design/dvs_smt2_randomize_fail.md`.
