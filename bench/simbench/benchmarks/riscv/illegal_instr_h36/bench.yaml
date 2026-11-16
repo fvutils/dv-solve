@@ -1,0 +1,7 @@
+# riscv-dv riscv_illegal_instr_test, seed 1: handle 36, the run's hotspot
+# (96 plain calls, ~95 ms/call). dvs_capture_replay --extract 36 of the run's
+# DVS_CAPTURE; see docs/design/dvs_capture_parts.md in Verilator.
+id: riscv.illegal_instr_h36
+tier: stress
+tags: [riscv, capture]
+capture: ill_h36.dvscap

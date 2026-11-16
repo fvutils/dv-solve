@@ -552,16 +552,7 @@ static int recorded(int kind, dvs_handle_t *h, const dvs_ref_t *refs, uint32_t *
     uint8_t *elem_bytes = NULL;
     if ((kind == DVS_CAP_SIZES && sizes) || (kind == DVS_CAP_ARRAYS && arrays)) {
         n_arrays = dvs_handle_n_arrays(h);
-        elem_bytes = calloc(n_arrays ? n_arrays : 1, 1);
-        if (!elem_bytes) return DVS_RANDOMIZE_ERROR;
-        for (dvs_expr_t r = h->p->arrays_head; r != EXPR_NULL;) {
-            const ArraySpec *a = POOL_PTR(h->p, r);
-            if (a->array_id < n_arrays) {
-                uint32_t w = a->elem_width;
-                elem_bytes[a->array_id] = w <= 8 ? 1 : w <= 16 ? 2 : w <= 32 ? 4 : 8;
-            }
-            r = a->next;
-        }
+        elem_bytes = dvs_capture_elem_bytes(h);
     }
     dvs_capbuf_t b;
     dvs_capture_begin(&b, h->cap_id, kind, modes != NULL, seed, refs, h->n_vars, sizes, arrays, elem_bytes,

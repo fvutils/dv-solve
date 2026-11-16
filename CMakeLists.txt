@@ -903,6 +903,12 @@ target_include_directories(dvs_capture_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 if(DVS_WITH_CADICAL)
     set_target_properties(dvs_capture_replay PROPERTIES LINKER_LANGUAGE CXX)
 endif()
+# test_parts captured, replayed and an extract of it replayed
+# (tests/c/test_capture_parts.sh).
+if(UNIX)
+    add_test(NAME test_capture_parts COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/c/test_capture_parts.sh
+             $<TARGET_FILE:test_parts> $<TARGET_FILE:dvs_capture_replay>)
+endif()
 if(DVS_WITH_CADICAL)
     # CaDiCaL is C++; link with the C++ driver so libstdc++/libc++ is pulled in.
     set_target_properties(dv-solve-smt2 PROPERTIES LINKER_LANGUAGE CXX)

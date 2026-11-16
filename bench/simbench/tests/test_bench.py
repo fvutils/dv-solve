@@ -24,6 +24,8 @@ DIVERSITY = os.environ.get("SIMBENCH_DIVERSITY") == "1"
 def _params():
     for cfg in CONFIGS.values():
         for bench in BENCHES:
+            if bench.capture and not cfg.native_replay:
+                continue        # only a dvs_capture_replay config replays a capture
             marks = [getattr(pytest.mark, bench.tier)]
             if not cfg.available:
                 marks.append(pytest.mark.skip(reason="%s: %s" % (cfg.id, cfg.reason)))
@@ -55,26 +57,31 @@ def test_bench(cfg, bench, build_cache, tmp_path, simbench_out):
             if cfg.version not in ver:
                 raise RuntimeError("%s: %s reports %r; config wants %r"
                                    % (cfg.id, cfg.tool, ver, cfg.version))
-        exe = build(cfg, bench, build_cache)
-        plusargs = ["+sb_n=%d" % N, "+sb_seed=%d" % SEED,
-                    "+sb_dump=%s" % (tmp_path / "dump.txt")]
-        session = str(tmp_path / "session.smt2")
-        if cfg.replay or cfg.replay_cmd:
-            plusargs.append(standalone.session_plusarg(session))
-        out = run(cfg, exe, str(tmp_path), plusargs)
-        provenance.check_banner(cfg.simulator, out.log, provenance.simulator_build(
-            cfg.simulator, cfg.tool, cfg.version_flag))
-        if cfg.native_replay:
-            out = standalone.native_replay(cfg, out, str(tmp_path))
-        elif cfg.replay_cmd:
-            out = standalone.replay_text(cfg, out, session, str(tmp_path))
-        elif cfg.replay:
-            out = standalone.replay(cfg, out, session, str(tmp_path))
-        info = out.info
-        active = probe_sampler(cfg, exe, str(tmp_path / "probe"))
-        if cfg.sampler and active != cfg.sampler:
-            raise RuntimeError("%s: image ran sampler %r; config wants %r"
-                               % (cfg.id, active, cfg.sampler))
+        if bench.capture:
+            exe = active = None
+            out = standalone.capture_bench(cfg, bench, str(tmp_path))
+            info = out.info
+        else:
+            exe = build(cfg, bench, build_cache)
+            plusargs = ["+sb_n=%d" % N, "+sb_seed=%d" % SEED,
+                        "+sb_dump=%s" % (tmp_path / "dump.txt")]
+            session = str(tmp_path / "session.smt2")
+            if cfg.replay or cfg.replay_cmd:
+                plusargs.append(standalone.session_plusarg(session))
+            out = run(cfg, exe, str(tmp_path), plusargs)
+            provenance.check_banner(cfg.simulator, out.log, provenance.simulator_build(
+                cfg.simulator, cfg.tool, cfg.version_flag))
+            if cfg.native_replay:
+                out = standalone.native_replay(cfg, out, str(tmp_path))
+            elif cfg.replay_cmd:
+                out = standalone.replay_text(cfg, out, session, str(tmp_path))
+            elif cfg.replay:
+                out = standalone.replay(cfg, out, session, str(tmp_path))
+            info = out.info
+            active = probe_sampler(cfg, exe, str(tmp_path / "probe"))
+            if cfg.sampler and active != cfg.sampler:
+                raise RuntimeError("%s: image ran sampler %r; config wants %r"
+                                   % (cfg.id, active, cfg.sampler))
     except Exception as e:
         if simbench_out:
             records.append(simbench_out, records.make_record(

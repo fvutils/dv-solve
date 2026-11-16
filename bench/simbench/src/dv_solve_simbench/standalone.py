@@ -23,7 +23,7 @@ from typing import Optional
 from . import provenance
 from .config import NATIVE_CAPTURE, Config
 from .result import Result
-from .runner import RunOutput
+from .runner import Bench, RunOutput
 
 _PASS = r"^%s\s+wall\s+[\d.]+ s\s+([\d.]+) us/check-sat.*?(\d+) bitblast failures, (\d+) unsolved"
 _PER_CALL = r"^%s\s+per call\s+([\d.]+) us\s+\((\d+) timed calls\)"
@@ -191,7 +191,7 @@ def replay_text(cfg: Config, sim: RunOutput, session: str, rundir: str,
     return RunOutput(cmd=cmd, returncode=p.returncode, log=log, result=res, info=info)
 
 
-_NATIVE_HEAD = r"^capture .*: (\d+) handles, (\d+) calls, (\d+) parts calls not replayed"
+_NATIVE_HEAD = r"^capture .*: (\d+) handles, (\d+) calls \((\d+) parts calls\)"
 _NATIVE_CHECK = r"^check (\d+) mismatches"
 _NATIVE_TOTAL = r"^total (\d+) timed calls, ([\d.]+) us, "
 
@@ -222,9 +222,6 @@ def native_replay(cfg: Config, sim: RunOutput, rundir: str, passes: int = 3,
     if head is None:
         raise ReplayError(info, "native replay failed (rc=%d):\n%s"
                           % (p.returncode, p.stdout[-2000:]))
-    if int(head.group(3)):
-        raise ReplayError(info, "the run made %s dvs_randomize_parts calls, which the "
-                          "capture does not record yet" % head.group(3))
     n_api = int(head.group(2))
     if not n_api or n_api % calls:
         raise ReplayError(info, "%d dv-solve calls for %d randomize() calls: not the same "
@@ -247,3 +244,29 @@ def native_replay(cfg: Config, sim: RunOutput, rundir: str, passes: int = 3,
     log = "%s\n# native replay (%d dv-solve calls per randomize(), %.2f us/call): %s\n%s" % (
         sim.log, per, us / sim.result.n, " ".join(cmd), p.stdout)
     return RunOutput(cmd=cmd, returncode=p.returncode, log=log, result=res, info=info)
+
+
+def capture_bench(cfg: Config, bench: Bench, rundir: str, passes: int = 3,
+                  timeout: float = 3600) -> RunOutput:
+    """Replay a capture bench (a DVS_CAPTURE file, e.g. an --extract of one
+    handle) with `cfg.native_replay`. Every call in it is timed, best of
+    `passes`; each call that does not reproduce its captured result is a
+    check error."""
+    os.makedirs(rundir, exist_ok=True)
+    cmd = [cfg.native_replay, "--passes", str(passes), bench.path]
+    p = subprocess.run(cmd, cwd=rundir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       text=True, timeout=timeout)
+    with open(os.path.join(rundir, "replay.log"), "w") as fp:
+        fp.write(p.stdout)
+    info = {"replay": {"args": cmd[1:], "returncode": p.returncode, "passes": passes}}
+    check = re.search(_NATIVE_CHECK, p.stdout, re.M)
+    total = re.search(_NATIVE_TOTAL, p.stdout, re.M)
+    if check is None or total is None:
+        raise ReplayError(info, "capture replay failed (rc=%d): %s\n%s"
+                          % (p.returncode, " ".join(cmd), p.stdout[-2000:]))
+    n = int(total.group(1))
+    res = Result(bench=bench.id, n=n, n_req=n, warmup=0, failures=0,
+                 check_errors=int(check.group(1)),
+                 elapsed_ns=int(round(float(total.group(2)) * 1e3)),
+                 first_call_ns=0, timed_out=False)
+    return RunOutput(cmd=cmd, returncode=p.returncode, log=p.stdout, result=res, info=info)

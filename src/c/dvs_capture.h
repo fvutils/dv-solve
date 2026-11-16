@@ -12,8 +12,9 @@
  *   'C' u32 id, u8 kind, u8 modes, u64 seed, a call on handle `id` (`modes`:
  *       u32 n_vars, u32 n_arrays,           given non-NULL)
  *       inputs, i32 rc, outputs
- *   'P' u32 id                              a dvs_randomize_parts* call rooted
- *                                           at handle `id` (not recorded yet)
+ *   'P' u32 id, u8 kind, u64 seed,          a dvs_randomize_parts* call rooted
+ *       u32 n_parts, parts, i32 rc,         at handle `id`; kind DVS_CAP_SIZES
+ *       outputs                             (_sizes) or DVS_CAP_ARRAYS
  *
  * The inputs of a call are, per var: u8 addr (non-NULL), u32 width, u8
  * is_signed, u8 layout, u64 value (the ref's bytes, zero-extended, when it is
@@ -23,6 +24,16 @@
  * recorded: a handle given state by it replays differently. The outputs are
  * the same values after the call: per valid ref its u64 value, then the
  * sizes or the elements.
+ *
+ * The parts of a 'P' record are those reached from the root through slots
+ * that are not null, each once by address (as the call identifies them),
+ * the root first. Per part: u32 handle id (0 for none); u32 n_vars and the
+ * vars as a call's inputs; u32 n_arrays and the arrays as DVS_CAP_ARRAYS
+ * inputs, elem_bytes 0 (no elements) for a slot array or kind DVS_CAP_SIZES;
+ * u32 n_slots and per slot u8 is_array, then for a slot array u32 n_elems
+ * and that many slots, else one slot: u32 state, u32 child (the index of its
+ * part, 0xFFFFFFFF when null). The outputs, per part: the values of its
+ * valid refs, then per array u32 n_elems and its elements.
  */
 #ifndef DVS_CAPTURE_H
 #define DVS_CAPTURE_H
@@ -31,7 +42,7 @@
 #include <stdint.h>
 #include "dv_solve.h"
 
-#define DVSCAP_MAGIC "DVSCAP1\n"
+#define DVSCAP_MAGIC "DVSCAP2\n"
 
 enum { DVS_CAP_RANDOMIZE = 0, DVS_CAP_SIZES = 1, DVS_CAP_ARRAYS = 2 };
 
@@ -71,7 +82,13 @@ void dvs_capture_end(dvs_capbuf_t *b, int kind, int rc, const dvs_ref_t *refs,
                      const dvs_array_ref_t *arrays, const uint8_t *elem_bytes,
                      uint32_t n_arrays);
 
-/** Record a dvs_randomize_parts* call rooted at handle `id`. */
-void dvs_capture_parts(uint32_t id);
+/** The bytes of each array element of `h` (calloc'd, n_arrays entries): 0 for
+ *  a slot array, whose data is not read. */
+uint8_t *dvs_capture_elem_bytes(const dvs_handle_t *h);
+
+/** Make `call` (dvs_randomize_parts, `sizes` for _sizes) on `root` and
+ *  record it; return its result. */
+int dvs_capture_parts(dvs_part_t *root, uint64_t seed, int sizes,
+                      int (*call)(dvs_part_t *, uint64_t, int));
 
 #endif

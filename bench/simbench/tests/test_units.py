@@ -465,3 +465,35 @@ def test_session_info_keeps(tmp_path, monkeypatch):
     assert i["bytes"] == 12 and i["n_check"] == 1 and len(i["sha256"]) == 64
     with gzip.open(i["kept"], "rt") as fp:
         assert fp.read() == "(check-sat)\n"
+
+
+def test_capture_bench(tmp_path):
+    """A bench.yaml with `capture:` is a capture bench, replayed by native_replay."""
+    from dv_solve_simbench.config import Config, dvs_defaults
+    from dv_solve_simbench.runner import find_benches
+    from dv_solve_simbench.standalone import capture_bench
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "benchmarks")
+    caps = {b.id: b for b in find_benches(root) if b.capture}
+    assert set(caps) >= {"riscv.illegal_instr_h36", "riscv.illegal_instr_h15"}
+    assert all(os.path.isfile(b.path) and b.path.endswith(".dvscap") for b in caps.values())
+    bench = caps["riscv.illegal_instr_h15"]
+    # A fake dvs_capture_replay: the result comes from its check and total lines.
+    for mismatches in (0, 2):
+        tool = tmp_path / "replay"
+        tool.write_text("#!/bin/sh\necho 'capture x: 1 handles, 4 calls (4 parts calls)'\n"
+                        "echo 'check %d mismatches'\n"
+                        "echo 'total 4 timed calls, 10.000 us, 2.500 us/call (best of 3 passes)'\n"
+                        % mismatches)
+        tool.chmod(0o755)
+        cfg = Config(id="c", simulator="verilator", tool="verilator", native_replay=str(tool))
+        r = capture_bench(cfg, bench, str(tmp_path / "run")).result
+        assert (r.n, r.n_req, r.warmup, r.elapsed_ns) == (4, 4, 0, 10000)
+        assert r.check_errors == mismatches and r.ok == (mismatches == 0)
+    # The real replay tool, when built (SIMBENCH_DVS_CAPTURE_REPLAY or this checkout).
+    real = os.environ.get("SIMBENCH_DVS_CAPTURE_REPLAY") \
+        or dvs_defaults().get("SIMBENCH_DVS_CAPTURE_REPLAY")
+    if not real or not os.access(real, os.X_OK):
+        pytest.skip("dvs_capture_replay not built")
+    cfg = Config(id="c", simulator="verilator", tool="verilator", native_replay=real)
+    r = capture_bench(cfg, bench, str(tmp_path / "real"), passes=1).result
+    assert r.ok and r.n == 1494

@@ -1,0 +1,8 @@
+# riscv-dv riscv_illegal_instr_test, seed 1: handle 15, a parts root (1494
+# parts calls over 3 handles). dvs_capture_replay --extract 15 of the run's
+# DVS_CAPTURE. The hottest parts root, handle 8, is a 30 MB extract: too large
+# to keep here.
+id: riscv.illegal_instr_h15
+tier: standard
+tags: [riscv, capture, parts]
+capture: ill_h15.dvscap

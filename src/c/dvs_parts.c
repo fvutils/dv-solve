@@ -634,11 +634,12 @@ out:
     return rc;
 }
 
-/* parts_call, noted in a capture (DVS_CAPTURE) when not made by another call. */
+/* parts_call, recorded in a capture (DVS_CAPTURE) when its root's handle is
+ * and the call is not made by another. */
 static int parts_api(dvs_part_t *root, uint64_t seed, int sizes) {
-    if (dvs_capture_enter() && root && dvs_handle_cap_id(root->handle))
-        dvs_capture_parts(dvs_handle_cap_id(root->handle));
-    int rc = parts_call(root, seed, sizes);
+    int rc = dvs_capture_enter() && root && dvs_handle_cap_id(root->handle)
+                 ? dvs_capture_parts(root, seed, sizes, parts_call)
+                 : parts_call(root, seed, sizes);
     dvs_capture_leave();
     return rc;
 }

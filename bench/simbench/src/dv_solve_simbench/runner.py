@@ -29,9 +29,12 @@ from .result import Result, parse_result
 class Bench:
     id: str
     tier: str
-    path: str                       # bench.sv
+    path: str                       # bench.sv, or the capture file of a capture bench
     tags: List[str] = dc.field(default_factory=list)
     fields: List[str] = dc.field(default_factory=list)
+    # A DVS_CAPTURE file (`capture:` in bench.yaml) in place of bench.sv: no
+    # build or run; a native_replay config replays it (standalone.capture_bench)
+    capture: bool = False
 
 
 def find_benches(root: str) -> List[Bench]:
@@ -40,8 +43,10 @@ def find_benches(root: str) -> List[Bench]:
         with open(yml) as fp:
             d = yaml.safe_load(fp) or {}
         benches.append(Bench(id=d["id"], tier=d.get("tier", "standard"),
-                             path=os.path.join(os.path.dirname(yml), "bench.sv"),
-                             tags=d.get("tags", []), fields=d.get("fields", [])))
+                             path=os.path.join(os.path.dirname(yml),
+                                               d.get("capture") or "bench.sv"),
+                             tags=d.get("tags", []), fields=d.get("fields", []),
+                             capture=bool(d.get("capture"))))
     return benches
 
 

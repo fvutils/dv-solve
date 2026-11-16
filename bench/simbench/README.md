@@ -140,7 +140,7 @@ export SIMBENCH_SESSION_DIR=$PWD/out/sessions     # keeps the captured solver se
 | `SIMBENCH_VERILATOR_SC` | Verilator with sampler control | `verilator` on PATH |
 | `SIMBENCH_VERILATOR` | stock Verilator ≥ 5.040 for `vlt540-z3` | `verilator` on PATH |
 | `SIMBENCH_VERILATOR_ARGS` | extra arguments for every Verilator build (compiler, C++ standard) | none |
-| `SIMBENCH_DVS_SMT2`, `SIMBENCH_DVS_REPLAY` | dv-solve tools | this checkout's `build/` |
+| `SIMBENCH_DVS_SMT2`, `SIMBENCH_DVS_REPLAY`, `SIMBENCH_DVS_CAPTURE_REPLAY` | dv-solve tools | this checkout's `build/` (or `SIMBENCH_DVS_BUILD`) |
 | `SIMBENCH_VCS`, `SIMBENCH_XRUN`, `SIMBENCH_VSIM` | commercial simulators | on PATH |
 | `SIMBENCH_BUILD_DIR` | kept build images; keyed by tool version, bench and build args | a fresh pytest temp dir |
 | `SIMBENCH_SESSION_DIR` | keep captured sessions as `<dir>/<config>/<bench>.smt2.gz` | not kept |
@@ -335,6 +335,7 @@ number that looks wrong, it holds:
 - `src/dv_solve_simbench/share/sv/`: the harness (`simbench_pkg.sv`, `simbench_top.sv`, `sb_time.c`)
 - `src/dv_solve_simbench/share/configs.yaml`: the configs (its header documents every field)
 - `benchmarks/<category>/<name>/{bench.sv,bench.yaml}`: one benchmark each
+- `benchmarks/<category>/<name>/{<file>.dvscap,bench.yaml}`: one capture benchmark each (below)
 - `tests/`: the pytest collection over config × bench
 
 ## Benchmarks
@@ -348,4 +349,43 @@ number that looks wrong, it holds:
 - **dist** (8): dist_enum, dist_if, dist_mixed, dist_range, dist_weight_div, randc_basic, randc_enum, weighted (smoke)
 - **hard** (7): global_nested, graph_color_8, knapsack_small, magic_square_3, nqueens_8 (stress), sudoku_4x4, unique_64 (stress)
 - **memmap** (8): addr_map_64, mem_partition_knapsack, memmap_tight_32 (stress), nonoverlap_regions_8, page_table_entry, soc_addr_map_32, soc_addr_map_40, soc_mem_map (smoke)
+- **riscv** (2, capture benches, below): illegal_instr_h15, illegal_instr_h36 (stress)
 - **scenario** (20): ahb_burst, apb_xfer, axi4_burst (smoke), bus_transaction (smoke), ddr5_cmd_basic, ddr5_mode_register, ddr5_timing, ddr5_timing_full (stress), dma_desc, ethernet_hdr, fifo_ctrl, i2c_xfer, mem_transaction, pcie_tlp, reset_reuse (smoke), riscv_instr_mem, riscv_instr_rtype, riscv_pmp_cfg, tl_ul_item, usb_pkt
+
+## Capture benches (from a DVS_CAPTURE run)
+
+A capture bench is a `.dvscap` file that dv-solve wrote under `DVS_CAPTURE`,
+usually one handle cut out of a real run, in place of `bench.sv`. It is not
+built or simulated. Only configs with `native_replay` run it (for example
+`vlt-dvs-native-replay`, from Verilator's `docs/design/simbench/vlt-dvs-native.yaml`
+via `SIMBENCH_CONFIGS`). They run `dvs_capture_replay --passes 3 <file>`.
+The time is the best of the passes over every call in the file. Each call that
+does not reproduce its captured result counts as a check error.
+`n` is the number of timed calls.
+
+From a run to a bench (`R` is `dvs_capture_replay` from the dv-solve build
+directory; use one that reads the capture's format, `DVSCAP2` for parts calls):
+
+```
+# 1. Capture: run an image whose dv-solve has DVS_CAPTURE
+DVS_CAPTURE=$PWD/full.dvscap <simulation command>
+# 2. Rank the handles: the ms column of each "handle N:" line
+$R --passes 1 full.dvscap > replay.log
+# 3. Cut out the hot handle ID; every call on ID is kept, from the first
+$R --extract ID -o hot.dvscap full.dvscap
+$R hot.dvscap                       # must print "check 0 mismatches"
+# 4. Make the bench directory
+mkdir -p benchmarks/CATEGORY/NAME
+cp hot.dvscap benchmarks/CATEGORY/NAME/
+printf 'id: CATEGORY.NAME\ntier: standard\ntags: [CATEGORY, capture]\ncapture: hot.dvscap\n' \
+  > benchmarks/CATEGORY/NAME/bench.yaml
+# 5. Run it
+SIMBENCH_CONFIGS=<verilator>/docs/design/simbench/vlt-dvs-native.yaml \
+  python3 -m pytest -q -rs -k "vlt-dvs-native-replay-CATEGORY.NAME" \
+  --simbench-out=out/results.jsonl
+```
+
+Keep the extracts small (about 1 MB at most). For a larger one, write down the
+steps that regenerate it instead of adding the file. The **riscv** benches were
+made this way from riscv-dv `riscv_illegal_instr_test`, seed 1 (Verilator
+`docs/design/dvs_capture_parts.md`).
