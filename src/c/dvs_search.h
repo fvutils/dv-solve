@@ -81,6 +81,19 @@ typedef struct {
     /* DistMetaEntry entries[n_entries] follow immediately */
 } DistMeta;
 
+/* A distribution record of a problem that has one read per call. */
+typedef struct {
+    dvs_expr_t spec;      /* its DistSpec, in the problem              */
+    uint32_t   var;       /* its variable (alias resolved)             */
+    uint32_t   dm;        /* its DistMeta, in the context's pool       */
+} DistDyn;
+
+/* Before a solve, after the STATE pins: give each variable the distribution
+ * of its first-added record whose guard holds, its entries evaluated over
+ * the pins; none (or one whose weights add up to 0): no distribution. `sp`
+ * is the compiled problem, or a copy with its offsets (dvs_handle.c). */
+void dvs_solver_eval_dists(dvs_ctx_t *ctx, const dvs_problem_t *sp);
+
 /* ------------------------------------------------------------------ */
 /* HoleEntry -- linked list node for excluded values (randc support)   */
 /*                                                                     */

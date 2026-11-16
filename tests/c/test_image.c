@@ -53,6 +53,9 @@ static dvs_problem_t *rich(void) {
     dvs_builder_add_source(b, 2, ids);
     dvs_dist_entry_t d[2] = { { 0, 9, 1, 1, {0} }, { 10, 20, 3, 0, {0} } };
     dvs_builder_add_dist(b, 0, 2, d);
+    dvs_builder_set_var_kind(b, 3, DVS_VAR_STATE);
+    dvs_dist_entry_ex_t dx = { c3, w, w, 1, {0} };
+    dvs_builder_add_dist_ex(b, 1, w, 1, &dx);
     return finish();
 }
 
@@ -78,7 +81,7 @@ static void check_layout(void) {
     CHECK(memcmp(p, "DVSP", 4) == 0, "magic is the bytes DVSP at offset 0");
     uint32_t ver;
     memcpy(&ver, (uint8_t *)p + 4, 4);
-    CHECK(ver == DVS_PROBLEM_FORMAT_VERSION && ver == 5, "format version 5 at offset 4");
+    CHECK(ver == DVS_PROBLEM_FORMAT_VERSION && ver == 6, "format version 6 at offset 4");
     CHECK(dvs_problem_check_image(p, sz, NULL, 0) == 0, "every node kind passes the check");
     int aligned = p->dists_head % 8 == 0
         && (uintptr_t)dist_spec_entries(p, p->dists_head) % 8 == 0;
@@ -176,6 +179,13 @@ static void check_damage(void) {
     FRESH();
     vs->var_id = 0xFFFFFFFFu;
     refused(q, sz, "variable id over n_vars");
+    /* ds: rich()'s guarded distribution */
+    FRESH();
+    ds->has_exprs = 0;
+    refused(q, sz, "a guard on a distribution of constant entries");
+    FRESH();
+    ((dvs_dist_entry_ex_t *)(ds + 1))->weight = (dvs_expr_t)sz;
+    refused(q, sz, "a distribution entry out of range");
     free(raw);
     free(q);
     dvs_builder_free_problem(b, p, sz);
@@ -237,6 +247,22 @@ static void check_validate(void) {
     dvs_dist_entry_t d = { 0, 1, 1, 1, {0} };
     dvs_builder_add_dist(b, 4, 1, &d);
     invalid(finish(), 0, "distribution names an undeclared variable");
+    /* A distribution read per call reads STATE values only */
+    dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 1, 8, 0, 0, 255);
+    dvs_builder_set_var_kind(b, 1, DVS_VAR_STATE);
+    x = dvs_builder_expr_const(b, 1, 0);
+    dvs_dist_entry_ex_t dx = { x, x, dvs_builder_expr_var(b, 1), 0, {0} };
+    dvs_builder_add_dist_ex(b, 0, dvs_builder_expr_var(b, 0), 1, &dx);
+    invalid(finish(), DVS_COMPILE_DIST_RAND, "distribution guard reads a RAND variable");
+    dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 1, 8, 0, 0, 255);
+    dvs_builder_set_var_kind(b, 1, DVS_VAR_STATE);
+    x = dvs_builder_expr_const(b, 1, 0);
+    dvs_dist_entry_ex_t dw = { x, x, dvs_builder_expr_binary(b, DVS_BIN_ADD,
+        dvs_builder_expr_var(b, 1), dvs_builder_expr_var(b, 0)), 0, {0} };
+    dvs_builder_add_dist_ex(b, 0, dvs_builder_expr_var(b, 1), 1, &dw);
+    invalid(finish(), DVS_COMPILE_DIST_RAND, "distribution weight reads a RAND variable");
     /* SV elaboration */
     dvs_builder_add_var(b, 0, 8, 0, 0, 255);
     dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ,

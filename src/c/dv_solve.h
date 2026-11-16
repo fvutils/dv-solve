@@ -111,6 +111,9 @@ typedef struct {
 #define DVS_COMPILE_ARRAYS            (-5)  /* the problem has arrays: only a
                                              * handle solves it
                                              * (dvs_randomize_arrays)        */
+#define DVS_COMPILE_DIST_RAND         (-6)  /* a distribution's guard, bounds
+                                             * or weights read a variable
+                                             * that is not STATE             */
 
 /* ------------------------------------------------------------------ */
 /* Solving                                                             */

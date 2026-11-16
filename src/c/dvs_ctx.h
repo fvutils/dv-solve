@@ -375,6 +375,10 @@ typedef struct dvs_ctx_s {
     uint8_t            pin_conflict;
     /* Distribution constraint metadata (Sprint 7) */
     uint32_t          *dist_offsets;  /* pool offset per var -> DistMeta, 0=none */
+    /* With a distribution read per call (DistSpec has_exprs): every record,
+     * newest first, as DistDyn[n_dist_dyn] at this pool offset; set into
+     * dist_offsets by dvs_solver_eval_dists. */
+    uint32_t           dist_dyn, n_dist_dyn;
     /* Per-variable hole list for randc exclusions (Sprint 8) */
     uint32_t          *var_holes_head; /* pool offset per var -> HoleEntry, 0=none */
     /* The size of the constant set an unconditional `x inside {...}` holds

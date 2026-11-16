@@ -391,16 +391,38 @@ typedef struct {
 
 /**
  * DistSpec -- declares a distribution constraint on a variable.
- * n_entries dvs_dist_entry_t values follow immediately in pool memory.
- * Use dist_spec_entries() to obtain the pointer.
+ * n_entries entries follow immediately in pool memory: dvs_dist_entry_t
+ * values (use dist_spec_entries() to obtain the pointer), or with has_exprs
+ * dvs_dist_entry_ex_t ones, evaluated on each call with the guard.
  */
 typedef struct {
     dvs_expr_t  next;       /* next DistSpec, or EXPR_NULL */
     uint32_t var_id;     /* variable this distribution applies to   */
-    uint32_t n_entries;  /* number of dvs_dist_entry_t items that follow   */
+    uint32_t n_entries;  /* number of entries that follow             */
     dvs_expr_t index;    /* in a ForeachSpec body: var_id is an array id and
                           * this the element's index; else EXPR_NULL      */
+    dvs_expr_t guard;    /* holds when nonzero; EXPR_NULL: always (only
+                          * with has_exprs)                               */
+    uint32_t has_exprs;  /* 1: dvs_dist_entry_ex_t entries                */
 } DistSpec;
+
+/** The size of one entry of `ds`. */
+static inline uint32_t dist_spec_entry_size(const DistSpec *ds) {
+    return ds->has_exprs ? (uint32_t)sizeof(dvs_dist_entry_ex_t)
+                         : (uint32_t)sizeof(dvs_dist_entry_t);
+}
+
+/** The expressions of `ds`: dist_spec_expr(ds, i) for i below this, its
+ *  guard (i == 0, maybe EXPR_NULL) and each entry's lo, hi and weight. */
+static inline uint32_t dist_spec_n_exprs(const DistSpec *ds) {
+    return ds->has_exprs ? 1 + 3 * ds->n_entries : 1;
+}
+
+static inline dvs_expr_t dist_spec_expr(const DistSpec *ds, uint32_t i) {
+    if (i == 0) return ds->guard;
+    const dvs_dist_entry_ex_t *e = (const dvs_dist_entry_ex_t *)(ds + 1) + (i - 1) / 3;
+    return (i - 1) % 3 == 0 ? e->lo : (i - 1) % 3 == 1 ? e->hi : e->weight;
+}
 
 /**
  * ArraySpec -- declares one array of variables whose size is given on each
@@ -563,6 +585,12 @@ typedef struct {
     uint64_t          n_more;
 } image_node_t;
 
+/** A distribution's guard and entries read only STATE variables, elements
+ *  of STATE arrays, loop indices and constants (dvs_image.c). The image
+ *  check has passed. @return 0 if they do, else -1 with the reason in
+ *  `why` (if not NULL), starting "DIST_RAND: ". */
+int dvs_problem_check_dists(const dvs_problem_t *p, char *why, size_t whylen);
+
 /** Describe the node at `node`, which has `avail` bytes of image after it
  *  (dvs_image.c). -1 if its kind or operator is unknown or it does not fit. */
 int dvs_image_node(const void *node, uint64_t avail, image_node_t *out);
@@ -610,6 +638,15 @@ void solve_problem_destroy(dvs_problem_t *sp);
  * current value. Defined in dvs_validate.c. */
 void dvs_expr_dump(const dvs_ctx_t *ctx, const dvs_problem_t *sp,
                    dvs_expr_t ref, int show_vals, char *buf, size_t n);
+
+/* The value of `ref` in its own type over the context's current values (a
+ * pinned variable's pin), as the model check evaluates it: its low 64 bits
+ * in *v, or for dvs_expr_truth() whether it is nonzero. -1 if it cannot be
+ * evaluated. Defined in dvs_validate.c. */
+int dvs_expr_value(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
+                   int64_t *v);
+int dvs_expr_truth(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
+                   int *v);
 
 /* ------------------------------------------------------------------ */
 /* Expression builders — return EXPR_NULL on pool overflow             */

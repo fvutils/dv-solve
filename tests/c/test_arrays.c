@@ -375,6 +375,64 @@ static void check_dist_soft(void) {
     dvs_handle_free(h);
 }
 
+/* foreach (a[i]) { a[i] < 2; if (g) a[i] dist {0 := s[i], 1 := 1}; } with g
+ * a STATE scalar and s a STATE array: element-local; and expanded when also
+ * a[i] < x, x a random scalar that must be 2. */
+static void check_dist_guarded(void) {
+    for (int coupled = 0; coupled < 2; coupled++) {
+        begin();
+        dvs_builder_add_array(B, 0, 8, 0, DVS_VAR_RAND);
+        dvs_builder_add_array(B, 1, 8, 0, DVS_VAR_STATE);
+        dvs_builder_add_var(B, 0, 1, 0, 0, 1);
+        dvs_builder_set_var_kind(B, 0, DVS_VAR_STATE);
+        dvs_builder_add_var(B, 1, 8, 0, 0, 255);
+        dvs_builder_add_constraint(B, bin(DVS_BIN_EQ, dvs_builder_expr_var(B, 1), c8(2)));
+        dvs_builder_foreach_begin(B, 0, 0);
+        dvs_builder_add_constraint(B, bin(DVS_BIN_LT, elem(0, idx(0)), c8(2)));
+        if (coupled)
+            dvs_builder_add_constraint(B, bin(DVS_BIN_LT, elem(0, idx(0)),
+                                              dvs_builder_expr_var(B, 1)));
+        dvs_dist_entry_ex_t de[2] = {
+            { c8(0), c8(0), elem(1, idx(0)), 1, {0} },
+            { c8(1), c8(1), c8(1), 1, {0} },
+        };
+        dvs_builder_add_dist_elem_ex(B, 0, idx(0), dvs_builder_expr_var(B, 0), 2, de);
+        dvs_builder_foreach_end(B);
+        dvs_handle_t *h = finish();
+        const char *how = coupled ? "expanded" : "local";
+        char msg[100];
+        snprintf(msg, sizeof msg, "guarded dist (%s): handle, classified %s", how, how);
+        CHECK(h && dvs_tmpl_array_is_local(dvs_handle_tmpl(h), 0) == !coupled, msg);
+        if (!h) continue;
+        uint8_t a[200], st[200], g = 1, x = 0;
+        for (uint32_t k = 0; k < 200; k++) st[k] = k % 2 ? 30 : 0;
+        uint32_t n[2] = {200, 200};
+        dvs_ref_t refs[2] = { {&g, 1, 0, DVS_REF_SCALAR, 0}, {&x, 8, 0, DVS_REF_SCALAR, 0} };
+        uint32_t zeros[2][2] = {{0}};   /* [g][odd] */
+        int ok = 1;
+        for (g = 0; g < 2; g++)
+            for (uint64_t s = 1; s <= 4; s++) {
+                if (randomize(h, refs, (uint8_t *[]){a, st}, n, 2, s) != DVS_RANDOMIZE_OK)
+                    ok = 0;
+                for (uint32_t k = 0; k < 200; k++) {
+                    if (a[k] > 1) ok = 0;
+                    zeros[g][k % 2] += a[k] == 0;
+                }
+            }
+        printf("     %s: zeros of 400 even/odd: g=0 %u/%u, g=1 %u/%u\n", how, zeros[0][0],
+               zeros[0][1], zeros[1][0], zeros[1][1]);
+        snprintf(msg, sizeof msg, "guarded dist (%s): calls ok, values in {0, 1}", how);
+        CHECK(ok, msg);
+        snprintf(msg, sizeof msg, "guarded dist (%s): g on, weight s[i]: even never 0, odd "
+                 "mostly 0", how);
+        CHECK(zeros[1][0] == 0 && zeros[1][1] >= 340, msg);
+        snprintf(msg, sizeof msg, "guarded dist (%s): g off: uniform", how);
+        CHECK(zeros[0][0] >= 120 && zeros[0][0] <= 280 && zeros[0][1] >= 120
+              && zeros[0][1] <= 280, msg);
+        dvs_handle_free(h);
+    }
+}
+
 /* x random below 5, foreach (a[i]) a[i] < x: coupled through x, expanded. */
 static void check_coupled(void) {
     begin();
@@ -541,6 +599,7 @@ int main(void) {
     check_unique_large();
     check_all_different_fixed();
     check_dist_soft();
+    check_dist_guarded();
     check_coupled();
     check_nested();
     check_sizes();

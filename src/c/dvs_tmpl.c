@@ -471,6 +471,10 @@ static int fe_body_walk(const dvs_tmpl_t *t, const ForeachSpec *fe, uint32_t *se
     for (dvs_expr_t r = fe->n_dists ? fe->dists_head : EXPR_NULL; r != EXPR_NULL;) {
         const DistSpec *d = POOL_PTR(t->p, r);
         if (walk(t, d->index, seen, mark, fn, arg)) return -1;
+        for (uint32_t i = 0; i < dist_spec_n_exprs(d); i++)
+            if (dist_spec_expr(d, i) != EXPR_NULL
+                    && walk(t, dist_spec_expr(d, i), seen, mark, fn, arg))
+                return -1;
         r = d->next;
     }
     return 0;
@@ -527,6 +531,13 @@ static int classify(dvs_tmpl_t *t) {
         const SoftSpec *s = POOL_PTR(p, r);
         rc = walk(t, s->root, seen, mark, mark_outside, NULL);
         r = s->next;
+    }
+    for (dvs_expr_t r = p->dists_head; r != EXPR_NULL && !rc;) {
+        const DistSpec *d = POOL_PTR(p, r);
+        for (uint32_t i = 0; i < dist_spec_n_exprs(d) && !rc; i++)
+            if (dist_spec_expr(d, i) != EXPR_NULL)
+                rc = walk(t, dist_spec_expr(d, i), seen, mark, mark_outside, NULL);
+        r = d->next;
     }
     for (dvs_expr_t f = p->n_foreachs ? p->foreachs_head : EXPR_NULL; f != EXPR_NULL && !rc;
          f = fe_at(t, f)->next) {
@@ -937,6 +948,32 @@ static uint32_t list_rev(const dvs_problem_t *p, dvs_expr_t head, uint32_t count
     return n;
 }
 
+/* Add `d` on `var` (element `ix` in a foreach body when not EXPR_NULL); one
+ * read per call with its guard and entries rebuilt. */
+static int add_dist(xp_t *x, const DistSpec *d, uint32_t var, dvs_expr_t ix) {
+    if (!d->has_exprs) {
+        const dvs_dist_entry_t *de = (const dvs_dist_entry_t *)(d + 1);
+        return (ix != EXPR_NULL ? dvs_builder_add_dist_elem(x->b, var, ix, d->n_entries, de)
+                                : dvs_builder_add_dist(x->b, var, d->n_entries, de))
+               == EXPR_NULL;
+    }
+    const dvs_dist_entry_ex_t *de = (const dvs_dist_entry_ex_t *)(d + 1);
+    dvs_dist_entry_ex_t *e = malloc((d->n_entries ? d->n_entries : 1) * sizeof *e);
+    dvs_expr_t g = EXPR_NULL;
+    int rc = !e || (d->guard != EXPR_NULL && (g = xp(x, d->guard)) == EXPR_NULL);
+    for (uint32_t i = 0; i < d->n_entries && !rc; i++) {
+        e[i] = de[i];
+        rc = (e[i].lo = xp(x, de[i].lo)) == EXPR_NULL || (e[i].hi = xp(x, de[i].hi)) == EXPR_NULL
+             || (e[i].weight = xp(x, de[i].weight)) == EXPR_NULL;
+    }
+    if (!rc)
+        rc = (ix != EXPR_NULL ? dvs_builder_add_dist_elem_ex(x->b, var, ix, g, d->n_entries, e)
+                              : dvs_builder_add_dist_ex(x->b, var, g, d->n_entries, e))
+             == EXPR_NULL;
+    free(e);
+    return rc;
+}
+
 /* Add the constraints, soft constraints and distributions of a body. */
 static int add_body(xp_t *x, dvs_expr_t c_head, uint32_t n_c, dvs_expr_t s_head,
                     uint32_t n_s, dvs_expr_t d_head, uint32_t n_d, int in_foreach) {
@@ -971,13 +1008,9 @@ static int add_body(xp_t *x, dvs_expr_t c_head, uint32_t n_c, dvs_expr_t s_head,
         const DistSpec *d = POOL_PTR(p, l[i]);
         uint32_t var = d->var_id;
         if (x->mode == XP_ASSEMBLE) {
-            const dvs_dist_entry_t *de = (const dvs_dist_entry_t *)(d + 1);
             dvs_expr_t ix = in_foreach ? xp(x, d->index) : EXPR_NULL;
-            rc = in_foreach ? ix == EXPR_NULL
-                                  || dvs_builder_add_dist_elem(x->b, x->array_base + var, ix,
-                                                               d->n_entries, de) == EXPR_NULL
-                            : dvs_builder_add_dist(x->b, x->var_map[var], d->n_entries, de)
-                                  == EXPR_NULL;
+            rc = in_foreach ? ix == EXPR_NULL || add_dist(x, d, x->array_base + var, ix)
+                            : add_dist(x, d, x->var_map[var], EXPR_NULL);
             continue;
         }
         if (in_foreach && x->mode == XP_EXPAND) {
@@ -991,8 +1024,7 @@ static int add_body(xp_t *x, dvs_expr_t c_head, uint32_t n_c, dvs_expr_t s_head,
         } else if (in_foreach) {
             var = 0;   /* the element of an element-local problem */
         }
-        rc = dvs_builder_add_dist(x->b, var, d->n_entries,
-                                  (const dvs_dist_entry_t *)(d + 1)) == EXPR_NULL;
+        rc = add_dist(x, d, var, EXPR_NULL);
     }
     free(l);
     if (rc && !x->err) x->err = DVS_RANDOMIZE_ERROR;
@@ -1386,10 +1418,12 @@ static int build_sizes(dvs_tmpl_t *t) {
         if (e == EXPR_NULL || dvs_builder_add_soft_constraint(x.b, e, sp->priority) == EXPR_NULL)
             goto out;
     }
+    /* (One read per call is left out: its guard may read an element.) */
     for (dvs_expr_t r = p->dists_head; r != EXPR_NULL;) {
         const DistSpec *d = POOL_PTR(p, r);
-        if (dvs_builder_add_dist(x.b, d->var_id, d->n_entries,
-                                 (const dvs_dist_entry_t *)(d + 1)) == EXPR_NULL)
+        if (!d->has_exprs && dvs_builder_add_dist(x.b, d->var_id, d->n_entries,
+                                                  (const dvs_dist_entry_t *)(d + 1))
+                                 == EXPR_NULL)
             goto out;
         r = d->next;
     }

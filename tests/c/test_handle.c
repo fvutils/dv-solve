@@ -131,6 +131,87 @@ static void check_used_kept(void) {
     dvs_handle_free(h);
 }
 
+/* Distributions read per call (dvs_builder_add_dist_ex), on one handle:
+ *   A: if (g)  x dist { 0 := w, [1:99] :/ w2 }   (added first)
+ *   B: if (g2) x dist { 99 := 1 }
+ * x is RAND in 0..99; g, g2, w, w2 are STATE. Counts over 200 calls. */
+typedef struct { uint8_t x, g, w, g2, w2; } gd_t;
+
+static void gd_run(dvs_handle_t *h, gd_t *m, int *zeros, int *nines, int *distinct) {
+    dvs_ref_t refs[5] = {
+        {&m->x, 8, 0, DVS_REF_SCALAR, 0}, {&m->g, 1, 0, DVS_REF_SCALAR, 0},
+        {&m->w, 8, 0, DVS_REF_SCALAR, 0}, {&m->g2, 1, 0, DVS_REF_SCALAR, 0},
+        {&m->w2, 8, 0, DVS_REF_SCALAR, 0},
+    };
+    int seen[100] = {0};
+    *zeros = *nines = *distinct = 0;
+    for (uint64_t s = 1; s <= 200; s++) {
+        if (dvs_randomize(h, refs, NULL, s) != DVS_RANDOMIZE_OK || m->x > 99) {
+            *distinct = -1;
+            return;
+        }
+        *zeros += m->x == 0;
+        *nines += m->x == 99;
+        *distinct += !seen[m->x]++;
+    }
+}
+
+static void check_guarded_dist(void) {
+    dvs_builder_t *b = dvs_builder_create(0, NULL);
+    dvs_builder_add_var(b, 0, 8, 0, 0, 99);
+    dvs_builder_add_var(b, 1, 1, 0, 0, 1);
+    dvs_builder_add_var(b, 2, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 3, 1, 0, 0, 1);
+    dvs_builder_add_var(b, 4, 8, 0, 0, 255);
+    for (uint32_t v = 1; v <= 4; v++) dvs_builder_set_var_kind(b, v, DVS_VAR_STATE);
+    dvs_expr_t c0 = dvs_builder_expr_const(b, 0, 0), c1 = dvs_builder_expr_const(b, 1, 0);
+    dvs_expr_t c99 = dvs_builder_expr_const(b, 99, 0);
+    dvs_dist_entry_ex_t a[2] = {
+        { c0, c0, dvs_builder_expr_var(b, 2), 1, {0} },
+        { c1, c99, dvs_builder_expr_var(b, 4), 0, {0} },
+    };
+    dvs_dist_entry_ex_t bb = { c99, c99, c1, 1, {0} };
+    CHECK(dvs_builder_add_dist_ex(b, 0, dvs_builder_expr_var(b, 1), 2, a) != EXPR_NULL
+          && dvs_builder_add_dist_ex(b, 0, dvs_builder_expr_var(b, 3), 1, &bb) != EXPR_NULL,
+          "guarded dist: added");
+    size_t sz;
+    dvs_problem_t *p = dvs_builder_finalize(b, &sz);
+    CHECK(dvs_problem_validate(p, NULL, 0) == 0, "guarded dist: validates");
+    dvs_handle_t *h = dvs_handle_new(p, sz);
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
+    if (!h) { CHECK(0, "guarded dist: handle"); return; }
+
+    gd_t m = { 0, 1, 200, 0, 1 };
+    int z, n9, d;
+    gd_run(h, &m, &z, &n9, &d);
+    printf("     A on: zeros %d, distinct %d\n", z, d);
+    CHECK(d > 0 && z >= 180, "guarded dist: A on, w = 200: x == 0 on nearly every call");
+    m.g = 0;
+    gd_run(h, &m, &z, &n9, &d);
+    printf("     none on: zeros %d, nines %d, distinct %d\n", z, n9, d);
+    CHECK(d >= 40 && z <= 20 && n9 <= 20, "guarded dist: none on: x uniform");
+    m.g = 1;
+    m.w = 0;
+    gd_run(h, &m, &z, &n9, &d);
+    printf("     A on, w = 0: zeros %d, distinct %d\n", z, d);
+    CHECK(d >= 40 && z == 0, "guarded dist: weight read from STATE, 0: x never 0");
+    m.w = 200;
+    m.g2 = 1;
+    gd_run(h, &m, &z, &n9, &d);
+    printf("     A and B on: zeros %d, nines %d\n", z, n9);
+    CHECK(d > 0 && z >= 180, "guarded dist: A and B on: the first added (A) is used");
+    m.g = 0;
+    gd_run(h, &m, &z, &n9, &d);
+    CHECK(d > 0 && n9 == 200, "guarded dist: B alone on: x == 99");
+    m.g = 1;
+    m.w = m.w2 = 0;
+    gd_run(h, &m, &z, &n9, &d);
+    printf("     A on with zero weights, B on: zeros %d, nines %d, distinct %d\n", z, n9, d);
+    CHECK(d >= 40 && n9 <= 20, "guarded dist: A's weights add up to 0: x uniform (not B)");
+    dvs_handle_free(h);
+}
+
 int main(void) {
     /* The two clause checks need draws that miss: with the value picker's
      * known bits (dvs_search.c, the pick domain) every draw of an aligned
@@ -140,6 +221,7 @@ int main(void) {
     check_learnt_dropped();
     check_used_kept();
     check_image_header();
+    check_guarded_dist();
     dvs_handle_t *h = make();
     CHECK(h != NULL, "handle made");
     if (!h) return 1;

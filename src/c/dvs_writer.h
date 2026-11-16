@@ -24,7 +24,7 @@ extern "C" {
 
 /** The version of the problem image format. A runtime solves only images of
  *  its own version: dvs_handle_new() refuses any other. */
-#define DVS_PROBLEM_FORMAT_VERSION 5u
+#define DVS_PROBLEM_FORMAT_VERSION 6u
 
 /** DVS_PROBLEM_FORMAT_VERSION of the linked library. */
 DVS_API uint32_t dvs_problem_format_version(void);
@@ -113,6 +113,17 @@ typedef struct {
                             * 0: the range shares `weight` (SV :/)          */
     uint8_t  _dpad[3];
 } dvs_dist_entry_t;
+
+/** One entry of a distribution read on each call; see
+ *  dvs_builder_add_dist_ex(). Each field is an expression over STATE
+ *  variables and constants. */
+typedef struct {
+    dvs_expr_t lo;           /* lowest value of the range                     */
+    dvs_expr_t hi;           /* highest value of the range                    */
+    dvs_expr_t weight;       /* a negative weight counts as 0                 */
+    uint8_t    is_per_value; /* as in dvs_dist_entry_t                        */
+    uint8_t    _dpad[3];
+} dvs_dist_entry_ex_t;
 
 /* ------------------------------------------------------------------ */
 /* Building a problem                                                  */
@@ -212,6 +223,21 @@ DVS_API int dvs_builder_set_var_kind(dvs_builder_t *b, uint32_t var_id,
 DVS_API dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,
                                         uint32_t n_entries,
                                         const dvs_dist_entry_t *entries);
+
+/**
+ * A distribution evaluated on each call (SV `dist` under a condition, or
+ * with weights or bounds that are not constants), from the STATE values
+ * pinned for the call: it holds when `guard` is nonzero (EXPR_NULL: always).
+ * When more than one distribution on a variable holds, the first added is
+ * used; when none does, or its weights add up to 0, the variable is drawn
+ * as if it had none. The guard and the entries read only STATE variables
+ * and constants (else DVS_COMPILE_DIST_RAND). Not in a foreach body: see
+ * dvs_builder_add_dist_elem_ex(). @return EXPR_NULL if an entry expression
+ * is EXPR_NULL, or on overflow.
+ */
+DVS_API dvs_expr_t dvs_builder_add_dist_ex(dvs_builder_t *b, uint32_t var_id,
+                                           dvs_expr_t guard, uint32_t n_entries,
+                                           const dvs_dist_entry_ex_t *entries);
 
 /** A constant. Like an unsized SystemVerilog literal it is 32 bits wide,
  *  unless the value doesn't fit in 32 bits. */
@@ -391,6 +417,14 @@ DVS_API dvs_expr_t dvs_builder_add_dist_elem(dvs_builder_t *b, uint32_t array_id
                                              dvs_expr_t index, uint32_t n_entries,
                                              const dvs_dist_entry_t *entries);
 
+/** dvs_builder_add_dist_ex() on element `index` of array `array_id`, in the
+ *  body of an open foreach; the guard and entries may also read the loop
+ *  index and elements of STATE arrays. */
+DVS_API dvs_expr_t dvs_builder_add_dist_elem_ex(dvs_builder_t *b, uint32_t array_id,
+                                                dvs_expr_t index, dvs_expr_t guard,
+                                                uint32_t n_entries,
+                                                const dvs_dist_entry_ex_t *entries);
+
 /* ------------------------------------------------------------------ */
 /* Parts: constraints across objects (IEEE 1800-2023 18.5.8)          */
 /*                                                                     */
@@ -482,7 +516,8 @@ DVS_API void dvs_builder_set_explicit(dvs_builder_t *b);
  * the checks dvs_solver_compile() makes: variable ids 0..n-1, each declared
  * once, 1 to 64 bits wide; all-different over at most 16 variables of at
  * most 32 bits; every variable named is declared; no width over
- * DVS_MAX_WIDTH, no reversed slice, no expression nested over 20000 deep.
+ * DVS_MAX_WIDTH, no reversed slice, no expression nested over 20000 deep;
+ * a distribution's guard and entries read only STATE variables.
  *
  * @param why     If not NULL, receives the reason for a refusal, starting
  *                with the dvs_solver_compile() code it stands for

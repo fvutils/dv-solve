@@ -1097,10 +1097,19 @@ dvs_expr_t dvs_builder_add_soft_constraint(dvs_builder_t *b, dvs_expr_t root,
     return ref;
 }
 
+/* `entries`: n_entries dvs_dist_entry_ex_t with has_exprs, else
+ * dvs_dist_entry_t. */
 static dvs_expr_t _add_dist(dvs_builder_t *b, uint32_t var_id, dvs_expr_t index,
-                            uint32_t n_entries, const dvs_dist_entry_t *entries) {
-    uint32_t total = (uint32_t)sizeof(DistSpec) +
-                     n_entries * (uint32_t)sizeof(dvs_dist_entry_t);
+                            dvs_expr_t guard, uint32_t n_entries, const void *entries,
+                            uint32_t has_exprs) {
+    const uint32_t esz = has_exprs ? (uint32_t)sizeof(dvs_dist_entry_ex_t)
+                                   : (uint32_t)sizeof(dvs_dist_entry_t);
+    for (uint32_t i = 0; has_exprs && i < n_entries; i++) {
+        const dvs_dist_entry_ex_t *e = (const dvs_dist_entry_ex_t *)entries + i;
+        if (e->lo == EXPR_NULL || e->hi == EXPR_NULL || e->weight == EXPR_NULL)
+            return EXPR_NULL;
+    }
+    uint32_t total = (uint32_t)sizeof(DistSpec) + n_entries * esz;
     dvs_expr_t ref = dvs_builder_alloc(b, total, DVS_IMAGE_ALIGN);
     if (ref == EXPR_NULL) return EXPR_NULL;
 
@@ -1110,9 +1119,9 @@ static dvs_expr_t _add_dist(dvs_builder_t *b, uint32_t var_id, dvs_expr_t index,
     ds->var_id    = var_id;
     ds->n_entries = n_entries;
     ds->index     = index;
-    dvs_dist_entry_t *dst = (dvs_dist_entry_t *)(ds + 1);
-    for (uint32_t i = 0; i < n_entries; i++)
-        dst[i] = entries[i];
+    ds->guard     = guard;
+    ds->has_exprs = has_exprs;
+    if (n_entries) memcpy(ds + 1, entries, (size_t)n_entries * esz);
     if (index != EXPR_NULL) {
         ForeachSpec *fe = (ForeachSpec *)dvs_builder_ref_ptr(b, b->foreach_open);
         ds->next = fe->dists_head;
@@ -1129,14 +1138,28 @@ static dvs_expr_t _add_dist(dvs_builder_t *b, uint32_t var_id, dvs_expr_t index,
 dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,
                          uint32_t n_entries, const dvs_dist_entry_t *entries) {
     if (b->foreach_open != EXPR_NULL) return EXPR_NULL;
-    return _add_dist(b, var_id, EXPR_NULL, n_entries, entries);
+    return _add_dist(b, var_id, EXPR_NULL, EXPR_NULL, n_entries, entries, 0);
 }
 
 dvs_expr_t dvs_builder_add_dist_elem(dvs_builder_t *b, uint32_t array_id,
                                      dvs_expr_t index, uint32_t n_entries,
                                      const dvs_dist_entry_t *entries) {
     if (b->foreach_open == EXPR_NULL || index == EXPR_NULL) return EXPR_NULL;
-    return _add_dist(b, array_id, index, n_entries, entries);
+    return _add_dist(b, array_id, index, EXPR_NULL, n_entries, entries, 0);
+}
+
+dvs_expr_t dvs_builder_add_dist_ex(dvs_builder_t *b, uint32_t var_id, dvs_expr_t guard,
+                                   uint32_t n_entries, const dvs_dist_entry_ex_t *entries) {
+    if (b->foreach_open != EXPR_NULL) return EXPR_NULL;
+    return _add_dist(b, var_id, EXPR_NULL, guard, n_entries, entries, 1);
+}
+
+dvs_expr_t dvs_builder_add_dist_elem_ex(dvs_builder_t *b, uint32_t array_id,
+                                        dvs_expr_t index, dvs_expr_t guard,
+                                        uint32_t n_entries,
+                                        const dvs_dist_entry_ex_t *entries) {
+    if (b->foreach_open == EXPR_NULL || index == EXPR_NULL) return EXPR_NULL;
+    return _add_dist(b, array_id, index, guard, n_entries, entries, 1);
 }
 
 /* ------------------------------------------------------------------ */

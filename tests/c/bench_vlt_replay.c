@@ -750,7 +750,22 @@ static dvs_problem_t *rebuild(Rebuild *r, dvs_problem_t *p, size_t *size) {
     n = walk(p, p->dists_head, &r->tmp, &r->tmp_cap);
     for (uint32_t i = n; i-- > 0;) {
         DistSpec *d = POOL_PTR(p, r->tmp[i]);
-        dvs_builder_add_dist(b, d->var_id, d->n_entries, dist_spec_entries(p, r->tmp[i]));
+        if (!d->has_exprs) {
+            dvs_builder_add_dist(b, d->var_id, d->n_entries, dist_spec_entries(p, r->tmp[i]));
+            continue;
+        }
+        dvs_dist_entry_ex_t *e = malloc((d->n_entries ? d->n_entries : 1) * sizeof *e);
+        if (!e) continue;
+        memcpy(e, d + 1, d->n_entries * sizeof *e);
+        for (uint32_t k = 0; k < d->n_entries; k++) {
+            e[k].lo = rb(r, e[k].lo);
+            e[k].hi = rb(r, e[k].hi);
+            e[k].weight = rb(r, e[k].weight);
+        }
+        dvs_builder_add_dist_ex(b, d->var_id, d->guard == EXPR_NULL ? EXPR_NULL
+                                                                    : rb(r, d->guard),
+                                d->n_entries, e);
+        free(e);
     }
     n = walk(p, p->allDiff_head, &r->tmp, &r->tmp_cap);
     for (uint32_t i = n; i-- > 0;) {

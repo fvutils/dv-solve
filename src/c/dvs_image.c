@@ -67,8 +67,9 @@ SIZE(SourceSpec, 8); AT(SourceSpec, next, 0); AT(SourceSpec, n_vars, 4);
 SIZE(AllDiffSpec, 8); AT(AllDiffSpec, next, 0); AT(AllDiffSpec, n_vars, 4);
 SIZE(SoftSpec, 16); AT(SoftSpec, next, 0); AT(SoftSpec, root, 4);
 AT(SoftSpec, priority, 8); AT(SoftSpec, constraint_id, 12);
-SIZE(DistSpec, 16); AT(DistSpec, next, 0); AT(DistSpec, var_id, 4);
-AT(DistSpec, n_entries, 8); AT(DistSpec, index, 12);
+SIZE(DistSpec, 24); AT(DistSpec, next, 0); AT(DistSpec, var_id, 4);
+AT(DistSpec, n_entries, 8); AT(DistSpec, index, 12); AT(DistSpec, guard, 16);
+AT(DistSpec, has_exprs, 20);
 SIZE(ExprArraySize, 8); AT(ExprArraySize, kind, 0); AT(ExprArraySize, array_id, 4);
 SIZE(ExprLoopIndex, 8); AT(ExprLoopIndex, kind, 0); AT(ExprLoopIndex, level, 4);
 SIZE(ExprElem, 16); AT(ExprElem, kind, 0); AT(ExprElem, array_id, 4);
@@ -87,6 +88,9 @@ AT(ForeachSpec, dists_head, 32); AT(ForeachSpec, n_dists, 36);
 SIZE(dvs_dist_entry_t, 24); AT(dvs_dist_entry_t, lo, 0); AT(dvs_dist_entry_t, hi, 8);
 AT(dvs_dist_entry_t, weight, 16); AT(dvs_dist_entry_t, is_per_value, 20);
 AT(dvs_dist_entry_t, _dpad, 21);
+SIZE(dvs_dist_entry_ex_t, 16); AT(dvs_dist_entry_ex_t, lo, 0); AT(dvs_dist_entry_ex_t, hi, 4);
+AT(dvs_dist_entry_ex_t, weight, 8); AT(dvs_dist_entry_ex_t, is_per_value, 12);
+AT(dvs_dist_entry_ex_t, _dpad, 13);
 SIZE(dvs_pool_t, 16); AT(dvs_pool_t, capacity, 0); AT(dvs_pool_t, used, 4);
 AT(dvs_pool_t, overflow, 8); AT(dvs_pool_t, _pad, 12);
 SIZE(ExportSpec, 8); AT(ExportSpec, next, 0); AT(ExportSpec, var_id, 4);
@@ -239,9 +243,9 @@ static const struct {
     { offsetof(dvs_problem_t, softs_head), offsetof(dvs_problem_t, n_softs),
       sizeof(SoftSpec), 0, 0, offsetof(SoftSpec, root), 0, "soft constraint" },
     { offsetof(dvs_problem_t, dists_head), offsetof(dvs_problem_t, n_dists),
-      sizeof(DistSpec), offsetof(DistSpec, n_entries), sizeof(dvs_dist_entry_t), 0, 0,
-      "distribution" },
+      sizeof(DistSpec), offsetof(DistSpec, n_entries), 0, 0, 0, "distribution" },
 };
+#define DIST_LIST  (sizeof _lists / sizeof _lists[0] - 1)
 
 static int _fail(char *why, size_t whylen, const char *fmt, ...) {
     if (why && whylen) {
@@ -254,6 +258,21 @@ static int _fail(char *why, size_t whylen, const char *fmt, ...) {
 }
 
 #define U32_AT(base, off)  (*(const uint32_t *)((const uint8_t *)(base) + (off)))
+
+/* A DistSpec whose entries fit: mark its expressions reachable. -1 if one is
+ * out of range, an entry's is EXPR_NULL, or a guard is not with has_exprs. */
+static int _dist_mark(const DistSpec *ds, uint64_t end, uint8_t *reach) {
+    if (ds->has_exprs > 1 || (!ds->has_exprs && ds->guard != EXPR_NULL)) return -1;
+    for (uint32_t i = 0; i < dist_spec_n_exprs(ds); i++) {
+        dvs_expr_t e = dist_spec_expr(ds, i);
+        if (e == EXPR_NULL && i == 0) continue;
+        if (e < sizeof(dvs_pool_t) || e % DVS_IMAGE_ALIGN || (uint64_t)e + 4 > end)
+            return -1;
+        uint32_t s = (e - (uint32_t)sizeof(dvs_pool_t)) / DVS_IMAGE_ALIGN;
+        reach[s / 8] |= (uint8_t)(1u << (s % 8));
+    }
+    return 0;
+}
 
 int dvs_problem_check_image(const void *img, size_t size, char *why, size_t whylen) {
     const size_t pool_at = offsetof(dvs_problem_t, pool);
@@ -297,11 +316,14 @@ int dvs_problem_check_image(const void *img, size_t size, char *why, size_t whyl
             }
             const uint8_t *s = pool + r;
             uint64_t n = _lists[l].n_at ? U32_AT(s, _lists[l].n_at) : 0;
-            if ((uint64_t)r + _lists[l].size + n * _lists[l].elem > end
+            uint64_t elem = l == DIST_LIST ? dist_spec_entry_size((const DistSpec *)s)
+                                           : _lists[l].elem;
+            if ((uint64_t)r + _lists[l].size + n * elem > end
                     || (_lists[l].var && U32_AT(s, 4) >= p->n_vars)
                     || (l == 0 && ((const VarSpec *)s)->kind > DVS_VAR_IMPORT)
                     /* an import's first slot is one of this part's */
-                    || (l == 2 && (n == 0 || U32_AT(s, sizeof(ImportSpec)) >= p->n_slots)))
+                    || (l == 2 && (n == 0 || U32_AT(s, sizeof(ImportSpec)) >= p->n_slots))
+                    || (l == DIST_LIST && _dist_mark((const DistSpec *)s, end, reach)))
                 rc = _fail(why, whylen, "%s list item %u is malformed", _lists[l].what, i);
             else if (_lists[l].root_at) {
                 dvs_expr_t root = U32_AT(s, _lists[l].root_at);
@@ -359,11 +381,13 @@ int dvs_problem_check_image(const void *img, size_t size, char *why, size_t whyl
             for (dvs_expr_t c = body[l].count ? body[l].head : EXPR_NULL;
                  c != EXPR_NULL && !rc; j++) {
                 const uint8_t *cs = pool + c;
-                uint64_t extra = l == 2 ? (uint64_t)((const DistSpec *)cs)->n_entries
-                                              * sizeof(dvs_dist_entry_t) : 0;
                 dvs_expr_t root = 0;
-                if (j == body[l].count || !OFF_OK(c, body[l].size + extra)
-                        || (l == 2 && ((const DistSpec *)cs)->var_id >= p->n_arrays)
+                if (j == body[l].count || !OFF_OK(c, body[l].size)
+                        || (l == 2 && (!OFF_OK(c, body[l].size
+                                               + (uint64_t)((const DistSpec *)cs)->n_entries
+                                               * dist_spec_entry_size((const DistSpec *)cs))
+                                       || ((const DistSpec *)cs)->var_id >= p->n_arrays
+                                       || _dist_mark((const DistSpec *)cs, end, reach)))
                         || !OFF_OK(root = U32_AT(cs, body[l].root_at), sizeof(uint32_t)))
                     rc = _fail(why, whylen, "the body of foreach %u is malformed", ai);
                 else {
@@ -568,6 +592,14 @@ int dvs_problem_validate(const dvs_problem_t *p, char *why, size_t whylen) {
         depth[SLOT(ss->root)] = 1;
         r = ss->next;
     }
+#define DIST_ROOTS(ds) \
+    for (uint32_t i = 0; i < dist_spec_n_exprs(ds); i++) \
+        if (dist_spec_expr(ds, i) != EXPR_NULL) depth[SLOT(dist_spec_expr(ds, i))] = 1
+    for (dvs_expr_t r = p->dists_head; r != EXPR_NULL;) {
+        const DistSpec *ds = dvs_pool_ptr(pool, r);
+        DIST_ROOTS(ds);
+        r = ds->next;
+    }
     for (dvs_expr_t f = p->n_foreachs ? p->foreachs_head : EXPR_NULL; f != EXPR_NULL;) {
         const ForeachSpec *fe = dvs_pool_ptr(pool, f);
         for (dvs_expr_t r = fe->n_constraints ? fe->constraints_head : EXPR_NULL;
@@ -584,6 +616,7 @@ int dvs_problem_validate(const dvs_problem_t *p, char *why, size_t whylen) {
         for (dvs_expr_t r = fe->n_dists ? fe->dists_head : EXPR_NULL; r != EXPR_NULL;) {
             const DistSpec *ds = dvs_pool_ptr(pool, r);
             depth[SLOT(ds->index)] = 1;
+            DIST_ROOTS(ds);
             r = ds->next;
         }
         f = fe->next;
@@ -623,7 +656,81 @@ int dvs_problem_validate(const dvs_problem_t *p, char *why, size_t whylen) {
         } else
             rc = _node_widths(node, why, whylen, r);
     }
+#undef DIST_ROOTS
 #undef SLOT
     free(depth);
+    return rc ? rc : dvs_problem_check_dists(p, why, whylen);
+}
+
+int dvs_problem_check_dists(const dvs_problem_t *p, char *why, size_t whylen) {
+    const dvs_pool_t *pool = &p->pool;
+    const uint8_t *base = (const uint8_t *)pool;
+    const uint64_t end = sizeof(dvs_pool_t) + (uint64_t)pool->used;
+    const uint32_t n_slots = (uint32_t)((end - sizeof(dvs_pool_t) + DVS_IMAGE_ALIGN - 1)
+                                        / DVS_IMAGE_ALIGN);
+    uint8_t *reach = calloc(n_slots / 8 + 1, 1);
+    /* The kind of each variable, then each array's: its elements', with
+     * 0x80 when its size is drawn. */
+    uint8_t *kind = calloc(p->n_vars + p->n_arrays + 1, 1);
+    if (!reach || !kind) {
+        free(reach);
+        free(kind);
+        return _fail(why, whylen, "out of memory");
+    }
+    int any = 0;
+    for (dvs_expr_t r = p->dists_head; r != EXPR_NULL;) {
+        const DistSpec *ds = dvs_pool_ptr(pool, r);
+        any |= _dist_mark(ds, end, reach) == 0 && ds->has_exprs;
+        r = ds->next;
+    }
+    for (dvs_expr_t f = p->n_foreachs ? p->foreachs_head : EXPR_NULL; f != EXPR_NULL;) {
+        const ForeachSpec *fe = dvs_pool_ptr(pool, f);
+        for (dvs_expr_t r = fe->n_dists ? fe->dists_head : EXPR_NULL; r != EXPR_NULL;) {
+            const DistSpec *ds = dvs_pool_ptr(pool, r);
+            any |= _dist_mark(ds, end, reach) == 0 && ds->has_exprs;
+            r = ds->next;
+        }
+        f = fe->next;
+    }
+    for (dvs_expr_t r = any ? p->vars_head : EXPR_NULL; r != EXPR_NULL;) {
+        const VarSpec *vs = dvs_pool_ptr(pool, r);
+        if (vs->var_id < p->n_vars) kind[vs->var_id] = vs->kind;
+        r = vs->next;
+    }
+    for (dvs_expr_t r = any && p->n_arrays ? p->arrays_head : EXPR_NULL; r != EXPR_NULL;) {
+        const ArraySpec *a = dvs_pool_ptr(pool, r);
+        kind[p->n_vars + a->array_id] = (uint8_t)(a->kind | (a->size_random ? 0x80 : 0));
+        r = a->next;
+    }
+    int rc = 0;
+    for (uint32_t s = any ? n_slots : 0; s-- > 0 && !rc;) {
+        if (!(reach[s / 8] & (1u << (s % 8)))) continue;
+        uint32_t r = (uint32_t)sizeof(dvs_pool_t) + s * DVS_IMAGE_ALIGN;
+        const uint32_t *w = (const uint32_t *)(base + r);
+        image_node_t nd;
+        dvs_image_node(w, end - r, &nd);
+        int ok;
+        switch (w[0]) {
+        case EXPR_VAR:        ok = w[1] >= p->n_vars || kind[w[1]] == DVS_VAR_STATE; break;
+        case EXPR_ELEM:       ok = (kind[p->n_vars + w[1]] & 0x7F) == DVS_VAR_STATE; break;
+        case EXPR_ARRAY_SIZE: ok = !(kind[p->n_vars + w[1]] & 0x80); break;
+        case EXPR_REDUCE:     ok = kind[p->n_vars + w[2]] == DVS_VAR_STATE; break;
+        /* their result is a variable the problem constrains */
+        case EXPR_SUM: case EXPR_COUNTONES: case EXPR_CLOG2: case EXPR_ARRAY_SELECT:
+            ok = 0;
+            break;
+        default:              ok = 1; break;
+        }
+        if (!ok)
+            rc = _fail(why, whylen, "DIST_RAND: a distribution's guard or entry reads "
+                       "more than STATE values (node at offset %u)", r);
+        for (uint64_t i = 0; i < nd.n_kids + nd.n_more; i++) {
+            dvs_expr_t c = i < nd.n_kids ? nd.kids[i] : nd.more[i - nd.n_kids];
+            uint32_t cs = (c - (uint32_t)sizeof(dvs_pool_t)) / DVS_IMAGE_ALIGN;
+            reach[cs / 8] |= (uint8_t)(1u << (cs % 8));
+        }
+    }
+    free(reach);
+    free(kind);
     return rc;
 }

@@ -415,6 +415,8 @@ dvs_expr_t problem_add_dist(dvs_problem_t *sp, uint32_t var_id,
     ds->var_id        = var_id;
     ds->n_entries     = n_entries;
     ds->index         = EXPR_NULL;
+    ds->guard         = EXPR_NULL;
+    ds->has_exprs     = 0;
     dvs_dist_entry_t *dst    = (dvs_dist_entry_t *)(ds + 1);
     for (uint32_t i = 0; i < n_entries; i++)
         dst[i] = entries[i];

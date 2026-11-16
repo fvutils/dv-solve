@@ -574,6 +574,24 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
     }
 }
 
+int dvs_expr_value(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
+                   int64_t *v) {
+    int skip = 0;
+    VTy t = _vtype(ctx, sp, ref, &skip);
+    if (skip || t.w > V_MAXW) return -1;
+    VI x = _ev(ctx, sp, ref, t.w, t.s, &skip);
+    if (skip) return -1;
+    *v = (int64_t)(uint64_t)(VU)x;
+    return 0;
+}
+
+int dvs_expr_truth(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
+                   int *v) {
+    int skip = 0;
+    *v = _truth(ctx, sp, ref, &skip);
+    return skip ? -1 : 0;
+}
+
 /* Compact expression-tree dumper for diagnostics: a single-line
  * s-expression, truncated at depth 16 and at the buffer size. It builds the
  * whole line in memory so a caller can emit it with one write (parallel

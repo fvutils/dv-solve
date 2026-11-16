@@ -245,6 +245,8 @@ static int solve_once(dvs_handle_t *h, const dvs_ref_t *refs, uint64_t seed) {
         if (dvs_solver_pin_var(h->ctx, v, ref_read(&refs[v], ref_bytes(&refs[v]))) != 0)
             return DVS_RANDOMIZE_UNSAT;
     }
+    /* The compile's problem keeps the offsets of h->p (dvs_sv.c copies). */
+    dvs_solver_eval_dists(h->ctx, h->p);
 
     /* The front end's options (smt2_frontend.c, _cmd_check_sat_body), but
      * the search takes max_conflicts as its restart unit: at 10000 a solve

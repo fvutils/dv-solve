@@ -4441,6 +4441,8 @@ static int _nomem_check(const dvs_ctx_t *ctx, int rc) {
 
 static int _solver_compile(dvs_ctx_t *ctx, dvs_problem_t *sp) {
     if (sp && (sp->n_arrays || sp->n_foreachs)) return DVS_COMPILE_ARRAYS;
+    if (sp && sp->n_dists && dvs_problem_check_dists(sp, NULL, 0))
+        return DVS_COMPILE_DIST_RAND;
     if (ctx) ctx->problem_fp = sp ? dvs_problem_fingerprint(sp) : 0;
     if (ctx) ctx->wmemo_epoch++;
 #ifdef DVS_STEP_CHECK
@@ -5179,10 +5181,25 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
         }
     }
 
-    /* ---- Walk DistSpec list -> store dist metadata per variable ---- */
+    /* ---- Walk DistSpec list -> store dist metadata per variable ----
+     * Newest first, so the first added of a variable's records is written
+     * last and wins. A record read per call (has_exprs) is set on each solve
+     * by dvs_solver_eval_dists; when the problem has one, every record is
+     * listed for it, as it decides between a variable's records. */
     if (sp->n_dists > 0) {
         /* The per-var dist_offsets table, all 0 (none) */
         dvs_ctx_enable_dists(ctx);
+        uint32_t n_dyn = 0, any_dyn = 0;
+        for (dvs_expr_t dref = sp->dists_head; dref != EXPR_NULL;) {
+            const DistSpec *ds = (const DistSpec *)dvs_pool_ptr(&sp->pool, dref);
+            any_dyn |= ds->has_exprs;
+            dref = ds->next;
+        }
+        if (any_dyn) {
+            ctx->dist_dyn = dvs_spool_alloc(&ctx->pool, sp->n_dists * (uint32_t)sizeof(DistDyn),
+                                            (uint32_t)_Alignof(DistDyn));
+            if (ctx->dist_dyn == EXPR_NULL) ctx->dist_dyn = 0;
+        }
         {
 
             dvs_expr_t dref = sp->dists_head;
@@ -5204,7 +5221,7 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                     DistMetaEntry *dme = (DistMetaEntry *)(dm + 1);
 
                     uint64_t cum = 0;
-                    for (uint32_t i = 0; i < ne; i++) {
+                    for (uint32_t i = 0; i < ne && !ds->has_exprs; i++) {
                         dme[i].lo = src_entries[i].lo;
                         dme[i].hi = src_entries[i].hi;
                         dme[i].weight = src_entries[i].weight;
@@ -5226,11 +5243,16 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                         cum += ew;
                         dme[i].cum_weight = cum;
                     }
-                    ctx->dist_offsets[vid] = dm_ref;
+                    if (!ds->has_exprs) ctx->dist_offsets[vid] = dm_ref;
+                    if (ctx->dist_dyn) {
+                        DistDyn *dd = (DistDyn *)dvs_spool_ptr(&ctx->pool, ctx->dist_dyn);
+                        dd[n_dyn++] = (DistDyn){ dref, vid, dm_ref };
+                    }
                 }
                 dref = ds->next;
             }
         }
+        ctx->n_dist_dyn = n_dyn;
     }
 
     /* The per-variable hole lists (randc) and value counts are part of the
@@ -5448,6 +5470,40 @@ static int _snapshot_added_vars(dvs_ctx_t *ctx, uint32_t base) {
     return 0;
 }
 
+void dvs_solver_eval_dists(dvs_ctx_t *ctx, const dvs_problem_t *sp) {
+    if (!ctx || !ctx->n_dist_dyn) return;
+    const DistDyn *dd = (const DistDyn *)dvs_spool_ptr(&ctx->pool, ctx->dist_dyn);
+    for (uint32_t k = 0; k < ctx->n_dist_dyn; k++) ctx->dist_offsets[dd[k].var] = 0;
+    /* Newest first: the first added record that holds is written last. */
+    for (uint32_t k = 0; k < ctx->n_dist_dyn; k++) {
+        const DistSpec *ds = (const DistSpec *)dvs_pool_ptr(&sp->pool, dd[k].spec);
+        if (!ds->has_exprs) {
+            ctx->dist_offsets[dd[k].var] = dd[k].dm;
+            continue;
+        }
+        int on = 1;
+        if (ds->guard != EXPR_NULL && (dvs_expr_truth(ctx, sp, ds->guard, &on) || !on))
+            continue;
+        DistMeta *dm = (DistMeta *)dvs_spool_ptr(&ctx->pool, dd[k].dm);
+        DistMetaEntry *dme = (DistMetaEntry *)(dm + 1);
+        const dvs_dist_entry_ex_t *e = (const dvs_dist_entry_ex_t *)(ds + 1);
+        int any = 0;
+        for (uint32_t i = 0; i < ds->n_entries; i++) {
+            int64_t lo = 0, hi = 0, w = 0;
+            /* An entry that cannot be evaluated is never drawn. */
+            if (dvs_expr_value(ctx, sp, e[i].lo, &lo) || dvs_expr_value(ctx, sp, e[i].hi, &hi)
+                    || dvs_expr_value(ctx, sp, e[i].weight, &w) || w < 0)
+                w = 0;
+            dme[i].lo = lo;
+            dme[i].hi = hi;
+            dme[i].weight = w > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)w;
+            dme[i].is_per_value = e[i].is_per_value;
+            any |= w != 0;
+        }
+        ctx->dist_offsets[dd[k].var] = any ? dd[k].dm : 0;
+    }
+}
+
 /* ---- An add names only variables that exist ----
  * A variable an add's items name must be declared by an earlier problem (or
  * made by the compile), or by the add itself. Anything else -- an id gap, an
@@ -5616,9 +5672,10 @@ static int _add_names_known(const dvs_ctx_t *ctx, dvs_problem_t *sp, uint32_t ba
         for (uint32_t i = 0; i < ss->n_vars; i++) _kw_id(&w, ids[i]);
         c = ss->next;
     }
-    for (dvs_expr_t c = sp->dists_head; c != EXPR_NULL && !w.bad; ) {
+    for (dvs_expr_t c = sp->dists_head; c != EXPR_NULL && !w.bad && !w.oom; ) {
         const DistSpec *ds = (const DistSpec *)dvs_pool_ptr(&sp->pool, c);
         _kw_id(&w, ds->var_id);
+        for (uint32_t i = 0; i < dist_spec_n_exprs(ds); i++) _kw_root(&w, dist_spec_expr(ds, i));
         c = ds->next;
     }
     if (mine) DVS_RELEASE(ctx->alloc, mine, nm);

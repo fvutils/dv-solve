@@ -3296,6 +3296,7 @@ static void _diversify(dvs_bbsolver_t *S) { _diversify_sweeps(S, 1u); }
  * not overlap it is dropped. If NO nonzero-weight range overlaps, the dist is
  * left unasserted rather than made unsatisfiable, which matches the picker's
  * own fallback to a uniform draw over the feasible domain in that case.
+ * A distribution read per call (has_exprs) is not encoded.
  *
  * @return 1 on success, 0 if a spec cannot be encoded (caller defers).
  */
@@ -3304,6 +3305,9 @@ static int _bb_encode_dists(dvs_bbsolver_t *S) {
         DistSpec *ds = (DistSpec *)POOL_PTR(S->problem, dref);
         dvs_dist_entry_t *ents = (dvs_dist_entry_t *)(ds + 1);
         uint32_t vid = ds->var_id;
+        /* One read per call holds only under its guard, from its STATE
+         * values: membership is the writer's own constraint. */
+        if (ds->has_exprs) { dref = ds->next; continue; }
         if (vid >= S->n_vars || !S->vars[vid].defined) return 0;
 
         dvs_bv_t v = bv_for_var(S, vid);

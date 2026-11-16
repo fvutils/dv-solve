@@ -228,6 +228,39 @@ shares `weight` (SystemVerilog `:/`).
 ```
 ````
 
+```{c:function} dvs_expr_t dvs_builder_add_dist_ex(dvs_builder_t *b, uint32_t var_id, dvs_expr_t guard, uint32_t n_entries, const dvs_dist_entry_ex_t *entries)
+A distribution evaluated on each call, from the STATE values pinned for it: a
+`dist` under a condition, or with weights or bounds that are not constants. It
+holds when `guard` is nonzero (`EXPR_NULL`: always). When more than one
+distribution on a variable holds, the first added is used; when none does, or
+its weights add up to 0, the variable is drawn as if it had none. The guard
+and the entries read only STATE variables and constants, else
+{c:func}`dvs_solver_compile` refuses the problem
+({c:macro}`DVS_COMPILE_DIST_RAND`). Returns `EXPR_NULL` in a foreach body
+(see {c:func}`dvs_builder_add_dist_elem_ex`), if an entry expression is
+`EXPR_NULL`, or on overflow.
+```
+
+````{c:struct} dvs_dist_entry_ex_t
+One entry of a distribution read on each call.
+
+```{c:member} dvs_expr_t lo
+Lowest value of the range.
+```
+
+```{c:member} dvs_expr_t hi
+Highest value of the range.
+```
+
+```{c:member} dvs_expr_t weight
+The entry's weight; a negative one counts as 0.
+```
+
+```{c:member} uint8_t is_per_value
+As in {c:struct}`dvs_dist_entry_t`.
+```
+````
+
 ### Arrays
 
 A problem can declare arrays whose size is given on each call (SystemVerilog
@@ -302,6 +335,12 @@ Give element `index` of the array a weighted distribution, in the body of an
 open foreach ({c:func}`dvs_builder_add_dist` is refused there).
 ```
 
+```{c:function} dvs_expr_t dvs_builder_add_dist_elem_ex(dvs_builder_t *b, uint32_t array_id, dvs_expr_t index, dvs_expr_t guard, uint32_t n_entries, const dvs_dist_entry_ex_t *entries)
+{c:func}`dvs_builder_add_dist_ex` on element `index` of the array, in the
+body of an open foreach. The guard and the entries may also read the loop
+index and elements of STATE arrays.
+```
+
 ```{c:macro} DVS_ARRAY_MEMBER(id)
 A member of {c:func}`dvs_builder_add_all_different` that is all the elements
 of array `id`.
@@ -351,7 +390,9 @@ then makes the checks {c:func}`dvs_solver_compile` makes:
 - every variable an expression, all-different, source group or distribution
   names is declared;
 - no width over {c:macro}`DVS_MAX_WIDTH`, no reversed slice, and no expression
-  nested more than 20000 deep.
+  nested more than 20000 deep;
+- a distribution's guard and entries read only STATE values
+  ({c:macro}`DVS_COMPILE_DIST_RAND`).
 
 It needs only libc, and is in the writer library. A problem it passes can
 still fail where the solve's own stack is smaller than that nesting needs.
@@ -784,6 +825,11 @@ already uses for a variable of its own, or re-declares one at another width.
 ```{c:macro} DVS_COMPILE_ARRAYS
 −5: the problem declares arrays ({c:func}`dvs_builder_add_array`). Only a
 handle solves such a problem, with {c:func}`dvs_randomize_arrays`.
+```
+
+```{c:macro} DVS_COMPILE_DIST_RAND
+−6: a distribution's guard, bounds or weights
+({c:func}`dvs_builder_add_dist_ex`) read a variable that is not STATE.
 ```
 
 ## Incremental solving
