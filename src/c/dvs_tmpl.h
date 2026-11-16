@@ -54,6 +54,9 @@ dvs_tmpl_t *dvs_handle_tmpl(dvs_handle_t *h);
 /** How many expanded problems were built so far (for tests). */
 uint32_t dvs_tmpl_n_expansions(const dvs_tmpl_t *t);
 
+/** The expanded problem's handle the last call solved, or NULL (for tests). */
+dvs_handle_t *dvs_tmpl_last_expansion(const dvs_tmpl_t *t);
+
 /* ------------------------------------------------------------------ */
 /* Parts (dvs_parts.c): problems assembled from several images         */
 /* ------------------------------------------------------------------ */
@@ -108,6 +111,9 @@ uint32_t dvs_parts_n_assembled(dvs_handle_t *h);
 
 /** How many learnt clauses a handle's context holds (for tests). */
 uint32_t dvs_handle_n_learnt(const dvs_handle_t *h);
+
+/** How many conflicts a handle's last solve took (for tests). */
+uint64_t dvs_handle_n_conflicts(const dvs_handle_t *h);
 
 /** What a handle carries from one call to the next, for
  *  dvs_handle_import_state() on a fresh handle of the same image, which then

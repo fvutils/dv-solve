@@ -1627,6 +1627,161 @@ static uint32_t _reify_cmp_var_var(dvs_ctx_t *ctx, dvs_binop_t op,
     }
 }
 
+/* Record g <-> x in {e[0..n-1]} for the value picker (DvsInSet). The OR of
+ * reified equalities that defines g gives x no domain: until all but one
+ * equality is false nothing narrows x, so the search drew x blind over its
+ * whole range (2^32 values for an enum `inside` a queue, docs H1). p0 is the
+ * propagator count before g's definition. Best effort: without the entry
+ * the picker draws as before. */
+static void _note_in_set(dvs_ctx_t *ctx, uint32_t p0, uint32_t x, uint32_t g, uint32_t n,
+                         const uint32_t *e) {
+    if (ctx->n_in_sets == ctx->in_sets_cap) {
+        uint32_t cap = ctx->in_sets_cap ? 2 * ctx->in_sets_cap : 8;
+        DvsInSet *m = (DvsInSet *)dvs_ctx_resize(ctx, ctx->in_sets,
+                                                 ctx->in_sets_cap * sizeof(DvsInSet),
+                                                 cap * sizeof(DvsInSet));
+        if (!m) return;
+        ctx->in_sets = m;
+        ctx->in_sets_cap = cap;
+    }
+    uint32_t ref = dvs_spool_alloc(&ctx->pool, n * (uint32_t)sizeof(uint32_t),
+                                   (uint32_t)_Alignof(uint32_t));
+    if (ref == EXPR_NULL) return;
+    memcpy(dvs_spool_ptr(&ctx->pool, ref), e, n * sizeof(uint32_t));
+    ctx->in_sets[ctx->n_in_sets++] = (DvsInSet){
+        .x = x, .g = g, .elems = ref, .n = n, .prop = p0 };
+}
+
+/* t of a leaf `x == t` or `t == x`, t a constant or a variable; else
+ * EXPR_NULL. */
+static dvs_expr_t _eq_other(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t r, uint32_t x) {
+    if (*(ExprKind *)dvs_pool_ptr(&sp->pool, r) != EXPR_BINARY) return EXPR_NULL;
+    ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, r);
+    uint32_t id;
+    int64_t c;
+    if (e->op != DVS_BIN_EQ) return EXPR_NULL;
+    dvs_expr_t t = _is_var(sp, e->lhs, &id) && _resolve(ctx, id) == x   ? e->rhs
+                   : _is_var(sp, e->rhs, &id) && _resolve(ctx, id) == x ? e->lhs
+                                                                        : EXPR_NULL;
+    return t != EXPR_NULL && (_is_var(sp, t, &id) || _is_const(sp, t, &c)) ? t : EXPR_NULL;
+}
+
+/* The `x == t` leaves of OR tree r, into out[n...] (out NULL: counted
+ * only): the count so far, or -1 when a leaf is neither one nor the
+ * constant 0 (Verilator starts an `inside` chain from false). *x unset
+ * (EXPR_NULL): the first leaf's lhs variable is x, or its rhs one if rhs. */
+static int _eq_set_leaves(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t r, uint32_t *x,
+                          int rhs, dvs_expr_t *out, int n) {
+    if (r == EXPR_NULL || dvs_stack_low(&ctx->stack_guard)) return -1;
+    ExprBinary *e = (ExprBinary *)dvs_pool_ptr(&sp->pool, r);
+    int64_t c;
+    if (e->kind == EXPR_BINARY && e->op == DVS_BIN_OR) {
+        n = _eq_set_leaves(ctx, sp, e->lhs, x, rhs, out, n);
+        return n < 0 ? n : _eq_set_leaves(ctx, sp, e->rhs, x, rhs, out, n);
+    }
+    if (_is_const(sp, r, &c)) return c ? -1 : n;
+    if (*x == EXPR_NULL && e->kind == EXPR_BINARY && _is_var(sp, rhs ? e->rhs : e->lhs, x))
+        *x = _resolve(ctx, *x);
+    if (*x == EXPR_NULL || _eq_other(ctx, sp, r, *x) == EXPR_NULL) return -1;
+    if (out) out[n] = r;
+    return n + 1;
+}
+
+/* The number of `x == t` leaves of OR tree r, and x (the first leaf's lhs
+ * variable, else its rhs one); -1 when r is not such a tree. */
+static int _eq_set_count(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t r, uint32_t *x) {
+    int n = -1;
+    for (int rhs = 0; rhs < 2 && n < 2; rhs++) {
+        *x = EXPR_NULL;
+        n = _eq_set_leaves(ctx, sp, r, x, rhs, NULL, 0);
+    }
+    return n;
+}
+
+/* An OR of `x == t` leaves, as Verilator writes `x inside {a, b, ...}`
+ * (past MAX_OR_CLAUSES constants there is no DisjClause, and no holes):
+ * reified leaf by leaf as any OR, and recorded as x's set. EXPR_NULL when r
+ * is not one, or does not compile. */
+static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref);
+static uint32_t _eq_set_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t r) {
+    uint32_t x;
+    int n = _eq_set_count(ctx, sp, r, &x);
+    if (n < 2) return EXPR_NULL;
+    dvs_expr_t *leaf = (dvs_expr_t *)DVS_ALLOC(ctx->alloc, (size_t)n * sizeof *leaf);
+    uint32_t *e = (uint32_t *)DVS_ALLOC(ctx->alloc, (size_t)n * sizeof *e);
+    uint32_t p0 = ctx->n_props, g = EXPR_NULL;
+    if (leaf && e && _eq_set_leaves(ctx, sp, r, &x, 0, leaf, 0) == n) {
+        for (int i = 0; i < n; i++) {
+            uint32_t gi = _bool_to_var(ctx, sp, leaf[i]);
+            g = i ? _or_guards(ctx, g, gi) : gi;
+            e[i] = _value_to_var(ctx, sp, _eq_other(ctx, sp, leaf[i], x), ctx->vars[x].width);
+            if (g == EXPR_NULL || e[i] == EXPR_NULL) { g = EXPR_NULL; break; }
+        }
+        if (g != EXPR_NULL) _note_in_set(ctx, p0, x, g, (uint32_t)n, e);
+    }
+    if (leaf) DVS_RELEASE(ctx->alloc, leaf, (size_t)n * sizeof *leaf);
+    if (e) DVS_RELEASE(ctx->alloc, e, (size_t)n * sizeof *e);
+    return g;
+}
+
+/* A constraint that is an OR of `x == c` leaves, c constants, whose values
+ * cover one range [lo, hi] (an enum's validity, which Verilator writes as
+ * `x == v0 || x == v1 || ...`): it is x's bounds. Past MAX_OR_CLAUSES
+ * leaves it was reified leaf by leaf, and every call propagated and
+ * validated the whole chain: 509 leaves for riscv-dv's instruction names
+ * (S12.1). Constants read as the DisjClause path reads them, x at most 32
+ * bits as for its holes. 1: compiled, -1: UNSAT, 0: not one. */
+static int _eq_set_root(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t r) {
+    uint32_t x;
+    int n = _eq_set_count(ctx, sp, r, &x);
+    if (n < 2 || ctx->vars[x].width > 32) return 0;
+    dvs_expr_t *leaf = (dvs_expr_t *)DVS_ALLOC(ctx->alloc, (size_t)n * sizeof *leaf);
+    uint8_t *seen = (uint8_t *)DVS_ALLOC(ctx->alloc, (size_t)n);
+    int rc = 0;
+    if (leaf && seen && _eq_set_leaves(ctx, sp, r, &x, 0, leaf, 0) == n) {
+        int64_t c, lo = INT64_MAX, hi = INT64_MIN;
+        int i = 0;
+        for (; i < n && _is_const(sp, _eq_other(ctx, sp, leaf[i], x), &c); i++) {
+            if (c < lo) lo = c;
+            if (c > hi) hi = c;
+        }
+        /* n leaves cover [lo, hi] only if it spans at most n values, and
+         * then each one is seen. */
+        if (i == n && (uint64_t)hi - (uint64_t)lo < (uint64_t)n) {
+            uint64_t left = (uint64_t)hi - (uint64_t)lo + 1;
+            memset(seen, 0, (size_t)n);
+            for (i = 0; i < n; i++) {
+                _is_const(sp, _eq_other(ctx, sp, leaf[i], x), &c);
+                if (!seen[c - lo]++) left--;
+            }
+            if (!left)
+                rc = ctx_tighten_lb64(ctx, x, lo) == PROP_CONFLICT
+                     || ctx_tighten_ub64(ctx, x, hi) == PROP_CONFLICT ? -1 : 1;
+        }
+    }
+    if (leaf) DVS_RELEASE(ctx->alloc, leaf, (size_t)n * sizeof *leaf);
+    if (seen) DVS_RELEASE(ctx->alloc, seen, (size_t)n);
+    return rc;
+}
+
+/* A constraint `x inside {a, b, ...}` of 2 to MAX_OR_CLAUSES leaves, some of
+ * them variables, is a DisjClause, which gives x no values to draw from
+ * (constant ones get holes): x was drawn blind and refuted one value at a
+ * time. Record the leaves as x's set (DvsInSet), which always holds (S12.3).
+ * p0 is the propagator count before the DisjClause. */
+static void _note_root_eq_set(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t r, uint32_t p0) {
+    uint32_t x, id, e[MAX_OR_CLAUSES], g;
+    dvs_expr_t leaf[MAX_OR_CLAUSES];
+    int n = _eq_set_count(ctx, sp, r, &x), vars = 0;
+    if (n < 2 || n > MAX_OR_CLAUSES || _eq_set_leaves(ctx, sp, r, &x, 0, leaf, 0) != n) return;
+    for (int i = 0; i < n; i++) vars += _is_var(sp, _eq_other(ctx, sp, leaf[i], x), &id);
+    for (int i = 0; vars && i < n; i++)
+        if ((e[i] = _value_to_var(ctx, sp, _eq_other(ctx, sp, leaf[i], x),
+                                  ctx->vars[x].width)) == EXPR_NULL)
+            return;
+    if (vars && (g = _const_guard(ctx, 1)) != EXPR_NULL) _note_in_set(ctx, p0, x, g, (uint32_t)n, e);
+}
+
 static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) {
     if (ref == EXPR_NULL || dvs_stack_low(&ctx->stack_guard)) return EXPR_NULL;
     ExprKind k = *(ExprKind *)dvs_pool_ptr(&sp->pool, ref);
@@ -1730,15 +1885,18 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
             uint32_t ne = eis->n_elems;
             if (ne == 0) return _const_guard(ctx, 0);   /* empty set: never */
             dvs_expr_t *elems = (dvs_expr_t *)(eis + 1);
-            uint32_t acc = EXPR_NULL;
+            uint32_t *e_ids = (uint32_t *)DVS_ALLOC(ctx->alloc, (size_t)ne * sizeof *e_ids);
+            if (!e_ids) return EXPR_NULL;
+            uint32_t p0 = ctx->n_props, acc = EXPR_NULL;
             for (uint32_t i = 0; i < ne; i++) {
-                uint32_t e_id = _value_to_var(ctx, sp, elems[i], w);
-                if (e_id == EXPR_NULL) return EXPR_NULL;
-                uint32_t g = _reify_cmp_var_var(ctx, DVS_BIN_EQ, v_id, e_id);
-                if (g == EXPR_NULL) return EXPR_NULL;
-                acc = (i == 0) ? g : _or_guards(ctx, acc, g);
-                if (acc == EXPR_NULL) return EXPR_NULL;
+                uint32_t e_id = e_ids[i] = _value_to_var(ctx, sp, elems[i], w);
+                uint32_t g = e_id == EXPR_NULL ? EXPR_NULL
+                                               : _reify_cmp_var_var(ctx, DVS_BIN_EQ, v_id, e_id);
+                acc = (i == 0 || g == EXPR_NULL) ? g : _or_guards(ctx, acc, g);
+                if (acc == EXPR_NULL) break;
             }
+            if (acc != EXPR_NULL) _note_in_set(ctx, p0, v_id, acc, ne, e_ids);
+            DVS_RELEASE(ctx->alloc, e_ids, (size_t)ne * sizeof *e_ids);
             return acc;
         }
         {
@@ -1797,9 +1955,12 @@ static uint32_t _bool_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t ref) 
     if (eb->op == DVS_BIN_AND)
         return _and_guards(ctx, _bool_to_var(ctx, sp, eb->lhs),
                                 _bool_to_var(ctx, sp, eb->rhs));
-    if (eb->op == DVS_BIN_OR)
+    if (eb->op == DVS_BIN_OR) {
+        uint32_t g = _eq_set_to_var(ctx, sp, ref);
+        if (g != EXPR_NULL) return g;
         return _or_guards(ctx, _bool_to_var(ctx, sp, eb->lhs),
                                _bool_to_var(ctx, sp, eb->rhs));
+    }
 
     /* A bitwise operator over two 1-bit values is the Boolean connective of
      * their truths (one bit: nonzero is the bit). svcorpus OR leaves arrive as
@@ -2064,6 +2225,93 @@ static void _note_ext_memo(dvs_ctx_t *ctx, uint32_t src, uint32_t r,
     ctx->ext_memo[ctx->n_ext_memo++] = (DvsExtMemo){ .src = src, .r = r, .to = to, .sgn = sgn };
 }
 
+/* r == a[hi:lo], at 64 bits when either needs it. Returns the
+ * propagator's id, or EXPR_NULL. */
+static uint32_t _add_slice(dvs_ctx_t *ctx, uint32_t r, uint32_t a,
+                           uint32_t hi, uint32_t lo) {
+    uint32_t id = ctx->n_props;
+    uint32_t ref = (_var_needs_wide(ctx, r) || _var_needs_wide(ctx, a))
+        ? prop_add_bit_slice_64(ctx, r, a, (uint8_t)hi, (uint8_t)lo, 0)
+        : prop_add_bit_slice_32(ctx, r, a, (uint8_t)hi, (uint8_t)lo, 0);
+    return ref == EXPR_NULL ? EXPR_NULL : id;
+}
+
+/* A new unsigned aux var of w bits (1..64), or EXPR_NULL. */
+static uint32_t _new_bits_var(dvs_ctx_t *ctx, uint32_t w) {
+    if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
+    uint32_t id = ctx->n_vars;
+    int64_t max_val = (w >= 64) ? (int64_t)UINT64_MAX : (int64_t)((1ULL << w) - 1);
+    if (_init_aux_tiered(ctx, &ctx->vars[id], w, VAR_AUX, 0, max_val) != 0)
+        return EXPR_NULL;   /* B24 */
+    ctx->n_vars = id + 1;
+    if (ctx->watcher_heads) ctx->watcher_heads[id] = EXPR_NULL;
+    return id;
+}
+
+/* Link the select just recorded to each earlier select of the same word that
+ * shares bits with it, through a variable t for the shared bits: t is
+ * either select's bits there. t is one of the two when the shared bits are
+ * all of it. Each select's own propagator meets the word only at its
+ * interval, so without the link a select that a wider one fixes is not
+ * fixed itself: a wrong `w[15:13]` while `w[15:5] == 0` was refuted only
+ * by walking w's bounds over its free bits, 2^16 steps for a 32-bit w
+ * (riscv-dv's illegal_instr). The links follow from the selects'
+ * definitions, so the solutions are the same. Pairwise, as a word has few
+ * distinct selects. Best effort: out of room, the links made so far stand. */
+static void _link_slices(dvs_ctx_t *ctx) {
+    const DvsSliceMemo m = ctx->slice_memo[ctx->n_slice_memo - 1];
+    for (uint32_t i = 0; i + 1 < ctx->n_slice_memo; i++) {
+        const DvsSliceMemo o = ctx->slice_memo[i];
+        uint32_t oh = o.hi < m.hi ? o.hi : m.hi, ol = o.lo > m.lo ? o.lo : m.lo;
+        if (o.src != m.src || o.r == m.r || oh < ol) continue;
+        uint32_t t = (oh == m.hi && ol == m.lo) ? m.r
+                   : (oh == o.hi && ol == o.lo) ? o.r
+                   : _new_bits_var(ctx, oh - ol + 1);
+        if (t == EXPR_NULL) return;
+        if (t != m.r) _add_slice(ctx, t, m.r, oh - m.lo, ol - m.lo);
+        if (t != o.r) _add_slice(ctx, t, o.r, oh - o.lo, ol - o.lo);
+    }
+}
+
+/* The variable for bits [hi:lo] (hi < 64) of src's value: the one an earlier
+ * select of the same bits has, else a new one, recorded and linked to the
+ * word's other selects (DvsSliceMemo). Given r, r becomes the select (a
+ * top-level `r == src[hi:lo]`; r unsigned and as wide as the select). A
+ * select of a select is a select of the word, x[15:5][10:8] is x[15:13],
+ * within the inner select's bits (above them it reads zeros). */
+static uint32_t _slice_var(dvs_ctx_t *ctx, uint32_t src, uint32_t hi,
+                           uint32_t lo, uint32_t r) {
+    for (uint32_t i = 0; i < ctx->n_slice_memo; i++) {
+        const DvsSliceMemo *m = &ctx->slice_memo[i];
+        if (m->r == src && hi <= (uint32_t)(m->hi - m->lo)) {
+            src = m->src; hi += m->lo; lo += m->lo;
+            break;
+        }
+    }
+    if (r == EXPR_NULL) {
+        for (uint32_t i = 0; i < ctx->n_slice_memo; i++) {
+            const DvsSliceMemo *m = &ctx->slice_memo[i];
+            if (m->src == src && m->hi == hi && m->lo == lo) return m->r;
+        }
+        if ((r = _new_bits_var(ctx, hi - lo + 1)) == EXPR_NULL) return EXPR_NULL;
+    }
+    uint32_t prop = _add_slice(ctx, r, src, hi, lo);
+    if (prop == EXPR_NULL) return r;
+    if (ctx->n_slice_memo == ctx->slice_memo_cap) {
+        uint32_t cap = ctx->slice_memo_cap ? 2 * ctx->slice_memo_cap : 8;
+        DvsSliceMemo *m = (DvsSliceMemo *)dvs_ctx_resize(ctx, ctx->slice_memo,
+                                                         ctx->slice_memo_cap * sizeof(DvsSliceMemo),
+                                                         cap * sizeof(DvsSliceMemo));
+        if (!m) return r;   /* best effort, as _note_ext_memo */
+        ctx->slice_memo = m;
+        ctx->slice_memo_cap = cap;
+    }
+    ctx->slice_memo[ctx->n_slice_memo++] = (DvsSliceMemo){
+        .src = src, .r = r, .prop = prop, .hi = (uint8_t)hi, .lo = (uint8_t)lo };
+    _link_slices(ctx);
+    return r;
+}
+
 static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
                                dvs_expr_t ref, uint32_t width) {
     if (ref == EXPR_NULL || dvs_stack_low(&ctx->stack_guard)) return EXPR_NULL;
@@ -2256,24 +2504,9 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
     if (k == EXPR_EXTRACT) {
         ExprExtract *ex = (ExprExtract *)dvs_pool_ptr(&sp->pool, ref);
         if (ex->hi_bit > 63) return EXPR_NULL;   /* wider than a CDCL var */
-        uint32_t out_w = (uint32_t)(ex->hi_bit - ex->lo_bit + 1);
         uint32_t src_id = _value_to_var(ctx, sp, ex->operand, 0);
         if (src_id == EXPR_NULL) return EXPR_NULL;
-        if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
-        uint32_t r_id = ctx->n_vars;
-        int64_t max_val = (out_w >= 64) ? (int64_t)UINT64_MAX
-                                        : (int64_t)((1ULL << out_w) - 1);
-        if (_init_aux_tiered(ctx, &ctx->vars[r_id], out_w, VAR_AUX,
-                             0, max_val) != 0)
-            return EXPR_NULL;   /* B24 */
-        ctx->n_vars = r_id + 1;
-        if (ctx->watcher_heads) ctx->watcher_heads[r_id] = EXPR_NULL;
-        if (_var_needs_wide(ctx, r_id) || _var_needs_wide(ctx, src_id)) {
-            prop_add_bit_slice_64(ctx, r_id, src_id, ex->hi_bit, ex->lo_bit, 0);
-        } else {
-            prop_add_bit_slice_32(ctx, r_id, src_id, ex->hi_bit, ex->lo_bit, 0);
-        }
-        return r_id;
+        return _slice_var(ctx, src_id, ex->hi_bit, ex->lo_bit, EXPR_NULL);
     }
     if (k == EXPR_CONCAT) {
         /* {hi, lo} as a value -- `{i[31], i[7], i[30:25], i[11:8]} != 0`, a
@@ -3006,16 +3239,21 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                                ? UINT32_MAX
                                : _resolve(ctx, clauses[i].rhs_var_id);
                 }
+                uint32_t p0 = ctx->n_props;
                 uint32_t ref = prop_add_disj_clause(ctx, (uint32_t)n,
                                                      vids, ops, cvs, 0,
                                                      rvids);
-                return (ref != EXPR_NULL) ? 1 : 0;
+                if (ref == EXPR_NULL) return 0;
+                _note_root_eq_set(ctx, sp, root, p0);
+                return 1;
             }
             /* Fallback: convert the whole OR tree to a Boolean guard via
              * _bool_to_var and tighten the guard to 1. This handles cases
              * the OrClause flattener can't (e.g. leaves are themselves OR
              * trees wrapped in `not`, or AND-of-comparisons leaves). */
             {
+                int rc = _eq_set_root(ctx, sp, root);
+                if (rc) return rc;
                 uint32_t g = _bool_to_var(ctx, sp, root);
                 if (g != EXPR_NULL) {
                     if (ctx_tighten_lb64(ctx, g, 1) == PROP_CONFLICT) return -1;
@@ -3527,13 +3765,12 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
                 uint32_t operand_id;
                 if (ex->hi_bit < 64 && _is_var(sp, ex->operand, &operand_id)) {
                     operand_id = _resolve(ctx, operand_id);
-                    if (_var_needs_wide(ctx, r_id) || _var_needs_wide(ctx, operand_id)) {
-                        prop_add_bit_slice_64(ctx, r_id, operand_id,
-                                              ex->hi_bit, ex->lo_bit, 0);
-                    } else {
-                        prop_add_bit_slice_32(ctx, r_id, operand_id,
-                                              ex->hi_bit, ex->lo_bit, 0);
-                    }
+                    /* r is then the select's value itself: share it. */
+                    if (ctx->vars[r_id].width == ex->hi_bit - ex->lo_bit + 1
+                            && !(ctx->vars[r_id].flags & VAR_SIGNED))
+                        _slice_var(ctx, operand_id, ex->hi_bit, ex->lo_bit, r_id);
+                    else
+                        _add_slice(ctx, r_id, operand_id, ex->hi_bit, ex->lo_bit);
                     return 1;
                 }
             }

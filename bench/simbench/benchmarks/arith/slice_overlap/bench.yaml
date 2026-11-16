@@ -1,0 +1,4 @@
+id: arith.slice_overlap
+tier: standard
+tags: [arith, slice, inline, solve_before]
+fields: [kind, hi3, lo2, w]

@@ -378,6 +378,10 @@ uint32_t dvs_handle_n_learnt(const dvs_handle_t *h) {
     return h->ctx ? lcg_n_clauses((const LCGCtx *)h->ctx->lcg) : 0;
 }
 
+uint64_t dvs_handle_n_conflicts(const dvs_handle_t *h) {
+    return h->ctx ? h->ctx->conflict_count : 0;
+}
+
 /* Words of the policy at the head of a state export. */
 #define STATE_HEAD 9
 

@@ -1,0 +1,4 @@
+id: array.inside_queue_enum
+tier: standard
+tags: [array, queue, inside, enum, std_randomize]
+fields: [name]

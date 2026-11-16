@@ -595,6 +595,16 @@ target_link_libraries(test_linprobe PRIVATE dv_solve)
 target_include_directories(test_linprobe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_linprobe COMMAND test_linprobe)
 
+add_executable(test_slice_share tests/c/test_slice_share.c)
+target_link_libraries(test_slice_share PRIVATE dv_solve)
+target_include_directories(test_slice_share PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_slice_share COMMAND test_slice_share)
+
+add_executable(test_in_set tests/c/test_in_set.c)
+target_link_libraries(test_in_set PRIVATE dv_solve)
+target_include_directories(test_in_set PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
+add_test(NAME test_in_set COMMAND test_in_set)
+
 add_executable(test_presolve tests/c/test_presolve.c)
 target_link_libraries(test_presolve PRIVATE dv_solve)
 target_include_directories(test_presolve PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)

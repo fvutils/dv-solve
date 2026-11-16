@@ -50,6 +50,80 @@ A 2026-07-10 generative fuzz sweep (`tests/formal/test_fuzz_cross_check.py`,
 
 ## 🟥 OPEN
 
+- **B134: `x inside {a, b, ...}` over variables (a DisjClause) drew x blind — FIXED 2026-11-16 (PERFORMANCE).**
+  A constraint OR of 2-16 `x == t` leaves compiles to a DisjClause. With
+  constant t it gets holes; with some t variables (STATE scalars, pinned
+  before the search) x had no values to draw from, so a 32-bit x was drawn
+  over 2^32 values and refuted one value at a time (B132's "Not covered").
+  Fixed (`dvs_compile.c` `_note_root_eq_set`): such a DisjClause also records
+  its leaves as x's `DvsInSet`, guard the constant 1, so `_pick_in_set` draws
+  from the elements' values once they are fixed. Constant-only DisjClauses
+  are unchanged (holes). construct.inside_vars (new bench): 31.5 -> 1.7
+  us/call. Test `test_in_set` (root vars). Verilator
+  `docs/design/dvs_hotspot_h1.md` "Follow-ups (S12)".
+
+- **B133: an enum's validity (an OR of hundreds of `x == k`) was propagated and validated leaf by leaf every call — FIXED 2026-11-16 (PERFORMANCE).**
+  Verilator writes enum validity as `x == v0 || x == v1 || ...`; for
+  riscv-dv's `riscv_instr_name_t` that is 509 leaves. Past MAX_OR_CLAUSES it
+  was reified (509 reified equalities and a 509-deep `ite` OR chain, woken on
+  every decision of x) and the model check walked the chain with no
+  short-circuit. It made the B132 site cost about 88 us per randomize(),
+  which riscv_jump_stress_test seeds 2-3 hit 5201 times once B132 changed
+  their config draw (0.25 -> 0.77 s). Fixed:
+  - `dvs_compile.c` `_eq_set_root`: a constraint OR of `x == c` (x at most 32
+    bits) whose constants cover one range [lo, hi] is x's bounds, no
+    propagator; other sets compile as before;
+  - `dvs_validate.c`: `&&` and `||` short-circuit.
+
+  Values change where such an enum is drawn (no set entry for it now).
+  array.inside_queue_enum 93.2 -> 33.3 us/call; the jump_stress handle-8
+  capture 45.2 -> 15.1 us per dv-solve call; riscv-dv dvs column (45 runs)
+  39.3 -> 20.6 s. Test `test_in_set` (enum
+  validity). Verilator `docs/design/dvs_hotspot_h1.md` "Follow-ups (S12)".
+
+- **B132: `x inside {queue}` drew x blind over its whole range — FIXED 2026-11-16 (PERFORMANCE).**
+  riscv-dv's `get_rand_instr` constrains a 32-bit enum `inside` STATE
+  queues (and `!inside` a third). The expansion turned each into an OR of
+  reified `x == q[k]`, which gives x no domain, so each call drew x over
+  2^32 values and refuted it about 56 times. A constant `inside` past 16
+  items (no DisjClause, no holes) did the same. Fixed:
+  - `dvs_tmpl.c` `xp_reduce` emits one `IN_SET` for `q.or() with (item == x)`;
+  - `dvs_compile.c` records each reified set and each OR of `x == t`
+    (`DvsInSet`: x, its guard, the element vars);
+  - `dvs_search.c` `_pick_in_set` draws x uniformly from the distinct values
+    of the sets whose guard is 1, minus those whose guard is 0, once every
+    element is fixed.
+
+  The OR chain stays the constraint, and a set with an unfixed (random)
+  element is not drawn from. A duplicated value is drawn no more often
+  (11.4.13, 18.5.10).
+  - array.inside_queue_enum: 2,112 -> 94 us/call;
+  - riscv_rand_jump_test seed 1: 25.3 -> 0.5 s.
+
+  Values change only on that site: replaying every other simbench capture
+  with the change off gives 0 mismatches. Test `test_in_set`. Not covered:
+  a root OR of 2-16 `x == var` leaves (DisjClause). Verilator
+  `docs/design/dvs_hotspot_h1.md`.
+
+- **B131: overlapping part-selects of one word were refuted by a 2^16-step bounds walk — FIXED 2026-11-15 (PERFORMANCE).**
+  riscv-dv's `riscv_illegal_instr` constrains `instr_bin[15:13] == c_msb`
+  and, by `reserved_c`, wider selects over the same bits (`[15:5] == 0`,
+  `[15:10] == 6'b100111`, `[15:0] == 0`). The selects cross, so the field
+  split leaves the word whole, and each select reached it only through its
+  interval: a wrong `c_msb` was refuted by walking `instr_bin`'s bounds over
+  its free bits `[31:16]`, about 2^16 steps, with 327 identical `[31:20]`
+  selects (one per element of `!(instr_bin[31:20] inside {csrs})`) woken on
+  every step. Fixed (`dvs_compile.c` `_slice_var`, `_link_slices`): one
+  variable per distinct select (src, hi, lo), a select of a select composed
+  onto the word, and every two selects of a word that share bits linked
+  through a variable for those bits. Same-seed values: the sharing alone
+  changes none; the links change the search, so values differ (34 values
+  in 9 of 96 calls on `riscv/illegal_instr_h36`; every result is still
+  validated against the constraints).
+  arith.slice_overlap 132 ms -> 29 us/call, scenario.riscv_illegal_instr
+  92.6 -> 5.4 ms/call, `ill_h36` replay 103.7 -> 1.9 ms/call. Test
+  `test_slice_share`. Verilator `docs/design/dvs_hotspot_h2.md`.
+
 - **B130: memmap.soc_mem_map samples a reused bitblast context slowly and clumps it — OPEN 2026-11-04 (PERFORMANCE + DIVERSITY).**
   (Numbered B130 because `wpk/solve-stats-routing-gap` already uses B129.)
   simbench dvs-standalone, N=200, seed 1: 2 distinct problems, 209 reuses,

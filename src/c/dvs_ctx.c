@@ -188,6 +188,12 @@ static dvs_ctx_t *_ctx_init(dvs_ctx_t *ctx, void *pool_buf, size_t pool_size,
     ctx->ext_memo        = NULL;
     ctx->n_ext_memo      = 0;
     ctx->ext_memo_cap    = 0;
+    ctx->slice_memo      = NULL;
+    ctx->n_slice_memo    = 0;
+    ctx->slice_memo_cap  = 0;
+    ctx->in_sets         = NULL;
+    ctx->n_in_sets       = 0;
+    ctx->in_sets_cap     = 0;
     memset(&ctx->divisors, 0, sizeof ctx->divisors);
     ctx->divisors.alloc = ctx->alloc;
     ctx->dec_tier        = NULL;
@@ -505,6 +511,10 @@ void dvs_solver_destroy(dvs_ctx_t *ctx) {
     ctx->mul_links = NULL; ctx->n_mul_links = ctx->mul_links_cap = 0;
     dvs_ctx_free(ctx, ctx->ext_memo, (size_t)ctx->ext_memo_cap * sizeof(DvsExtMemo));
     ctx->ext_memo = NULL; ctx->n_ext_memo = ctx->ext_memo_cap = 0;
+    dvs_ctx_free(ctx, ctx->slice_memo, (size_t)ctx->slice_memo_cap * sizeof(DvsSliceMemo));
+    ctx->slice_memo = NULL; ctx->n_slice_memo = ctx->slice_memo_cap = 0;
+    dvs_ctx_free(ctx, ctx->in_sets, (size_t)ctx->in_sets_cap * sizeof(DvsInSet));
+    ctx->in_sets = NULL; ctx->n_in_sets = ctx->in_sets_cap = 0;
     dvs_divisors_free(&ctx->divisors);
     dvs_ctx_free(ctx, ctx->dec_tier, ctx->dec_tier_n);
     ctx->dec_tier = NULL; ctx->dec_tier_n = 0;

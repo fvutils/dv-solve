@@ -113,6 +113,29 @@ typedef struct {
     uint8_t  _pad;
 } DvsExtMemo;
 
+/* A variable that IS bits [hi:lo] of src's value, unsigned: the var compile
+ * made for an extract, or a declared one a top-level `r == src[hi:lo]`
+ * defines. Kept so a second select of the same bits reuses it, and so
+ * selects of one word that share bits are linked (_link_slices). prop is
+ * its defining propagator's id: the entry goes with it on restore. */
+typedef struct {
+    uint32_t src, r;
+    uint32_t prop;
+    uint8_t  hi, lo;
+    uint8_t  _pad[2];
+} DvsSliceMemo;
+
+/* g <-> x is one of the n variables at spool ref `elems` (`x inside {q}`,
+ * an OR of `x == t`): the value picker draws x from their values while g is
+ * 1 and they are fixed, and avoids them while g is 0 (_pick_in_set). prop
+ * is the propagator count before g's definition: a restore to that count
+ * drops the entry. */
+typedef struct {
+    uint32_t x, g;
+    uint32_t elems, n;
+    uint32_t prop;
+} DvsInSet;
+
 /* A pin made outside any checkpoint (dvs_solver_pin_var). */
 typedef struct {
     uint32_t var;
@@ -300,6 +323,12 @@ typedef struct dvs_ctx_s {
     DvsExtMemo        *ext_memo;
     uint32_t           n_ext_memo;
     uint32_t           ext_memo_cap;
+    DvsSliceMemo      *slice_memo;
+    uint32_t           n_slice_memo;
+    uint32_t           slice_memo_cap;
+    DvsInSet          *in_sets;
+    uint32_t           n_in_sets;
+    uint32_t           in_sets_cap;
     DvsDivisors        divisors;      /* last fixed product factored     */
     uint8_t           *dec_tier;      /* [dec_tier_n] decision tier from the
                                        * multiply links; NULL: all equal  */

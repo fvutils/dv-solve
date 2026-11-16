@@ -2125,6 +2125,69 @@ static int _keep_draws_enabled(void) {
     return cached;
 }
 
+static int _cmp_i64(const void *a, const void *b) {
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* The values of set s that x can take now (fixed elements inside [lo, hi],
+ * not holes), sorted and each once, into v: their count, or -1 when an
+ * element is not fixed yet. */
+static int _in_set_vals(dvs_ctx_t *ctx, const DvsInSet *s, uint32_t x, int64_t lo, int64_t hi,
+                        int64_t *v) {
+    const Variable *xv = &ctx->vars[x];
+    const uint32_t *e = (const uint32_t *)dvs_spool_ptr(&ctx->pool, s->elems);
+    int n = 0, m = 0;
+    for (uint32_t i = 0; i < s->n; i++) {
+        int64_t c = var_lo64(ctx, &ctx->vars[e[i]]);
+        if (c != var_hi64(ctx, &ctx->vars[e[i]])) return -1;
+        if (!var_b_lt(xv, c, lo) && !var_b_gt(xv, c, hi) && !_is_hole(ctx, x, c)) v[n++] = c;
+    }
+    qsort(v, (size_t)n, sizeof *v, _cmp_i64);
+    for (int i = 0; i < n; i++)
+        if (!m || v[i] != v[m - 1]) v[m++] = v[i];
+    return m;
+}
+
+/* Draw x from what its value sets (DvsInSet, `x inside {q}`) leave: a value
+ * of every set whose guard is 1, of none whose guard is 0, all elements
+ * fixed. Uniform over those values, so a value the queue holds twice is no
+ * likelier than one it holds once: `inside` is membership in a set of values
+ * (IEEE 1800-2023 11.4.13), and without dist the solver draws uniformly over
+ * the solutions (18.5.10). 0: no set with guard 1 is fixed, or it leaves no
+ * value (the search then finds the conflict). */
+static int _pick_in_set(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t hi, int64_t *out) {
+    uint32_t cap = 0;
+    for (uint32_t i = 0; i < ctx->n_in_sets; i++)
+        if (ctx->in_sets[i].x == x && ctx->in_sets[i].n > cap) cap = ctx->in_sets[i].n;
+    if (!cap) return 0;
+    int64_t *a = (int64_t *)DVS_ALLOC(ctx->alloc, 2u * cap * sizeof *a), *b = a + cap;
+    if (!a) return 0;
+    int na = -1;   /* -1: no set yet */
+    for (int neg = 0; neg < 2; neg++) {
+        for (uint32_t i = 0; i < ctx->n_in_sets; i++) {
+            const DvsInSet *s = &ctx->in_sets[i];
+            int64_t g = var_lo64(ctx, &ctx->vars[s->g]);
+            if (s->x != x || g != var_hi64(ctx, &ctx->vars[s->g]) || (g == 0) != neg
+                    || (neg && na < 0))
+                continue;
+            int nb = _in_set_vals(ctx, s, x, lo, hi, na < 0 ? a : b);
+            if (nb < 0) continue;
+            if (na < 0) { na = nb; continue; }
+            /* a and b, or a without b: both sorted */
+            int m = 0;
+            for (int k = 0, j = 0; k < na; k++) {
+                while (j < nb && b[j] < a[k]) j++;
+                if ((j < nb && b[j] == a[k]) != neg) a[m++] = a[k];
+            }
+            na = m;
+        }
+    }
+    if (na > 0) *out = a[_rand64(ctx) % (uint64_t)na];
+    DVS_RELEASE(ctx->alloc, a, 2u * cap * sizeof *a);
+    return na > 0;
+}
+
 static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
                             const dvs_solve_opts_t *opts) {
     int64_t lo = var_lo64(ctx, &ctx->vars[var_id]);
@@ -2180,6 +2243,8 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
     if (ctx->dist_offsets && var_id < ctx->n_vars_capacity &&
         ctx->dist_offsets[var_id] != 0) {
         v = _pick_value_dist(ctx, var_id, lo, hi);
+    } else if (_pick_in_set(ctx, var_id, lo, hi, &v)) {
+        /* one of the values x's sets leave */
     } else if (opts && opts->seed != 0 && ctx->fair_pick && !opts->seq_pick
                && !_wpick_in_product(ctx, var_id) && !(ctx->vars[var_id].flags & VAR_AUX)
                && _wpick_enabled() && _pick_value_weighted(ctx, var_id, lo, hi, &v)) {

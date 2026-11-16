@@ -1,0 +1,4 @@
+id: construct.inside_vars
+tier: standard
+tags: [construct, inside]
+fields: [addr, rd]

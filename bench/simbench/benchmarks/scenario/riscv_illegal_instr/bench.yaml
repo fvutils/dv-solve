@@ -1,0 +1,4 @@
+id: scenario.riscv_illegal_instr
+tier: standard
+tags: [scenario, isa, slice, inline]
+fields: [exception, reserved_c, compressed, c_msb, c_op, opcode, func3, func7, instr_bin]

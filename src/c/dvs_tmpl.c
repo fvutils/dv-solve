@@ -696,16 +696,37 @@ static dvs_expr_t xp_reduce(xp_t *x, const ExprReduce *n) {
         uint64_t id = n->op == DVS_BIN_MUL ? 1 : n->op == DVS_BIN_BAND ? ~0ull : 0;
         return const_of(x->b, mask_w(id, ty.w), ty);
     }
+    /* `v inside {a}` is the OR of `a[i] == v` (IEEE 1800-2023 11.4.13). With v
+     * not reading i it becomes one set constraint over the elements, which the
+     * compile turns into a value domain for v (an OR of n equalities gives v
+     * no domain until all but one are false). */
+    dvs_expr_t v = EXPR_NULL, e = n->body, *set = NULL;
+    if (n->op == DVS_BIN_BOR && KIND(x->t, n->body) == EXPR_BINARY) {
+        const ExprBinary *eq = NODE(x->t, n->body);
+        const uint8_t bit = (uint8_t)(1u << n->level);
+        int lfree = !(dep_of(x, eq->lhs) & bit), rfree = !(dep_of(x, eq->rhs) & bit);
+        if (eq->op == DVS_BIN_EQ && lfree != rfree) {
+            v = xp(x, lfree ? eq->lhs : eq->rhs);
+            e = lfree ? eq->rhs : eq->lhs;
+            if (v == EXPR_NULL) return EXPR_NULL;
+            if (!(set = malloc(size * sizeof *set))) { x->err = DVS_RANDOMIZE_ERROR; return EXPR_NULL; }
+        }
+    }
     dvs_expr_t acc = EXPR_NULL;
     for (uint32_t k = 0; k < size; k++) {
         env_bind(&x->env, n->level, (int32_t)k);
-        dvs_expr_t term = xp(x, n->body);
-        if (term == EXPR_NULL) break;
+        dvs_expr_t term = xp(x, e);
+        if (term == EXPR_NULL) { acc = EXPR_NULL; break; }
+        if (set) { set[k] = acc = term; continue; }
         acc = k ? dvs_builder_expr_binary(x->b, (dvs_binop_t)n->op, acc, term) : term;
         if (acc == EXPR_NULL) break;
     }
     x->env.bound &= ~(1u << n->level);
     x->env.changed[n->level] = ++x->env.tick;
+    if (set) {
+        if (acc != EXPR_NULL) acc = dvs_builder_expr_in_set(x->b, v, size, set);
+        free(set);
+    }
     return acc;
 }
 
@@ -1564,6 +1585,13 @@ int dvs_tmpl_array_is_local(const dvs_tmpl_t *t, uint32_t a) {
 }
 
 uint32_t dvs_tmpl_n_expansions(const dvs_tmpl_t *t) { return t->n_expansions; }
+
+dvs_handle_t *dvs_tmpl_last_expansion(const dvs_tmpl_t *t) {
+    const expansion_t *e = NULL;
+    for (uint32_t i = 0; i < TMPL_LRU; i++)
+        if (t->lru[i].h && (!e || t->lru[i].used > e->used)) e = &t->lru[i];
+    return e ? e->h : NULL;
+}
 
 /* Solve element-local array `a`, one element at a time. */
 static int solve_local(dvs_tmpl_t *t, uint32_t a, const dvs_ref_t *refs,

@@ -451,16 +451,13 @@ static VI _ev(const dvs_ctx_t *ctx, const dvs_problem_t *sp, dvs_expr_t ref,
         case DVS_BIN_EQ: case DVS_BIN_NEQ: case DVS_BIN_LT:
         case DVS_BIN_LTE: case DVS_BIN_GT: case DVS_BIN_GTE:
             return _cmp(ctx, sp, op, eb->lhs, eb->rhs, skip);
-        case DVS_BIN_AND: {
-            int l = _truth(ctx, sp, eb->lhs, skip);
-            int r = _truth(ctx, sp, eb->rhs, skip);
-            return l && r;
-        }
-        case DVS_BIN_OR: {
-            int l = _truth(ctx, sp, eb->lhs, skip);
-            int r = _truth(ctx, sp, eb->rhs, skip);
-            return l || r;
-        }
+        /* Short-circuit: the first operand decides when it can, whatever
+         * the second would give (an enum's validity is a 509-leaf || chain,
+         * checked every call). */
+        case DVS_BIN_AND:
+            return _truth(ctx, sp, eb->lhs, skip) && _truth(ctx, sp, eb->rhs, skip);
+        case DVS_BIN_OR:
+            return _truth(ctx, sp, eb->lhs, skip) || _truth(ctx, sp, eb->rhs, skip);
         default:
             *skip = 1; return 0;
         }
