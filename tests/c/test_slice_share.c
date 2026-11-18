@@ -316,6 +316,42 @@ static void test_restore(void) {
     release(&c);
 }
 
+/* A split word keeps its solve-order stage. f, first, is 3 or 200 evenly,
+ * though f == 3 leaves w a single value. Split by f[7:4], its fields had no
+ * stage, so w was drawn first (riscv-dv's riscv_illegal_instr: opcode and
+ * func7, before instr_bin, took 3 ms a call). */
+static void test_order(void) {
+    B *b = dvs_builder_create(0, NULL);
+    dvs_builder_add_var(b, 0, 8, 0, 0, 255);
+    dvs_builder_add_var(b, 1, 32, 0, 0, 0xFFFFFFFFLL);
+    dvs_builder_set_var_order(b, 0, 1);
+    dvs_builder_set_var_order(b, 1, 2);
+    add(b, BIN(b, DVS_BIN_OR, BIN(b, DVS_BIN_EQ, V(b, 0), K(b, 3, 8)),
+               BIN(b, DVS_BIN_EQ, V(b, 0), K(b, 200, 8))));
+    add(b, BIN(b, DVS_BIN_NEQ, X(b, V(b, 0), 7, 4), K(b, 15, 4)));
+    add(b, BIN(b, DVS_BIN_EQ, X(b, V(b, 1), 7, 0), V(b, 0)));
+    add(b, BIN(b, DVS_BIN_OR, BIN(b, DVS_BIN_NEQ, V(b, 0), K(b, 3, 8)),
+               BIN(b, DVS_BIN_EQ, X(b, V(b, 1), 31, 8), K(b, 0, 24))));
+    Ctx c = compile(b);
+    uint32_t ids[2] = { 0, 1 };
+    int64_t v[2];
+    int ok = c.ctx != NULL, threes = 0;
+    for (int s = 1; s <= 200 && ok; s++) {
+        dvs_solve_opts_t o = {0};
+        o.seed = (uint64_t)s;
+        o.fair_pick = 1;
+        if (s > 1) dvs_solver_reset(c.ctx);
+        ok = dvs_solver_solve(c.ctx, &o) == DVS_SOLVE_OK;
+        dvs_solver_get_values(c.ctx, 2, ids, v);
+        ok = ok && (v[0] == 3 || v[0] == 200) && (v[1] & 0xFF) == v[0]
+            && (v[0] != 3 || v[1] == 3);
+        threes += v[0] == 3;
+    }
+    CHECK(ok, "order: 200 draws satisfy the constraints");
+    CHECK(threes >= 70 && threes <= 130, "order: the split word is decided first");
+    release(&c);
+}
+
 int main(void) {
     test_dedup();
     test_link();
@@ -324,6 +360,7 @@ int main(void) {
     test_nested();
     test_left_alone();
     test_restore();
+    test_order();
     if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     printf("all passed\n");
     return 0;

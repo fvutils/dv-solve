@@ -2002,6 +2002,16 @@ static void _fd_split(SvE *E) {
                 first = 0;
         if (first && ++w->n_iv >= FD_MAX_WORDS) w->skip = 1;
     }
+    /* A word in a solve order is decided whole, at its stage. Split, its
+     * fields have no stage, so the later stages are decided first, and see
+     * only the bounds of the word's value set (`func7 inside {0, 1, 32}`):
+     * riscv-dv's riscv_illegal_instr (opcode, func7) took 3 ms a call and
+     * lost its `exception dist` to the search's restarts. */
+    for (dvs_expr_t c = p->vars_head; c != EXPR_NULL; ) {
+        const VarSpec *vs = (const VarSpec *)_P(E, c);
+        if (vs->order && vs->var_id < E->nv) S.w[vs->var_id].skip = 1;
+        c = vs->next;
+    }
     int any = 0;
     for (uint32_t v = 0; v < E->nv; v++) {
         FdWord *w = &S.w[v];
