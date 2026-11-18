@@ -3,6 +3,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dvs_i128.h"
+
+#if !defined(DVS_HAVE_INT128)
+/* The presolve's arithmetic is __int128 throughout (MSVC has none). It is a
+ * speed-up only, so without it nothing is added. */
+uint32_t dvs_presolve_linear(dvs_problem_t **psp, size_t *psize) {
+    (void)psp;
+    (void)psize;
+    return 0;
+}
+#else
+
 /*
  * Linear-equality presolve -- see dvs_presolve.h.
  *
@@ -576,3 +588,5 @@ done:
     free(v); free(cand); free(cval);
     return added;
 }
+
+#endif /* DVS_HAVE_INT128 */

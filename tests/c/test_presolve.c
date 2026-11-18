@@ -8,6 +8,7 @@
 
 #include "dv_solve.h"
 #include "dvs_problem.h"
+#include "dvs_i128.h"
 #include "dvs_presolve.h"
 
 static int failures = 0;
@@ -140,6 +141,10 @@ static void check_signed(void) {
 }
 
 int main(void) {
+#if !defined(DVS_HAVE_INT128)
+    puts("SKIP: the presolve needs __int128 (dvs_presolve.c)");
+    return 77;
+#endif
     check_sum_partition();
     check_solved(DVS_ENGINE_CDCL, "CDCL: both sums 200 on every call");
     check_solved(DVS_ENGINE_BITBLAST, "bit-blast: both sums 200 on every call");

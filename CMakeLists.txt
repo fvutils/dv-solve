@@ -609,6 +609,7 @@ add_executable(test_presolve tests/c/test_presolve.c)
 target_link_libraries(test_presolve PRIVATE dv_solve)
 target_include_directories(test_presolve PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/c)
 add_test(NAME test_presolve COMMAND test_presolve)
+set_tests_properties(test_presolve PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(test_engine tests/c/test_engine.c)
 target_link_libraries(test_engine PRIVATE dv_solve)

@@ -1301,7 +1301,7 @@ static int _pd_congr(PdFacts *F, uint64_t b, uint64_t r) {
     if (bg == 1u) return 1;
     if (F->cm > ((uint64_t)1 << 62) / bg) return 1;
     uint64_t inv = (uint64_t)(((u % (int64_t)bg) + (int64_t)bg) % (int64_t)bg);
-    uint64_t t = (uint64_t)(((unsigned __int128)((d / (uint64_t)g) % bg) * inv) % bg);
+    uint64_t t = dvs_mulmod_u64((d / (uint64_t)g) % bg, inv, bg);
     F->cr += F->cm * t;
     F->cm *= bg;
     F->cr %= F->cm;
@@ -2027,6 +2027,7 @@ static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t 
     DvsWMemo *m = _wmemo_find(ctx, x, nb);
     const uint16_t known0 = m ? m->known : 0;
     const uint64_t q = span / nb, r1 = span % nb + 1u;
+    const uint64_t pq = pdn / nb, pr = pdn % nb;   /* pdn*k/nb without overflow */
     int64_t b0[DVS_WPICK_BUCKETS], b1[DVS_WPICK_BUCKETS];
     int64_t dlo[DVS_WPICK_BUCKETS], dhi[DVS_WPICK_BUCKETS];
     double u[DVS_WPICK_BUCKETS];
@@ -2038,8 +2039,8 @@ static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t 
         b1[k] = (int64_t)((uint64_t)lo + o1);
         if (pdn) {
             /* Values of rank pdn*k/nb .. pdn*(k+1)/nb - 1 among those allowed. */
-            uint64_t r0 = (uint64_t)(((unsigned __int128)pdn * k) / nb);
-            uint64_t r1_ = (uint64_t)(((unsigned __int128)pdn * (k + 1)) / nb) - 1u;
+            uint64_t r0 = k * pq + (k * pr) / nb;
+            uint64_t r1_ = (k + 1) * pq + ((k + 1) * pr) / nb - 1u;
             b0[k] = (int64_t)_pd_nth(&F, (uint64_t)lo, (uint64_t)hi, r0);
             b1[k] = (int64_t)_pd_nth(&F, (uint64_t)lo, (uint64_t)hi, r1_);
         }
