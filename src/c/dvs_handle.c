@@ -55,6 +55,7 @@ struct dvs_handle_s {
     uint32_t      *exports;    /* var_id per export index                   */
     dvs_shapes_t  *shapes;     /* a part's assembled problems (dvs_parts.c) */
     int            canonical;  /* DVS_CANONICAL=1: dvs_solve_opts_t.canonical */
+    int            validate;   /* DVS_VALIDATE=1: re-check each model      */
     /* The clause policy (handle_settle). With the randc histories and the
      * kept clauses it is all a call carries to the next, so a fresh handle
      * that imports them (dvs_handle_import_state) goes on as this one. */
@@ -114,6 +115,8 @@ static dvs_handle_t *handle_new(const void *buf, size_t size, int top) {
     h->cdcl_only |= h->p->n_softs != 0 || h->p->n_dists != 0;
     const char *canon = getenv("DVS_CANONICAL");
     h->canonical = canon && *canon == '1';
+    const char *val = getenv("DVS_VALIDATE");
+    h->validate = val && *val == '1';
     /* An export is a declared variable of this part, not an import. */
     h->exports = malloc((h->p->n_exports ? h->p->n_exports : 1) * sizeof *h->exports);
     if (!h->exports) {
@@ -265,7 +268,11 @@ static int solve_once(dvs_handle_t *h, const dvs_ref_t *refs, uint64_t seed) {
     dvs_result_t res = dvs_solver_solve(h->ctx, &o);
     if (res == DVS_SOLVE_UNSAT) return DVS_RANDOMIZE_UNSAT;
     if (res != DVS_SOLVE_OK) return DVS_RANDOMIZE_ERROR;
-    if (dvs_solver_validate_model(h->ctx, h->p, NULL) != 0) return DVS_RANDOMIZE_ERROR;
+    /* Compile took every constraint (compile_rc), so a model the propagators
+     * accept satisfies the problem: re-checking it only finds solver bugs.
+     * It cost 7-26% of a riscv-dv run, so tests turn it on (ctest does). */
+    if (h->validate && dvs_solver_validate_model(h->ctx, h->p, NULL) != 0)
+        return DVS_RANDOMIZE_ERROR;
     return DVS_RANDOMIZE_OK;
 }
 

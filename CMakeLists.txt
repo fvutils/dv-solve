@@ -995,3 +995,10 @@ foreach(_dvs_t dv_solve dv_solve_debug dv_solve_dpi dv_solve_static dv_solve_rt_
         target_link_libraries(${_dvs_t} PRIVATE ${CMAKE_DL_LIBS})   # dladdr
     endif()
 endforeach()
+
+# Tests re-check every model against the problem (dvs_handle.c; off by
+# default, for speed).
+if(DV_SOLVE_BUILD_TOOLS)
+    get_property(_dvs_tests DIRECTORY PROPERTY TESTS)
+    set_tests_properties(${_dvs_tests} PROPERTIES ENVIRONMENT DVS_VALIDATE=1)
+endif()
