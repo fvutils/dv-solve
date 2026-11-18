@@ -82,8 +82,9 @@ static __forceinline int dvs__popcount64(unsigned long long x) {
 
 /* ---- checked arithmetic ---------------------------------------------- *
  * C only (_Generic); no C++ source uses these builtins.
- * Only the unsigned 32-bit add (dvs_arena.c) and unsigned 64-bit multiply
- * (dvs_prop_templates.c) are reached here; the int64 multiply elsewhere is
+ * Only the unsigned 32-bit add (dvs_arena.c), unsigned 64-bit add
+ * (dvs_linprobe.c) and unsigned 64-bit multiply (dvs_prop_templates.c) are
+ * reached here; the int64 multiply elsewhere is
  * already guarded with #ifdef __GNUC__. _Generic flags any unexpected type at
  * compile time (no default case). Needs C11 -- CMAKE_C_STANDARD is 11. */
 static __forceinline int dvs__add_ovf_u32(uint32_t a, uint32_t b, uint32_t *r) {
@@ -104,6 +105,18 @@ static __forceinline int dvs__mul_ovf_u64(uint64_t a, uint64_t b, uint64_t *r) {
 #define __builtin_mul_overflow(a, b, r) _Generic((r), \
     uint64_t *: dvs__mul_ovf_u64)((a), (b), (r))
 #endif
+
+/* ---- atomics ---------------------------------------------------------- *
+ * Only the relaxed uint64_t counter in dvs_linprobe.c uses these. */
+#define __ATOMIC_RELAXED 0
+static __forceinline uint64_t dvs__atomic_add_u64(uint64_t *p, uint64_t v) {
+    return (uint64_t)_InterlockedExchangeAdd64((volatile __int64 *)p, (__int64)v);
+}
+static __forceinline uint64_t dvs__atomic_load_u64(uint64_t *p) {
+    return *(volatile uint64_t *)p;   /* an aligned 64-bit load is atomic on x64 */
+}
+#define __atomic_fetch_add(p, v, order) dvs__atomic_add_u64((p), (v))
+#define __atomic_load_n(p, order)       dvs__atomic_load_u64(p)
 
 /* ---- POSIX unlocked stdio (CaDiCaL's file.hpp) ----------------------- */
 #ifndef getc_unlocked
