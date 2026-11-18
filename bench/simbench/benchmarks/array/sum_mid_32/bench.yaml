@@ -1,0 +1,4 @@
+id: array.sum_mid_32
+tier: standard
+tags: [array, sum, sum_scale]
+fields: [a]

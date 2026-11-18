@@ -1702,6 +1702,12 @@ static WBox _wpick_box(dvs_ctx_t *ctx, uint32_t omit) {
     for (uint32_t g = 0; g < ctx->n_eq_grp; g++) {
         uint32_t open = 0;
         double widest = 0.0;
+        /* A group lists each variable once (_lin_collect), so a merged
+         * variable can repeat only when a member is aliased. */
+        int merged = 0;
+        if (ctx->var_alias)
+            for (uint32_t j = ctx->eq_grp_off[g]; j < ctx->eq_grp_off[g + 1] && !merged; j++)
+                merged = ctx->var_alias[ctx->eq_grp[j]] != ctx->eq_grp[j];
         for (uint32_t j = ctx->eq_grp_off[g]; j < ctx->eq_grp_off[g + 1]; j++) {
             uint32_t i = ctx->eq_grp[j];
             if (ctx->var_alias) i = ctx->var_alias[i];
@@ -1710,12 +1716,10 @@ static WBox _wpick_box(dvs_ctx_t *ctx, uint32_t omit) {
             if ((v->flags & VAR_AUX) || _is_defined(ctx, i)) continue;
             int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
             if (lo == hi) continue;
-            uint32_t k;      /* count a merged variable once */
-            for (k = ctx->eq_grp_off[g]; k < j; k++) {
-                uint32_t i2 = ctx->eq_grp[k];
-                if (ctx->var_alias) i2 = ctx->var_alias[i2];
-                if (i2 == i) break;
-            }
+            uint32_t k = j;  /* count a merged variable once */
+            if (merged)
+                for (k = ctx->eq_grp_off[g]; k < j; k++)
+                    if (ctx->var_alias[ctx->eq_grp[k]] == i) break;
             if (k < j) continue;
             double d = (double)_dom_size(ctx, i, lo, hi) + 1.0;
             if (d > widest) widest = d;

@@ -2,8 +2,9 @@
  * against propagation: under DVS_LINPROBE=2 every weighted-pick probe it can
  * run is run both ways, and any difference in the outcome, the bucket's range
  * or the box aborts. Address-map chains at 33 and 16 bits (the 64- and 32-bit
- * comparison forms), with a subtract and a strict order, and an 8-bit sum
- * that can wrap, which it must leave to propagation. */
+ * comparison forms), with a subtract and a strict order, an 8-bit sum
+ * that can wrap, which it must leave to propagation, and an SV sum()'s
+ * shape, one expression whose partial sums the evaluator folds. */
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -124,6 +125,42 @@ static void check_wrap(void) {
     dvs_handle_free(h);
 }
 
+/* x0 + ... + x7 == total, each x < 64, at 16 bits: one expression, so the
+ * partial sums are aux variables, folded into one sum row. 200 draws; each
+ * must hold. */
+static void check_sum(int64_t total, const char *msg) {
+    enum { N = 8 };
+    B *b = dvs_builder_create(0, NULL);
+    dvs_builder_set_explicit(b);
+    dvs_expr_t s = EXPR_NULL;
+    for (uint32_t i = 0; i < N; i++) {
+        dvs_builder_add_var(b, i, 16, 0, 0, 63);
+        s = i ? dvs_builder_expr_binary(b, DVS_BIN_ADD, s, var(b, i)) : var(b, i);
+    }
+    rel(b, DVS_BIN_EQ, s, dvs_builder_expr_const_sized(b, total, 0, 16));
+    size_t sz;
+    dvs_problem_t *p = dvs_builder_finalize(b, &sz);
+    dvs_handle_t *h = dvs_handle_new(p, sz);
+    dvs_builder_free_problem(b, p, sz);
+    dvs_builder_destroy(b);
+    dvs_handle_set_engine(h, DVS_ENGINE_CDCL);
+    uint16_t v[N];
+    dvs_ref_t refs[N];
+    for (int i = 0; i < N; i++) refs[i] = (dvs_ref_t){ &v[i], 16, 0, DVS_REF_SCALAR, 0 };
+    int ok = 1;
+    for (uint64_t seed = 1; ok && seed <= 200; seed++) {
+        ok &= dvs_randomize(h, refs, NULL, seed) == DVS_RANDOMIZE_OK;
+        int64_t t = 0;
+        for (int i = 0; i < N; i++) {
+            ok &= v[i] < 64;
+            t += v[i];
+        }
+        ok &= t == total;
+    }
+    CHECK(ok, msg);
+    dvs_handle_free(h);
+}
+
 int main(void) {
     setenv("DVS_LINPROBE", "2", 1);
     uint64_t n = dvs_linprobe_checks();
@@ -136,6 +173,12 @@ int main(void) {
     n = dvs_linprobe_checks();
     check_wrap();
     CHECK(dvs_linprobe_checks() == n, "8-bit sum that can wrap: left to propagation");
+    n = dvs_linprobe_checks();
+    check_sum(256, "sum of 8, mid total: probes agree, every draw holds");
+    check_ran(n, "sum of 8, mid total: the evaluator ran");
+    n = dvs_linprobe_checks();
+    check_sum(480, "sum of 8, tight total: probes agree, every draw holds");
+    check_ran(n, "sum of 8, tight total: the evaluator ran");
     if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     printf("all passed\n");
     return 0;

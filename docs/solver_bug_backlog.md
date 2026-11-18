@@ -50,6 +50,25 @@ A 2026-07-10 generative fuzz sweep (`tests/formal/test_fuzz_cross_check.py`,
 
 ## 🟥 OPEN
 
+- **B135: the weighted pick on an SV `sum()` grew as N^2 per call — PARTLY FIXED 2026-11-16 (PERFORMANCE).**
+  `a.sum() == K` over N elements reaches dv-solve as a chain of N-1 adds
+  with aux partial sums. 90% of a call was the weighted value pick, not the
+  search: per pick, its probes (`_wpick_probe_linear`) loaded, stored and
+  undid every variable of the sum's component (about 3N), walked the chain,
+  and `_wpick_box` rescanned each equality group for repeats in O(group^2).
+  Fixed, with the values drawn unchanged (every capture replays with 0
+  mismatches, and DVS_LINPROBE=2 agrees):
+  - `_wpick_box` scans a group for repeats only when a member is aliased.
+  - A probe loads, stores and undoes only the variables it reaches.
+  - The probe folds a chain of adds whose partial sums are aux variables
+    into one sum row (`LINROW_SUM`), so it no longer walks the partial sums.
+  array.sum_mid_64 1127 -> 431 us/call, sum_tight_64 1659 -> 881, smaller
+  N less. The floor did not move (geomean 1.007). Test `test_linprobe` (sum
+  of 8). Open: each probe still costs O(N) (the sum's terms, the box over
+  all variables) and the pick-memo key hashes every variable, so it is
+  still about N^1.6; going further needs state kept across a pick's probes.
+  Verilator `docs/design/dvs_array_theory.md` section 7.
+
 - **B134: `x inside {a, b, ...}` over variables (a DisjClause) drew x blind — FIXED 2026-11-16 (PERFORMANCE).**
   A constraint OR of 2-16 `x == t` leaves compiles to a DisjClause. With
   constant t it gets holes; with some t variables (STATE scalars, pinned

@@ -9,7 +9,9 @@
 
 #define LP_NONE UINT32_MAX
 
+/* A row; a LINROW_SUM is v0 = the sum of leaf[v1 .. v1+v2). */
 typedef struct { uint8_t k, w; uint32_t v[3]; } LinRow;
+#define LINROW_SUM 5u
 
 /* The index of the problem's linear components, one block from ctx->alloc.
  * Rows are grouped by component; scratch bounds are by variable. */
@@ -20,13 +22,15 @@ typedef struct {
     uint32_t  undo_comp;     /* written in place, LP_NONE: nothing      */
     uint32_t *comp;          /* [n_vars] component, LP_NONE: not linear */
     uint32_t *crow;          /* [n_comps + 1] rows of each component    */
-    uint32_t *cvar;          /* [n_comps + 1] into vars                 */
-    uint32_t *vars;          /* [n_vars] grouped by component           */
     uint32_t *vrow;          /* [n_vars + 1] into vrows                 */
     uint32_t *vrows;         /* each variable's rows                    */
     LinRow   *rows;          /* [n_rows]                                */
+    uint32_t *leaf;          /* [2 * n_rows] the terms of the sum rows  */
     uint64_t *lo, *hi;       /* [n_vars] propagated bounds              */
     uint64_t *slo, *shi;     /* [n_vars] bounds before the probe        */
+    uint32_t  gen;           /* the probe; seen[i] == gen: i is loaded  */
+    uint32_t *seen;          /* [n_vars]                                */
+    uint32_t *chg, n_chg;    /* [n_vars] the variables the probe narrowed */
     uint32_t *q;             /* [n_rows + 1] ring of queued rows        */
     uint8_t  *inq;           /* [n_rows]                                */
 } LinIx;
@@ -61,6 +65,97 @@ static const Propagator *_prop(const dvs_ctx_t *ctx, uint32_t k) {
 
 static int _guarded(const dvs_ctx_t *ctx, uint32_t k) {
     return ctx->prop_guard_vars && ctx->prop_guard_vars[k] != EXPR_NULL;
+}
+
+static uint32_t _row_nvars(const LinRow *R) {
+    return R->k == LINROW_SUM ? R->v[2] + 1u : R->k == LINROW_ADD ? 3u : 2u;
+}
+
+/* Variable j of row R: a sum's result, then its terms. */
+static uint32_t _row_var(const LinIx *ix, const LinRow *R, uint32_t j) {
+    return R->k == LINROW_SUM && j ? ix->leaf[R->v[1] + j - 1u] : R->v[j];
+}
+
+/* Fold each chain of adds into one sum row: `s1 = a + b, s2 = s1 + c` is
+ * `s2 = a + b + c` when s1 is an aux variable in no other row. A sum's
+ * interval is exactly its terms' (they are integer intervals), so the sum
+ * row narrows the terms and the result as the chain does, without walking
+ * the partial sums: a chain of n adds costs n row evaluations per narrowed
+ * term. The partial sums are then not narrowed by a probe; nothing reads
+ * them (the box counts no aux variable). A component is folded whole or
+ * not at all: not when a term repeats, or a partial sum is not reached from
+ * a sum's result. */
+static void _fold(dvs_ctx_t *ctx, LinIx *ix) {
+    const uint32_t nv = ix->n_vars, nr = ix->n_rows;
+    const size_t tsz = (size_t)nv * 4u * sizeof(uint32_t) + (size_t)nr * sizeof(LinRow);
+    uint32_t *def = (uint32_t *)dvs_ctx_resize(ctx, NULL, 0, tsz);
+    if (!def) return;
+    uint32_t *occ = def + nv, *term = occ + nv, *mark = term + nv;  /* mark: a row's terms */
+    LinRow *out = (LinRow *)(mark + nv);
+    for (uint32_t i = 0; i < nv; i++) {
+        def[i] = mark[i] = LP_NONE;
+        occ[i] = term[i] = 0;
+    }
+    for (uint32_t r = 0; r < nr; r++) {
+        const LinRow *R = &ix->rows[r];
+        for (uint32_t j = 0; j < _row_nvars(R); j++) occ[R->v[j]]++;
+        if (R->k != LINROW_ADD) continue;
+        def[R->v[0]] = def[R->v[0]] == LP_NONE ? r : LP_NONE - 1u;
+        term[R->v[1]]++;
+        term[R->v[2]]++;
+    }
+    /* A partial sum: aux, the result of one add and a term of one other,
+     * and in no other row. */
+#define LP_PARTIAL(i) ((ctx->vars[i].flags & VAR_AUX) && occ[i] == 2u && term[i] == 1u \
+                       && def[i] < nr)
+    uint32_t nout = 0, nleaf = 0;
+    for (uint32_t c = 0; c < ix->n_comps; c++) {
+        const uint32_t r0 = ix->crow[c], r1 = ix->crow[c + 1], out0 = nout, leaf0 = nleaf;
+        uint32_t partials = 0, folded = 0;
+        int ok = 1;
+        for (uint32_t r = r0; r < r1 && ok; r++) {
+            const LinRow *R = &ix->rows[r];
+            if (R->k == LINROW_ADD && LP_PARTIAL(R->v[0])) { partials++; continue; }
+            if (R->k != LINROW_ADD || (!LP_PARTIAL(R->v[1]) && !LP_PARTIAL(R->v[2]))) {
+                out[nout++] = *R;
+                continue;
+            }
+            /* Collect the terms below R, depth first; folded rows' widths. */
+            LinRow S = { LINROW_SUM, R->w, { R->v[0], nleaf, 0 } };
+            uint32_t st[64], top = 0;
+            st[top++] = R->v[2];
+            st[top++] = R->v[1];
+            while (top && ok) {
+                const uint32_t u = st[--top];
+                if (LP_PARTIAL(u)) {
+                    const LinRow *D = &ix->rows[def[u]];
+                    if (top + 2u > 64u) { ok = 0; break; }
+                    if (D->w < S.w) S.w = D->w;
+                    st[top++] = D->v[2];
+                    st[top++] = D->v[1];
+                    folded++;
+                } else if (mark[u] == r) {
+                    ok = 0;                   /* a repeated term */
+                } else {
+                    mark[u] = r;
+                    ix->leaf[nleaf++] = u;
+                }
+            }
+            S.v[2] = nleaf - S.v[1];
+            out[nout++] = S;
+        }
+        if (!ok || folded != partials) {      /* keep the component's rows */
+            nout = out0;
+            nleaf = leaf0;
+            for (uint32_t r = r0; r < r1; r++) out[nout++] = ix->rows[r];
+        }
+        ix->crow[c] = out0;
+    }
+#undef LP_PARTIAL
+    ix->crow[ix->n_comps] = nout;
+    ix->n_rows = nout;
+    memcpy(ix->rows, out, (size_t)nout * sizeof(LinRow));
+    dvs_ctx_free(ctx, def, tsz);
 }
 
 static LinIx *_build(dvs_ctx_t *ctx) {
@@ -119,8 +214,9 @@ static LinIx *_build(dvs_ctx_t *ctx) {
     size_t off = (sizeof(LinIx) + 7u) & ~(size_t)7u;
     const size_t o_lo = off;   off += 4u * (size_t)nv * sizeof(uint64_t);
     const size_t o_rows = off; off += (size_t)nr * sizeof(LinRow);
-    const size_t o_u32 = off;  off += ((size_t)nv + (nc + 1u) * 2u + (size_t)nv + nv + 1u
-                                       + 3u * (size_t)nr + nr + 1u) * sizeof(uint32_t);
+    const size_t o_u32 = off;  off += ((size_t)nv + nc + 1u + nv + 1u + 3u * (size_t)nr
+                                       + nr + 1u + 2u * (size_t)nv + 2u * (size_t)nr)
+                                      * sizeof(uint32_t);
     const size_t o_inq = off;  off += nr + 1u;
     LinIx *ix = (LinIx *)dvs_ctx_resize(ctx, NULL, 0, off);
     if (!ix) { dvs_ctx_free(ctx, rep, tsz); return NULL; }
@@ -140,21 +236,19 @@ static LinIx *_build(dvs_ctx_t *ctx) {
     ix->rows = (LinRow *)(base + o_rows);
     ix->comp = (uint32_t *)(base + o_u32);
     ix->crow = ix->comp + nv;
-    ix->cvar = ix->crow + nc + 1;
-    ix->vars = ix->cvar + nc + 1;
-    ix->vrow = ix->vars + nv;
+    ix->vrow = ix->crow + nc + 1;
     ix->vrows = ix->vrow + nv + 1;
     ix->q = ix->vrows + 3u * (size_t)nr;
+    ix->seen = ix->q + nr + 1u;
+    ix->chg = ix->seen + nv;
+    ix->leaf = ix->chg + nv;
+    memset(ix->seen, 0, (size_t)nv * sizeof(uint32_t));
     ix->inq = (uint8_t *)(base + o_inq);
     memset(ix->inq, 0, nr + 1u);
 
-    /* Rows grouped by component (counting sort), variables likewise. */
+    /* Rows grouped by component (counting sort). */
     memset(ix->crow, 0, (nc + 1u) * sizeof(uint32_t));
-    memset(ix->cvar, 0, (nc + 1u) * sizeof(uint32_t));
-    for (uint32_t i = 0; i < nv; i++) {
-        ix->comp[i] = cid[_find(rep, i)];
-        if (ix->comp[i] != LP_NONE) ix->cvar[ix->comp[i] + 1]++;
-    }
+    for (uint32_t i = 0; i < nv; i++) ix->comp[i] = cid[_find(rep, i)];
     for (uint32_t k = 0; k < np; k++) {
         const Propagator *p = _prop(ctx, k);
         uint32_t n, v[3];
@@ -163,14 +257,8 @@ static LinIx *_build(dvs_ctx_t *ctx) {
         uint32_t c = ix->comp[prop_watched_vars(p, &n)[0]];
         if (c != LP_NONE && prop_linear_row(p, ctx, v, &w) != LINROW_NONE) ix->crow[c + 1]++;
     }
-    for (uint32_t c = 0; c < nc; c++) {
-        ix->crow[c + 1] += ix->crow[c];
-        ix->cvar[c + 1] += ix->cvar[c];
-    }
+    for (uint32_t c = 0; c < nc; c++) ix->crow[c + 1] += ix->crow[c];
     /* Fill, with rep reused as each component's next slot. */
-    for (uint32_t c = 0; c < nc; c++) rep[c] = ix->cvar[c];
-    for (uint32_t i = 0; i < nv; i++)
-        if (ix->comp[i] != LP_NONE) ix->vars[rep[ix->comp[i]]++] = i;
     for (uint32_t c = 0; c < nc; c++) rep[c] = ix->crow[c];
     for (uint32_t k = 0; k < np; k++) {
         const Propagator *p = _prop(ctx, k);
@@ -183,17 +271,20 @@ static LinIx *_build(dvs_ctx_t *ctx) {
         if (row.k != LINROW_NONE) ix->rows[rep[c]++] = row;
     }
     ix->n_rows = ix->crow[nc];
+    _fold(ctx, ix);
     /* variable -> rows */
     memset(ix->vrow, 0, ((size_t)nv + 1u) * sizeof(uint32_t));
     for (uint32_t r = 0; r < ix->n_rows; r++) {
         const LinRow *R = &ix->rows[r];
-        for (uint32_t j = 0; j < (R->k == LINROW_ADD ? 3u : 2u); j++) ix->vrow[R->v[j] + 1]++;
+        const uint32_t n = _row_nvars(R);
+        for (uint32_t j = 0; j < n; j++) ix->vrow[_row_var(ix, R, j) + 1]++;
     }
     for (uint32_t i = 0; i < nv; i++) ix->vrow[i + 1] += ix->vrow[i];
     for (uint32_t i = 0; i < nv; i++) rep[i] = ix->vrow[i];
     for (uint32_t r = 0; r < ix->n_rows; r++) {
         const LinRow *R = &ix->rows[r];
-        for (uint32_t j = 0; j < (R->k == LINROW_ADD ? 3u : 2u); j++) ix->vrows[rep[R->v[j]]++] = r;
+        const uint32_t n = _row_nvars(R);
+        for (uint32_t j = 0; j < n; j++) ix->vrows[rep[_row_var(ix, R, j)]++] = r;
     }
     dvs_ctx_free(ctx, rep, tsz);
     ctx->linprobe = ix;
@@ -228,20 +319,19 @@ int dvs_linprobe_run(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi, uint3
     const uint32_t c = ix->comp[x];
     const uint32_t r0 = ix->crow[c], r1 = ix->crow[c + 1];
     uint64_t *lo = ix->lo, *hi = ix->hi;
-    for (uint32_t j = ix->cvar[c]; j < ix->cvar[c + 1]; j++) {
-        const uint32_t i = ix->vars[j];
-        lo[i] = ix->slo[i] = (uint64_t)var_lo64(ctx, &ctx->vars[i]);
-        hi[i] = ix->shi[i] = (uint64_t)var_hi64(ctx, &ctx->vars[i]);
+    /* A probe reads and writes only the variables it reaches: each is
+     * loaded on first use (seen), and the ones it narrows are listed (chg). */
+    if (++ix->gen == 0) {
+        memset(ix->seen, 0, (size_t)ix->n_vars * sizeof(uint32_t));
+        ix->gen = 1;
     }
-    /* Every add exact now stays exact: bounds only narrow. */
-    for (uint32_t r = r0; r < r1; r++) {
-        const LinRow *R = &ix->rows[r];
-        uint64_t s;
-        if (R->k == LINROW_ADD
-                && (__builtin_add_overflow(hi[R->v[1]], hi[R->v[2]], &s)
-                    || s >= (R->w >= 64 ? ~(uint64_t)0 : ((uint64_t)1 << R->w) - 1u)))
-            return -1;
-    }
+    ix->n_chg = 0;
+#define LP_LOAD(i) do { const uint32_t l_ = (i);                            \
+        if (ix->seen[l_] != ix->gen) {                                      \
+            ix->seen[l_] = ix->gen;                                         \
+            lo[l_] = ix->slo[l_] = (uint64_t)var_lo64(ctx, &ctx->vars[l_]); \
+            hi[l_] = ix->shi[l_] = (uint64_t)var_hi64(ctx, &ctx->vars[l_]); \
+        } } while (0)
 
     /* A worklist of rows; a row is queued when a bound of one of its
      * variables narrows. A row's narrowing equals its propagator's: the add
@@ -262,16 +352,20 @@ int dvs_linprobe_run(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi, uint3
                 if (++qt == nq) qt = 0;                                     \
             }                                                               \
         } } while (0)
+#define LP_CHG(i) do {                                                      \
+        if (lo[i] == ix->slo[i] && hi[i] == ix->shi[i]) ix->chg[ix->n_chg++] = (i); \
+        } while (0)
 #define LP_LB(i, b) do { const uint64_t b_ = (b);                           \
         if (b_ > lo[i]) {                                                   \
             if (b_ > hi[i]) { res = 0; goto done; }                         \
-            lo[i] = b_; LP_QUEUE(i);                                        \
+            LP_CHG(i); lo[i] = b_; LP_QUEUE(i);                             \
         } } while (0)
 #define LP_UB(i, b) do { const uint64_t b_ = (b);                           \
         if (b_ < hi[i]) {                                                   \
             if (b_ < lo[i]) { res = 0; goto done; }                         \
-            hi[i] = b_; LP_QUEUE(i);                                        \
+            LP_CHG(i); hi[i] = b_; LP_QUEUE(i);                             \
         } } while (0)
+    LP_LOAD(x);
     LP_LB(x, (uint64_t)blo);
     LP_UB(x, (uint64_t)bhi);
     while (qh != qt) {
@@ -281,8 +375,46 @@ int dvs_linprobe_run(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi, uint3
         if (++qh == nq) qh = 0;
         if (++evals > cap) { res = -1; goto done; }
         const uint32_t a = R->v[0], b = R->v[1], d = R->v[2];
+        LP_LOAD(a);
+        if (R->k == LINROW_SUM) {               /* a = the sum of the terms */
+            const uint32_t *t = &ix->leaf[b];
+            uint64_t sl = 0, sh = 0, s0 = 0;
+            for (uint32_t j = 0; j < d; j++) {
+                LP_LOAD(t[j]);
+                sl += lo[t[j]];
+                sh += hi[t[j]];
+                if (__builtin_add_overflow(s0, ix->shi[t[j]], &s0)) s0 = ~(uint64_t)0;
+            }
+            /* As for an add: exact now, so exact while bounds narrow. */
+            if (s0 >= (R->w >= 64 ? ~(uint64_t)0 : ((uint64_t)1 << R->w) - 1u)) {
+                res = -1;
+                goto done;
+            }
+            evals += d - 1u;                    /* the adds it stands for */
+            LP_LB(a, sl);
+            LP_UB(a, sh);
+            /* One pass is the fixpoint: a term narrowed to fit a leaves the
+             * others' bounds on a as they were. */
+            for (uint32_t j = 0; j < d; j++) {
+                const uint32_t u = t[j];
+                const uint64_t ul = lo[u], uh = hi[u];   /* as in sl, sh */
+                if (lo[a] > sh - uh) LP_LB(u, lo[a] - (sh - uh));
+                if (hi[a] - (sl - ul) < uh) LP_UB(u, hi[a] - (sl - ul));
+            }
+            continue;
+        }
+        LP_LOAD(b);
         switch (R->k) {
-        case LINROW_ADD:                        /* a = b + d */
+        case LINROW_ADD: {                      /* a = b + d */
+            LP_LOAD(d);
+            /* An add exact now stays exact: bounds only narrow. A row the
+             * probe does not reach keeps its bounds, so it is not checked. */
+            uint64_t s;
+            if (__builtin_add_overflow(ix->shi[b], ix->shi[d], &s)
+                    || s >= (R->w >= 64 ? ~(uint64_t)0 : ((uint64_t)1 << R->w) - 1u)) {
+                res = -1;
+                goto done;
+            }
             LP_LB(a, lo[b] + lo[d]);
             LP_UB(a, hi[b] + hi[d]);
             if (lo[a] > hi[d]) LP_LB(b, lo[a] - hi[d]);
@@ -290,6 +422,7 @@ int dvs_linprobe_run(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi, uint3
             if (lo[a] > hi[b]) LP_LB(d, lo[a] - hi[b]);
             if (hi[a] >= lo[b]) LP_UB(d, hi[a] - lo[b]);
             break;
+        }
         case LINROW_LE:
             LP_UB(a, hi[b]);
             LP_LB(b, lo[a]);
@@ -308,6 +441,8 @@ int dvs_linprobe_run(dvs_ctx_t *ctx, uint32_t x, int64_t blo, int64_t bhi, uint3
         }
     }
 done:
+#undef LP_LOAD
+#undef LP_CHG
 #undef LP_QUEUE
 #undef LP_LB
 #undef LP_UB
@@ -318,9 +453,9 @@ done:
     if (res < 0) return -1;
     *fires = evals;
     if (res == 0) return 0;
-    for (uint32_t j = ix->cvar[c]; j < ix->cvar[c + 1]; j++) {
-        const uint32_t i = ix->vars[j];
-        if (lo[i] != ix->slo[i] || hi[i] != ix->shi[i]) _store(ctx, i, lo[i], hi[i]);
+    for (uint32_t j = 0; j < ix->n_chg; j++) {
+        const uint32_t i = ix->chg[j];
+        _store(ctx, i, lo[i], hi[i]);
     }
     ix->undo_comp = c;
     return 1;
@@ -329,11 +464,9 @@ done:
 void dvs_linprobe_undo(dvs_ctx_t *ctx) {
     LinIx *ix = (LinIx *)ctx->linprobe;
     if (!ix || ix->undo_comp == LP_NONE) return;
-    const uint32_t c = ix->undo_comp;
-    for (uint32_t j = ix->cvar[c]; j < ix->cvar[c + 1]; j++) {
-        const uint32_t i = ix->vars[j];
-        if (ix->lo[i] != ix->slo[i] || ix->hi[i] != ix->shi[i])
-            _store(ctx, i, ix->slo[i], ix->shi[i]);
+    for (uint32_t j = 0; j < ix->n_chg; j++) {
+        const uint32_t i = ix->chg[j];
+        _store(ctx, i, ix->slo[i], ix->shi[i]);
     }
     ix->undo_comp = LP_NONE;
 }
