@@ -109,6 +109,10 @@ def test_order_chain(k):
     _check(f"order_chain_a{k}")
 
 
-@pytest.mark.parametrize("name", ["sum_unique", "linear_sys", "sum3_const"])
+@pytest.mark.parametrize("name", [
+    "sum_unique",
+    pytest.param("linear_sys", marks=pytest.mark.xfail(
+        reason="B136: skewed draws (median p 0.03 over 20 seed bases)", strict=True)),
+    "sum3_const"])
 def test_equality_sums(name):
     _check(name)

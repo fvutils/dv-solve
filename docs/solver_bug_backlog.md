@@ -50,6 +50,17 @@ A 2026-07-10 generative fuzz sweep (`tests/formal/test_fuzz_cross_check.py`,
 
 ## 🟥 OPEN
 
+- **B136: fair_pick draws on sums under an equality are mildly skewed — OPEN 2026-11-18 (ACCURACY).**
+  `tests/unit/test_count_weighted.py::test_equality_sums` gates on one fixed
+  seed base, which hid it. Over 20 seed bases (8 sessions x 500 draws each)
+  the chi-square p-values should be uniform (median ~0.5), as for
+  `sum3_const` (0.46); `linear_sys` gives median 0.025 (0.055 since 88a2dd1),
+  13 of 20 below 0.05, and `sum_unique` median 0.012, 15 of 20. Unchanged at
+  least since 385c27a (2026-11-05). 88a2dd1 (the weighted pick by rejection)
+  only changed how the RNG is used, so `linear_sys`'s seed stopped passing;
+  it is xfail(strict) now. `sum_unique` still passes by its seed. linear_sys's
+  worst bins are small c (6, 23, 41 drawn ~1.5x their truth).
+
 - **B135: the weighted pick on an SV `sum()` grew as N^2 per call — PARTLY FIXED 2026-11-16 (PERFORMANCE).**
   `a.sum() == K` over N elements reaches dv-solve as a chain of N-1 adds
   with aux partial sums. 90% of a call was the weighted value pick, not the
