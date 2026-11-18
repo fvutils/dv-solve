@@ -2522,10 +2522,20 @@ static uint32_t _value_to_var(dvs_ctx_t *ctx, dvs_problem_t *sp,
         uint32_t hi_id = _value_to_var(ctx, sp, cat.hi, hi_w);
         uint32_t lo_id = _value_to_var(ctx, sp, cat.lo, lo_w);
         if (hi_id == EXPR_NULL || lo_id == EXPR_NULL) return EXPR_NULL;
-        if (ctx->vars[hi_id].width != hi_w || ctx->vars[lo_id].width != lo_w
-                || (ctx->vars[hi_id].flags & VAR_SIGNED)
-                || (ctx->vars[lo_id].flags & VAR_SIGNED))
+        if (ctx->vars[hi_id].width != hi_w || ctx->vars[lo_id].width != lo_w)
             return EXPR_NULL;
+        /* A signed part is its bits: read it as the unsigned value congruent
+         * to it mod 2^w (the zero-addend bv add, as a value-changing cast). */
+        uint32_t *part[2] = { &hi_id, &lo_id };
+        for (int i = 0; i < 2; i++) {
+            if (!(ctx->vars[*part[i]].flags & VAR_SIGNED)) continue;
+            uint32_t pw = ctx->vars[*part[i]].width;
+            uint32_t u = _new_bits_var(ctx, pw);
+            uint32_t z = _const_guard(ctx, 0);
+            if (u == EXPR_NULL || z == EXPR_NULL) return EXPR_NULL;
+            prop_add_bvadd_64(ctx, u, *part[i], z, pw, 0);
+            *part[i] = u;
+        }
         if (!dvs_ctx_room(ctx, 1)) return EXPR_NULL;
         uint32_t r_id = ctx->n_vars;
         uint32_t out_w = (uint32_t)(hi_w + lo_w);
