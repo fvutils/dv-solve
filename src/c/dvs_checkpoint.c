@@ -68,6 +68,10 @@ static int _solver_checkpoint(dvs_ctx_t *ctx) {
     m->initial_vars     = ctx->initial_vars;
     m->initial_n_vars   = ctx->initial_n_vars;
     m->initial_vars_cap = ctx->initial_vars_cap;
+    m->assumption_var_ids     = ctx->assumption_var_ids;
+    m->assumption_priorities  = ctx->assumption_priorities;
+    m->assumption_active_mask = ctx->assumption_active_mask;
+    m->n_assumptions          = ctx->n_assumptions;
 
     if (ctx->dynamic)
         m->stack_mark = dvs_stack_push(ctx->dynamic);
@@ -137,6 +141,16 @@ static void _rewind_pool(dvs_ctx_t *ctx, const CheckpointMark *m,
         }
         for (uint32_t v = n_keep; v < n_vars_was; v++)
             ctx->watcher_heads[v] = EXPR_NULL;
+    }
+
+    /* A distribution an add in the scope set lives in the freed memory (an
+     * add only fills an empty slot, so the slot was empty before). */
+    if (ctx->dist_offsets) {
+        for (uint32_t v = 0; v < n_keep; v++)
+            if (ctx->dist_offsets[v] != 0 && ctx->dist_offsets[v] >= first)
+                ctx->dist_offsets[v] = 0;
+        for (uint32_t v = n_keep; v < n_vars_was; v++)
+            ctx->dist_offsets[v] = 0;
     }
 
     _HoleCarry *carry = NULL;
@@ -348,6 +362,12 @@ static void _solver_restore(dvs_ctx_t *ctx, uint32_t cp) {
             }
         }
     }
+
+    /* The soft constraints an add in the scope appended go with it. */
+    ctx->assumption_var_ids     = m->assumption_var_ids;
+    ctx->assumption_priorities  = m->assumption_priorities;
+    ctx->assumption_active_mask = m->assumption_active_mask;
+    ctx->n_assumptions          = m->n_assumptions;
 
     _rewind_pool(ctx, m, n_vars_was);
 }

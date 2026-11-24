@@ -832,6 +832,13 @@ handle solves such a problem, with {c:func}`dvs_randomize_arrays`.
 ({c:func}`dvs_builder_add_dist_ex`) read a variable that is not STATE.
 ```
 
+```{c:macro} DVS_COMPILE_ADD_UNSUPPORTED
+−7: {c:func}`dvs_solver_add_constraint` cannot take the problem: it has a
+distribution with expressions ({c:func}`dvs_builder_add_dist_ex`), a
+distribution on a variable whose compiled distribution has them, or more
+soft constraints than the 64 a context holds in all.
+```
+
 ## Incremental solving
 
 These functions change what the following solves may return, without
@@ -865,9 +872,17 @@ the compile may have made variables of its own after the ones its problem
 declared. `p` may also name, or re-declare at the same width, variables a
 problem declared before.
 
+Soft constraints of `p` keep their priority and are ranked with those of the
+compile and of earlier adds. Its distributions are drawn as compiled ones; of
+several on one variable, the first added wins. A
+{c:func}`dvs_solver_restore` to a checkpoint taken before the add removes
+both. Once the context has soft constraints, the add does not propagate, so a
+contradiction is left to the solve, which relaxes them.
+
 :returns: The same codes as {c:func}`dvs_solver_compile`;
   {c:macro}`DVS_COMPILE_BAD_VAR` if `p` declares an id the compile took for
-  a variable of its own, or re-declares a variable at another width.
+  a variable of its own, or re-declares a variable at another width;
+  {c:macro}`DVS_COMPILE_ADD_UNSUPPORTED` for what an add cannot take.
 ```
 
 ```{c:function} uint32_t dvs_solver_n_vars(const dvs_ctx_t *ctx)

@@ -336,8 +336,11 @@ class SolveCtx:
 
         Returns 0 on success, -1 if capacity exceeded, -2 if UNSAT, -3 for
         an unsupported width, -4 for an undeclared variable or one numbered
-        below :attr:`n_vars` that the problem did not declare, or a positive
-        count of constraints that could not be compiled.
+        below :attr:`n_vars` that the problem did not declare, -7 for a
+        distribution with expressions or more than 64 soft constraints in
+        all, or a positive count of constraints that could not be compiled.
+        Soft constraints and distributions of the problem are kept, as at
+        compile.
         """
         sp_ptr = getattr(aux_problem, "_sp", None)
         if sp_ptr is None:

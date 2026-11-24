@@ -5935,6 +5935,24 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
     TrailEntry *add_trail_top = ctx->trail_top;
     int n_uncompiled = 0;
 
+    /* ---- What an add cannot take, refused before anything changes ----
+     * The assumption mask is 64 bits. A distribution with expressions is
+     * evaluated on each solve from its problem (dvs_solver_eval_dists), which
+     * an add does not keep; nor may an added one share a variable with a
+     * compiled one that is, as that evaluation rewrites the variable's slot. */
+    if (ctx->n_assumptions + aux_sp->n_softs > 64) return DVS_COMPILE_ADD_UNSUPPORTED;
+    for (dvs_expr_t d = aux_sp->dists_head; d != EXPR_NULL; ) {
+        const DistSpec *ds = (const DistSpec *)dvs_pool_ptr(&aux_sp->pool, d);
+        if (ds->has_exprs) return DVS_COMPILE_ADD_UNSUPPORTED;
+        if (ctx->n_dist_dyn && ds->var_id < ctx->n_vars) {
+            uint32_t vid = _resolve(ctx, ds->var_id);
+            const DistDyn *dd = (const DistDyn *)dvs_spool_ptr(&ctx->pool, ctx->dist_dyn);
+            for (uint32_t k = 0; k < ctx->n_dist_dyn; k++)
+                if (dd[k].var == vid) return DVS_COMPILE_ADD_UNSUPPORTED;
+        }
+        d = ds->next;
+    }
+
     /* ---- Add new variables ----
      * Builder's vars_head is LIFO, so we need to walk twice: first
      * to find the max new var id (giving us the right ctx->n_vars
@@ -6038,6 +6056,102 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
         adref = ad->next;
     }
 
+    /* ---- Compile new soft constraints ----
+     * As dvs_solver_compile's SoftSpec walk: each gets an assumption
+     * variable pinned to 1 that gates its body, ranked by its priority with
+     * the softs of the compile and of earlier adds. The assumption arrays
+     * are pool memory, so they are copied into larger ones; a restore puts
+     * back the old (CheckpointMark). */
+    if (aux_sp->n_softs > 0) {
+        uint32_t old_n = ctx->n_assumptions, ns = old_n + aux_sp->n_softs;
+        uint32_t av_ref = dvs_spool_alloc(&ctx->pool, ns * (uint32_t)sizeof(uint32_t),
+                                          (uint32_t)_Alignof(uint32_t));
+        uint32_t ap_ref = dvs_spool_alloc(&ctx->pool, ns * (uint32_t)sizeof(uint32_t),
+                                          (uint32_t)_Alignof(uint32_t));
+        if (av_ref == EXPR_NULL || ap_ref == EXPR_NULL) return -1;
+        uint32_t *av = (uint32_t *)dvs_spool_ptr(&ctx->pool, av_ref);
+        uint32_t *ap = (uint32_t *)dvs_spool_ptr(&ctx->pool, ap_ref);
+        if (old_n) {
+            memcpy(av, ctx->assumption_var_ids, old_n * sizeof *av);
+            memcpy(ap, ctx->assumption_priorities, old_n * sizeof *ap);
+        }
+        ctx->assumption_var_ids = av;
+        ctx->assumption_priorities = ap;
+        for (dvs_expr_t sref = aux_sp->softs_head; sref != EXPR_NULL; ) {
+            SoftSpec *ss = (SoftSpec *)dvs_pool_ptr(&aux_sp->pool, sref);
+            uint32_t avar_id = ctx->n_vars;
+            if (!dvs_ctx_room(ctx, 1)) return -1;
+            Variable *v = &ctx->vars[avar_id];
+            v->lo = 1; v->hi = 1;             /* pinned to 1 = active */
+            v->width = 1; v->flags = 0;
+            v->holes_offset = 0; v->_pad = 0;
+            ctx->n_vars = avar_id + 1;
+            if (ctx->watcher_heads) ctx->watcher_heads[avar_id] = EXPR_NULL;
+            uint32_t aidx = ctx->n_assumptions++;
+            av[aidx] = avar_id;
+            ap[aidx] = ss->priority;
+            ctx->assumption_active_mask |= 1ULL << aidx;
+            /* A body that cannot be compiled gated is counted, not dropped. */
+            if (_compile_gated_constraint(ctx, aux_sp, ss->root, avar_id) == 0) {
+                n_uncompiled++;
+                _log_uncompiled(ctx, aux_sp, ss->root);
+            }
+            sref = ss->next;
+        }
+    }
+
+    /* ---- Store new distributions ----
+     * As dvs_solver_compile's DistSpec walk (constant entries only, checked
+     * above). Of a variable's records the first added wins: one compiled or
+     * added earlier keeps its slot, and of this problem's the last in the
+     * (newest-first) list is taken. */
+    if (aux_sp->n_dists > 0) {
+        dvs_ctx_enable_dists(ctx);
+        if (!ctx->dist_offsets) return -1;
+        for (dvs_expr_t dref = aux_sp->dists_head; dref != EXPR_NULL; ) {
+            const DistSpec *ds = (const DistSpec *)dvs_pool_ptr(&aux_sp->pool, dref);
+            uint32_t vid = _resolve(ctx, ds->var_id);
+            dvs_expr_t next = ds->next;
+            int older = 0;
+            for (dvs_expr_t o = next; o != EXPR_NULL && !older; ) {
+                const DistSpec *os = (const DistSpec *)dvs_pool_ptr(&aux_sp->pool, o);
+                older = _resolve(ctx, os->var_id) == vid;
+                o = os->next;
+            }
+            if (older || vid >= ctx->n_vars || ctx->dist_offsets[vid] != 0) {
+                dref = next;
+                continue;
+            }
+            uint32_t ne = ds->n_entries;
+            const dvs_dist_entry_t *src = (const dvs_dist_entry_t *)(ds + 1);
+            uint32_t dm_ref = dvs_spool_alloc(&ctx->pool,
+                (uint32_t)sizeof(DistMeta) + ne * (uint32_t)sizeof(DistMetaEntry),
+                (uint32_t)_Alignof(DistMeta));
+            if (dm_ref == EXPR_NULL) return -1;
+            DistMeta *dm = (DistMeta *)dvs_spool_ptr(&ctx->pool, dm_ref);
+            dm->n_entries = ne;
+            dm->_pad = 0;
+            DistMetaEntry *dme = (DistMetaEntry *)(dm + 1);
+            uint64_t cum = 0;
+            for (uint32_t i = 0; i < ne; i++) {
+                dme[i].lo = src[i].lo;
+                dme[i].hi = src[i].hi;
+                dme[i].weight = src[i].weight;
+                dme[i].is_per_value = src[i].is_per_value;
+                dme[i]._dmpad[0] = dme[i]._dmpad[1] = dme[i]._dmpad[2] = 0;
+                /* := weighs each value, :/ the whole range */
+                uint64_t ew = src[i].weight == 0 ? 0
+                    : src[i].is_per_value
+                        ? (uint64_t)src[i].weight * ((uint64_t)(src[i].hi - src[i].lo) + 1u)
+                        : (uint64_t)src[i].weight;
+                cum += ew;
+                dme[i].cum_weight = cum;
+            }
+            ctx->dist_offsets[vid] = dm_ref;
+            dref = next;
+        }
+    }
+
     /* ---- Inside a checkpoint scope, log the bounds compile set ----
      * A constraint compiled to a bound tightening has no propagator: if a
      * reset rewound the scope's trail, nothing would re-derive it. Taken
@@ -6078,7 +6192,11 @@ static int _solver_add_constraint_body(dvs_ctx_t *ctx, dvs_problem_t *aux_sp) {
 
     if (_snapshot_added_vars(ctx, init_base_n_vars) < 0) return -1;
 
-    /* ---- Run propagation to fixpoint ---- */
+    /* ---- Run propagation to fixpoint ----
+     * Not with soft constraints in the context: propagated active, they
+     * conflict with each other or a hard constraint, which only the solve
+     * resolves by relaxing them (dvs_solver_compile does not propagate). */
+    if (ctx->n_assumptions > 0) return n_uncompiled;
     PropResult pr = dvs_solver_propagate(ctx);
     if (pr == PROP_CONFLICT && ctx->prop_aborted) {
         /* Abandoned (trail cap), not refuted: leave the verdict to the solve,

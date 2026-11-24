@@ -114,6 +114,13 @@ typedef struct {
 #define DVS_COMPILE_DIST_RAND         (-6)  /* a distribution's guard, bounds
                                              * or weights read a variable
                                              * that is not STATE             */
+#define DVS_COMPILE_ADD_UNSUPPORTED   (-7)  /* dvs_solver_add_constraint():
+                                             * the problem has a distribution
+                                             * with expressions, one on a
+                                             * variable whose compiled
+                                             * distribution has them, or
+                                             * the context would hold more
+                                             * than 64 soft constraints     */
 
 /* ------------------------------------------------------------------ */
 /* Solving                                                             */
@@ -259,8 +266,14 @@ DVS_API int dvs_solver_exclude_value(dvs_ctx_t *ctx, uint32_t var_id, int64_t va
  * the problem declared before; re-declaring any other id is
  * DVS_COMPILE_BAD_VAR.
  *
- * @return  The same codes as dvs_solver_compile(). `p` may name variables
- *          the context already has without declaring them.
+ * Soft constraints of `p` keep their priority and are ranked with those of
+ * the compile and of earlier adds; its distributions are drawn as compiled
+ * ones (of several on one variable, the first added wins). A restore of a
+ * checkpoint taken before the add removes both.
+ *
+ * @return  The same codes as dvs_solver_compile(), or
+ *          DVS_COMPILE_ADD_UNSUPPORTED. `p` may name variables the context
+ *          already has without declaring them.
  */
 DVS_API int dvs_solver_add_constraint(dvs_ctx_t *ctx, dvs_problem_t *p);
 

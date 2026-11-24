@@ -83,6 +83,12 @@ typedef struct {
     Variable        *initial_vars;
     uint32_t         initial_n_vars;
     uint32_t         initial_vars_cap;
+    /* The soft-constraint assumptions as they stood: an add in the scope
+     * appends to them, in arrays the restore frees. */
+    uint32_t        *assumption_var_ids;
+    uint32_t        *assumption_priorities;
+    uint64_t         assumption_active_mask;
+    uint32_t         n_assumptions;
 } CheckpointMark;
 
 /* `r == a % b` with b a positive constant, all unsigned: the value picker
