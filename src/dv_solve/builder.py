@@ -477,6 +477,49 @@ class SolveProblemBuilder:
             raise ValueError("set_var_kind: variable %d is not declared, or "
                              "kind %d is not valid" % (var_id, kind))
 
+    def add_array(self, array_id: int, elem_width: int, elem_signed: bool,
+                  kind: int) -> None:
+        """Declare array *array_id*: its size is given per call
+        (:class:`dv_solve.handle.SolveHandle`). *kind* is ``VAR_RAND`` (the
+        elements are solved) or ``VAR_STATE`` (they are read)."""
+        if self._lib.dvs_builder_add_array(
+                self._b, ctypes.c_uint32(array_id), ctypes.c_uint32(elem_width),
+                ctypes.c_uint8(1 if elem_signed else 0), ctypes.c_int(kind)) != 0:
+            raise ValueError("add_array: width %d or kind %d is not valid"
+                             % (elem_width, kind))
+
+    def expr_array_size(self, array_id: int) -> int:
+        """The size of array *array_id*: a 32-bit signed int."""
+        return self._lib.dvs_builder_expr_array_size(self._b, ctypes.c_uint32(array_id))
+
+    def expr_loop_index(self, level: int) -> int:
+        """The index bound at *level* by the enclosing foreach or reduce."""
+        return self._lib.dvs_builder_expr_loop_index(self._b, ctypes.c_uint32(level))
+
+    def expr_elem(self, array_id: int, index: int) -> int:
+        """Element *index* of array *array_id*; 0 when out of range."""
+        return self._lib.dvs_builder_expr_elem(
+            self._b, ctypes.c_uint32(array_id), ctypes.c_uint32(index))
+
+    def expr_reduce(self, op: int, array_id: int, level: int, body: int) -> int:
+        """*body* (indexed by :meth:`expr_loop_index` at *level*) folded with
+        *op* (BIN_ADD, MUL, BAND, BOR or BXOR) over array *array_id*."""
+        return self._lib.dvs_builder_expr_reduce(
+            self._b, ctypes.c_int(op), ctypes.c_uint32(array_id),
+            ctypes.c_uint32(level), ctypes.c_uint32(body))
+
+    def foreach_begin(self, array_id: int, level: int) -> None:
+        """Open a foreach over *array_id*: constraints added until
+        :meth:`foreach_end` hold once per element."""
+        if self._lib.dvs_builder_foreach_begin(
+                self._b, ctypes.c_uint32(array_id), ctypes.c_uint32(level)) != 0:
+            raise ValueError("foreach_begin: level %d is out of range or bound" % level)
+
+    def foreach_end(self) -> None:
+        """Close the innermost open foreach."""
+        if self._lib.dvs_builder_foreach_end(self._b) != 0:
+            raise ValueError("foreach_end: no foreach is open")
+
     def add_dist(self, var_id: int, entries) -> int:
         """Give a variable a weighted distribution, like SystemVerilog's ``dist``.
 

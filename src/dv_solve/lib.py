@@ -435,6 +435,39 @@ def _wire_builder_argtypes(lib: ctypes.CDLL) -> None:
     lib.dvs_builder_set_var_order.argtypes = [c.c_void_p, c.c_uint32, c.c_uint8]
     lib.dvs_builder_set_var_kind.restype  = c.c_int
     lib.dvs_builder_set_var_kind.argtypes = [c.c_void_p, c.c_uint32, c.c_int]
+
+    # Arrays (dvs_tmpl.h): sized per call, solved through a handle.
+    lib.dvs_builder_add_array.restype  = c.c_int
+    lib.dvs_builder_add_array.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32,
+                                          c.c_uint8, c.c_int]
+    lib.dvs_builder_expr_array_size.restype  = c.c_uint32
+    lib.dvs_builder_expr_array_size.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_builder_expr_loop_index.restype  = c.c_uint32
+    lib.dvs_builder_expr_loop_index.argtypes = [c.c_void_p, c.c_uint32]
+    lib.dvs_builder_expr_elem.restype  = c.c_uint32
+    lib.dvs_builder_expr_elem.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32]
+    lib.dvs_builder_expr_reduce.restype  = c.c_uint32
+    lib.dvs_builder_expr_reduce.argtypes = [c.c_void_p, c.c_int, c.c_uint32,
+                                            c.c_uint32, c.c_uint32]
+    lib.dvs_builder_foreach_begin.restype  = c.c_int
+    lib.dvs_builder_foreach_begin.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32]
+    lib.dvs_builder_foreach_end.restype  = c.c_int
+    lib.dvs_builder_foreach_end.argtypes = [c.c_void_p]
+
+    # Problem handles (dv_solve.h): one buffer compiled once, solved per call.
+    lib.dvs_handle_new.restype  = c.c_void_p
+    lib.dvs_handle_new.argtypes = [c.c_void_p, c.c_size_t]
+    lib.dvs_handle_free.restype  = None
+    lib.dvs_handle_free.argtypes = [c.c_void_p]
+    lib.dvs_handle_n_vars.restype  = c.c_uint32
+    lib.dvs_handle_n_vars.argtypes = [c.c_void_p]
+    lib.dvs_handle_n_arrays.restype  = c.c_uint32
+    lib.dvs_handle_n_arrays.argtypes = [c.c_void_p]
+    lib.dvs_randomize.restype  = c.c_int
+    lib.dvs_randomize.argtypes = [c.c_void_p, c.c_void_p, c.c_void_p, c.c_uint64]
+    lib.dvs_randomize_arrays.restype  = c.c_int
+    lib.dvs_randomize_arrays.argtypes = [c.c_void_p, c.c_void_p, c.c_void_p,
+                                         c.c_void_p, c.c_uint64]
     lib.dvs_builder_add_soft_constraint.restype  = c.c_uint32
     lib.dvs_builder_add_soft_constraint.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32]
 
