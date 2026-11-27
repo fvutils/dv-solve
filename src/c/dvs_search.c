@@ -765,6 +765,69 @@ static int64_t _pick_mul_divisor(dvs_ctx_t *ctx, uint32_t var_id, int64_t v,
     return v;
 }
 
+/* x in `r == x * c` (modulo 2^w), c fixed, r bounded, the product wrapping:
+ * draw r, then x from it. A product that wraps leaves x's bounds alone, so
+ * x was drawn uniformly over 2^w values of which a few thousand fit r
+ * (`ticks * (prescale + 1) <= 5000` once `solve prescale before ticks`
+ * fixed prescale: 5001 of 2^32), and the search refuted draw after draw
+ * until it gave up. With c = 2^k * odd, x * c == r takes r a multiple of
+ * 2^k, and then x == (r >> k) * odd^-1 (mod 2^(w-k)), its top k bits free:
+ * each r has 2^k such x, so r a uniform multiple of 2^k and the top bits
+ * uniform make x uniform over the solutions. x's bounds, holes and facts
+ * reject. 1 and *out, or 0 (draw as before). */
+static int _pd_allows(dvs_ctx_t *ctx, uint32_t x, int64_t v);
+
+static int _pick_mul_inverse(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t hi,
+                             int64_t *out) {
+    if (!ctx->n_mul_links || (ctx->vars[x].flags & VAR_SIGNED)) return 0;
+    for (uint32_t i = 0; i < ctx->n_mul_links; i++) {
+        const DvsMulLink *ml = &ctx->mul_links[i];
+        if (ml->a == ml->b || ml->width == 0 || ml->width > 64) continue;
+        for (int side = 0; side < 2; side++) {
+            uint32_t xa = side ? ml->b : ml->a, y = side ? ml->a : ml->b;
+            if (xa != x) continue;
+            const Variable *rv = &ctx->vars[ml->r], *yv = &ctx->vars[y];
+            const uint32_t w = ml->width;
+            if ((rv->flags | yv->flags) & VAR_SIGNED) continue;
+            if (ctx->vars[x].width != w || rv->width != w) continue;
+            const uint64_t mask = w >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
+            uint64_t c = (uint64_t)var_lo64(ctx, yv);
+            if (c != (uint64_t)var_hi64(ctx, yv)) continue;
+            c &= mask;
+            if (c == 0) continue;
+            /* No wrap over x's bounds: the propagator's bounds are exact. */
+            if ((uint64_t)hi <= mask / c) continue;
+            uint64_t rlo = (uint64_t)var_lo64(ctx, rv), rhi = (uint64_t)var_hi64(ctx, rv);
+            if (rhi > mask) rhi = mask;
+            if (rlo > rhi) continue;
+            /* r's domain about as wide as x's: no better than uniform. */
+            if (rhi - rlo >= ((uint64_t)hi - (uint64_t)lo) / 2) continue;
+            const uint32_t k = (uint32_t)__builtin_ctzll(c);
+            const uint64_t odd = c >> k;
+            uint64_t inv = odd;                       /* odd * inv == 1 mod 2^64 */
+            for (int it = 0; it < 6; it++) inv *= 2 - odd * inv;
+            const uint64_t m0 = (rlo >> k) + ((rlo & (((uint64_t)1 << k) - 1)) != 0);
+            const uint64_t m1 = rhi >> k;
+            if (m0 > m1) return 0;                    /* no multiple: a conflict */
+            const uint64_t lowm = (w - k) >= 64 ? ~(uint64_t)0
+                                                : (((uint64_t)1 << (w - k)) - 1);
+            const uint64_t span = m1 - m0;
+            for (int tries = 0; tries < 64; tries++) {
+                uint64_t m = m0 + (span == ~(uint64_t)0 ? _rand64(ctx)
+                                                         : _rand64(ctx) % (span + 1));
+                uint64_t t = (m * inv) & lowm;
+                if (k) t |= (_rand64(ctx) & (((uint64_t)1 << k) - 1)) << (w - k);
+                if (t < (uint64_t)lo || t > (uint64_t)hi) continue;
+                if (_is_hole(ctx, x, (int64_t)t) || !_pd_allows(ctx, x, (int64_t)t)) continue;
+                *out = (int64_t)t;
+                return 1;
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
 /* ---- Pick domain: draw only values the problem can still take ----------
  *
  * A variable's domain is its bounds (and a hole list), but propagators know
@@ -2369,6 +2432,8 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
         v = _pick_value_dist(ctx, var_id, lo, hi);
     } else if (_pick_in_set(ctx, var_id, lo, hi, &v)) {
         /* one of the values x's sets leave */
+    } else if (_pick_mul_inverse(ctx, var_id, lo, hi, &v)) {
+        /* x * c lands in r's bounds */
     } else if (opts && opts->seed != 0 && ctx->fair_pick && !opts->seq_pick
                && !_wpick_in_product(ctx, var_id) && !(ctx->vars[var_id].flags & VAR_AUX)
                && _wpick_enabled() && _pick_value_weighted(ctx, var_id, lo, hi, &v)) {
