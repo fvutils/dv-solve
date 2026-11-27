@@ -614,6 +614,39 @@ static int _has_holes(const dvs_ctx_t *ctx, uint32_t var_id) {
            ctx->var_holes_head[var_id] != 0;
 }
 
+/* Any variable with holes (randc exclusions) at all: the tiers then check
+ * the holes of variables they do not decide (_hole_dead). */
+static int _any_holes(const dvs_ctx_t *ctx) {
+    if (!ctx->var_holes_head) return 0;
+    uint32_t n = ctx->n_vars < ctx->n_vars_capacity ? ctx->n_vars : ctx->n_vars_capacity;
+    for (uint32_t i = 0; i < n; i++)
+        if (ctx->var_holes_head[i]) return 1;
+    return 0;
+}
+
+/* Some variable has no value left but holes: its [lo, hi] is all holes.
+ *
+ * Holes are not bounds: no propagator sees them, only the value pickers do.
+ * A variable the search never decides -- fixed by propagation (`c < x` with
+ * x decided first: c in [0, 0]), or one whose remaining range is all holes
+ * (`zext(c) != 7` learnt down to [0, 6] with 0..6 excluded) -- would end up
+ * on a hole, and the model with it: a randc variable then repeats a value
+ * of its cycle, and the cycle never ends (the UNSAT that ends it is not
+ * seen). A state with such a variable has no solution. */
+static int _hole_dead(const dvs_ctx_t *ctx) {
+    if (!ctx->var_holes_head) return 0;
+    uint32_t n = ctx->n_vars < ctx->n_vars_capacity ? ctx->n_vars : ctx->n_vars_capacity;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!ctx->var_holes_head[i]) continue;
+        const Variable *v = &ctx->vars[i];
+        int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
+        if (var_b_gt(v, lo, hi)) continue;   /* an empty domain is a conflict anyway */
+        uint64_t span = (uint64_t)hi - (uint64_t)lo;   /* values - 1 */
+        if ((uint64_t)_count_holes_in_range(ctx, i, lo, hi) > span) return 1;
+    }
+    return 0;
+}
+
 /* Pick a value avoiding holes via rejection sampling, with fallback
  * to enumeration for domains with many holes. */
 static int64_t _pick_avoiding_holes(dvs_ctx_t *ctx, uint32_t var_id,
@@ -2678,6 +2711,8 @@ static int _box_try(dvs_ctx_t *ctx, uint32_t base) {
             return -1;
         }
     }
+    /* A variable the draw left to propagation may sit on a hole. */
+    if (_hole_dead(ctx)) { trail_backtrack(ctx, base); return 0; }
     return 1;
 }
 
@@ -2947,6 +2982,7 @@ static int _enum_build(dvs_ctx_t *ctx, uint32_t base) {
     int ok = 1;
     uint32_t nodes = 0;
     const uint64_t fires0 = ctx->prop_fires;
+    const int holes = _any_holes(ctx);
     uint32_t d = 0;
     int advance = 0;     /* back at depth d's scan level after a try */
     trail_push_level(ctx);
@@ -3020,6 +3056,12 @@ static int _enum_build(dvs_ctx_t *ctx, uint32_t base) {
         }
         /* A leaf: every enumerated var pinned, propagation quiet. */
         if (!_all_fixed(ctx)) { ok = 0; break; }
+        /* A var left to propagation on a hole: not a solution. */
+        if (holes && _hole_dead(ctx)) {
+            trail_backtrack(ctx, lvl[d]);
+            advance = 1;
+            continue;
+        }
         if ((uint64_t)(ctx->enum_nsol + 1) * nv > DVS_ENUM_MAX) { ok = 0; break; }
         size_t need = (size_t)(ctx->enum_nsol + 1) * nv;
         if (need > ctx->enum_cap) {
@@ -3368,6 +3410,7 @@ static dvs_result_t _canon_search(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
     dvs_result_t res;
     uint64_t tick = 0;
     uint32_t depth = 0;
+    const int holes = _any_holes(ctx);   /* see _hole_dead */
     int open = 1;    /* the last candidate held: open the next variable's frame */
     int failed = 0;  /* the top frame's candidate f->v has no solution */
     for (;;) {
@@ -3421,6 +3464,7 @@ static dvs_result_t _canon_search(dvs_ctx_t *ctx, const dvs_solve_opts_t *opts,
         PropResult pr = ctx_tighten_lb64(ctx, x, v);
         if (pr == PROP_OK) pr = ctx_tighten_ub64(ctx, x, v);
         if (pr == PROP_OK) pr = dvs_solver_propagate(ctx);
+        if (pr == PROP_OK && holes && _hole_dead(ctx)) pr = PROP_CONFLICT;
         if (pr == PROP_OK) { open = 1; continue; }
         if (ctx->prop_aborted) { res = DVS_SOLVE_TIMEOUT; break; }
         failed = 1;
@@ -3722,6 +3766,10 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (ABORTED()) return DVS_SOLVE_TIMEOUT;   /* a probe's verdict is void */
         if (sr == PROP_CONFLICT) return DVS_SOLVE_UNSAT;
     }
+    /* Holes: every tier checks the variables it does not decide (see
+     * _hole_dead); at the root, one with nothing but holes left is UNSAT. */
+    const int holes = _any_holes(ctx);
+    if (holes && _hole_dead(ctx)) return DVS_SOLVE_UNSAT;
     if (opts && opts->canonical) return _canon_search(ctx, opts, base, _deadline);
 
     /* Box-rejection tier: uniform over solutions when it succeeds. With a
@@ -3774,6 +3822,21 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
         if (ctx->work_limit && dvs_ctx_work(ctx) > ctx->work_limit) {
             ctx->work_hit = 1;
             return DVS_SOLVE_TIMEOUT;
+        }
+
+        /* A variable with nothing but holes left (_hole_dead): the
+         * decisions so far have no solution. A conflict with no culprit
+         * propagator or clause, as a decision's own tightening is: conflict
+         * analysis learns nothing from it, and the search goes back
+         * chronologically, ruling out the last decision. */
+        int fresh = 1;   /* the conflict is the decision just made */
+        PropResult pr = PROP_OK;
+        if (holes && _hole_dead(ctx)) {
+            ctx->conflict_prop_ref   = EXPR_NULL;
+            ctx->conflict_clause_idx = EXPR_NULL;
+            pr = PROP_CONFLICT;
+            fresh = 0;
+            goto conflict;
         }
 
         /* ── Variable selection ── */
@@ -3844,7 +3907,6 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
          * that removes solutions (wrong `unsat`). */
         ctx->conflict_prop_ref   = EXPR_NULL;
         ctx->conflict_clause_idx = EXPR_NULL;
-        PropResult pr;
         if (bound == 1)      pr = ctx_tighten_ub64(ctx, x_id, v);
         else if (bound == 2) pr = ctx_tighten_lb64(ctx, x_id, v);
         else {
@@ -3866,7 +3928,7 @@ static dvs_result_t _solver_solve_core(dvs_ctx_t *ctx, const dvs_solve_opts_t *o
             ctx->value_fails[x_id]++;
 
         /* ── Conflict loop ── */
-        int fresh = 1;   /* first pass: the conflict is the decision just made */
+    conflict:
         while (pr == PROP_CONFLICT) {
             const int counted = fresh;   /* value_fails already has it */
             fresh = 0;
