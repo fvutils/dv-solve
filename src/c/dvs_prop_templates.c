@@ -4406,7 +4406,8 @@ uint32_t prop_add_bounds_concat_64(dvs_ctx_t *ctx, uint32_t r_id,
 }
 
 /* r = a % b and s = a[j-1:0]: once b is a power of two 2^k with k <= j,
- * a % b == s % b, so r = s % b; with k > j, r = a[k-1:0], so s = r[j-1:0]. Redundant, but it lets a congruence on a
+ * a % b == s % b, so r = s % b; with k > j, r = a[k-1:0], so s = r[j-1:0].
+ * Any other even b = 2^t * odd fixes s's low t bits once r is fixed. Redundant, but it lets a congruence on a
  * reach a decided low slice: `a % 64 == 0` against `a[11:0] == 216` used
  * to move a's bounds one page at a time between the two propagators
  * (docs/structural_reasoning_design.md, axi_burst_bytes_64). The explainer
@@ -4420,7 +4421,20 @@ static PropResult _fire_lowslice_mod(Propagator *self, dvs_ctx_t *ctx) {
     uint64_t blo = (uint64_t)var_lo64(ctx, &ctx->vars[bid]);
     uint64_t bhi = (uint64_t)var_hi64(ctx, &ctx->vars[bid]);
     uint32_t j = ((LowSliceMod_t *)self)->j;
-    if (blo != bhi || blo == 0 || (blo & (blo - 1)) != 0) return PROP_OK;
+    if (blo != bhi || blo == 0) return PROP_OK;
+    if ((blo & (blo - 1)) != 0) {
+        /* b = 2^t * odd: a % b == r gives a % 2^t == r % 2^t, so once r is
+         * fixed, s's low min(t, j) bits are r's (`addr % 12 == 0` against a
+         * decided addr[0]). */
+        uint32_t t = (uint32_t)__builtin_ctzll(blo);
+        uint64_t rlo = (uint64_t)var_lo64(ctx, &ctx->vars[rid]);
+        if (t == 0 || rlo != (uint64_t)var_hi64(ctx, &ctx->vars[rid])) return PROP_OK;
+        if (t > j) t = j;
+        uint64_t v = rlo & (((uint64_t)1 << t) - 1);
+        if (t == j) return _tighten_u64(ctx, sid, v, v);
+        return _bit_slice_backward(ctx, sid, 0, t - 1, v, var_lo64(ctx, &ctx->vars[sid]),
+                                   var_hi64(ctx, &ctx->vars[sid]));
+    }
     if (j >= 64 || blo <= ((uint64_t)1 << j))
         return _mod_u64(ctx, rid, sid, bid);
     /* k > j: r = a[k-1:0], so s = r[j-1:0]. */
@@ -4439,11 +4453,38 @@ static PropResult _fire_lowslice_mod(Propagator *self, dvs_ctx_t *ctx) {
     return PROP_OK;
 }
 
+/* Propagator p as a low slice s = src[j-1:0]: a bit slice from bit 0, or the
+ * low half of a concat (`a[j-1:0] == c` compiles to this, the constant as
+ * s). 1 and *sid, *src, *j; else 0. */
+static int _low_slice_of(Propagator *p, uint32_t *sid, uint32_t *src, uint32_t *j) {
+    PropWatchSect *w = PROP_WS(p);
+    if (p->fire == _fire_bit_slice_64 || p->fire == _fire_bit_slice_32) {
+        uint32_t lo = p->fire == _fire_bit_slice_64
+            ? ((BitSlice_64_t *)p)->lo_bit : ((BitSlice_32_t *)p)->lo_bit;
+        if (lo != 0) return 0;
+        *sid = w->var_ids[0]; *src = w->var_ids[1];
+        *j = 1u + (p->fire == _fire_bit_slice_64
+            ? ((BitSlice_64_t *)p)->hi_bit : ((BitSlice_32_t *)p)->hi_bit);
+        return 1;
+    }
+    if (p->fire == _fire_bounds_concat_64) {
+        *sid = w->var_ids[2]; *src = w->var_ids[0];
+        *j = ((BoundsConcat_64_t *)p)->lo_width;
+        return 1;
+    }
+    return 0;
+}
+
 /* After the compile walk: link each unsigned remainder r = a % b to the
- * low slices s = a[j-1:0] of the same a, from a bit slice or the low half
- * of a concat (at most 64 links). */
+ * low slices s = a[j-1:0] of the same a (at most 64 links). A low slice of
+ * a low slice is one of a too: reading address[0] and address[31] splits
+ * address into {a31, {a30_1, a0}}, and `address % 16 == 0` against a
+ * decided a0 == 1 moved the low part's bounds 16 at a time between the
+ * remainder and the inner concat, 2^27 rounds, until the trail cap gave the
+ * solve up (Verilator's t_constraint_implication_set). With a0 linked,
+ * r == 0 fixes a0 = 0 before any decision. */
 void prop_add_lowslice_mod_links(dvs_ctx_t *ctx) {
-    enum { MAXL = 64 };
+    enum { MAXL = 64, MAXS = 16 };
     uint32_t lim = ctx->n_props < ctx->n_prop_refs_capacity
                    ? ctx->n_props : ctx->n_prop_refs_capacity;
     uint32_t n_links = 0;
@@ -4456,33 +4497,34 @@ void prop_add_lowslice_mod_links(dvs_ctx_t *ctx) {
         if (((ctx->vars[rid].flags | ctx->vars[aid].flags |
               ctx->vars[bid].flags) & VAR_SIGNED) || ctx->vars[aid].width > 64)
             continue;
-        for (uint32_t si = 0; si < lim && n_links < MAXL; si++) {
-            if (ctx->prop_refs[si] == EXPR_NULL) continue;
-            Propagator *sp = (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[si]);
-            PropWatchSect *sw = PROP_WS(sp);
-            uint32_t sid, src, j;
-            if (sp->fire == _fire_bit_slice_64 || sp->fire == _fire_bit_slice_32) {
-                uint32_t lo = sp->fire == _fire_bit_slice_64
-                    ? ((BitSlice_64_t *)sp)->lo_bit : ((BitSlice_32_t *)sp)->lo_bit;
-                if (lo != 0) continue;
-                sid = sw->var_ids[0]; src = sw->var_ids[1];
-                j = 1u + (sp->fire == _fire_bit_slice_64
-                    ? ((BitSlice_64_t *)sp)->hi_bit : ((BitSlice_32_t *)sp)->hi_bit);
-            } else if (sp->fire == _fire_bounds_concat_64) {
-                /* a = {h, s}: s is a's low lo_width bits (`a[j-1:0] == c`
-                 * compiles to this, the constant as s). */
-                sid = sw->var_ids[2]; src = sw->var_ids[0];
-                j = ((BoundsConcat_64_t *)sp)->lo_width;
-            } else continue;
-            if (src != aid || sid == aid || j == 0) continue;
-            if (ctx->vars[sid].flags & VAR_SIGNED) continue;
-            if (j >= ctx->vars[aid].width) continue;   /* whole of a */
-            uint32_t ids[3] = { rid, sid, bid };
-            uint32_t ref = _alloc_prop(ctx, _fire_lowslice_mod, 0, 3, ids,
-                                       sizeof(LowSliceMod_t));
-            if (ref == EXPR_NULL) return;
-            ((LowSliceMod_t *)dvs_spool_ptr(&ctx->pool, ref))->j = j;
-            n_links++;
+        /* a's low slices: lv[i] = a[lj[i]-1:0], a itself first. Grown to a
+         * fixed point, as a slice may be compiled before the one it reads. */
+        uint32_t lv[MAXS], lj[MAXS], nl = 1;
+        lv[0] = aid; lj[0] = ctx->vars[aid].width;
+        for (int grew = 1; grew && nl < MAXS; ) {
+            grew = 0;
+            for (uint32_t si = 0; si < lim && nl < MAXS; si++) {
+                if (ctx->prop_refs[si] == EXPR_NULL) continue;
+                Propagator *sp = (Propagator *)dvs_spool_ptr(&ctx->pool, ctx->prop_refs[si]);
+                uint32_t sid, src, j, i, k;
+                if (!_low_slice_of(sp, &sid, &src, &j) || j == 0) continue;
+                if (ctx->vars[sid].flags & VAR_SIGNED) continue;
+                for (i = 0; i < nl && lv[i] != src; i++) {}
+                if (i == nl) continue;
+                if (j > lj[i]) j = lj[i];
+                if (j >= ctx->vars[aid].width) continue;   /* whole of a */
+                for (k = 0; k < nl && lv[k] != sid; k++) {}
+                if (k < nl) continue;
+                lv[nl] = sid; lj[nl] = j; nl++;
+                grew = 1;
+                uint32_t ids[3] = { rid, sid, bid };
+                if (n_links >= MAXL) return;
+                uint32_t ref = _alloc_prop(ctx, _fire_lowslice_mod, 0, 3, ids,
+                                           sizeof(LowSliceMod_t));
+                if (ref == EXPR_NULL) return;
+                ((LowSliceMod_t *)dvs_spool_ptr(&ctx->pool, ref))->j = j;
+                n_links++;
+            }
         }
     }
 }
