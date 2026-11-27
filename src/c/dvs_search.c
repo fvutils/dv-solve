@@ -841,7 +841,14 @@ typedef struct {
     uint64_t cm, cr;      /* congruence: x % cm == cr (cm 1: none)     */
     PdSet    set;
     uint64_t maxv;        /* the variable's largest value              */
+    uint8_t  plo, phi;    /* popcount: plo <= $countones(x) <= phi
+                           * (0, 64: none)                             */
 } PdFacts;
+
+/* F bounds x's popcount below its width's 0..w. */
+static inline int _pd_pc_on(const PdFacts *F) {
+    return F->plo > 0 || F->phi < __builtin_popcountll(F->maxv);
+}
 
 static inline uint64_t _pd_maxv(uint32_t w) {
     return w >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1u);
@@ -991,7 +998,7 @@ static uint32_t _pd_roles(const dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t pi
     case PPK_SHL:
         if (nw == 3) xs[n++] = w[0];
         break;
-    case PPK_MOD: case PPK_SLICE:
+    case PPK_MOD: case PPK_SLICE: case PPK_POPCNT:
         if (nw >= 2) xs[n++] = w[1];
         break;
     case PPK_DISJ: {
@@ -1371,6 +1378,7 @@ static int _pd_facts(dvs_ctx_t *ctx, uint32_t x, PdFacts *F) {
             F->km = F->kv = 0;
             F->cm = 1; F->cr = 0;
             F->set.univ = 1; F->set.n = 0;
+            F->plo = 0; F->phi = 64;
         }
         if (!_pd_bits(F, kr->mask, kr->val)) return -1;
         rc = 1;
@@ -1386,6 +1394,7 @@ static int _pd_class(dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t x, PdFacts *F
     F->km = F->kv = 0;
     F->cm = 1; F->cr = 0;
     F->set.univ = 1; F->set.n = 0;
+    F->plo = 0; F->phi = 64;
     if (!_pd_has(ix, r)) return 0;
     if (ix->skm[r] && !_pd_bits(F, ix->skm[r], ix->skv[r])) return -1;
     for (uint32_t i = ix->off[r]; i < ix->off[r + 1]; i++) {
@@ -1449,6 +1458,19 @@ static int _pd_class(dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t x, PdFacts *F
             }
             break;
         }
+        case PPK_POPCNT: {
+            /* c == $countones(x), c in [clo, chi]: x has clo..chi bits set. */
+            if (nw != 2 || ix->rep[w[1]] != r) break;
+            const Variable *cv = &ctx->vars[w[0]];
+            int64_t clo = var_lo64(ctx, cv), chi = var_hi64(ctx, cv);
+            if (!(cv->flags & VAR_SIGNED) && (clo < 0 || chi < 0)) break;  /* past 2^63 */
+            if (chi < 0) return -1;
+            if (clo > 64) return -1;
+            if (clo > F->plo) F->plo = (uint8_t)clo;
+            if (chi < F->phi) F->phi = (uint8_t)chi;
+            if (F->plo > F->phi) return -1;
+            break;
+        }
         case PPK_DISJ: {
             if (depth) break;
             PdSet s;
@@ -1472,7 +1494,7 @@ static int _pd_class(dvs_ctx_t *ctx, const DvsPickIx *ix, uint32_t x, PdFacts *F
                 && !_pd_congr(F, (uint64_t)1 << t, F->kv & low))
             return -1;
     }
-    if (!F->km && F->cm == 1u && F->set.univ) return 0;
+    if (!F->km && F->cm == 1u && F->set.univ && !_pd_pc_on(F)) return 0;
     return 1;
 }
 
@@ -1577,10 +1599,69 @@ static uint64_t _pd_nth(const PdFacts *F, uint64_t lo, uint64_t hi, uint64_t i) 
     return b;
 }
 
+/* y is in F's value set. */
+static int _pd_in_set(const PdFacts *F, uint64_t y) {
+    if (F->set.univ) return 1;
+    for (uint32_t i = 0; i < F->set.n; i++)
+        if (F->set.lo[i] <= y && y <= F->set.hi[i]) return 1;
+    return 0;
+}
+
+/* _pd_draw under a popcount fact (`$countones(x) == k`, `$onehot(x)`).
+ * The values with k bits set are too sparse for the interval draw: of a
+ * 33-bit x, 33 values in 2^33 have one bit set, and the search, refuting
+ * one uniform draw after another, ended on the same bound every time.
+ * Instead draw a pattern: k by its count C(free, k - known ones) among the
+ * popcounts allowed, then which free bits are set, uniformly. Every value
+ * with an allowed popcount and x's known bits is equally likely; the other
+ * facts (bounds, congruence, value set, holes) reject, which keeps it
+ * uniform over what they leave. 0 when the rejections run out. */
+#define PD_PC_TRIES 256
+static int _pd_draw_pc(dvs_ctx_t *ctx, uint32_t x, const PdFacts *F, uint64_t lo, uint64_t hi,
+                       int64_t *out) {
+    const uint64_t fr = ~F->km & F->maxv;
+    const uint64_t kv = F->kv & F->km & F->maxv;
+    const int nf = __builtin_popcountll(fr), kp = __builtin_popcountll(kv);
+    int k0 = F->plo > kp ? F->plo : kp;
+    int k1 = F->phi < kp + nf ? F->phi : kp + nf;
+    if (k0 > k1) return 0;
+    double wt[65], tot = 0.0;
+    for (int k = k0; k <= k1; k++) {
+        /* C(nf, j), j = k - kp */
+        double c = 1.0;
+        int j = k - kp;
+        for (int i = 0; i < j; i++) c = c * (double)(nf - i) / (double)(i + 1);
+        wt[k] = c;
+        tot += c;
+    }
+    uint8_t pos[64];
+    for (int tries = 0; tries < PD_PC_TRIES; tries++) {
+        double u = (double)(_rand64(ctx) >> 11) * 0x1p-53 * tot;
+        int k = k0;
+        while (k < k1 && u >= wt[k]) { u -= wt[k]; k++; }
+        /* j of the nf free bits, by a partial Fisher-Yates shuffle */
+        int n = 0;
+        for (uint64_t f = fr; f; f &= f - 1u) pos[n++] = (uint8_t)__builtin_ctzll(f);
+        uint64_t y = kv;
+        for (int i = 0; i < k - kp; i++) {
+            int r = i + (int)(_rand64(ctx) % (uint64_t)(n - i));
+            uint8_t t = pos[i]; pos[i] = pos[r]; pos[r] = t;
+            y |= (uint64_t)1 << pos[i];
+        }
+        if (y < lo || y > hi) continue;
+        if (F->cm > 1u && y % F->cm != F->cr) continue;
+        if (!_pd_in_set(F, y) || _is_hole(ctx, x, (int64_t)y)) continue;
+        *out = (int64_t)y;
+        return 1;
+    }
+    return 0;
+}
+
 /* A value of x in [lo, hi] (unsigned) drawn uniformly among those the facts
  * allow, missing holes: 1 and *out, or 0 (none found). */
 static int _pd_draw(dvs_ctx_t *ctx, uint32_t x, const PdFacts *F, uint64_t lo, uint64_t hi,
                     int64_t *out) {
+    if (_pd_pc_on(F)) return _pd_draw_pc(ctx, x, F, lo, hi, out);
     uint64_t a, b, tot = 0;
     uint64_t cnt[PD_MAXIV];
     uint32_t np = 0;
@@ -1615,6 +1696,8 @@ static int _pd_allows(dvs_ctx_t *ctx, uint32_t x, int64_t v) {
     if (_pd_facts(ctx, x, &F) != 1) return 1;
     uint64_t y = (uint64_t)v;
     if ((y & F.km) != F.kv || (F.cm > 1u && y % F.cm != F.cr)) return 0;
+    int pc = __builtin_popcountll(y & F.maxv);
+    if (pc < F.plo || pc > F.phi) return 0;
     return _pd_count(&F, y, y) > 0.0;
 }
 
@@ -2033,6 +2116,9 @@ static int _pick_value_weighted(dvs_ctx_t *ctx, uint32_t x, int64_t lo, int64_t 
     PdFacts F;
     uint64_t pdn = 0;
     if (_pd_facts(ctx, x, &F) == 1) {
+        /* The counts by rank know no popcount: draw such x uniformly
+         * (_pd_draw_pc). */
+        if (_pd_pc_on(&F)) return 0;
         if (!_pd_total(&F, (uint64_t)lo, (uint64_t)hi, &pdn)) pdn = 0;
         else if (pdn < 2) return 0;
         else nb = pdn < DVS_WPICK_BUCKETS ? (uint32_t)pdn : DVS_WPICK_BUCKETS;

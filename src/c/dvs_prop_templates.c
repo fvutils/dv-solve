@@ -5596,6 +5596,7 @@ dvs_pick_kind_t prop_pick_kind(const Propagator *p, uint32_t *hi_bit, uint32_t *
     if (f == _fire_ite_value_64) return PPK_ITE;
     if (f == _fire_bounds_add_64 || f == _fire_bounds_add_32) return PPK_ADD;
     if (f == _fire_disj_clause) return PPK_DISJ;
+    if (f == _fire_countones_32) return PPK_POPCNT;
     if (f == _fire_bit_slice_64) {
         *hi_bit = ((const BitSlice_64_t *)p)->hi_bit;
         *lo_bit = ((const BitSlice_64_t *)p)->lo_bit;

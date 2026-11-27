@@ -4010,10 +4010,19 @@ static int _compile_constraint(dvs_ctx_t *ctx, dvs_problem_t *sp, dvs_expr_t roo
     if (k == EXPR_COUNTONES) {
         ExprCountones *ec = (ExprCountones *)dvs_pool_ptr(&sp->pool, root);
         uint32_t r_id, x_id;
-        if (!_is_var(sp, ec->result, &r_id)) return 0;
+        int64_t rc;
         if (!_is_var(sp, ec->operand, &x_id)) return 0;
-        r_id = _resolve(ctx, r_id);
         x_id = _resolve(ctx, x_id);
+        /* A constant count (`countones(k, x)`): a one-value variable, so x
+         * is still drawn by its popcount (_pd_draw_pc). */
+        if (_is_const(sp, ec->result, &rc)) {
+            if (rc < 0 || rc > 64) return -1;
+            r_id = _adjacent_const_var(ctx, x_id, rc, 0);
+            if (r_id == EXPR_NULL) return 0;
+        } else {
+            if (!_is_var(sp, ec->result, &r_id)) return 0;
+            r_id = _resolve(ctx, r_id);
+        }
         uint32_t ref = prop_add_countones_32(ctx, r_id, x_id, 0);
         return (ref != EXPR_NULL) ? 1 : 0;
     }

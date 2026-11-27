@@ -530,10 +530,11 @@ uint32_t prop_disj_eq_set(const Propagator *p, uint32_t *out_var,
  *   PPK_ADD      r, a, b              r == a + b
  *   PPK_CONCAT   r, hi, lo            r == {hi, lo}, lo *lo_bit bits wide
  *   PPK_DISJ     a DisjClause_t
+ *   PPK_POPCNT   r, x                 r == $countones(x)
  * Anything else is PPK_OTHER. */
 typedef enum {
     PPK_OTHER = 0, PPK_EQ, PPK_BAND, PPK_SHL, PPK_MOD, PPK_SLICE,
-    PPK_REIF_LE, PPK_REIF_EQ, PPK_ITE, PPK_ADD, PPK_CONCAT, PPK_DISJ
+    PPK_REIF_LE, PPK_REIF_EQ, PPK_ITE, PPK_ADD, PPK_CONCAT, PPK_DISJ, PPK_POPCNT
 } dvs_pick_kind_t;
 dvs_pick_kind_t prop_pick_kind(const Propagator *p, uint32_t *hi_bit, uint32_t *lo_bit);
 
