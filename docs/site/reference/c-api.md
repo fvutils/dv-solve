@@ -233,10 +233,22 @@ A distribution evaluated on each call, from the STATE values pinned for it: a
 `dist` under a condition, or with weights or bounds that are not constants. It
 holds when `guard` is nonzero (`EXPR_NULL`: always). When more than one
 distribution on a variable holds, the first added is used; when none does, or
-its weights add up to 0, the variable is drawn as if it had none. The guard
-and the entries read only STATE variables and constants, else
-{c:func}`dvs_solver_compile` refuses the problem
-({c:macro}`DVS_COMPILE_DIST_RAND`). Returns `EXPR_NULL` in a foreach body
+its weights add up to 0, the variable is drawn as if it had none. It only
+weights the draw: the caller adds the membership (`var_id` inside the entries)
+as a constraint.
+
+The guard and the entries read constants, STATE variables, and RAND or RANDC
+variables other than `var_id`. Each RAND one is solved before `var_id`, and
+the distribution is evaluated with its value when the search decides
+`var_id`: one with a solve-order stage ({c:func}`dvs_builder_set_var_order`)
+must be in an earlier stage than `var_id`'s; one without is put in a stage of
+its own before `var_id`, as `solve r before var_id` would (a solve order
+changes which solutions are drawn, never which exist). A distribution that
+reads its own variable, or one solved in its stage or after it, and
+distributions that read each other's variables in a cycle, make
+{c:func}`dvs_solver_compile` refuse the problem
+({c:macro}`DVS_COMPILE_DIST_RAND`). {c:macro}`DVS_HAS_DIST_RAND_READS` is
+defined by a library that takes RAND reads. Returns `EXPR_NULL` in a foreach body
 (see {c:func}`dvs_builder_add_dist_elem_ex`), if an entry expression is
 `EXPR_NULL`, or on overflow.
 ```
@@ -271,7 +283,9 @@ such a problem ({c:func}`dvs_randomize_arrays`);
 {c:func}`dvs_solver_compile` refuses it ({c:macro}`DVS_COMPILE_ARRAYS`).
 
 ```{c:function} int dvs_builder_add_array(dvs_builder_t *b, uint32_t array_id, uint32_t elem_width, uint8_t elem_signed, dvs_var_kind_t kind)
-Declare array `array_id` with elements of `elem_width` bits (1 to 64).
+Declare array `array_id` with elements of `elem_width` bits (1 to
+{c:macro}`DVS_MAX_WIDTH`; over 64, an element is held as a
+{c:enumerator}`DVS_REF_WORDS` ref holds a value, see {c:type}`dvs_array_ref_t`).
 `kind` is {c:enumerator}`DVS_VAR_RAND` (the elements are solved) or
 {c:enumerator}`DVS_VAR_STATE` (they are read). Returns 0, or −1 for another
 width or kind.
@@ -384,15 +398,28 @@ writes problems (a compiler embedding them) can refuse one when it writes it
 rather than have it fail at run time. It checks that the image is well formed,
 then makes the checks {c:func}`dvs_solver_compile` makes:
 
-- variable ids are 0 to n-1, each declared once, 1 to 64 bits wide
+- variable ids are 0 to n-1, each declared once, 1 to 64 bits wide, or wider
+  in a problem a handle solves on bit-blast (below)
   ({c:macro}`DVS_COMPILE_BAD_VAR`, {c:macro}`DVS_COMPILE_UNSUPPORTED_WIDTH`);
 - an all-different is over variables of at most 32 bits;
 - every variable an expression, all-different, source group or distribution
   names is declared;
 - no width over {c:macro}`DVS_MAX_WIDTH`, no reversed slice, and no expression
   nested more than 20000 deep;
-- a distribution's guard and entries read only STATE values
-  ({c:macro}`DVS_COMPILE_DIST_RAND`).
+- a distribution's guard and entries read only STATE values and variables
+  that can be solved before the distribution's own
+  ({c:macro}`DVS_COMPILE_DIST_RAND`; see {c:func}`dvs_builder_add_dist_ex`);
+- a variable or array element over 64 bits is only in a problem without soft
+  constraints, distributions or randc variables (a handle solves it on
+  bit-blast, {c:func}`dvs_randomize`);
+- in a problem with soft constraints, distributions or randc variables (at
+  the top or in a foreach body), which stays on CDCL, every constraint and
+  soft constraint reads no expression over 64 bits once a handle has narrowed
+  it (see {c:func}`dvs_randomize`): it runs the same narrowing.
+  `UNSUPPORTED_WIDTH: [soft ]constraint <id> has a <W>-bit expression that
+  cannot be narrowed to 64 bits, in a problem with soft constraints, a
+  distribution or randc`, `<id>` the constraint id the builder returned and
+  `<W>` the width of the context it could not narrow.
 
 It needs only libc, and is in the writer library. A problem it passes can
 still fail where the solve's own stack is smaller than that nesting needs.
@@ -829,7 +856,10 @@ handle solves such a problem, with {c:func}`dvs_randomize_arrays`.
 
 ```{c:macro} DVS_COMPILE_DIST_RAND
 −6: a distribution's guard, bounds or weights
-({c:func}`dvs_builder_add_dist_ex`) read a variable that is not STATE.
+({c:func}`dvs_builder_add_dist_ex`) read a variable that cannot be solved
+before the distribution's own: the distribution's variable itself, one in its
+solve-order stage or a later one, or one of distributions that read each
+other in a cycle.
 ```
 
 ```{c:macro} DVS_COMPILE_ADD_UNSUPPORTED
@@ -929,7 +959,11 @@ The variable's storage, or `NULL`: the variable is not read or written.
 ```
 
 ```{c:member} uint32_t width
-Width in bits, 1 to 64.
+Width in bits: 1 to 64 for {c:enumerator}`DVS_REF_SCALAR`, 1 to
+{c:macro}`DVS_MAX_WIDTH` for {c:enumerator}`DVS_REF_WORDS`. A value is read at
+this width (extended to the variable's, by its sign when `is_signed`), and
+written masked to it. A variable over 64 bits takes a
+{c:enumerator}`DVS_REF_WORDS` ref of its width.
 ```
 
 ```{c:member} uint8_t is_signed
@@ -937,14 +971,30 @@ A {c:enumerator}`DVS_VAR_STATE` value is sign-extended when set.
 ```
 
 ```{c:member} uint8_t layout
-How the value is stored: {c:enumerator}`DVS_REF_SCALAR`.
+How the value is stored: {c:enumerator}`DVS_REF_SCALAR` or
+{c:enumerator}`DVS_REF_WORDS`.
 ```
 ````
 
 ```{c:enumerator} DVS_REF_SCALAR
-The only {c:member}`dvs_ref_t.layout` so far: one little-endian word of 1, 2,
-4 or 8 bytes, the smallest that holds `width` (Verilator's C, S, I and Q
-types).
+One little-endian word of 1, 2, 4 or 8 bytes, the smallest that holds `width`
+(Verilator's C, S, I and Q types).
+```
+
+```{c:enumerator} DVS_REF_WORDS
+`ceil(width / 32)` `uint32_t` words, least significant first: word 0 holds
+bits 31:0 (Verilator's `VlWide` / `EData` W type). The bits of the top word
+above `width` are ignored on a read and written 0.
+```
+
+```{c:macro} DVS_HAS_REF_WORDS
+Defined by a library that reads and writes {c:enumerator}`DVS_REF_WORDS` refs
+and solves problems with variables over 64 bits through a handle.
+```
+
+```{c:macro} DVS_HAS_DIST_RAND_READS
+Defined by a library whose distributions may read RAND variables
+({c:func}`dvs_builder_add_dist_ex`).
 ```
 
 ```{c:function} dvs_handle_t *dvs_handle_new(const void *buf, size_t size)
@@ -1023,6 +1073,29 @@ value is left, and an UNSAT call ends every cycle: it is solved once more
 before it returns {c:enumerator}`DVS_RANDOMIZE_UNSAT`. Calls on one handle
 must not overlap.
 
+A problem with a variable over 64 bits is solved on bit-blast (the CDCL engine
+searches only up to 64), the STATE values pinned by equalities; the instance
+is kept while they stay the same. Its solve order is not honoured (the
+solutions are the same), and one with soft constraints, a distribution or a
+RANDC variable is {c:enumerator}`DVS_RANDOMIZE_ERROR`.
+
+An expression over 64 bits whose variables (and array elements) are all 64
+bits or less, in a problem that stays on CDCL (STATE or RANDC variables, soft
+constraints, a distribution, a solve order, or arrays), is first narrowed to
+an equal one of 64 bits or less where one exists: zero and sign extensions,
+concatenations (a wide value read as 32-bit words), slices, casts, `& | ^ ~`
+and shifts by a constant move its bits; `+ - *` are done at the width their
+operands' ranges need when that is at most 63 bits unsigned or 64 signed; a
+comparison of two values is done at 64 bits or less when both are such
+values (or one is a constant), else slice by slice from the top. What it
+cannot narrow (a wide `/` or `%`, a product or sum that may need more than 64
+bits, a shift by a variable, `>>` of a signed value, `inside` over 64 bits)
+the CDCL compile leaves out: such a problem without soft constraints, a
+distribution or randc is then solved on bit-blast with the STATE values
+pinned, as above; with them it is {c:enumerator}`DVS_RANDOMIZE_ERROR`, and
+{c:func}`dvs_problem_validate` refuses it. Distribution expressions are not
+narrowed.
+
 :param refs: {c:func}`dvs_handle_n_vars` entries.
 :param modes: `constraint_mode` / `rand_mode` bits. The buffer format has
   none yet: pass `NULL` (anything else is {c:enumerator}`DVS_RANDOMIZE_ERROR`).
@@ -1035,7 +1108,9 @@ must not overlap.
 ```{c:type} dvs_array_ref_t
 One array of a problem with arrays: `n_elems` elements at `data`, packed,
 each in the smallest of 1, 2, 4 or 8 bytes that holds the element width (as a
-{c:enumerator}`DVS_REF_SCALAR` ref), little-endian. `data` may be `NULL` when
+{c:enumerator}`DVS_REF_SCALAR` ref), little-endian; an element over 64 bits in
+`ceil(width / 32)` 32-bit words, least significant first (as a
+{c:enumerator}`DVS_REF_WORDS` ref). `data` may be `NULL` when
 `n_elems` is 0.
 ```
 

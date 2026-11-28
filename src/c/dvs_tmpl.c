@@ -609,15 +609,25 @@ static uint8_t dep_of(xp_t *x, dvs_expr_t r) {
     return d;
 }
 
+/* The declared bounds of a variable of `w` bits that has no others. Over 64
+ * bits the bounds cannot spell the range: [0, INT64_MAX] or [INT64_MIN,
+ * INT64_MAX] stand for it (as dvs_bbsolver reads them). */
+static int64_t full_lo(uint32_t w, uint8_t sg) {
+    return sg ? (w >= 64 ? INT64_MIN : -(1ll << (w - 1))) : 0;
+}
+
+static int64_t full_hi(uint32_t w, uint8_t sg) {
+    return sg ? (w >= 64 ? INT64_MAX : (1ll << (w - 1)) - 1)
+              : w > 64 ? INT64_MAX : (int64_t)mask_w(~0ull, w);
+}
+
 /* A new var of the element-local problem, reading `src`/`id` on each call. */
 static uint32_t local_var(xp_t *x, uint8_t src, uint32_t id, uint32_t width, uint8_t sg) {
     uint32_t v = x->n_srcs++;
     x->srcs[v].src = src;
     x->srcs[v].id = id;
-    int64_t lo = sg ? (width >= 64 ? INT64_MIN : -(1ll << (width - 1))) : 0;
-    int64_t hi = sg ? (width >= 64 ? INT64_MAX : (1ll << (width - 1)) - 1)
-                    : (int64_t)mask_w(~0ull, width);
-    if (dvs_builder_add_var(x->b, v, width, sg, lo, hi) == EXPR_NULL
+    if (dvs_builder_add_var(x->b, v, width, sg, full_lo(width, sg), full_hi(width, sg))
+            == EXPR_NULL
             || dvs_builder_set_var_kind(x->b, v, src == SRC_ELEM ? DVS_VAR_RAND
                                                                  : DVS_VAR_STATE))
         x->err = DVS_RANDOMIZE_ERROR;
@@ -1073,13 +1083,6 @@ static int expand_foreach(xp_t *x, dvs_expr_t f) {
     return 0;
 }
 
-static int64_t full_lo(uint32_t w, uint8_t sg) {
-    return sg ? (w >= 64 ? INT64_MIN : -(1ll << (w - 1))) : 0;
-}
-
-static int64_t full_hi(uint32_t w, uint8_t sg) {
-    return sg ? (w >= 64 ? INT64_MAX : (1ll << (w - 1)) - 1) : (int64_t)mask_w(~0ull, w);
-}
 
 /* Build the expansion for `sizes` into `e`; a DVS_RANDOMIZE_* code. */
 static int expand(dvs_tmpl_t *t, const uint32_t *sizes, expansion_t *e) {
@@ -1360,8 +1363,16 @@ out:
     return rc;
 }
 
+/* Bytes of an element of `w` bits in a dvs_array_ref_t: a SCALAR word up
+ * to 64 bits, DVS_REF_WORDS words over. */
 static uint32_t elem_bytes(uint32_t w) {
-    return w <= 8 ? 1 : w <= 16 ? 2 : w <= 32 ? 4 : 8;
+    return w <= 8 ? 1 : w <= 16 ? 2 : w <= 32 ? 4 : w <= 64 ? 8 : 4 * ((w + 31u) / 32u);
+}
+
+/* Bytes a scalar's ref reads (dvs_handle.c checked the ref). */
+static size_t ref_size(const dvs_ref_t *r) {
+    return r->layout == DVS_REF_WORDS ? 4 * (size_t)((r->width + 31u) / 32u)
+                                      : elem_bytes(r->width < 64 ? r->width : 64);
 }
 
 static int refs_reserve(dvs_tmpl_t *t, uint32_t n) {
@@ -1378,7 +1389,7 @@ static void ref_set(dvs_ref_t *r, void *addr, uint32_t width, uint8_t sg) {
     r->addr = addr;
     r->width = width;
     r->is_signed = sg;
-    r->layout = DVS_REF_SCALAR;
+    r->layout = width > 64 ? DVS_REF_WORDS : DVS_REF_SCALAR;
 }
 
 static uint64_t mix64(uint64_t z) {
@@ -1472,16 +1483,21 @@ int dvs_tmpl_randomize_sizes(dvs_tmpl_t *t, const dvs_ref_t *refs, uint32_t n_va
     if (n_vars != t->n_vars || (t->n_arrays && !sizes)) return DVS_RANDOMIZE_ERROR;
     if (!t->any_size_random) return DVS_RANDOMIZE_OK;
     if (!t->size_h && build_sizes(t)) return DVS_RANDOMIZE_ERROR;
-    /* The scalars are read from copies: this call writes no ref. */
-    uint64_t *vals = calloc(n_vars ? n_vars : 1, sizeof *vals);
+    /* The scalars are read from copies: this call writes no ref. Each copy
+     * is in 8-byte units: a DVS_REF_WORDS ref may be wider than 64 bits. */
+    size_t n_units = 0;
+    for (uint32_t v = 0; v < n_vars; v++)
+        if (refs[v].addr) n_units += (ref_size(&refs[v]) + 7) / 8;
+    uint64_t *vals = calloc(n_units ? n_units : 1, sizeof *vals);
     int32_t *sizes32 = calloc(t->n_arrays ? t->n_arrays : 1, sizeof *sizes32);
     int rc = DVS_RANDOMIZE_ERROR;
     if (!vals || !sizes32 || refs_reserve(t, n_vars + t->n_arrays)) goto out;
-    for (uint32_t v = 0; v < n_vars; v++) {
+    for (uint32_t v = 0, u = 0; v < n_vars; v++) {
         t->refs[v] = refs[v];
         if (!refs[v].addr) continue;
-        memcpy(&vals[v], refs[v].addr, elem_bytes(refs[v].width));
-        t->refs[v].addr = &vals[v];
+        memcpy(&vals[u], refs[v].addr, ref_size(&refs[v]));
+        t->refs[v].addr = &vals[u];
+        u += (uint32_t)((ref_size(&refs[v]) + 7) / 8);
     }
     for (uint32_t a = 0; a < t->n_arrays; a++) {
         if (sizes[a] > INT32_MAX) goto out;
@@ -1607,7 +1623,21 @@ static int solve_local(dvs_tmpl_t *t, uint32_t a, const dvs_ref_t *refs,
         ar->out = o;
         ar->cap_out = need;
     }
-    static const uint64_t zero = 0;
+    /* An element past a STATE array's end reads 0. */
+    static const uint64_t zero64 = 0;
+    const void *zero = &zero64;
+    uint8_t *zbuf = NULL;
+    for (uint32_t v = 0; v < ar->n_srcs; v++) {
+        const local_src_t *s = &ar->srcs[v];
+        if (s->src == SRC_STATE_ELEM && t->arr[s->id].width > 64 && !zbuf) {
+            uint32_t mw = 0;
+            for (uint32_t u = 0; u < ar->n_srcs; u++)
+                if (ar->srcs[u].src == SRC_STATE_ELEM && t->arr[ar->srcs[u].id].width > mw)
+                    mw = t->arr[ar->srcs[u].id].width;
+            if (!(zbuf = calloc(1, elem_bytes(mw)))) return DVS_RANDOMIZE_ERROR;
+            zero = zbuf;
+        }
+    }
     int32_t index = 0;
     for (uint32_t k = 0; k < arrays[a].n_elems; k++) {
         index = (int32_t)k;
@@ -1627,7 +1657,7 @@ static int solve_local(dvs_tmpl_t *t, uint32_t a, const dvs_ref_t *refs,
                 void *at = k < arrays[s->id].n_elems
                                ? (uint8_t *)arrays[s->id].data
                                      + (size_t)k * elem_bytes(sa->width)
-                               : (void *)&zero;
+                               : (void *)zero;
                 ref_set(r, at, sa->width, sa->is_signed);
                 break;
             }
@@ -1635,8 +1665,12 @@ static int solve_local(dvs_tmpl_t *t, uint32_t a, const dvs_ref_t *refs,
         }
         int rc = dvs_randomize(ar->h, t->refs, NULL,
                                mix64(seed ^ mix64(((uint64_t)a << 32) | k)));
-        if (rc != DVS_RANDOMIZE_OK) return rc;
+        if (rc != DVS_RANDOMIZE_OK) {
+            free(zbuf);
+            return rc;
+        }
     }
+    free(zbuf);
     return DVS_RANDOMIZE_OK;
 }
 

@@ -86,7 +86,16 @@ typedef struct {
     dvs_expr_t spec;      /* its DistSpec, in the problem              */
     uint32_t   var;       /* its variable (alias resolved)             */
     uint32_t   dm;        /* its DistMeta, in the context's pool       */
+    uint32_t   reads;     /* the RAND variables it reads: n_reads ids at
+                           * this pool offset (0: none, read at the root) */
+    uint32_t   n_reads;
 } DistDyn;
+
+/* Evaluate the distributions of `var` that read RAND variables (DistDyn
+ * n_reads), now that the earlier solve-order stages are decided: set its
+ * dist_offsets slot as dvs_solver_eval_dists() sets the others. No-op for
+ * any other variable. */
+void dvs_dist_refresh(dvs_ctx_t *ctx, uint32_t var);
 
 /* Before a solve, after the STATE pins: give each variable the distribution
  * of its first-added record whose guard holds, its entries evaluated over

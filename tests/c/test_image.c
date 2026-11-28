@@ -217,8 +217,51 @@ static void check_validate(void) {
     p = finish();
     ((VarSpec *)POOL_PTR(p, p->vars_head))->width = 0;
     invalid(p, DVS_COMPILE_BAD_VAR, "variable of width 0");
+    /* Over 64 bits: a handle solves it on bit-blast, which has no soft
+     * constraints (dvs_solver_compile refuses any such variable). */
     dvs_builder_add_var(b, 0, 65, 0, 0, 255);
-    invalid(finish(), DVS_COMPILE_UNSUPPORTED_WIDTH, "variable over 64 bits");
+    dvs_builder_add_soft_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ,
+        dvs_builder_expr_var(b, 0), dvs_builder_expr_const(b, 1, 0)), 0);
+    invalid(finish(), DVS_COMPILE_UNSUPPORTED_WIDTH, "variable over 64 bits, soft constraint");
+    /* An expression over 64 bits a handle narrows: {w1, w0} > 2^40, then one
+     * it cannot (a 96-bit product of two 40-bit values, which may need 80
+     * bits). With a soft constraint the problem stays on CDCL, which takes
+     * the first and leaves the second out: validate refuses only it, and
+     * dvs_randomize() fails only on it (compile on a context, which does not
+     * narrow, leaves both out). */
+    for (int narrow = 1; narrow >= 0; narrow--) {
+        const int w = narrow ? 32 : 40;
+        dvs_builder_add_var(b, 0, (uint32_t)w, 0, 0, (int64_t)((1ull << w) - 1));
+        dvs_builder_add_var(b, 1, (uint32_t)w, 0, 0, (int64_t)((1ull << w) - 1));
+        dvs_expr_t v0 = dvs_builder_expr_var(b, 0), v1 = dvs_builder_expr_var(b, 1);
+        uint64_t k[2] = { narrow ? 1ull << 40 : 0, narrow ? 0 : 1ull << 6 };
+        x = narrow ? dvs_builder_expr_extend(b, dvs_builder_expr_concat(b, v1, v0, 32), 64, 96, 0)
+                   : dvs_builder_expr_binary(b, DVS_BIN_MUL,
+                                             dvs_builder_expr_extend(b, v0, 40, 96, 0),
+                                             dvs_builder_expr_extend(b, v1, 40, 96, 0));
+        dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_GT, x,
+            dvs_builder_expr_const_wide(b, 2, k, 96, 0)));
+        dvs_builder_add_soft_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ, v0,
+            dvs_builder_expr_const(b, 3, 0)), 0);
+        p = finish();
+        char why[200] = "";
+        int v = dvs_problem_validate(p, why, sizeof why);
+        dvs_handle_t *h = dvs_handle_new(p, sz);
+        uint64_t val[2] = { 0, 0 };
+        dvs_ref_t refs[2] = { { &val[0], (uint32_t)w, 0, DVS_REF_SCALAR },
+                              { &val[1], (uint32_t)w, 0, DVS_REF_SCALAR } };
+        int r = h ? dvs_randomize(h, refs, NULL, 7) : -99;
+        printf("  (validate %d %s, randomize %d)\n", v, why, r);
+        if (narrow)
+            CHECK(v == 0 && r == DVS_RANDOMIZE_OK && val[0] == 3 && (val[1] << 32 | val[0]) > 1ull << 40,
+                  "wide concatenation of words with a soft constraint: narrowed, solved");
+        else
+            CHECK(v == -1 && strncmp(why, "UNSUPPORTED_WIDTH:", 18) == 0
+                  && r == DVS_RANDOMIZE_ERROR,
+                  "un-narrowable wide product with a soft constraint: refused by both");
+        dvs_handle_free(h);
+        dvs_builder_free_problem(b, p, sz);
+    }
     /* All-different */
     uint32_t ids[16];
     for (uint32_t i = 0; i < 16; i++) ids[i] = i;
@@ -247,14 +290,15 @@ static void check_validate(void) {
     dvs_dist_entry_t d = { 0, 1, 1, 1, {0} };
     dvs_builder_add_dist(b, 4, 1, &d);
     invalid(finish(), 0, "distribution names an undeclared variable");
-    /* A distribution read per call reads STATE values only */
+    /* A distribution read per call reads STATE values, and RAND ones it
+     * can be ordered after (dvs_problem_dist_order): not its own variable */
     dvs_builder_add_var(b, 0, 8, 0, 0, 255);
     dvs_builder_add_var(b, 1, 8, 0, 0, 255);
     dvs_builder_set_var_kind(b, 1, DVS_VAR_STATE);
     x = dvs_builder_expr_const(b, 1, 0);
     dvs_dist_entry_ex_t dx = { x, x, dvs_builder_expr_var(b, 1), 0, {0} };
     dvs_builder_add_dist_ex(b, 0, dvs_builder_expr_var(b, 0), 1, &dx);
-    invalid(finish(), DVS_COMPILE_DIST_RAND, "distribution guard reads a RAND variable");
+    invalid(finish(), DVS_COMPILE_DIST_RAND, "distribution guard reads its own variable");
     dvs_builder_add_var(b, 0, 8, 0, 0, 255);
     dvs_builder_add_var(b, 1, 8, 0, 0, 255);
     dvs_builder_set_var_kind(b, 1, DVS_VAR_STATE);
@@ -262,7 +306,7 @@ static void check_validate(void) {
     dvs_dist_entry_ex_t dw = { x, x, dvs_builder_expr_binary(b, DVS_BIN_ADD,
         dvs_builder_expr_var(b, 1), dvs_builder_expr_var(b, 0)), 0, {0} };
     dvs_builder_add_dist_ex(b, 0, dvs_builder_expr_var(b, 1), 1, &dw);
-    invalid(finish(), DVS_COMPILE_DIST_RAND, "distribution weight reads a RAND variable");
+    invalid(finish(), DVS_COMPILE_DIST_RAND, "distribution weight reads its own variable");
     /* SV elaboration */
     dvs_builder_add_var(b, 0, 8, 0, 0, 255);
     dvs_builder_add_constraint(b, dvs_builder_expr_binary(b, DVS_BIN_EQ,
@@ -335,8 +379,8 @@ static void check_array_damage(void) {
     ((ForeachSpec *)POOL_PTR(q, q->foreachs_head))->n_constraints = 2;
     refused(q, sz, "a foreach body with fewer constraints than it says");
     memcpy(q, p, sz);
-    ((ArraySpec *)POOL_PTR(q, q->arrays_head))->elem_width = 65;
-    refused(q, sz, "an array wider than 64 bits");
+    ((ArraySpec *)POOL_PTR(q, q->arrays_head))->elem_width = DVS_MAX_WIDTH + 1;
+    refused(q, sz, "an array wider than DVS_MAX_WIDTH");
     free(q);
     dvs_builder_free_problem(b, p, sz);
     dvs_builder_destroy(b);

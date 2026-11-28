@@ -585,11 +585,33 @@ typedef struct {
     uint64_t          n_more;
 } image_node_t;
 
-/** A distribution's guard and entries read only STATE variables, elements
- *  of STATE arrays, loop indices and constants (dvs_image.c). The image
- *  check has passed. @return 0 if they do, else -1 with the reason in
- *  `why` (if not NULL), starting "DIST_RAND: ". */
+/** A distribution's guard and entries read only variables (STATE ones, or
+ *  others that dvs_problem_dist_order() can order before the distribution's
+ *  variable), elements of STATE arrays, loop indices and constants
+ *  (dvs_image.c). The image check has passed. @return 0 if they do, else -1
+ *  with the reason in `why` (if not NULL), starting "DIST_RAND: ". */
 int dvs_problem_check_dists(const dvs_problem_t *p, char *why, size_t whylen);
+
+/** The variables other than STATE ones that distribution `ds` (in `p`)
+ *  reads in its guard and entries: their distinct ids into `out` (at most
+ *  `cap`). `kind`: the dvs_var_kind_t of each variable id. @return how many
+ *  there are (more than `cap` when they did not fit). */
+uint32_t dvs_dist_rand_reads(const dvs_problem_t *p, const DistSpec *ds,
+                             const uint8_t *kind, uint32_t *out, uint32_t cap);
+
+/** The solve order that has every variable a distribution reads (other
+ *  than STATE ones) decided before the distribution's variable (the dists
+ *  of `p` itself, not those of foreach bodies). A variable read by a
+ *  distribution that has no solve-order stage of its own is moved to a
+ *  stage before the distribution's variable (an implicit `solve r before
+ *  x`); one with an explicit stage must already be before it. When `order`
+ *  is not NULL it is set to the stage of each variable id (VarSpec.order
+ *  values, renumbered; 0 for the last). @return 1 when some distribution
+ *  reads such a variable (and `order` is set), 0 when none does (`order`
+ *  untouched), -1 with the reason in `why` (starting "DIST_RAND: ") when no
+ *  order does: a distribution reads its own variable, one solved in its
+ *  stage or after it, or distributions read each other in a cycle. */
+int dvs_problem_dist_order(const dvs_problem_t *p, uint8_t *order, char *why, size_t whylen);
 
 /** Describe the node at `node`, which has `avail` bytes of image after it
  *  (dvs_image.c). -1 if its kind or operator is unknown or it does not fit. */

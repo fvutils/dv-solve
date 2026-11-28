@@ -30,6 +30,9 @@ RANDOMIZE_ERROR = -1
 RANDOMIZE_TOO_LARGE = -2
 RANDOMIZE_NULL = -3
 
+REF_SCALAR = 0   # DVS_REF_SCALAR: one word of 1, 2, 4 or 8 bytes
+REF_WORDS = 1    # DVS_REF_WORDS: ceil(width / 32) 32-bit words, low first
+
 _MASK64 = (1 << 64) - 1
 
 
@@ -52,6 +55,21 @@ def _word(width: int) -> int:
     raise ValueError("width %d is over 64 bits" % width)
 
 
+def _ref_bytes(width: int, layout: int) -> int:
+    """Bytes a ref of *width* bits and *layout* reads and writes."""
+    if layout == REF_WORDS:
+        return 4 * ((width + 31) // 32)
+    return _word(width)
+
+
+def _var_spec(spec) -> Tuple[int, bool, int]:
+    """``(width, signed[, layout])``: the layout defaults to REF_WORDS over
+    64 bits, else REF_SCALAR."""
+    width, signed = spec[0], spec[1]
+    layout = spec[2] if len(spec) > 2 else (REF_WORDS if width > 64 else REF_SCALAR)
+    return width, signed, layout
+
+
 def _to_word(value: int, nbytes: int) -> bytes:
     return (int(value) & ((1 << (8 * nbytes)) - 1)).to_bytes(nbytes, "little")
 
@@ -69,7 +87,9 @@ class SolveHandle:
     Args:
         buf: The problem buffer (:meth:`SolveProblemBuilder.finalize_bytes`).
         vars: ``(width, signed)`` of each variable id, in id order
-            (``dvs_handle_n_vars`` entries; ``None`` for an id with no ref).
+            (``dvs_handle_n_vars`` entries; ``None`` for an id with no ref),
+            or ``(width, signed, layout)`` to choose the ref's layout
+            (REF_SCALAR or REF_WORDS; by default REF_WORDS over 64 bits).
         arrays: ``(elem_width, signed)`` of each array id, in id order.
     """
 
@@ -122,14 +142,14 @@ class SolveHandle:
         for vid, spec in enumerate(self._vars):
             if spec is None:
                 continue
-            width, signed = spec
-            nb = _word(width)
+            width, signed, layout = _var_spec(spec)
+            nb = _ref_bytes(width, layout)
             cell = ctypes.create_string_buffer(_to_word(state.get(vid, 0), nb), nb)
             cells.append((vid, cell, width, signed))
             refs[vid].addr = ctypes.cast(cell, ctypes.c_void_p)
             refs[vid].width = width
             refs[vid].is_signed = 1 if signed else 0
-            refs[vid].layout = 0
+            refs[vid].layout = layout
         seed &= _MASK64
         if not self._arrays:
             rc = self._lib.dvs_randomize(self._h, refs, None, seed)
@@ -140,7 +160,7 @@ class SolveHandle:
             arefs = (_ArrayRef * len(self._arrays))()
             datas = []
             for aid, ((width, signed), elems) in enumerate(zip(self._arrays, given)):
-                nb = _word(width)
+                nb = _ref_bytes(width, REF_WORDS if width > 64 else REF_SCALAR)
                 raw = b"".join(_to_word(v, nb) for v in elems)
                 data = ctypes.create_string_buffer(raw, max(1, len(raw)))
                 datas.append((data, len(elems), nb, width, signed))

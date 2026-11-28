@@ -113,7 +113,9 @@ typedef struct {
                                              * (dvs_randomize_arrays)        */
 #define DVS_COMPILE_DIST_RAND         (-6)  /* a distribution's guard, bounds
                                              * or weights read a variable
-                                             * that is not STATE             */
+                                             * that cannot be solved before
+                                             * the distribution's own
+                                             * (dvs_builder_add_dist_ex)     */
 #define DVS_COMPILE_ADD_UNSUPPORTED   (-7)  /* dvs_solver_add_constraint():
                                              * the problem has a distribution
                                              * with expressions, one on a
@@ -415,18 +417,39 @@ DVS_API int dvs_problem_write_smt2(const dvs_problem_t *p, FILE *out);
 /** A problem buffer compiled once and solved on every dvs_randomize(). */
 typedef struct dvs_handle_s dvs_handle_t;
 
-/** dvs_ref_t.layout values. Only DVS_REF_SCALAR is supported so far. */
+/** dvs_ref_t.layout values. */
 enum {
-    DVS_REF_SCALAR = 0   /* one little-endian word of 1, 2, 4 or 8 bytes (the
-                          * smallest that holds `width`; Verilator C/S/I/Q) */
+    DVS_REF_SCALAR = 0,  /* one little-endian word of 1, 2, 4 or 8 bytes (the
+                          * smallest that holds `width`; Verilator C/S/I/Q);
+                          * `width` 1 to 64 */
+    DVS_REF_WORDS  = 1   /* ceil(width / 32) uint32_t words, least significant
+                          * first: word 0 holds bits 31:0 (Verilator's VlWide /
+                          * EData W); `width` 1 to DVS_MAX_WIDTH. Bits of the
+                          * top word above `width` are ignored on a read and
+                          * written 0 */
 };
 
-/** Where the value of one variable lives. refs[i] is variable i. */
+/** This library reads and writes DVS_REF_WORDS refs, and solves problems
+ *  with variables over 64 bits through a handle (dvs_randomize). */
+#define DVS_HAS_REF_WORDS 1
+
+/** This library takes distributions whose guard and entries read RAND
+ *  variables, solved before the distribution's variable
+ *  (dvs_builder_add_dist_ex). */
+#define DVS_HAS_DIST_RAND_READS 1
+
+/** Where the value of one variable lives. refs[i] is variable i.
+ *
+ *  A variable over 64 bits takes a DVS_REF_WORDS ref of its width; any
+ *  variable may have one. A value is read at the ref's width (extended to
+ *  the variable's, by its sign when `is_signed`), and written masked to the
+ *  ref's width (a ref wider than the variable gets its sign when the
+ *  variable is signed). */
 typedef struct {
     void     *addr;       /* the variable's storage, or NULL: not read or written */
-    uint32_t  width;      /* bits, 1 to 64 */
+    uint32_t  width;      /* bits: 1 to 64 (SCALAR), 1 to DVS_MAX_WIDTH (WORDS) */
     uint8_t   is_signed;  /* a STATE value is sign-extended when set */
-    uint8_t   layout;     /* DVS_REF_SCALAR */
+    uint8_t   layout;     /* DVS_REF_SCALAR or DVS_REF_WORDS */
     uint16_t  _pad;
 } dvs_ref_t;
 
@@ -495,6 +518,21 @@ enum {
  * solved once more before it returns DVS_RANDOMIZE_UNSAT). Calls on one
  * handle must not overlap.
  *
+ * A problem with a variable over 64 bits is solved on bit-blast (the CDCL
+ * engine searches only up to 64), the STATE values pinned by equalities; the
+ * instance is kept while they stay the same. Its solve order is not
+ * honoured (the solutions are the same), and one with soft constraints, a
+ * dist or a RANDC variable is DVS_RANDOMIZE_ERROR (dvs_problem_validate
+ * refuses it).
+ *
+ * An expression over 64 bits whose variables are 64 bits or less, in a
+ * problem that stays on CDCL (STATE or RANDC variables, soft constraints, a
+ * dist, a solve order, or arrays), is narrowed to an equal one of 64 bits or
+ * less where one exists (dvs_narrow.h). What cannot be narrowed is solved
+ * the same way on bit-blast, with the STATE values pinned, when the problem
+ * has no soft constraint, dist or RANDC variable; otherwise the call is
+ * DVS_RANDOMIZE_ERROR (dvs_problem_validate refuses it).
+ *
  * @param refs   dvs_handle_n_vars(h) entries.
  * @param modes  constraint_mode / rand_mode bits. The buffer format has none
  *               yet: pass NULL (non-NULL is DVS_RANDOMIZE_ERROR).
@@ -506,7 +544,9 @@ DVS_API int dvs_randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t
 
 /** One array of a problem with arrays: `n_elems` elements, packed, each in
  *  the smallest of 1, 2, 4 or 8 bytes that holds the element width (as a
- *  DVS_REF_SCALAR ref), little-endian. */
+ *  DVS_REF_SCALAR ref), little-endian; an element over 64 bits in
+ *  ceil(width / 32) 32-bit words, least significant first (as a
+ *  DVS_REF_WORDS ref), so element k is at byte 4 * ceil(width / 32) * k. */
 typedef struct {
     void     *data;      /* NULL when n_elems is 0 */
     uint32_t  n_elems;

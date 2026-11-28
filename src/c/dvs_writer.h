@@ -230,8 +230,18 @@ DVS_API dvs_expr_t dvs_builder_add_dist(dvs_builder_t *b, uint32_t var_id,
  * pinned for the call: it holds when `guard` is nonzero (EXPR_NULL: always).
  * When more than one distribution on a variable holds, the first added is
  * used; when none does, or its weights add up to 0, the variable is drawn
- * as if it had none. The guard and the entries read only STATE variables
- * and constants (else DVS_COMPILE_DIST_RAND). Not in a foreach body: see
+ * as if it had none. It only weights the draw: the caller adds the
+ * membership (`x inside` the entries) as a constraint.
+ *
+ * The guard and the entries read constants, STATE variables, and RAND or
+ * RANDC variables other than `var_id`. A RAND one is solved before
+ * `var_id`, and the distribution is evaluated with its value once it is
+ * decided: one with a solve-order stage (dvs_builder_set_var_order) must be
+ * in an earlier stage than `var_id`'s; one without is put in a stage of its
+ * own before `var_id` (as `solve r before var_id`: a solve order changes
+ * which solutions are drawn, never which exist). Distributions that read
+ * each other's variables in a cycle, or a variable solved in `var_id`'s
+ * stage or after it, are DVS_COMPILE_DIST_RAND. Not in a foreach body: see
  * dvs_builder_add_dist_elem_ex(). @return EXPR_NULL if an entry expression
  * is EXPR_NULL, or on overflow.
  */
@@ -349,9 +359,10 @@ DVS_API dvs_expr_t dvs_builder_expr_clog2(dvs_builder_t *b, dvs_expr_t result,
 #define DVS_MAX_LOOP_LEVELS 8u
 
 /**
- * Declare array `array_id` with elements of `elem_width` bits (1 to 64).
- * `kind` is DVS_VAR_RAND (the elements are solved) or DVS_VAR_STATE (they
- * are read).
+ * Declare array `array_id` with elements of `elem_width` bits (1 to
+ * DVS_MAX_WIDTH; over 64, an element is held as DVS_REF_WORDS holds a value,
+ * see dvs_array_ref_t). `kind` is DVS_VAR_RAND (the elements are solved) or
+ * DVS_VAR_STATE (they are read).
  *
  * @return 0, or -1 if the width or kind is not one of these.
  */
@@ -514,10 +525,19 @@ DVS_API void dvs_builder_set_explicit(dvs_builder_t *b);
  * program writing problems can refuse one when it writes it rather than have
  * it fail at run time. It checks that the image is well formed, and makes
  * the checks dvs_solver_compile() makes: variable ids 0..n-1, each declared
- * once, 1 to 64 bits wide; all-different over at most 16 variables of at
- * most 32 bits; every variable named is declared; no width over
- * DVS_MAX_WIDTH, no reversed slice, no expression nested over 20000 deep;
- * a distribution's guard and entries read only STATE variables.
+ * once, 1 to 64 bits wide (or, for a problem solved through a handle, to
+ * DVS_MAX_WIDTH when it has no soft constraint, distribution or randc
+ * variable: dvs_randomize() solves it on bit-blast); all-different over at
+ * most 16 variables of at most 32 bits; every variable named is declared;
+ * no width over DVS_MAX_WIDTH, no reversed slice, no expression nested over
+ * 20000 deep; a distribution's guard and entries read only STATE variables
+ * and variables that can be solved before the distribution's variable
+ * (dvs_builder_add_dist_ex); and, in a problem with soft constraints,
+ * distributions or randc variables (which stays on CDCL), no constraint
+ * reading an expression over 64 bits that a handle cannot narrow to 64 bits
+ * or less (dvs_randomize(): the same narrowing runs here; "UNSUPPORTED_WIDTH:
+ * [soft ]constraint <id> has a <W>-bit expression that cannot be narrowed
+ * ...").
  *
  * @param why     If not NULL, receives the reason for a refusal, starting
  *                with the dvs_solver_compile() code it stands for

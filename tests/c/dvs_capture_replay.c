@@ -127,6 +127,8 @@ static void rd_refs(rd_t *r, dvs_ref_t *refs, uint64_t *vals, uint32_t n_vars) {
         refs[v].is_signed = rd_u8(r);
         refs[v].layout = rd_u8(r);
         vals[v] = rd_u64(r);
+        /* The capture holds the low 64 bits of a wider (DVS_REF_WORDS) value. */
+        if (refs[v].layout == DVS_REF_WORDS && refs[v].width > 64) refs[v].width = 64;
         if (addr) refs[v].addr = &vals[v];  /* little-endian host */
     }
 }

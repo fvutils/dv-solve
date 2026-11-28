@@ -35,6 +35,8 @@
 #include "dvs_lcg.h"
 #include "dvs_search.h"
 #include "dvs_tmpl.h"
+#include "dvs_bbsolver.h"
+#include "dvs_narrow.h"
 
 struct dvs_handle_s {
     dvs_problem_t *p;          /* the copied image                          */
@@ -72,7 +74,66 @@ struct dvs_handle_s {
     uint32_t       n_kept;     /* clauses this call started with            */
     uint32_t       cap_id;     /* DVS_CAPTURE: the id its calls are recorded
                                 * with; 0 when not recorded                 */
+    uint32_t      *width;      /* declared width per var_id                 */
+    int64_t       *lo, *hi;    /* declared bounds per var_id                */
+    uint8_t       *sgn;        /* 1: declared signed                        */
+    /* Wide problems (a variable over 64 bits, or a constraint the CDCL
+     * compile left out; wide_solve). The CDCL engine does not search such
+     * variables, so the handle solves them on bit-blast, the STATE values
+     * pinned by equalities added to a copy of the problem (wp). The
+     * instance is kept while the STATE values stay the same, and then
+     * resampled. */
+    int             wide;      /* solved by wide_solve: a declared variable
+                                * is over 64 bits, or (wide_open) CDCL left
+                                * a constraint out of a problem bit-blast
+                                * can solve with the STATE values pinned   */
+    int             wide_bad;  /* and the problem has what bit-blast cannot
+                                * honour: randc, soft constraints, dist     */
+    uint32_t       *woff;      /* [n_vars + 1]: each var's first limb       */
+    uint64_t       *wkey;      /* the pins `wbb` was built for: per var, a
+                                * pinned flag limb, then its limbs          */
+    uint64_t       *wcur;      /* this call's pins, as wkey                 */
+    dvs_problem_t  *wp;        /* the pinned copy wbb blasts                */
+    dvs_bbsolver_t *wbb;
+    int             wrc;       /* its check's DVS_BB_* verdict              */
 };
+
+/* 64-bit limbs of a `width`-bit value. */
+static uint32_t n_limbs(uint32_t width) { return (width + 63u) / 64u; }
+
+/* The tables of wide_solve: each var's pins (woff, wkey, wcur). */
+static int wide_setup(dvs_handle_t *h) {
+    free(h->woff);
+    free(h->wkey);
+    free(h->wcur);
+    h->wkey = h->wcur = NULL;
+    h->woff = malloc((h->n_vars + 1) * sizeof *h->woff);
+    if (!h->woff) return -1;
+    uint64_t nl = 0;
+    for (uint32_t v = 0; v < h->n_vars; v++) {
+        h->woff[v] = (uint32_t)nl;
+        nl += h->declared[v] ? 1 + n_limbs(h->width[v]) : 0;
+    }
+    h->woff[h->n_vars] = (uint32_t)nl;
+    h->wkey = calloc(nl ? nl : 1, sizeof *h->wkey);
+    h->wcur = calloc(nl ? nl : 1, sizeof *h->wcur);
+    return nl > UINT32_MAX || !h->wkey || !h->wcur ? -1 : 0;
+}
+
+/* Whether the problem stays on CDCL whatever it reads: STATE or RANDC
+ * variables, solve order, soft constraints or dists (cdcl_only), or arrays,
+ * whose expansions have STATE variables of their own (a local array's size,
+ * an element-local problem's index). Its expressions over 64 bits are
+ * narrowed (dvs_narrow.c), the CDCL engine compiling nothing wider. */
+static int stays_on_cdcl(const dvs_problem_t *p) {
+    if (p->n_arrays || p->n_foreachs || p->n_softs || p->n_dists) return 1;
+    for (dvs_expr_t r = p->vars_head; r != EXPR_NULL;) {
+        const VarSpec *vs = POOL_PTR(p, r);
+        if (vs->kind == DVS_VAR_STATE || vs->kind == DVS_VAR_RANDC || vs->order) return 1;
+        r = vs->next;
+    }
+    return 0;
+}
 
 /* `top`: not made inside another API call (dvs_capture_enter). */
 static dvs_handle_t *handle_new(const void *buf, size_t size, int top) {
@@ -89,6 +150,14 @@ static dvs_handle_t *handle_new(const void *buf, size_t size, int top) {
         return NULL;
     }
     size_t psize = size;
+    /* What it cannot narrow stays as it is: dvs_problem_validate() refuses
+     * it when soft constraints, a dist or randc keep it from bit-blast, and
+     * otherwise solve_once hands the problem to wide_solve. */
+    if (stays_on_cdcl(h->p) && !dvs_narrow_has_wide_decl(h->p)
+            && dvs_narrow_problem(&h->p, &psize, NULL, 0) < 0) {
+        dvs_handle_free(h);
+        return NULL;
+    }
     dvs_presolve_linear(&h->p, &psize);
     for (dvs_expr_t r = h->p->vars_head; r != EXPR_NULL;) {
         VarSpec *vs = POOL_PTR(h->p, r);
@@ -104,15 +173,37 @@ static dvs_handle_t *handle_new(const void *buf, size_t size, int top) {
         dvs_handle_free(h);
         return NULL;
     }
+    h->width = calloc(h->n_vars ? h->n_vars : 1, sizeof *h->width);
+    h->sgn = calloc(h->n_vars ? h->n_vars : 1, 1);
+    h->lo = calloc(h->n_vars ? h->n_vars : 1, sizeof *h->lo);
+    h->hi = calloc(h->n_vars ? h->n_vars : 1, sizeof *h->hi);
+    if (!h->width || !h->sgn || !h->lo || !h->hi) {
+        dvs_handle_free(h);
+        return NULL;
+    }
+    int randc = 0;
     for (dvs_expr_t r = h->p->vars_head; r != EXPR_NULL;) {
         VarSpec *vs = POOL_PTR(h->p, r);
         h->kind[vs->var_id] = vs->kind;
         h->declared[vs->var_id] = 1;
+        h->width[vs->var_id] = vs->width;
+        h->sgn[vs->var_id] = vs->is_signed ? 1 : 0;
+        h->lo[vs->var_id] = vs->lo;
+        h->hi[vs->var_id] = vs->hi;
+        h->wide |= vs->width > 64;
+        randc |= vs->kind == DVS_VAR_RANDC;
         h->cdcl_only |= vs->kind == DVS_VAR_STATE || vs->kind == DVS_VAR_RANDC
                         || vs->order != 0;
         r = vs->next;
     }
     h->cdcl_only |= h->p->n_softs != 0 || h->p->n_dists != 0;
+    /* Solve order changes only which solution is drawn, never the set, so
+     * the wide path solves an ordered problem (without the order). */
+    h->wide_bad = randc || h->p->n_softs != 0 || h->p->n_dists != 0;
+    if (h->wide && wide_setup(h)) {
+        dvs_handle_free(h);
+        return NULL;
+    }
     const char *canon = getenv("DVS_CANONICAL");
     h->canonical = canon && *canon == '1';
     const char *val = getenv("DVS_VALIDATE");
@@ -166,6 +257,15 @@ void dvs_handle_free(dvs_handle_t *h) {
     free(h->cap_hist);
     free(h->kind);
     free(h->declared);
+    free(h->width);
+    free(h->sgn);
+    free(h->lo);
+    free(h->hi);
+    if (h->wbb) dvs_bbsolver_free(h->wbb);
+    free(h->wp);
+    free(h->woff);
+    free(h->wkey);
+    free(h->wcur);
     free(h->p);
     free(h);
 }
@@ -191,16 +291,37 @@ int dvs_handle_engine(const dvs_handle_t *h) {
     return h->ctx ? dvs_solver_engine(h->ctx) : h->engine;
 }
 
-/* Bytes of the scalar word that holds `width` bits, or 0 if unsupported. */
+/* Bytes a ref reads and writes, or 0 if it is not a supported ref. */
 static size_t ref_bytes(const dvs_ref_t *rf) {
-    if (rf->layout != DVS_REF_SCALAR || rf->width == 0 || rf->width > 64) return 0;
+    if (rf->width == 0) return 0;
+    if (rf->layout == DVS_REF_WORDS)
+        return rf->width > DVS_MAX_WIDTH ? 0 : 4 * (size_t)((rf->width + 31u) / 32u);
+    if (rf->layout != DVS_REF_SCALAR || rf->width > 64) return 0;
     return rf->width <= 8 ? 1 : rf->width <= 16 ? 2 : rf->width <= 32 ? 4 : 8;
 }
 
+/* Word i of a DVS_REF_WORDS ref (the words need not be aligned). */
+static uint32_t ref_word(const dvs_ref_t *rf, size_t i) {
+    uint32_t w;
+    memcpy(&w, (const uint8_t *)rf->addr + 4 * i, 4);
+    return w;
+}
+
+static void ref_set_word(const dvs_ref_t *rf, size_t i, uint32_t w) {
+    memcpy((uint8_t *)rf->addr + 4 * i, &w, 4);
+}
+
+/* The low 64 bits of the value at `rf`, sign-extended from its width when
+ * it is signed. `n`: ref_bytes(rf). */
 static int64_t ref_read(const dvs_ref_t *rf, size_t n) {
-    const uint8_t *a = rf->addr;
     uint64_t u = 0;
-    for (size_t i = 0; i < n; i++) u |= (uint64_t)a[i] << (8 * i);
+    if (rf->layout == DVS_REF_WORDS) {
+        u = ref_word(rf, 0);
+        if (n > 4) u |= (uint64_t)ref_word(rf, 1) << 32;
+    } else {
+        const uint8_t *a = rf->addr;
+        for (size_t i = 0; i < n; i++) u |= (uint64_t)a[i] << (8 * i);
+    }
     if (rf->width < 64) {
         u &= (1ull << rf->width) - 1;
         if (rf->is_signed && (u >> (rf->width - 1)) & 1) u |= ~0ull << rf->width;
@@ -208,11 +329,68 @@ static int64_t ref_read(const dvs_ref_t *rf, size_t n) {
     return (int64_t)u;
 }
 
+/* Write `v` through a DVS_REF_SCALAR ref, masked to its width. */
 static void ref_write(const dvs_ref_t *rf, size_t n, int64_t v) {
     uint64_t u = (uint64_t)v;
     if (rf->width < 64) u &= (1ull << rf->width) - 1;
     uint8_t *a = rf->addr;
     for (size_t i = 0; i < n; i++) a[i] = (uint8_t)(u >> (8 * i));
+}
+
+/* Bit b of little-endian limbs. */
+static int limb_bit(const uint64_t *l, uint32_t b) { return (int)((l[b / 64] >> (b % 64)) & 1); }
+
+/* Keep bits [0, from) of `nl` limbs; set those of [from, nl * 64) to `one`. */
+static void limbs_fill(uint64_t *l, uint32_t nl, uint32_t from, int one) {
+    for (uint32_t i = from / 64; i < nl; i++) {
+        uint64_t keep = i == from / 64 && from % 64 ? (1ull << (from % 64)) - 1
+                        : i * 64 < from ? ~0ull : 0;
+        l[i] = (l[i] & keep) | (one ? ~keep : 0);
+    }
+}
+
+/* The value at `rf` as the n_limbs(width) limbs of a `width`-bit variable:
+ * read at the ref's width, sign-extended (is_signed) or zero-extended to
+ * `width`, the bits above it 0. */
+static void ref_read_limbs(const dvs_ref_t *rf, uint64_t *l, uint32_t width) {
+    const uint32_t nl = n_limbs(width);
+    memset(l, 0, nl * sizeof *l);
+    const uint32_t rw = rf->width < width ? rf->width : width;
+    if (rf->layout == DVS_REF_WORDS) {
+        for (uint32_t i = 0; 32 * i < rw; i++)
+            l[i / 2] |= (uint64_t)ref_word(rf, i) << (32 * (i % 2));
+    } else {
+        l[0] = (uint64_t)ref_read(rf, ref_bytes(rf));
+    }
+    limbs_fill(l, nl, rw, rf->is_signed && rf->width < width && limb_bit(l, rw - 1));
+    limbs_fill(l, nl, width, 0);
+}
+
+/* Write the `width`-bit value `l` (n_limbs(width) limbs) through `rf`,
+ * masked to the ref's width; a wider ref is filled with the sign of a
+ * signed value. */
+static void ref_write_limbs(const dvs_ref_t *rf, const uint64_t *l, uint32_t width,
+                            int is_signed) {
+    if (rf->layout != DVS_REF_WORDS) {
+        int64_t v = (int64_t)l[0];
+        if (width < 64 && is_signed && limb_bit(l, width - 1)) v |= (int64_t)(~0ull << width);
+        ref_write(rf, ref_bytes(rf), v);
+        return;
+    }
+    const uint32_t nw = (rf->width + 31u) / 32u;
+    const uint32_t fill = is_signed && limb_bit(l, width - 1) ? ~0u : 0u;
+    for (uint32_t i = 0; i < nw; i++) {
+        uint32_t w;
+        if (32 * i >= width) {
+            w = fill;
+        } else {
+            w = (uint32_t)(l[i / 2] >> (32 * (i % 2)));
+            if (32 * (i + 1) > width)
+                w = (w & ((1u << (width % 32)) - 1)) | (fill & ~((1u << (width % 32)) - 1));
+        }
+        if (i == nw - 1 && rf->width % 32) w &= (1u << (rf->width % 32)) - 1;
+        ref_set_word(rf, i, w);
+    }
 }
 
 /* Compile the context (again, when stale) and exclude the held randc values. */
@@ -238,9 +416,20 @@ static int handle_open(dvs_handle_t *h) {
     return 0;
 }
 
+/* solve_once: CDCL cannot solve the problem whole; wide_solve can (not a
+ * DVS_RANDOMIZE_* code). */
+#define RANDOMIZE_PINNED 0x7FFF
+
 static int solve_once(dvs_handle_t *h, const dvs_ref_t *refs, uint64_t seed) {
     if (handle_open(h) != 0) return DVS_RANDOMIZE_ERROR;
     if (h->compile_rc == DVS_COMPILE_UNSAT) return DVS_RANDOMIZE_UNSAT;
+    /* CDCL left a constraint out (one over 64 bits it could not narrow) of a
+     * problem it kept because of its STATE variables or solve order: solved
+     * on bit-blast with the STATE values pinned, as a wide problem is. Not
+     * with randc, soft constraints or dists, which bit-blast cannot honour,
+     * nor when the caller asked for CDCL. */
+    if (h->compile_rc > 0 && !h->wide_bad && h->engine != DVS_ENGINE_CDCL)
+        return RANDOMIZE_PINNED;
     if (h->compile_rc != DVS_COMPILE_OK) return DVS_RANDOMIZE_ERROR;
 
     for (uint32_t v = 0; v < h->n_vars; v++) {
@@ -284,7 +473,12 @@ static void write_back(dvs_handle_t *h, const dvs_ref_t *refs) {
         if (!h->declared[v]) continue;
         if (h->kind[v] != DVS_VAR_RAND && h->kind[v] != DVS_VAR_RANDC) continue;
         int64_t x = dvs_solver_get_value(h->ctx, v);
-        if (refs[v].addr) ref_write(&refs[v], ref_bytes(&refs[v]), x);
+        if (refs[v].addr && refs[v].layout == DVS_REF_WORDS) {
+            uint64_t l = (uint64_t)x;
+            ref_write_limbs(&refs[v], &l, h->width[v], h->sgn[v]);
+        } else if (refs[v].addr) {
+            ref_write(&refs[v], ref_bytes(&refs[v]), x);
+        }
         if (h->kind[v] != DVS_VAR_RANDC) continue;
         if (h->n_hist[v] == h->cap_hist[v]) {
             uint32_t cap = h->cap_hist[v] ? 2 * h->cap_hist[v] : 16;
@@ -314,6 +508,118 @@ static void write_back(dvs_handle_t *h, const dvs_ref_t *refs) {
             h->stale = 1;
         }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Wide problems: bit-blast with the STATE values pinned                */
+/* ------------------------------------------------------------------ */
+
+static uint64_t mix64(uint64_t z) {
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+    return z ^ (z >> 31);
+}
+
+static void wide_drop(dvs_handle_t *h) {
+    if (h->wbb) dvs_bbsolver_free(h->wbb);
+    h->wbb = NULL;
+    free(h->wp);
+    h->wp = NULL;
+}
+
+/* A copy of the problem with `var == value` added for each pinned var of
+ * h->wcur; NULL when memory runs out. */
+static dvs_problem_t *wide_pinned(const dvs_handle_t *h) {
+    const dvs_problem_t *p = h->p;
+    uint64_t extra = 0;
+    for (uint32_t v = 0; v < h->n_vars; v++)
+        if (h->declared[v] && h->wcur[h->woff[v]])
+            extra += 256 + 8 * (uint64_t)n_limbs(h->width[v]);
+    const uint64_t cap = (uint64_t)p->pool.used + extra;
+    if (cap > UINT32_MAX - 64) return NULL;
+    dvs_problem_t *q = malloc(sizeof *q + (size_t)cap);
+    if (!q) return NULL;
+    memcpy(q, p, sizeof *q + p->pool.used);
+    q->pool.capacity = (uint32_t)cap;
+    for (uint32_t v = 0; v < h->n_vars; v++) {
+        const uint64_t *k = &h->wcur[h->woff[v]];
+        if (!h->declared[v] || !k[0]) continue;
+        dvs_expr_t c = expr_const_wide(q, n_limbs(h->width[v]), k + 1, h->width[v], h->sgn[v]);
+        dvs_expr_t x = expr_var(q, v);
+        dvs_expr_t eq = c == EXPR_NULL || x == EXPR_NULL ? EXPR_NULL
+                                                        : expr_binary(q, DVS_BIN_EQ, x, c);
+        if (eq == EXPR_NULL || problem_add_constraint(q, eq) == EXPR_NULL) {
+            free(q);
+            return NULL;
+        }
+    }
+    return q;
+}
+
+/* Solve a problem with a variable over 64 bits once, and write the RAND
+ * values on OK. A new instance is built when the STATE values differ from
+ * those of the last one; otherwise the last one is resampled. */
+static int wide_solve(dvs_handle_t *h, const dvs_ref_t *refs, uint64_t seed) {
+    if (h->wide_bad) return DVS_RANDOMIZE_ERROR;
+    for (uint32_t v = 0; v < h->n_vars; v++) {
+        if (!h->declared[v]) continue;
+        uint64_t *k = &h->wcur[h->woff[v]];
+        memset(k, 0, (h->woff[v + 1] - h->woff[v]) * sizeof *k);
+        if (h->kind[v] != DVS_VAR_STATE || !refs[v].addr) continue;
+        k[0] = 1;
+        ref_read_limbs(&refs[v], k + 1, h->width[v]);
+    }
+    const size_t nk = h->woff[h->n_vars];
+    if (!seed) seed = 0x9e3779b97f4a7c15ull;
+    if (h->wbb && memcmp(h->wkey, h->wcur, nk * sizeof *h->wkey) == 0) {
+        if (h->wrc == DVS_BB_UNSAT) return DVS_RANDOMIZE_UNSAT;
+        if (dvs_bbsolver_resample(h->wbb, seed) != 0) return DVS_RANDOMIZE_ERROR;
+    } else {
+        wide_drop(h);
+        h->wp = wide_pinned(h);
+        h->wbb = h->wp ? dvs_bbsolver_new(NULL, h->wp) : NULL;
+        if (!h->wbb) {
+            wide_drop(h);
+            return DVS_RANDOMIZE_ERROR;
+        }
+        dvs_bbsolver_set_resample(h->wbb, 1);
+        h->wrc = dvs_bbsolver_check(h->wbb, seed);
+        if (h->wrc != DVS_BB_SAT && h->wrc != DVS_BB_UNSAT) {
+            wide_drop(h);
+            return DVS_RANDOMIZE_ERROR;
+        }
+        memcpy(h->wkey, h->wcur, nk * sizeof *h->wkey);
+        if (h->wrc == DVS_BB_UNSAT) return DVS_RANDOMIZE_UNSAT;
+    }
+    /* Read every value before writing any: a ref may alias a STATE input. */
+    for (uint32_t v = 0; v < h->n_vars; v++) {
+        if (!h->declared[v] || !refs[v].addr) continue;
+        if (h->kind[v] != DVS_VAR_RAND) continue;
+        uint64_t *l = &h->wcur[h->woff[v] + 1];
+        const uint32_t w = h->width[v];
+        if (w > 64) {
+            if (dvs_bbsolver_value_wide(h->wbb, v, l, n_limbs(w)) != 0)
+                return DVS_RANDOMIZE_ERROR;
+            continue;
+        }
+        /* As the context's bit-blast engine does (dvs_engine.c): a variable
+         * no constraint reads may come back outside its declared bounds, and
+         * is then drawn between them from the seed. */
+        int64_t x = 0;
+        uint64_t span = (uint64_t)h->hi[v] - (uint64_t)h->lo[v] + 1;   /* 0: all 2^64 */
+        if (dvs_bbsolver_value(h->wbb, v, &x) != 0
+                || (uint64_t)x - (uint64_t)h->lo[v] > span - 1) {
+            uint64_t r = mix64(seed * 0x9e3779b97f4a7c15ull + v + 1);
+            x = (int64_t)((uint64_t)h->lo[v] + (span ? r % span : r));
+        }
+        l[0] = (uint64_t)x;
+        limbs_fill(l, 1, w, 0);
+    }
+    for (uint32_t v = 0; v < h->n_vars; v++) {
+        if (!h->declared[v] || !refs[v].addr || h->kind[v] != DVS_VAR_RAND) continue;
+        ref_write_limbs(&refs[v], &h->wcur[h->woff[v] + 1], h->width[v], h->sgn[v]);
+    }
+    return DVS_RANDOMIZE_OK;
 }
 
 /* After a CDCL call: keep the clauses it used for the next call, or drop
@@ -530,9 +836,18 @@ static int randomize(dvs_handle_t *h, const dvs_ref_t *refs, const uint32_t *mod
     for (uint32_t v = 0; v < h->n_vars; v++)
         if (refs[v].addr && !ref_bytes(&refs[v])) return DVS_RANDOMIZE_ERROR;
     h->called = 1;
+    if (h->wide) return wide_solve(h, refs, seed);
 
     for (int attempt = 0;; attempt++) {
         int rc = solve_once(h, refs, seed);
+        if (rc == RANDOMIZE_PINNED) {
+            /* From now on every call: the context goes. */
+            dvs_solver_free(h->ctx);
+            h->ctx = NULL;
+            if (wide_setup(h)) return DVS_RANDOMIZE_ERROR;
+            h->wide = 1;
+            return wide_solve(h, refs, seed);
+        }
         if (rc != DVS_RANDOMIZE_UNSAT || attempt) {
             if (rc == DVS_RANDOMIZE_OK) write_back(h, refs);
             handle_settle(h);

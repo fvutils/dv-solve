@@ -539,6 +539,13 @@ static uint32_t _select_unassigned(dvs_ctx_t *ctx) {
 /* Value selection                                                     */
 /* ------------------------------------------------------------------ */
 
+/* Variable i has a distribution now, or one evaluated when it is decided
+ * (it reads RAND values: dvs_dist_refresh). */
+static int _has_dist(const dvs_ctx_t *ctx, uint32_t i) {
+    return (ctx->dist_offsets && i < ctx->n_vars_capacity && ctx->dist_offsets[i] != 0)
+           || (ctx->dist_late && i < ctx->var_order_n && ctx->dist_late[i]);
+}
+
 /* var_id's dist entries, and an entry's weight inside the feasible domain
  * [lo, hi] (0: none of it is). Entry bounds are bit patterns like the var's
  * own: order them per the var's signedness, or an unsigned 64-bit var's
@@ -2426,7 +2433,9 @@ static int64_t _pick_value(dvs_ctx_t *ctx, uint32_t var_id,
     }
 
     int64_t v;
-    /* Distribution-weighted selection if this variable has a dist constraint */
+    /* Distribution-weighted selection if this variable has a dist constraint;
+     * one that reads RAND values is evaluated now, its stage open. */
+    if (ctx->dist_late) dvs_dist_refresh(ctx, var_id);
     if (ctx->dist_offsets && var_id < ctx->n_vars_capacity &&
         ctx->dist_offsets[var_id] != 0) {
         v = _pick_value_dist(ctx, var_id, lo, hi);
@@ -2925,8 +2934,7 @@ static int _box_sample_inner(dvs_ctx_t *ctx, uint32_t base, int last_stage,
         if (ctx->var_alias && ctx->var_alias[i] != i) continue;
         if (var_lo64(ctx, v) == var_hi64(ctx, v)) continue;
         if (ctx->box_skip && ctx->box_skip[i]) continue;
-        if (ctx->dist_offsets && i < ctx->n_vars_capacity
-                && ctx->dist_offsets[i] != 0)
+        if (_has_dist(ctx, i))
             return 0;
         n_draw++;
     }
@@ -3073,7 +3081,7 @@ static int _enum_build(dvs_ctx_t *ctx, uint32_t base) {
         int64_t lo = var_lo64(ctx, v), hi = var_hi64(ctx, v);
         if (lo == hi) continue;
         if ((uint64_t)hi - (uint64_t)lo >= (1ULL << 32)) return 0;
-        if (ctx->dist_offsets && i < ctx->n_vars_capacity && ctx->dist_offsets[i])
+        if (_has_dist(ctx, i))
             return 0;
         nv++;
     }
@@ -3476,6 +3484,7 @@ static int _canon_draw(dvs_ctx_t *ctx, const CanonGaps *g, CanonFrame *f, uint32
     const uint64_t r = dvs_rng_draw(key, f->k++);
     /* A dist draws by its weights (an entry, then a value in it), rejecting
      * ruled-out values: exact while they are rare; then uniform. */
+    if (ctx->dist_late) dvs_dist_refresh(ctx, x);
     if (ctx->dist_offsets && x < ctx->n_vars_capacity && ctx->dist_offsets[x]) {
         const int64_t hi = (int64_t)((uint64_t)f->lo + f->span);
         uint64_t total = _dist_total(ctx, x, f->lo, hi);

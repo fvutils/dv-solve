@@ -102,6 +102,17 @@ class DistEntry(ctypes.Structure):
     ]
 
 
+class DistEntryEx(ctypes.Structure):
+    """ctypes mirror of dvs_dist_entry_ex_t: expressions read per call."""
+    _fields_ = [
+        ("lo",           ctypes.c_uint32),
+        ("hi",           ctypes.c_uint32),
+        ("weight",       ctypes.c_uint32),
+        ("is_per_value", ctypes.c_uint8),
+        ("_dpad",        ctypes.c_uint8 * 3),
+    ]
+
+
 class SolveProblem:
     """Thin ctypes wrapper around the C ``SolveProblem`` API.
 

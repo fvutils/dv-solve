@@ -548,3 +548,63 @@ class SolveProblemBuilder:
         if ref == EXPR_NULL:
             raise RuntimeError("dvs_builder_add_dist returned EXPR_NULL")
         return ref
+
+    @staticmethod
+    def _dist_entries_ex(entries):
+        from .problem import DistEntryEx
+        arr = (DistEntryEx * max(1, len(entries)))()
+        for i, e in enumerate(entries):
+            arr[i].lo = e["lo"]
+            arr[i].hi = e.get("hi", e["lo"])
+            arr[i].weight = e["weight"]
+            arr[i].is_per_value = 1 if e.get("is_per_value", True) else 0
+        return arr
+
+    def add_dist_ex(self, var_id: int, entries, guard: int = EXPR_NULL) -> int:
+        """A distribution evaluated on each call (``dvs_builder_add_dist_ex``):
+        like :meth:`add_dist`, but ``lo``, ``hi`` (default ``lo``) and
+        ``weight`` of each entry are expressions, and it holds only when
+        ``guard`` (an expression; EXPR_NULL: always) is nonzero. They may read
+        STATE variables, and RAND variables solved in an earlier solve-order
+        stage than ``var_id`` (or in none: then they are solved first)."""
+        ref = self._lib.dvs_builder_add_dist_ex(
+            self._b, ctypes.c_uint32(var_id), ctypes.c_uint32(guard),
+            ctypes.c_uint32(len(entries)), self._dist_entries_ex(entries))
+        if ref == EXPR_NULL:
+            raise RuntimeError("dvs_builder_add_dist_ex returned EXPR_NULL")
+        return ref
+
+    def add_dist_elem_ex(self, array_id: int, index: int, entries,
+                         guard: int = EXPR_NULL) -> int:
+        """:meth:`add_dist_ex` on element ``index`` (an expression) of
+        ``array_id``, in a foreach body (``dvs_builder_add_dist_elem_ex``)."""
+        ref = self._lib.dvs_builder_add_dist_elem_ex(
+            self._b, ctypes.c_uint32(array_id), ctypes.c_uint32(index),
+            ctypes.c_uint32(guard), ctypes.c_uint32(len(entries)),
+            self._dist_entries_ex(entries))
+        if ref == EXPR_NULL:
+            raise RuntimeError("dvs_builder_add_dist_elem_ex returned EXPR_NULL")
+        return ref
+
+    def set_explicit(self) -> None:
+        """Mark the problem EXPLICIT (``dvs_builder_set_explicit``): every
+        operator's operands already have its width and signedness, as a
+        Verilator-written problem's do."""
+        self._lib.dvs_builder_set_explicit(self._b)
+
+    def expr_sv_cast(self, operand: int, from_bits: int, to_bits: int,
+                     sign_extend: bool = False, dst_signed: bool = False) -> int:
+        """The conversion of an EXPLICIT problem (``dvs_builder_expr_sv_cast``):
+        the low ``from_bits`` bits of ``operand``, extended to ``to_bits`` (by
+        sign when ``sign_extend``), read signed when ``dst_signed``."""
+        return self._lib.dvs_builder_expr_sv_cast(
+            self._b, ctypes.c_uint32(operand), ctypes.c_uint32(from_bits),
+            ctypes.c_uint32(to_bits), ctypes.c_uint8(1 if sign_extend else 0),
+            ctypes.c_uint8(1 if dst_signed else 0))
+
+    def validate(self) -> Tuple[bool, str]:
+        """``dvs_problem_validate`` of the finalized problem: ``(ok, why)``."""
+        buf, _ = self.finalize()
+        why = ctypes.create_string_buffer(512)
+        rc = self._lib.dvs_problem_validate(buf, why, len(why))
+        return rc == 0, why.value.decode()

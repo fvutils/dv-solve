@@ -414,6 +414,11 @@ typedef struct dvs_ctx_s {
      * newest first, as DistDyn[n_dist_dyn] at this pool offset; set into
      * dist_offsets by dvs_solver_eval_dists. */
     uint32_t           dist_dyn, n_dist_dyn;
+    /* [var_order_n] 1: a var whose distribution reads RAND variables, set
+     * by dvs_dist_refresh() when the search decides it; NULL: none. Such a
+     * problem has var_order (the read variables are in earlier stages). */
+    uint8_t           *dist_late;
+    const dvs_problem_t *dist_sp;     /* the problem eval_dists last read */
     /* Per-variable hole list for randc exclusions (Sprint 8) */
     uint32_t          *var_holes_head; /* pool offset per var -> HoleEntry, 0=none */
     /* The size of the constant set an unconditional `x inside {...}` holds

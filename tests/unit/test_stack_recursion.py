@@ -79,6 +79,15 @@ BOUNDED = {
     ("dvs_sv", "_fd_build"): "depth cap FD_MAX_SEGS",
     ("dvs_sv", "_fd_walk"): "dvs_stack_deep",
     ("dvs_sv", "_fd_root"): "dvs_stack_deep",
+    # Narrowing over 64 bits (dvs_narrow.c, compiled inside dvs_image.c too)
+    ("dvs_narrow", "rw"): "depth cap NW_MAX_DEPTH",
+    ("dvs_narrow", "truth"): "depth cap NW_MAX_DEPTH",
+    ("dvs_narrow", "seg_of"): "depth cap NW_MAX_DEPTH",
+    ("dvs_narrow", "selfseg"): "depth cap NW_MAX_DEPTH",
+    ("dvs_image", "rw"): "depth cap NW_MAX_DEPTH (dvs_narrow.c)",
+    ("dvs_image", "truth"): "depth cap NW_MAX_DEPTH (dvs_narrow.c)",
+    ("dvs_image", "seg_of"): "depth cap NW_MAX_DEPTH (dvs_narrow.c)",
+    ("dvs_image", "selfseg"): "depth cap NW_MAX_DEPTH (dvs_narrow.c)",
     # CDCL compile
     # Linear presolve
     ("dvs_presolve", "_form_node"): "depth cap PS_MAX_DEPTH (256)",

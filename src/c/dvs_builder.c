@@ -1168,7 +1168,7 @@ dvs_expr_t dvs_builder_add_dist_elem_ex(dvs_builder_t *b, uint32_t array_id,
 
 int dvs_builder_add_array(dvs_builder_t *b, uint32_t array_id, uint32_t elem_width,
                           uint8_t elem_signed, dvs_var_kind_t kind) {
-    if (elem_width == 0 || elem_width > 64
+    if (elem_width == 0 || elem_width > DVS_MAX_WIDTH
             || (kind != DVS_VAR_RAND && kind != DVS_VAR_STATE))
         return -1;
     dvs_expr_t ref = dvs_builder_alloc(b, (uint32_t)sizeof(ArraySpec), DVS_IMAGE_ALIGN);

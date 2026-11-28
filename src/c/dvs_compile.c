@@ -5093,6 +5093,9 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
 
     ctx->n_vars         = n;
     ctx->n_decl_vars    = n;
+    dvs_ctx_free(ctx, ctx->dist_late, ctx->var_order_n);
+    ctx->dist_late      = NULL;
+    ctx->dist_sp        = NULL;
     dvs_ctx_free(ctx, ctx->var_order, ctx->var_order_n);
     ctx->var_order      = NULL;
     ctx->var_order_n    = 0;
@@ -5456,6 +5459,46 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                                             (uint32_t)_Alignof(DistDyn));
             if (ctx->dist_dyn == EXPR_NULL) ctx->dist_dyn = 0;
         }
+        /* A distribution that reads RAND variables: they are solved in
+         * earlier solve-order stages (dvs_problem_dist_order, which may add
+         * stages), and the distribution is evaluated when the search decides
+         * its variable (dvs_dist_refresh). */
+        uint8_t *kinds = NULL;
+        const uint32_t nd = ctx->n_decl_vars < sp->n_vars ? ctx->n_decl_vars : sp->n_vars;
+        if (ctx->dist_dyn && nd) {
+            uint8_t *ord = (uint8_t *)calloc(sp->n_vars, 1);
+            kinds = (uint8_t *)calloc(sp->n_vars, 1);
+            if (!ord || !kinds) { free(ord); free(kinds); return -1; }
+            for (dvs_expr_t r = sp->vars_head; r != EXPR_NULL;) {
+                const VarSpec *vs = (const VarSpec *)dvs_pool_ptr(&sp->pool, r);
+                if (vs->var_id < sp->n_vars) {
+                    ord[vs->var_id] = vs->order;
+                    kinds[vs->var_id] = vs->kind;
+                }
+                r = vs->next;
+            }
+            int orc = dvs_problem_dist_order(sp, ord, NULL, 0);
+            if (orc < 0) { free(ord); free(kinds); return DVS_COMPILE_DIST_RAND; }
+            if (orc == 1) {
+                if (!ctx->var_order) {
+                    ctx->var_order = (uint8_t *)DVS_ALLOC(ctx->alloc, nd);
+                    if (ctx->var_order) ctx->var_order_n = nd;
+                }
+                if (ctx->var_order)
+                    ctx->dist_late = (uint8_t *)DVS_ALLOC(ctx->alloc, ctx->var_order_n);
+                if (!ctx->var_order || !ctx->dist_late) {
+                    free(ord); free(kinds);
+                    return -1;
+                }
+                memset(ctx->dist_late, 0, ctx->var_order_n);
+                for (uint32_t i = 0; i < ctx->var_order_n && i < sp->n_vars; i++)
+                    ctx->var_order[i] = ord[i];
+            } else {
+                free(kinds);
+                kinds = NULL;
+            }
+            free(ord);
+        }
         {
 
             dvs_expr_t dref = sp->dists_head;
@@ -5501,14 +5544,32 @@ static int _solver_compile_body(dvs_ctx_t *ctx, dvs_problem_t *sp) {
                     }
                     if (!ds->has_exprs) ctx->dist_offsets[vid] = dm_ref;
                     if (ctx->dist_dyn) {
+                        uint32_t reads = 0, nr = 0;
+                        if (kinds && ds->has_exprs) {
+                            uint32_t rd[256];   /* dvs_problem_dist_order: at most 256 */
+                            nr = dvs_dist_rand_reads(sp, ds, kinds, rd, 256);
+                            if (nr > 256) nr = 256;
+                            reads = nr ? dvs_spool_alloc(&ctx->pool, nr * (uint32_t)sizeof(uint32_t),
+                                                         (uint32_t)_Alignof(uint32_t))
+                                       : 0;
+                            if (reads == EXPR_NULL) {
+                                free(kinds);
+                                return -1;
+                            }
+                            if (nr) {
+                                memcpy(dvs_spool_ptr(&ctx->pool, reads), rd, nr * sizeof *rd);
+                                if (vid < ctx->var_order_n) ctx->dist_late[vid] = 1;
+                            }
+                        }
                         DistDyn *dd = (DistDyn *)dvs_spool_ptr(&ctx->pool, ctx->dist_dyn);
-                        dd[n_dyn++] = (DistDyn){ dref, vid, dm_ref };
+                        dd[n_dyn++] = (DistDyn){ dref, vid, dm_ref, reads, nr };
                     }
                 }
                 dref = ds->next;
             }
         }
         ctx->n_dist_dyn = n_dyn;
+        free(kinds);
     }
 
     /* The per-variable hole lists (randc) and value counts are part of the
@@ -5726,37 +5787,69 @@ static int _snapshot_added_vars(dvs_ctx_t *ctx, uint32_t base) {
     return 0;
 }
 
+/* Apply distribution record `d` if its guard holds: its variable's slot
+ * gets its DistMeta, with the entries evaluated now (0 when every weight is
+ * 0). A record whose guard does not hold leaves the slot. */
+static void _dist_eval(dvs_ctx_t *ctx, const dvs_problem_t *sp, const DistDyn *d) {
+    const DistSpec *ds = (const DistSpec *)dvs_pool_ptr(&sp->pool, d->spec);
+    if (!ds->has_exprs) {
+        ctx->dist_offsets[d->var] = d->dm;
+        return;
+    }
+    int on = 1;
+    if (ds->guard != EXPR_NULL && (dvs_expr_truth(ctx, sp, ds->guard, &on) || !on))
+        return;
+    DistMeta *dm = (DistMeta *)dvs_spool_ptr(&ctx->pool, d->dm);
+    DistMetaEntry *dme = (DistMetaEntry *)(dm + 1);
+    const dvs_dist_entry_ex_t *e = (const dvs_dist_entry_ex_t *)(ds + 1);
+    int any = 0;
+    for (uint32_t i = 0; i < ds->n_entries; i++) {
+        int64_t lo = 0, hi = 0, w = 0;
+        /* An entry that cannot be evaluated is never drawn. */
+        if (dvs_expr_value(ctx, sp, e[i].lo, &lo) || dvs_expr_value(ctx, sp, e[i].hi, &hi)
+                || dvs_expr_value(ctx, sp, e[i].weight, &w) || w < 0)
+            w = 0;
+        dme[i].lo = lo;
+        dme[i].hi = hi;
+        dme[i].weight = w > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)w;
+        dme[i].is_per_value = e[i].is_per_value;
+        any |= w != 0;
+    }
+    ctx->dist_offsets[d->var] = any ? d->dm : 0;
+}
+
+static int _dist_is_late(const dvs_ctx_t *ctx, uint32_t var) {
+    return ctx->dist_late && var < ctx->var_order_n && ctx->dist_late[var];
+}
+
 void dvs_solver_eval_dists(dvs_ctx_t *ctx, const dvs_problem_t *sp) {
     if (!ctx || !ctx->n_dist_dyn) return;
+    ctx->dist_sp = sp;
     const DistDyn *dd = (const DistDyn *)dvs_spool_ptr(&ctx->pool, ctx->dist_dyn);
     for (uint32_t k = 0; k < ctx->n_dist_dyn; k++) ctx->dist_offsets[dd[k].var] = 0;
-    /* Newest first: the first added record that holds is written last. */
+    /* Newest first: the first added record that holds is written last. The
+     * records of a variable whose distribution reads RAND values wait for
+     * the search (dvs_dist_refresh). */
+    for (uint32_t k = 0; k < ctx->n_dist_dyn; k++)
+        if (!_dist_is_late(ctx, dd[k].var)) _dist_eval(ctx, sp, &dd[k]);
+}
+
+void dvs_dist_refresh(dvs_ctx_t *ctx, uint32_t var) {
+    if (!_dist_is_late(ctx, var) || !ctx->dist_sp || !ctx->dist_offsets) return;
+    const DistDyn *dd = (const DistDyn *)dvs_spool_ptr(&ctx->pool, ctx->dist_dyn);
+    ctx->dist_offsets[var] = 0;
     for (uint32_t k = 0; k < ctx->n_dist_dyn; k++) {
-        const DistSpec *ds = (const DistSpec *)dvs_pool_ptr(&sp->pool, dd[k].spec);
-        if (!ds->has_exprs) {
-            ctx->dist_offsets[dd[k].var] = dd[k].dm;
-            continue;
+        if (dd[k].var != var) continue;
+        /* Its stage is open, so the variables it reads are decided; one
+         * that is not (a decision made out of stage) leaves it out. */
+        const uint32_t *rd = dd[k].n_reads
+            ? (const uint32_t *)dvs_spool_ptr(&ctx->pool, dd[k].reads) : NULL;
+        int fixed = 1;
+        for (uint32_t i = 0; i < dd[k].n_reads && fixed; i++) {
+            const Variable *v = &ctx->vars[_resolve(ctx, rd[i])];
+            fixed = var_lo64(ctx, v) == var_hi64(ctx, v);
         }
-        int on = 1;
-        if (ds->guard != EXPR_NULL && (dvs_expr_truth(ctx, sp, ds->guard, &on) || !on))
-            continue;
-        DistMeta *dm = (DistMeta *)dvs_spool_ptr(&ctx->pool, dd[k].dm);
-        DistMetaEntry *dme = (DistMetaEntry *)(dm + 1);
-        const dvs_dist_entry_ex_t *e = (const dvs_dist_entry_ex_t *)(ds + 1);
-        int any = 0;
-        for (uint32_t i = 0; i < ds->n_entries; i++) {
-            int64_t lo = 0, hi = 0, w = 0;
-            /* An entry that cannot be evaluated is never drawn. */
-            if (dvs_expr_value(ctx, sp, e[i].lo, &lo) || dvs_expr_value(ctx, sp, e[i].hi, &hi)
-                    || dvs_expr_value(ctx, sp, e[i].weight, &w) || w < 0)
-                w = 0;
-            dme[i].lo = lo;
-            dme[i].hi = hi;
-            dme[i].weight = w > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)w;
-            dme[i].is_per_value = e[i].is_per_value;
-            any |= w != 0;
-        }
-        ctx->dist_offsets[dd[k].var] = any ? dd[k].dm : 0;
+        if (fixed) _dist_eval(ctx, ctx->dist_sp, &dd[k]);
     }
 }
 

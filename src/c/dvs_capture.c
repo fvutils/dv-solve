@@ -73,8 +73,12 @@ static void emit(dvs_capbuf_t *b) {
     memset(b, 0, sizeof *b);
 }
 
+/* Bytes of a ref's value the capture records: a value over 64 bits (a
+ * DVS_REF_WORDS ref) only by its low 64. */
 size_t dvs_capture_ref_bytes(const dvs_ref_t *rf) {
-    if (!rf->addr || rf->layout != DVS_REF_SCALAR || rf->width == 0 || rf->width > 64) return 0;
+    if (!rf->addr || rf->width == 0) return 0;
+    if (rf->layout == DVS_REF_WORDS) return rf->width <= 32 ? 4 : 8;
+    if (rf->layout != DVS_REF_SCALAR || rf->width > 64) return 0;
     return rf->width <= 8 ? 1 : rf->width <= 16 ? 2 : rf->width <= 32 ? 4 : 8;
 }
 

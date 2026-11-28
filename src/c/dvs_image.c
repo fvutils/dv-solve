@@ -13,6 +13,7 @@
 #include <string.h>
 #include "dvs_problem.h"
 #include "dvs_sv.h"           /* DVS_SV_MAX_DEPTH */
+#include "dvs_narrow.h"
 
 #define SIZE(T, n)   _Static_assert(sizeof(T) == (n), "size of " #T)
 #define AT(T, f, o)  _Static_assert(offsetof(T, f) == (o), "offset of " #T "." #f)
@@ -345,7 +346,7 @@ int dvs_problem_check_image(const void *img, size_t size, char *why, size_t whyl
         const ArraySpec *a = (const ArraySpec *)(pool + r);
         if (ai == p->n_arrays || !OFF_OK(r, sizeof(ArraySpec)))
             rc = _fail(why, whylen, "array list item %u is out of range or one too many", ai);
-        else if (a->array_id >= p->n_arrays || a->elem_width == 0 || a->elem_width > 64
+        else if (a->array_id >= p->n_arrays || a->elem_width == 0 || a->elem_width > DVS_MAX_WIDTH
                  || (a->kind != DVS_VAR_RAND && a->kind != DVS_VAR_STATE)
                  || (a->slot != DVS_NO_SLOT && a->slot >= p->n_slots))
             rc = _fail(why, whylen, "array list item %u is malformed", ai);
@@ -483,6 +484,21 @@ static int _node_widths(const void *node, char *why, size_t whylen, uint32_t at)
     return 0;
 }
 
+/* The CDCL engine compiles nothing over 64 bits, and a handle narrows what
+ * it can (dvs_narrow.c): the rest a problem kept on CDCL by soft constraints,
+ * a distribution or randc cannot solve. Narrowed here as the handle does. */
+static int _narrow_check(const dvs_problem_t *p, char *why, size_t whylen) {
+    size_t size = sizeof *p + (size_t)p->pool.used;
+    dvs_problem_t *q = malloc(size);
+    if (!q) return _fail(why, whylen, "out of memory");
+    memcpy(q, p, size);
+    q->pool.capacity = p->pool.used;
+    int n = dvs_narrow_problem(&q, &size, why, whylen);
+    free(q);
+    if (n < 0) return _fail(why, whylen, "out of memory");
+    return n ? -1 : 0;
+}
+
 int dvs_problem_validate(const dvs_problem_t *p, char *why, size_t whylen) {
     if (!p) return _fail(why, whylen, "no problem");
     if (dvs_problem_check_image(p, sizeof *p + (size_t)p->pool.capacity, why, whylen))
@@ -492,8 +508,30 @@ int dvs_problem_validate(const dvs_problem_t *p, char *why, size_t whylen) {
     int rc = 0;
 
     /* dvs_solver_compile: the ids are 0..n-1, each declared once, with a
-     * width of 1 to 64 (a wider variable is UNSUPPORTED_WIDTH). Each var is
-     * also where a dvs_ref_t (1..64 bits) reads or writes it. */
+     * width of 1 to 64. A wider variable (or array element) is solved only
+     * through a handle (dvs_randomize, on bit-blast, its value read and
+     * written through a DVS_REF_WORDS ref), and only in a problem without
+     * soft constraints, distributions or randc variables, which bit-blast
+     * cannot honour: else UNSUPPORTED_WIDTH. */
+    int bb_bad = p->n_softs != 0 || p->n_dists != 0;
+    for (dvs_expr_t r = p->vars_head; r != EXPR_NULL;) {
+        const VarSpec *vs = dvs_pool_ptr(pool, r);
+        bb_bad |= vs->kind == DVS_VAR_RANDC;
+        r = vs->next;
+    }
+    for (dvs_expr_t f = p->n_foreachs ? p->foreachs_head : EXPR_NULL; f != EXPR_NULL;) {
+        const ForeachSpec *fe = dvs_pool_ptr(pool, f);
+        bb_bad |= fe->n_softs != 0 || fe->n_dists != 0;
+        f = fe->next;
+    }
+    for (dvs_expr_t r = p->n_arrays ? p->arrays_head : EXPR_NULL; r != EXPR_NULL && !rc;) {
+        const ArraySpec *a = dvs_pool_ptr(pool, r);
+        if (a->elem_width > 64 && bb_bad)
+            rc = _fail(why, whylen, "UNSUPPORTED_WIDTH: array %u has elements of %u bits, "
+                       "over 64, in a problem with soft constraints, a distribution or "
+                       "randc", a->array_id, a->elem_width);
+        r = a->next;
+    }
     uint32_t *width = calloc(n ? n : 1, sizeof *width);
     if (!width) return _fail(why, whylen, "out of memory");
     for (dvs_expr_t r = p->vars_head; r != EXPR_NULL && !rc;) {
@@ -505,8 +543,9 @@ int dvs_problem_validate(const dvs_problem_t *p, char *why, size_t whylen) {
             rc = _fail(why, whylen, "BAD_VAR: variable %u is declared twice", vs->var_id);
         else if (vs->width == 0)
             rc = _fail(why, whylen, "BAD_VAR: variable %u has width 0", vs->var_id);
-        else if (vs->width > 64)
-            rc = _fail(why, whylen, "UNSUPPORTED_WIDTH: variable %u is %u bits, over 64",
+        else if (vs->width > 64 && bb_bad)
+            rc = _fail(why, whylen, "UNSUPPORTED_WIDTH: variable %u is %u bits, over 64, "
+                       "in a problem with soft constraints, a distribution or randc",
                        vs->var_id, vs->width);
         else
             width[vs->var_id] = vs->width;
@@ -659,7 +698,9 @@ int dvs_problem_validate(const dvs_problem_t *p, char *why, size_t whylen) {
 #undef DIST_ROOTS
 #undef SLOT
     free(depth);
-    return rc ? rc : dvs_problem_check_dists(p, why, whylen);
+    if (!rc) rc = dvs_problem_check_dists(p, why, whylen);
+    if (!rc && bb_bad && !dvs_narrow_has_wide_decl(p)) rc = _narrow_check(p, why, whylen);
+    return rc;
 }
 
 int dvs_problem_check_dists(const dvs_problem_t *p, char *why, size_t whylen) {
@@ -711,7 +752,9 @@ int dvs_problem_check_dists(const dvs_problem_t *p, char *why, size_t whylen) {
         dvs_image_node(w, end - r, &nd);
         int ok;
         switch (w[0]) {
-        case EXPR_VAR:        ok = w[1] >= p->n_vars || kind[w[1]] == DVS_VAR_STATE; break;
+        /* A RAND variable is read once its solve-order stage is decided,
+         * before the distribution's variable (dvs_problem_dist_order). */
+        case EXPR_VAR:        ok = w[1] >= p->n_vars || kind[w[1]] != DVS_VAR_AUX; break;
         case EXPR_ELEM:       ok = (kind[p->n_vars + w[1]] & 0x7F) == DVS_VAR_STATE; break;
         case EXPR_ARRAY_SIZE: ok = !(kind[p->n_vars + w[1]] & 0x80); break;
         case EXPR_REDUCE:     ok = kind[p->n_vars + w[2]] == DVS_VAR_STATE; break;
@@ -732,5 +775,169 @@ int dvs_problem_check_dists(const dvs_problem_t *p, char *why, size_t whylen) {
     }
     free(reach);
     free(kind);
+    if (!rc && any && dvs_problem_dist_order(p, NULL, why, whylen) < 0) rc = -1;
     return rc;
 }
+
+uint32_t dvs_dist_rand_reads(const dvs_problem_t *p, const DistSpec *ds,
+                             const uint8_t *kind, uint32_t *out, uint32_t cap) {
+    const uint8_t *base = (const uint8_t *)&p->pool;
+    const uint64_t end = sizeof(dvs_pool_t) + (uint64_t)p->pool.used;
+    dvs_expr_t st[64];
+    uint32_t n_st = 0, n = 0, steps = 0;
+    for (uint32_t i = 0; i < dist_spec_n_exprs(ds); i++) {
+        dvs_expr_t e = dist_spec_expr(ds, i);
+        if (e != EXPR_NULL && n_st < 64) st[n_st++] = e;
+        while (n_st && steps++ < (1u << 20)) {
+            dvs_expr_t r = st[--n_st];
+            if (r < sizeof(dvs_pool_t) || r >= end) continue;
+            const uint32_t *w = (const uint32_t *)(base + r);
+            if (w[0] == EXPR_VAR && w[1] < p->n_vars && kind[w[1]] != DVS_VAR_STATE) {
+                uint32_t j = 0;
+                while (j < n && j < cap && out[j] != w[1]) j++;
+                if (j == n) {
+                    if (n < cap) out[n] = w[1];
+                    n++;
+                }
+                continue;
+            }
+            image_node_t nd;
+            if (dvs_image_node(w, end - r, &nd) != 0) continue;
+            for (uint64_t k = 0; k < nd.n_kids + nd.n_more && n_st < 64; k++)
+                st[n_st++] = k < nd.n_kids ? nd.kids[k] : nd.more[k - nd.n_kids];
+        }
+    }
+    return n;
+}
+
+/* Stage keys while ordering: an explicit stage 1..255, or 256 (none). */
+#define DO_LAST 256u
+
+int dvs_problem_dist_order(const dvs_problem_t *p, uint8_t *order, char *why, size_t whylen) {
+    const uint32_t n = p->n_vars;
+    int rc = 0, any = 0;
+    for (dvs_expr_t r = p->dists_head; r != EXPR_NULL;) {
+        const DistSpec *ds = dvs_pool_ptr(&p->pool, r);
+        any |= ds->has_exprs != 0;
+        r = ds->next;
+    }
+    if (!any || !n) return 0;
+    uint8_t  *kind = calloc(n, 1);
+    uint16_t *e = calloc(n, sizeof *e), *ek = calloc(n, sizeof *ek), *hk = calloc(n, sizeof *hk);
+    uint32_t *indeg = calloc(n, sizeof *indeg), *topo = calloc(n, sizeof *topo);
+    /* The edges r -> x (r is read by a dist on x), as (r, x) pairs. */
+    uint32_t n_edges = 0, cap_edges = 64, rd[256];
+    uint32_t *edges = malloc(2 * cap_edges * sizeof *edges);
+    if (!kind || !e || !ek || !hk || !indeg || !topo || !edges) {
+        rc = _fail(why, whylen, "out of memory");
+        goto out;
+    }
+    for (uint32_t v = 0; v < n; v++) e[v] = DO_LAST;
+    for (dvs_expr_t r = p->vars_head; r != EXPR_NULL;) {
+        const VarSpec *vs = dvs_pool_ptr(&p->pool, r);
+        if (vs->var_id < n) {
+            kind[vs->var_id] = vs->kind;
+            e[vs->var_id] = vs->order ? vs->order : DO_LAST;
+        }
+        r = vs->next;
+    }
+    for (dvs_expr_t r = p->dists_head; r != EXPR_NULL && !rc;) {
+        const DistSpec *ds = dvs_pool_ptr(&p->pool, r);
+        r = ds->next;
+        if (!ds->has_exprs || ds->var_id >= n) continue;
+        uint32_t nr = dvs_dist_rand_reads(p, ds, kind, rd, 256);
+        if (nr > 256) {
+            rc = _fail(why, whylen, "DIST_RAND: a distribution reads more than 256 "
+                       "random variables");
+            break;
+        }
+        for (uint32_t i = 0; i < nr && !rc; i++) {
+            if (rd[i] == ds->var_id) {
+                rc = _fail(why, whylen, "DIST_RAND: the distribution of variable %u reads "
+                           "the variable", ds->var_id);
+            } else if (e[rd[i]] != DO_LAST && e[rd[i]] >= e[ds->var_id]) {
+                rc = _fail(why, whylen, "DIST_RAND: the distribution of variable %u reads "
+                           "variable %u, solved in the same stage or after it",
+                           ds->var_id, rd[i]);
+            } else {
+                if (n_edges == cap_edges) {
+                    uint32_t *g = realloc(edges, 4 * cap_edges * sizeof *g);
+                    if (!g) { rc = _fail(why, whylen, "out of memory"); break; }
+                    edges = g;
+                    cap_edges *= 2;
+                }
+                edges[2 * n_edges] = rd[i];
+                edges[2 * n_edges + 1] = ds->var_id;
+                n_edges++;
+                indeg[ds->var_id]++;
+            }
+        }
+    }
+    if (rc || !n_edges) goto out;
+    /* Kahn: a cycle of distributions reading each other has no order. */
+    uint32_t nt = 0;
+    for (uint32_t v = 0; v < n; v++)
+        if (!indeg[v]) topo[nt++] = v;
+    for (uint32_t h = 0; h < nt; h++)
+        for (uint32_t k = 0; k < n_edges; k++)
+            if (edges[2 * k] == topo[h] && --indeg[edges[2 * k + 1]] == 0)
+                topo[nt++] = edges[2 * k + 1];
+    if (nt != n) {
+        rc = _fail(why, whylen, "DIST_RAND: distributions read each other's variables "
+                   "in a cycle");
+        goto out;
+    }
+    /* From the sinks back: a variable without an explicit stage moves up to
+     * the stage of the earliest variable whose distribution it feeds (ek),
+     * and within a stage, a variable a distribution reads comes before the
+     * distribution's variable (hk: the longest chain of reads below it). */
+    for (uint32_t h = nt; h-- > 0;) {
+        const uint32_t v = topo[h];
+        ek[v] = e[v];
+        for (uint32_t k = 0; k < n_edges; k++)
+            if (edges[2 * k] == v && e[v] == DO_LAST && ek[edges[2 * k + 1]] < ek[v])
+                ek[v] = ek[edges[2 * k + 1]];
+        for (uint32_t k = 0; k < n_edges; k++) {
+            const uint32_t x = edges[2 * k + 1];
+            if (edges[2 * k] != v) continue;
+            if (ek[x] < ek[v]) {
+                rc = _fail(why, whylen, "DIST_RAND: the distribution of variable %u reads "
+                           "variable %u, solved after it", x, v);
+                goto out;
+            }
+            if (ek[x] == ek[v] && hk[x] + 1u > hk[v]) hk[v] = (uint16_t)(hk[x] + 1u);
+        }
+    }
+    /* The stages in order of (ek, -hk); the last, (DO_LAST, 0), stays 0. */
+    uint32_t n_groups = 0;
+    for (uint32_t key = 1; key <= DO_LAST; key++) {
+        uint16_t top = 0;
+        int used = 0;
+        for (uint32_t v = 0; v < n; v++)
+            if (ek[v] == key) { used = 1; if (hk[v] > top) top = hk[v]; }
+        if (!used) continue;
+        for (uint32_t hh = top + 1u; hh-- > 0;) {
+            int here = 0;
+            for (uint32_t v = 0; v < n && !here; v++) here = ek[v] == key && hk[v] == hh;
+            if (!here) continue;
+            const int last = key == DO_LAST && hh == 0;
+            if (!last && ++n_groups > 255) {
+                rc = _fail(why, whylen, "DIST_RAND: more than 255 solve-order stages");
+                goto out;
+            }
+            for (uint32_t v = 0; order && v < n; v++)
+                if (ek[v] == key && hk[v] == hh) order[v] = last ? 0 : (uint8_t)n_groups;
+        }
+    }
+    rc = 1;
+out:
+    free(kind); free(e); free(ek); free(hk); free(indeg); free(topo); free(edges);
+    return rc;
+}
+#undef DO_LAST
+
+/* The narrowing of expressions over 64 bits (dvs_narrow.h), in this
+ * translation unit: the writer archive keeps no global but the DVS_API
+ * functions of each object, so dvs_problem_validate() can only reach it
+ * here; the runtime's dvs_handle.c calls it through the merged object. */
+#include "dvs_narrow.c"
